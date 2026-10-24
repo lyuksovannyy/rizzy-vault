@@ -25,6 +25,12 @@ use wasm_bindgen::prelude::wasm_bindgen;
 /// A call came in an order the flow does not allow: a response with no request outstanding, a
 /// second factor when none was asked for, a result before the flow finished.
 pub const WRONG_STATE: &str = "wrong_state";
+/// `webauthn/login/finish` refused the security key's assertion, or its 60 s pending login had
+/// expired or was used (ADR 0058 point 3): the login starts again from the password.
+pub const SECURITY_KEY_REFUSED: &str = "security_key_refused";
+/// The account's second factor is a security key only, which this flow cannot use (the browser
+/// extension's enrolment login: an extension page is not on the server's origin).
+pub const SECURITY_KEY_REQUIRED: &str = "security_key_required";
 /// The session was locked ([`crate::Session::lock`]); log in again.
 pub const LOCKED: &str = "locked";
 /// A response body larger than anything `/api/v1` sizes (ADR 0028 item 7).

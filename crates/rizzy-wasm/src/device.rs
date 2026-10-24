@@ -80,7 +80,8 @@ use rizzy_client::rizzy_proto::auth::{
 };
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
-use rizzy_client::rizzy_proto::wire::SessionToken;
+use rizzy_client::rizzy_proto::webauthn::WebauthnLoginChallengeResponse;
+use rizzy_client::rizzy_proto::wire::{Id, SessionToken};
 use rizzy_client::session::{
     DeviceSession as ClientDeviceSession, device_auth_finish, device_auth_start,
 };
@@ -89,10 +90,11 @@ use rizzy_client::store::floors::Floors;
 use rizzy_client::store::rows::{CacheRows, Changeset};
 use rizzy_client::store::{self, record::Stage as RecordStage};
 use rizzy_client::sync::{Authors, VaultSync};
+use rizzy_client::webauthn::{self, SecondFactor};
 use wasm_bindgen::prelude::wasm_bindgen;
 use zeroize::Zeroizing;
 
-use crate::error::{CoreError, CoreResult, WRONG_STATE};
+use crate::error::{CoreError, CoreResult, SECURITY_KEY_REQUIRED, WRONG_STATE};
 use crate::http::{self, HttpRequest};
 use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, type_from_name, visible_item};
 use crate::matching::{self, MatchDecision, MatchSettingsView, UriInput};
@@ -131,11 +133,16 @@ enum FlowStage {
     /// `login/start` is outstanding.
     Start(Box<LoginStarted>),
     /// `login/finish` is outstanding.
-    Finish(LoginAwaitingSession),
+    Finish(LoginAwaitingSession, Id),
     /// `devices/enrol` is outstanding.
     Enrol(Box<rizzy_client::login::PendingEnrolment>),
     /// The account has 2FA and the login carried no code.
     NeedsTotp,
+    /// `login/finish` answered `second_factor_required`: `webauthn/login/challenge` asks which
+    /// second factor the account has (ADR 0058 point 3). A security key cannot be used here (an
+    /// extension page is not on the server's origin), so a key-only account ends the flow with
+    /// `security_key_required`; an account with TOTP too is asked for a code.
+    SecondFactor,
     /// Enrolled; the result is ready for [`EnrolFlow::finish`].
     Done(Box<Enrolled>),
     /// Failed, or the result was taken.
@@ -212,7 +219,10 @@ impl EnrolFlow {
     #[must_use]
     pub fn state(&self) -> String {
         match self.stage {
-            FlowStage::Start(_) | FlowStage::Finish(_) | FlowStage::Enrol(_) => "request",
+            FlowStage::Start(_)
+            | FlowStage::Finish(_, _)
+            | FlowStage::SecondFactor
+            | FlowStage::Enrol(_) => "request",
             FlowStage::NeedsTotp => "needs_totp",
             FlowStage::Done(_) => "done",
             FlowStage::Spent => "failed",
@@ -310,13 +320,19 @@ impl EnrolFlow {
                 let totp = self.totp.as_ref().map(|t| t.as_str());
                 let (awaiting, finish) = (*started).finish(&mut self.rng, &answer, totp)?;
                 self.pending = Some(HttpRequest::post(paths::LOGIN_FINISH, &finish, None)?);
-                self.stage = FlowStage::Finish(awaiting);
+                self.stage = FlowStage::Finish(awaiting, finish.login_id);
                 Ok(())
             }
-            FlowStage::Finish(awaiting) => {
+            FlowStage::Finish(awaiting, login_id) => {
                 match http::server_code(status, body) {
                     Some(ErrorCode::SecondFactorRequired) if self.totp.is_none() => {
-                        self.stage = FlowStage::NeedsTotp;
+                        drop(awaiting);
+                        self.pending = Some(HttpRequest::post(
+                            paths::WEBAUTHN_LOGIN_CHALLENGE,
+                            &webauthn::login_challenge_request(login_id),
+                            None,
+                        )?);
+                        self.stage = FlowStage::SecondFactor;
                         return Ok(());
                     }
                     Some(ErrorCode::Unauthorized) => {
@@ -342,6 +358,21 @@ impl EnrolFlow {
                 http::empty(status, body)?;
                 self.stage = FlowStage::Done(Box::new(pending_enrol.finalize()));
                 Ok(())
+            }
+            FlowStage::SecondFactor => {
+                let answer = match http::server_code(status, body) {
+                    Some(code) => Err(code),
+                    None => Ok(http::json::<WebauthnLoginChallengeResponse>(status, body)?),
+                };
+                match SecondFactor::from_challenge(answer).map_err(CoreError::server)? {
+                    SecondFactor::SecurityKey { totp: false, .. } => {
+                        Err(CoreError::new(SECURITY_KEY_REQUIRED))
+                    }
+                    SecondFactor::SecurityKey { totp: true, .. } | SecondFactor::Totp => {
+                        self.stage = FlowStage::NeedsTotp;
+                        Ok(())
+                    }
+                }
             }
             FlowStage::NeedsTotp | FlowStage::Done(_) | FlowStage::Spent => {
                 Err(CoreError::new(WRONG_STATE))

@@ -115,6 +115,7 @@ use crate::secret::take_secret;
 use crate::sync::{Ctx, Signer, SyncDriver};
 
 mod attachments;
+mod webauthn;
 
 pub use attachments::AttachmentView;
 

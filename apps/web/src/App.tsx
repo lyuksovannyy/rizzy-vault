@@ -6,7 +6,8 @@
 // lock or a reload ends it. "Unlock" is therefore a new login, with the login name kept in
 // memory only.
 import { ToastProvider } from "@rizzy-vault/ui";
-import { useCallback, useEffect, useState } from "react";
+import type { SecurityKeyAnswer } from "@rizzy-vault/core";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type CoreClient, codeOf } from "./core-client.ts";
 import { messageFor } from "./messages.ts";
@@ -14,6 +15,7 @@ import type { SessionInfo } from "./protocol.ts";
 import { ThemeProvider } from "./theme.ts";
 import { LoginView } from "./views/LoginView.tsx";
 import { SignupView } from "./views/SignupView.tsx";
+import { SecurityKeyDialog } from "./views/SecurityKeyDialog.tsx";
 import { TotpDialog } from "./views/TotpDialog.tsx";
 import { VaultView } from "./views/VaultView.tsx";
 
@@ -32,6 +34,16 @@ export function App(props: { readonly client: CoreClient }) {
   const [phase, setPhase] = useState<Phase>({ kind: "starting" });
   const [loginName, setLoginName] = useState("");
   const [totpAsk, setTotpAsk] = useState<((code: string | null) => void) | undefined>();
+  const [keyAsk, setKeyAsk] = useState<
+    | {
+        readonly options: string;
+        readonly totpAllowed: boolean;
+        readonly retried: boolean;
+        readonly answer: (answer: SecurityKeyAnswer | null) => void;
+      }
+    | undefined
+  >();
+  const lastKeyRetry = useRef(false);
 
   useEffect(() => {
     client.setTotpPrompt(
@@ -40,6 +52,22 @@ export function App(props: { readonly client: CoreClient }) {
           setTotpAsk(() => (code: string | null) => {
             setTotpAsk(undefined);
             resolve(code);
+          });
+        }),
+    );
+    client.setSecurityKeyPrompt(
+      (request) =>
+        new Promise<SecurityKeyAnswer | null>((resolve) => {
+          const retried = lastKeyRetry.current;
+          lastKeyRetry.current = false;
+          setKeyAsk({
+            ...request,
+            retried,
+            answer: (answer) => {
+              lastKeyRetry.current = answer?.kind === "retry";
+              setKeyAsk(undefined);
+              resolve(answer);
+            },
           });
         }),
     );
@@ -114,6 +142,14 @@ export function App(props: { readonly client: CoreClient }) {
       <ToastProvider>
         <main>{body}</main>
         {totpAsk !== undefined && <TotpDialog onAnswer={totpAsk} />}
+        {keyAsk !== undefined && (
+          <SecurityKeyDialog
+            options={keyAsk.options}
+            totpAllowed={keyAsk.totpAllowed}
+            retried={keyAsk.retried}
+            onAnswer={keyAsk.answer}
+          />
+        )}
       </ToastProvider>
     </ThemeProvider>
   );

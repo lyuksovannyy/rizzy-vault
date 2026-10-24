@@ -37,6 +37,9 @@ import type {
   Notice,
   PassphraseOptions,
   PasswordOptions,
+  SecurityKeyAnswer,
+  SecurityKeyEnrolmentInfo,
+  SecurityKeyInfo,
   SessionListView,
   SettingsChange,
   StorageUsage,
@@ -188,6 +191,15 @@ export interface CoreApi {
   enableTwoFactor(): TwoFactorSetup;
   confirmTwoFactor(code: string): void;
   disableTwoFactor(code: string): void;
+  /** Security keys (ADR 0058): a started enrolment's options, for `navigator.credentials` on
+   * the UI thread; needs a fresh login. */
+  startSecurityKeyEnrolment(): SecurityKeyEnrolmentInfo;
+  /** Confirms an enrolment with the browser's `create()` result (JSON) and a label. */
+  confirmSecurityKey(enrolmentId: string, label: string, credential: string): void;
+  /** The account's security keys. */
+  listSecurityKeys(): SecurityKeyInfo[];
+  /** Removes one security key; needs a fresh login. */
+  removeSecurityKey(credentialId: string): void;
   /** The account's match default and equivalence groups (ADR 0037 §6–§7, ADR 0042). */
   matchSettings(): MatchSettings;
   /** What autofill would offer on a website, under the account's settings. Ids and hosts only. */
@@ -292,6 +304,10 @@ export const METHODS: readonly Method[] = [
   "enableTwoFactor",
   "confirmTwoFactor",
   "disableTwoFactor",
+  "startSecurityKeyEnrolment",
+  "confirmSecurityKey",
+  "listSecurityKeys",
+  "removeSecurityKey",
   "matchSettings",
   "matchCandidates",
   "changeMatchSettings",
@@ -331,6 +347,13 @@ export interface TotpMessage {
   readonly code: string | null;
 }
 
+/** UI → Worker: the answer to an {@link AskSecurityKeyMessage}; `null` when the user cancelled. */
+export interface SecurityKeyMessage {
+  readonly kind: "security-key";
+  readonly id: number;
+  readonly answer: SecurityKeyAnswer | null;
+}
+
 /** Worker → UI: the result of a call. */
 export type ResultMessage =
   | { readonly kind: "result"; readonly id: number; readonly ok: true; readonly value: unknown }
@@ -342,11 +365,20 @@ export interface AskTotpMessage {
   readonly id: number;
 }
 
+/** Worker → UI: the login of call `id` needs a security key (ADR 0058): run
+ * `navigator.credentials.get` with `options` on the UI thread. */
+export interface AskSecurityKeyMessage {
+  readonly kind: "ask-security-key";
+  readonly id: number;
+  readonly options: string;
+  readonly totpAllowed: boolean;
+}
+
 /** Any message to the Worker. */
-export type ToWorker = CallMessage | TotpMessage;
+export type ToWorker = CallMessage | TotpMessage | SecurityKeyMessage;
 
 /** Any message from the Worker. */
-export type FromWorker = ResultMessage | AskTotpMessage;
+export type FromWorker = ResultMessage | AskTotpMessage | AskSecurityKeyMessage;
 
 /**
  * Codes the web vault adds to the core's (packages/core's README lists those): the user
@@ -354,6 +386,8 @@ export type FromWorker = ResultMessage | AskTotpMessage;
  * must be reloaded; a message that is not one of ours.
  */
 export const TOTP_CANCELLED = "totp_cancelled";
+/** The user closed the security-key prompt of a login. */
+export const SECURITY_KEY_CANCELLED = "security_key_cancelled";
 /** The server ended this session (ADR 0075 §6): the Worker locked it, the UI shows the login
  * with "This session has ended. Log in again." */
 export const SESSION_ENDED = "session_ended";
@@ -379,7 +413,28 @@ export function isToWorker(value: unknown): value is ToWorker {
   if (m["kind"] === "totp") {
     return m["code"] === null || typeof m["code"] === "string";
   }
+  if (m["kind"] === "security-key") {
+    return m["answer"] === null || isSecurityKeyAnswer(m["answer"]);
+  }
   return false;
+}
+
+/** Whether `value` is a {@link SecurityKeyAnswer} (shape only). */
+function isSecurityKeyAnswer(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const a = value as Record<string, unknown>;
+  switch (a["kind"]) {
+    case "credential":
+      return typeof a["credential"] === "string";
+    case "totp":
+      return typeof a["code"] === "string";
+    case "retry":
+      return true;
+    default:
+      return false;
+  }
 }
 
 /** Whether `value` is a message the Worker sends. */
@@ -393,6 +448,9 @@ export function isFromWorker(value: unknown): value is FromWorker {
   }
   if (m["kind"] === "ask-totp") {
     return true;
+  }
+  if (m["kind"] === "ask-security-key") {
+    return typeof m["options"] === "string" && typeof m["totpAllowed"] === "boolean";
   }
   return (
     m["kind"] === "result" &&

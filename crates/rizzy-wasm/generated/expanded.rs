@@ -5320,7 +5320,8 @@ pub mod device {
     };
     use rizzy_client::rizzy_proto::error::ErrorCode;
     use rizzy_client::rizzy_proto::http::paths;
-    use rizzy_client::rizzy_proto::wire::SessionToken;
+    use rizzy_client::rizzy_proto::webauthn::WebauthnLoginChallengeResponse;
+    use rizzy_client::rizzy_proto::wire::{Id, SessionToken};
     use rizzy_client::session::{
         DeviceSession as ClientDeviceSession, device_auth_finish,
         device_auth_start,
@@ -5330,9 +5331,12 @@ pub mod device {
     use rizzy_client::store::rows::{CacheRows, Changeset};
     use rizzy_client::store::{self, record::Stage as RecordStage};
     use rizzy_client::sync::{Authors, VaultSync};
+    use rizzy_client::webauthn::{self, SecondFactor};
     use wasm_bindgen::prelude::wasm_bindgen;
     use zeroize::Zeroizing;
-    use crate::error::{CoreError, CoreResult, WRONG_STATE};
+    use crate::error::{
+        CoreError, CoreResult, SECURITY_KEY_REQUIRED, WRONG_STATE,
+    };
     use crate::http::{self, HttpRequest};
     use crate::items::{
         self, FieldView, ItemDraft, ItemSummary, hex, type_from_name,
@@ -5372,13 +5376,19 @@ pub mod device {
         Start(Box<LoginStarted>),
 
         /// `login/finish` is outstanding.
-        Finish(LoginAwaitingSession),
+        Finish(LoginAwaitingSession, Id),
 
         /// `devices/enrol` is outstanding.
         Enrol(Box<rizzy_client::login::PendingEnrolment>),
 
         /// The account has 2FA and the login carried no code.
         NeedsTotp,
+
+        /// `login/finish` answered `second_factor_required`: `webauthn/login/challenge` asks which
+        /// second factor the account has (ADR 0058 point 3). A security key cannot be used here (an
+        /// extension page is not on the server's origin), so a key-only account ends the flow with
+        /// `security_key_required`; an account with TOTP too is asked for a code.
+        SecondFactor,
 
         /// Enrolled; the result is ready for [`EnrolFlow::finish`].
         Done(Box<Enrolled>),
@@ -6003,8 +6013,8 @@ pub mod device {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             match self.stage {
-                    FlowStage::Start(_) | FlowStage::Finish(_) |
-                        FlowStage::Enrol(_) => "request",
+                    FlowStage::Start(_) | FlowStage::Finish(_, _) |
+                        FlowStage::SecondFactor | FlowStage::Enrol(_) => "request",
                     FlowStage::NeedsTotp => "needs_totp",
                     FlowStage::Done(_) => "done",
                     FlowStage::Spent => "failed",
@@ -6602,14 +6612,18 @@ pub mod device {
                     self.pending =
                         Some(HttpRequest::post(paths::LOGIN_FINISH, &finish,
                                     None)?);
-                    self.stage = FlowStage::Finish(awaiting);
+                    self.stage = FlowStage::Finish(awaiting, finish.login_id);
                     Ok(())
                 }
-                FlowStage::Finish(awaiting) => {
+                FlowStage::Finish(awaiting, login_id) => {
                     match http::server_code(status, body) {
                         Some(ErrorCode::SecondFactorRequired) if self.totp.is_none()
                             => {
-                            self.stage = FlowStage::NeedsTotp;
+                            drop(awaiting);
+                            self.pending =
+                                Some(HttpRequest::post(paths::WEBAUTHN_LOGIN_CHALLENGE,
+                                            &webauthn::login_challenge_request(login_id), None)?);
+                            self.stage = FlowStage::SecondFactor;
                             return Ok(());
                         }
                         Some(ErrorCode::Unauthorized) => {
@@ -6634,6 +6648,26 @@ pub mod device {
                     self.stage =
                         FlowStage::Done(Box::new(pending_enrol.finalize()));
                     Ok(())
+                }
+                FlowStage::SecondFactor => {
+                    let answer =
+                        match http::server_code(status, body) {
+                            Some(code) => Err(code),
+                            None =>
+                                Ok(http::json::<WebauthnLoginChallengeResponse>(status,
+                                            body)?),
+                        };
+                    match SecondFactor::from_challenge(answer).map_err(CoreError::server)?
+                        {
+                        SecondFactor::SecurityKey { totp: false, .. } => {
+                            Err(CoreError::new(SECURITY_KEY_REQUIRED))
+                        }
+                        SecondFactor::SecurityKey { totp: true, .. } |
+                            SecondFactor::Totp => {
+                            self.stage = FlowStage::NeedsTotp;
+                            Ok(())
+                        }
+                    }
                 }
                 FlowStage::NeedsTotp | FlowStage::Done(_) | FlowStage::Spent
                     => {
@@ -13847,6 +13881,12 @@ pub mod error {
     /// A call came in an order the flow does not allow: a response with no request outstanding, a
     /// second factor when none was asked for, a result before the flow finished.
     pub const WRONG_STATE: &str = "wrong_state";
+    /// `webauthn/login/finish` refused the security key's assertion, or its 60 s pending login had
+    /// expired or was used (ADR 0058 point 3): the login starts again from the password.
+    pub const SECURITY_KEY_REFUSED: &str = "security_key_refused";
+    /// The account's second factor is a security key only, which this flow cannot use (the browser
+    /// extension's enrolment login: an extension page is not on the server's origin).
+    pub const SECURITY_KEY_REQUIRED: &str = "security_key_required";
     /// The session was locked ([`crate::Session::lock`]); log in again.
     pub const LOCKED: &str = "locked";
     /// A response body larger than anything `/api/v1` sizes (ADR 0028 item 7).
@@ -31317,7 +31357,10 @@ mod login {
     //!
     //! ```text
     //! LoginFlow.start ──login/start──► respond ──login/finish──► respond
-    //!   ├─ second_factor_required ──► state "needs_totp" ──provideTotp──► (again from login/start)
+    //!   ├─ second_factor_required ──webauthn/login/challenge──► respond
+    //!   │    ├─ not_found ──► state "needs_totp" ──provideTotp──► (again from login/start)
+    //!   │    └─ options ──► state "needs_security_key" ──provideSecurityKey──webauthn/login/finish──► respond
+    //!   │         (or provideTotp when securityKeyTotp, or retrySecurityKey for a new challenge)
     //!   └─ verified ──devices/web-certificate (kind 4, 12 h)──► respond ──► state "done" ──finish──► Session
     //! ```
     //!
@@ -31365,10 +31408,14 @@ mod login {
     use rizzy_client::rizzy_proto::change::ReregisterStartResponse;
     use rizzy_client::rizzy_proto::error::ErrorCode;
     use rizzy_client::rizzy_proto::http::paths;
-    use rizzy_client::rizzy_proto::wire::SessionToken;
+    use rizzy_client::rizzy_proto::webauthn::WebauthnLoginChallengeResponse;
+    use rizzy_client::rizzy_proto::wire::{Id, SessionToken};
+    use rizzy_client::webauthn::{self, SecondFactor};
     use wasm_bindgen::prelude::wasm_bindgen;
     use zeroize::Zeroizing;
-    use crate::error::{CoreError, CoreResult, WRONG_STATE};
+    use crate::error::{
+        CoreError, CoreResult, SECURITY_KEY_REFUSED, WRONG_STATE,
+    };
     use crate::http::{self, HttpRequest};
     use crate::rng::{Rng, os_rng};
     use crate::secret::take_secret;
@@ -31454,7 +31501,7 @@ mod login {
         Start(Box<LoginStarted>),
 
         /// `login/finish` is outstanding.
-        Finish(LoginAwaitingSession),
+        Finish(LoginAwaitingSession, Id),
 
         /// `account/reregister/start` of the same-password re-registration is outstanding (ADR
         /// 0031 point 2).
@@ -31468,6 +31515,16 @@ mod login {
 
         /// The account has 2FA and the login carried no code.
         NeedsTotp,
+
+        /// `login/finish` answered `second_factor_required`: `webauthn/login/challenge` for the
+        /// login's `login_id` (its pending id, ADR 0058 point 3) is outstanding.
+        SecondFactor(LoginAwaitingSession, Id),
+
+        /// Waiting for the browser's assertion over [`LoginFlow::security_key_options`].
+        NeedsSecurityKey(LoginAwaitingSession, Id),
+
+        /// `webauthn/login/finish` is outstanding.
+        SecurityKeyFinish(LoginAwaitingSession),
 
         /// A session is ready.
         Done(Box<WebSession>),
@@ -31492,6 +31549,9 @@ mod login {
         input: Credentials,
         #[doc = " The second factor, if given."]
         totp: Option<Zeroizing<String>>,
+        #[doc =
+        " On `\"needs_security_key\"`: the request options and whether TOTP is offered too."]
+        security_key: Option<(String, bool)>,
         #[doc = " Session or re-authentication."]
         purpose: Purpose,
         #[doc = " Where the flow is."]
@@ -32006,7 +32066,8 @@ mod login {
                 }, totp.map(Zeroizing::new), Purpose::Session)
         }
         #[doc =
-        " `\"request\"` while a request is outstanding, `\"needs_totp\"`, `\"done\"`, or `\"failed\"`"]
+        " `\"request\"` while a request is outstanding, `\"needs_totp\"`, `\"needs_security_key\"`,"]
+        #[doc = " `\"done\"`, or `\"failed\"`"]
         #[doc = " after an error or once the result was taken."]
         #[must_use]
         pub fn state(&self) -> String {
@@ -32014,7 +32075,8 @@ mod login {
             const _: () =
                 {
                     #[doc =
-                    " `\"request\"` while a request is outstanding, `\"needs_totp\"`, `\"done\"`, or `\"failed\"`"]
+                    " `\"request\"` while a request is outstanding, `\"needs_totp\"`, `\"needs_security_key\"`,"]
+                    #[doc = " `\"done\"`, or `\"failed\"`"]
                     #[doc = " after an error or once the result was taken."]
                     #[must_use]
                     #[export_name = "loginflow_state_e09cc0eb35f8b583"]
@@ -32051,7 +32113,8 @@ mod login {
             const _: () =
                 {
                     #[doc =
-                    " `\"request\"` while a request is outstanding, `\"needs_totp\"`, `\"done\"`, or `\"failed\"`"]
+                    " `\"request\"` while a request is outstanding, `\"needs_totp\"`, `\"needs_security_key\"`,"]
+                    #[doc = " `\"done\"`, or `\"failed\"`"]
                     #[doc = " after an error or once the result was taken."]
                     #[must_use]
                     #[no_mangle]
@@ -32074,7 +32137,7 @@ mod login {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\tLoginFlow\x02T `\"request\"` while a request is outstanding, `\"needs_totp\"`, `\"done\"`, or `\"failed\"`- after an error or once the result was taken.\0\0\0\0\x05state\x01\x01\0\0\0\0\x01\0\x02\x05state\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\tLoginFlow\x03T `\"request\"` while a request is outstanding, `\"needs_totp\"`, `\"needs_security_key\"`,\x18 `\"done\"`, or `\"failed\"`- after an error or once the result was taken.\0\0\0\0\x05state\x01\x01\0\0\0\0\x01\0\x02\x05state\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -32101,10 +32164,12 @@ mod login {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             match self.stage {
-                    Stage::Start(_) | Stage::Finish(_) | Stage::Reregister(..) |
-                        Stage::ReregisterCommit(..) | Stage::Certificate(_) =>
-                        "request",
+                    Stage::Start(_) | Stage::Finish(..) |
+                        Stage::SecondFactor(..) | Stage::SecurityKeyFinish(_) |
+                        Stage::Reregister(..) | Stage::ReregisterCommit(..) |
+                        Stage::Certificate(_) => "request",
                     Stage::NeedsTotp => "needs_totp",
+                    Stage::NeedsSecurityKey(..) => "needs_security_key",
                     Stage::Done(_) | Stage::Reauthenticated(_) |
                         Stage::Refreshed(..) => "done",
                     Stage::Spent => "failed",
@@ -32538,14 +32603,474 @@ mod login {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            if !#[allow(non_exhaustive_omitted_patterns)] match self.stage {
-                        Stage::NeedsTotp => true,
-                        _ => false,
-                    } {
-                return Err(CoreError::new(WRONG_STATE));
+            let totp_offered =
+                #[allow(non_exhaustive_omitted_patterns)] match self.security_key
+                    {
+                    Some((_, true)) => true,
+                    _ => false,
+                };
+            match self.stage {
+                Stage::NeedsTotp => {}
+                Stage::NeedsSecurityKey(..) if totp_offered => {}
+                _ => return Err(CoreError::new(WRONG_STATE)),
             }
+            self.security_key = None;
             self.totp = Some(Zeroizing::new(code.to_owned()));
             self.restart()
+        }
+        #[doc =
+        " On `\"needs_security_key\"`: the request options for `navigator.credentials.get`, as the"]
+        #[doc =
+        " server\'s JSON (`{\"publicKey\": {...}}`, binary values as base64url)."]
+        #[must_use]
+        pub fn security_key_options(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " On `\"needs_security_key\"`: the request options for `navigator.credentials.get`, as the"]
+                    #[doc =
+                    " server\'s JSON (`{\"publicKey\": {...}}`, binary values as base64url)."]
+                    #[must_use]
+                    #[export_name =
+                    "loginflow_securityKeyOptions_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_LoginFlow_securityKeyOptions(me:
+                            <LoginFlow as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<LoginFlow>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<LoginFlow>();
+                                            let me =
+                                                unsafe {
+                                                    <LoginFlow as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.security_key_options();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " On `\"needs_security_key\"`: the request options for `navigator.credentials.get`, as the"]
+                    #[doc =
+                    " server\'s JSON (`{\"publicKey\": {...}}`, binary values as base64url)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_loginflow_securityKeyOptions_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tLoginFlow\x02W On `\"needs_security_key\"`: the request options for `navigator.credentials.get`, as theD server's JSON (`{\"publicKey\": {...}}`, binary values as base64url).\0\0\0\0\x12securityKeyOptions\x01\x01\0\0\0\0\x01\0\x02\x12securityKeyOptions\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.security_key.as_ref().map(|(options, _)| options.clone())
+        }
+        #[doc =
+        " On `\"needs_security_key\"`: whether a TOTP code would also do ([`LoginFlow::provide_totp`])."]
+        #[must_use]
+        pub fn security_key_totp(&self) -> bool {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " On `\"needs_security_key\"`: whether a TOTP code would also do ([`LoginFlow::provide_totp`])."]
+                    #[must_use]
+                    #[export_name =
+                    "loginflow_securityKeyTotp_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_LoginFlow_securityKeyTotp(me:
+                            <LoginFlow as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<bool as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<LoginFlow>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<LoginFlow>();
+                                            let me =
+                                                unsafe {
+                                                    <LoginFlow as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.security_key_totp();
+                                            _ret
+                                        }
+                                    });
+                        <bool as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " On `\"needs_security_key\"`: whether a TOTP code would also do ([`LoginFlow::provide_totp`])."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_loginflow_securityKeyTotp_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <bool as WasmDescribe>::describe();
+                        <bool as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tLoginFlow\x01\\ On `\"needs_security_key\"`: whether a TOTP code would also do ([`LoginFlow::provide_totp`]).\0\0\0\0\x0fsecurityKeyTotp\x01\x01\0\0\0\0\x01\0\x02\x0fsecurityKeyTotp\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+
+            #[allow(non_exhaustive_omitted_patterns)]
+            match self.security_key { Some((_, true)) => true, _ => false, }
+        }
+        #[doc =
+        " On `\"needs_security_key\"`: the browser\'s assertion (`PublicKeyCredential` JSON) for"]
+        #[doc =
+        " [`LoginFlow::security_key_options`]; then `\"request\"` again (`webauthn/login/finish`)."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `wrong_state`; `invalid_input` for JSON outside the wire bounds."]
+        pub fn provide_security_key(&mut self, credential_json: &str)
+            -> Result<(), CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " On `\"needs_security_key\"`: the browser\'s assertion (`PublicKeyCredential` JSON) for"]
+                    #[doc =
+                    " [`LoginFlow::security_key_options`]; then `\"request\"` again (`webauthn/login/finish`)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `wrong_state`; `invalid_input` for JSON outside the wire bounds."]
+                    #[export_name =
+                    "loginflow_provideSecurityKey_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_LoginFlow_provideSecurityKey(me:
+                            <LoginFlow as
+                            wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<LoginFlow>();
+                                            let mut me =
+                                                unsafe {
+                                                    <LoginFlow as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            let _ret = me.provide_security_key(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<(), CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " On `\"needs_security_key\"`: the browser\'s assertion (`PublicKeyCredential` JSON) for"]
+                    #[doc =
+                    " [`LoginFlow::security_key_options`]; then `\"request\"` again (`webauthn/login/finish`)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `wrong_state`; `invalid_input` for JSON outside the wire bounds."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_loginflow_provideSecurityKey_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <&str as WasmDescribe>::describe();
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tLoginFlow\x05T On `\"needs_security_key\"`: the browser's assertion (`PublicKeyCredential` JSON) forW [`LoginFlow::security_key_options`]; then `\"request\"` again (`webauthn/login/finish`).\0\t # ErrorsA `wrong_state`; `invalid_input` for JSON outside the wire bounds.\0\x01\x0fcredential_json\0\0\0\0\0\x12provideSecurityKey\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let Stage::NeedsSecurityKey(_, login_id) =
+                &self.stage else { return Err(CoreError::new(WRONG_STATE)); };
+            let request =
+                webauthn::login_finish_request(*login_id, credential_json)?;
+            self.pending =
+                Some(HttpRequest::post(paths::WEBAUTHN_LOGIN_FINISH, &request,
+                            None)?);
+            if let Stage::NeedsSecurityKey(awaiting, _) =
+                    core::mem::replace(&mut self.stage, Stage::Spent) {
+                self.stage = Stage::SecurityKeyFinish(awaiting);
+            }
+            Ok(())
+        }
+        #[doc =
+        " On `\"needs_security_key\"`, after the browser prompt was cancelled or timed out: asks the"]
+        #[doc =
+        " server for a fresh challenge (the pending row lives 60 s); then `\"request\"` again."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `wrong_state`."]
+        pub fn retry_security_key(&mut self) -> Result<(), CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " On `\"needs_security_key\"`, after the browser prompt was cancelled or timed out: asks the"]
+                    #[doc =
+                    " server for a fresh challenge (the pending row lives 60 s); then `\"request\"` again."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `wrong_state`."]
+                    #[export_name =
+                    "loginflow_retrySecurityKey_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_LoginFlow_retrySecurityKey(me:
+                            <LoginFlow as
+                            wasm_bindgen::convert::RefMutFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<LoginFlow>();
+                                            let mut me =
+                                                unsafe {
+                                                    <LoginFlow as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            let _ret = me.retry_security_key();
+                                            _ret
+                                        }
+                                    });
+                        <Result<(), CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " On `\"needs_security_key\"`, after the browser prompt was cancelled or timed out: asks the"]
+                    #[doc =
+                    " server for a fresh challenge (the pending row lives 60 s); then `\"request\"` again."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `wrong_state`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_loginflow_retrySecurityKey_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tLoginFlow\x05Y On `\"needs_security_key\"`, after the browser prompt was cancelled or timed out: asks theS server for a fresh challenge (the pending row lives 60 s); then `\"request\"` again.\0\t # Errors\x0f `wrong_state`.\0\0\0\0\x10retrySecurityKey\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let Stage::NeedsSecurityKey(_, login_id) =
+                &self.stage else { return Err(CoreError::new(WRONG_STATE)); };
+            let login_id = *login_id;
+            self.pending =
+                Some(HttpRequest::post(paths::WEBAUTHN_LOGIN_CHALLENGE,
+                            &webauthn::login_challenge_request(login_id), None)?);
+            if let Stage::NeedsSecurityKey(awaiting, _) =
+                    core::mem::replace(&mut self.stage, Stage::Spent) {
+                self.stage = Stage::SecondFactor(awaiting, login_id);
+            }
+            Ok(())
         }
         #[doc = " The session of a finished login. Consumes the flow."]
         #[doc = ""]
@@ -32691,6 +33216,7 @@ mod login {
                 Self {
                     input,
                     totp,
+                    security_key: None,
                     purpose,
                     stage: Stage::Spent,
                     pending: None,
@@ -32734,14 +33260,17 @@ mod login {
                     self.pending =
                         Some(HttpRequest::post(paths::LOGIN_FINISH, &finish,
                                     None)?);
-                    self.stage = Stage::Finish(awaiting);
+                    self.stage = Stage::Finish(awaiting, finish.login_id);
                     Ok(())
                 }
-                Stage::Finish(awaiting) => {
+                Stage::Finish(awaiting, login_id) => {
                     match http::server_code(status, body) {
                         Some(ErrorCode::SecondFactorRequired) if self.totp.is_none()
                             => {
-                            self.stage = Stage::NeedsTotp;
+                            self.pending =
+                                Some(HttpRequest::post(paths::WEBAUTHN_LOGIN_CHALLENGE,
+                                            &webauthn::login_challenge_request(login_id), None)?);
+                            self.stage = Stage::SecondFactor(awaiting, login_id);
                             return Ok(());
                         }
                         Some(ErrorCode::Unauthorized) => {
@@ -32750,12 +33279,33 @@ mod login {
                         _ => {}
                     }
                     let answer: LoginFinishResponse = http::json(status, body)?;
-                    let logged_in = awaiting.complete(answer)?;
-                    if self.purpose == Purpose::Session &&
-                            logged_in.reregister() {
-                        return self.reregister(logged_in, now_ms);
+                    self.verified(awaiting, answer, now_ms)
+                }
+                Stage::SecondFactor(awaiting, login_id) => {
+                    let answer =
+                        match http::server_code(status, body) {
+                            Some(code) => Err(code),
+                            None =>
+                                Ok(http::json::<WebauthnLoginChallengeResponse>(status,
+                                            body)?),
+                        };
+                    match SecondFactor::from_challenge(answer).map_err(CoreError::server)?
+                        {
+                        SecondFactor::Totp => self.stage = Stage::NeedsTotp,
+                        SecondFactor::SecurityKey { options, totp } => {
+                            self.security_key = Some((options, totp));
+                            self.stage = Stage::NeedsSecurityKey(awaiting, login_id);
+                        }
                     }
-                    self.logged_in(logged_in, now_ms)
+                    Ok(())
+                }
+                Stage::SecurityKeyFinish(awaiting) => {
+                    if http::server_code(status, body) ==
+                            Some(ErrorCode::Unauthorized) {
+                        return Err(CoreError::new(SECURITY_KEY_REFUSED));
+                    }
+                    let answer: LoginFinishResponse = http::json(status, body)?;
+                    self.verified(awaiting, answer, now_ms)
                 }
                 Stage::Reregister(login, started) => {
                     let built =
@@ -32790,10 +33340,21 @@ mod login {
                     self.stage = Stage::Done(web);
                     Ok(())
                 }
-                Stage::NeedsTotp | Stage::Done(_) | Stage::Reauthenticated(_)
-                    | Stage::Refreshed(..) | Stage::Spent =>
+                Stage::NeedsTotp | Stage::NeedsSecurityKey(..) |
+                    Stage::Done(_) | Stage::Reauthenticated(_) |
+                    Stage::Refreshed(..) | Stage::Spent =>
                     Err(CoreError::new(WRONG_STATE)),
             }
+        }
+        /// A login whose KE3 and second factor verified: completes it, then re-registers or goes on.
+        fn verified(&mut self, awaiting: LoginAwaitingSession,
+            answer: LoginFinishResponse, now_ms: u64) -> CoreResult<()> {
+            self.security_key = None;
+            let logged_in = awaiting.complete(answer)?;
+            if self.purpose == Purpose::Session && logged_in.reregister() {
+                return self.reregister(logged_in, now_ms);
+            }
+            self.logged_in(logged_in, now_ms)
         }
         /// ADR 0031 point 2 (module docs): starts the same-password re-registration over the
         /// login's OPAQUE session; if it cannot even start, the login goes on without it.
@@ -43606,6 +44167,2088 @@ pub mod session {
                 inner.vault.remove_attachment(&mut inner.rng, &inner.unlocked,
                         item, attachment, now_ms)?;
                 Ok(())
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                static _INCLUDED_FILES: &[&str] = &[];
+                const _ENCODED_BYTES: &[u8] =
+                    {
+                        const _CHUNK_SLICES: [&[u8]; 1usize] =
+                            [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        #[allow(long_running_const_eval)]
+                        const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                        #[allow(long_running_const_eval)]
+                        const _CHUNKS: [u8; _CHUNK_LEN] =
+                            flat_byte_slices(_CHUNK_SLICES);
+                        const _LEN_BYTES: [u8; 4] =
+                            (_CHUNK_LEN as u32).to_le_bytes();
+                        const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                        #[allow(long_running_const_eval)]
+                        const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                            flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                        &_ENCODED_BYTES
+                    };
+                const _PREFIX_JSON_BYTES: &[u8] =
+                    b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                const _PREFIX_JSON_BYTES_LEN: usize =
+                    _PREFIX_JSON_BYTES.len();
+                const _LEN: usize =
+                    _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                #[link_section = "__wasm_bindgen_unstable"]
+                #[allow(long_running_const_eval)]
+                static _GENERATED: [u8; _LEN] =
+                    flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+            };
+    }
+    mod webauthn {
+        //! Security keys as a server-side second factor for the web vault ([ADR 0058] as amended by
+        //! [ADR 0077]; CRYPTO.md §11.17; `rizzy_client::webauthn`).
+        //!
+        //! ```text
+        //! (fresh OPAQUE session)
+        //! const e = session.securityKeyEnrolResponse(...send(session.securityKeyEnrolRequest()))
+        //! const credential = await navigator.credentials.create(fromJson(e.options))   // UI thread
+        //! send(session.securityKeyConfirmRequest(e.enrolmentId, label, toJson(credential)))   // 204
+        //! const keys = session.securityKeyListResponse(...send(session.securityKeyListRequest()))
+        //! send(session.securityKeyRemoveRequest(keys[0].credentialId))                        // 204
+        //! ```
+        //!
+        //! The ceremony runs in the browser on the web vault's own origin, never in this module: it only
+        //! builds the requests and reads the answers. The options and the credential stay JSON text.
+        //!
+        //! [ADR 0058]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0058-webauthn-2fa-second-factor.md
+        //! [ADR 0077]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0077-webauthn-rs-integration-fixes.md
+        use rizzy_client::ClientError;
+        use rizzy_client::rizzy_proto::http::paths;
+        use rizzy_client::rizzy_proto::webauthn::{
+            WebauthnCredentialId, WebauthnEnrolStartResponse,
+            WebauthnListResponse,
+        };
+        use rizzy_client::rizzy_proto::wire::Id;
+        use rizzy_client::webauthn::{enrol_confirm_request, remove_request};
+        use wasm_bindgen::prelude::wasm_bindgen;
+        use super::Session;
+        use crate::error::{CoreError, CoreResult};
+        use crate::http::{self, HttpRequest};
+        #[wasm_bindgen()]
+        #[__wasm_bindgen_retried]
+        #[doc =
+        " A started enrolment: its id (base64url) and the creation options JSON."]
+        pub struct SecurityKeyEnrolment {
+            #[doc = " The enrolment id, base64url."]
+            enrolment_id: String,
+            #[doc = " The creation options JSON."]
+            options: String,
+        }
+        #[automatically_derived]
+        impl ::core::clone::Clone for SecurityKeyEnrolment {
+            #[inline]
+            fn clone(&self) -> SecurityKeyEnrolment {
+                SecurityKeyEnrolment {
+                    enrolment_id: ::core::clone::Clone::clone(&self.enrolment_id),
+                    options: ::core::clone::Clone::clone(&self.options),
+                }
+            }
+        }
+        #[automatically_derived]
+        impl ::core::fmt::Debug for SecurityKeyEnrolment {
+            #[inline]
+            fn fmt(&self, f: &mut ::core::fmt::Formatter)
+                -> ::core::fmt::Result {
+                ::core::fmt::Formatter::debug_struct_field2_finish(f,
+                    "SecurityKeyEnrolment", "enrolment_id", &self.enrolment_id,
+                    "options", &&self.options)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsConstructor for
+            SecurityKeyEnrolment {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
+            SecurityKeyEnrolment {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsStaticProperty for
+            SecurityKeyEnrolment {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::describe::WasmDescribe for SecurityKeyEnrolment {
+            fn describe() {
+                use wasm_bindgen::describe::*;
+                inform(RUST_STRUCT);
+                inform(20u32);
+                inform(83u32);
+                inform(101u32);
+                inform(99u32);
+                inform(117u32);
+                inform(114u32);
+                inform(105u32);
+                inform(116u32);
+                inform(121u32);
+                inform(75u32);
+                inform(101u32);
+                inform(121u32);
+                inform(69u32);
+                inform(110u32);
+                inform(114u32);
+                inform(111u32);
+                inform(108u32);
+                inform(109u32);
+                inform(101u32);
+                inform(110u32);
+                inform(116u32);
+                inform(27u32);
+                inform(114u32);
+                inform(105u32);
+                inform(122u32);
+                inform(122u32);
+                inform(121u32);
+                inform(45u32);
+                inform(119u32);
+                inform(97u32);
+                inform(115u32);
+                inform(109u32);
+                inform(45u32);
+                inform(101u32);
+                inform(48u32);
+                inform(57u32);
+                inform(99u32);
+                inform(99u32);
+                inform(48u32);
+                inform(101u32);
+                inform(98u32);
+                inform(51u32);
+                inform(53u32);
+                inform(102u32);
+                inform(56u32);
+                inform(98u32);
+                inform(53u32);
+                inform(56u32);
+                inform(51u32);
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::IntoWasmAbi for SecurityKeyEnrolment {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyEnrolment>>;
+            fn into_abi(self) -> Self::Abi {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+                WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self)))
+                        as *mut WasmRefCell<SecurityKeyEnrolment>)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::FromWasmAbi for SecurityKeyEnrolment {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyEnrolment>>;
+            unsafe fn from_abi(js: Self::Abi) -> Self {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+                use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+                let ptr = js.into_ptr();
+                assert_not_null(ptr);
+                let rc = Rc::from_raw(ptr);
+                match Rc::try_unwrap(rc) {
+                    Ok(cell) => cell.into_inner(),
+                    Err(_) =>
+                        wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+                }
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::core::convert::From<SecurityKeyEnrolment> for
+            wasm_bindgen::JsValue {
+            fn from(value: SecurityKeyEnrolment) -> Self {
+                let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+                #[link(wasm_import_module = "__wbindgen_placeholder__")]
+                extern "C" {
+                    #[link_name =
+                    "__wbg_securitykeyenrolment_new_e09cc0eb35f8b583"]
+                    fn __wbg_securitykeyenrolment_new(ptr:
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyEnrolment>>)
+                    -> u32;
+                }
+                unsafe {
+                    <wasm_bindgen::JsValue as
+                            wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_securitykeyenrolment_new(ptr))
+                }
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                #[export_name =
+                "__wbg_securitykeyenrolment_free_e09cc0eb35f8b583"]
+                #[doc(hidden)]
+                pub unsafe extern "C-unwind" fn __wbg_securitykeyenrolment_free(ptr:
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyEnrolment>>,
+                    allow_delayed: u32) {
+                    use wasm_bindgen::__rt::alloc::rc::Rc;
+                    if allow_delayed != 0 {
+                        let ptr = ptr.into_ptr();
+                        wasm_bindgen::__rt::assert_not_null(ptr);
+                        drop(Rc::from_raw(ptr));
+                    } else {
+                        let _ =
+                            <SecurityKeyEnrolment as
+                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                    }
+                }
+            };
+        #[automatically_derived]
+        impl wasm_bindgen::convert::RefFromWasmAbi for SecurityKeyEnrolment {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyEnrolment>>;
+            type Anchor = wasm_bindgen::__rt::RcRef<SecurityKeyEnrolment>;
+            unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                let js = js.into_ptr();
+                wasm_bindgen::__rt::assert_not_null(js);
+                Rc::increment_strong_count(js);
+                let rc = Rc::from_raw(js);
+                wasm_bindgen::__rt::RcRef::new(rc)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::RefMutFromWasmAbi for SecurityKeyEnrolment
+            {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyEnrolment>>;
+            type Anchor = wasm_bindgen::__rt::RcRefMut<SecurityKeyEnrolment>;
+            unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                let js = js.into_ptr();
+                wasm_bindgen::__rt::assert_not_null(js);
+                Rc::increment_strong_count(js);
+                let rc = Rc::from_raw(js);
+                wasm_bindgen::__rt::RcRefMut::new(rc)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::LongRefFromWasmAbi for
+            SecurityKeyEnrolment {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyEnrolment>>;
+            type Anchor = wasm_bindgen::__rt::RcRef<SecurityKeyEnrolment>;
+            unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+                <Self as
+                        wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::OptionIntoWasmAbi for SecurityKeyEnrolment
+            {
+            #[inline]
+            fn none() -> Self::Abi {
+                <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyEnrolment>>>::null()
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::OptionFromWasmAbi for SecurityKeyEnrolment
+            {
+            #[inline]
+            fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::TryFromJsValue for SecurityKeyEnrolment {
+            fn try_from_js_value(value: wasm_bindgen::JsValue)
+                ->
+                    wasm_bindgen::__rt::core::result::Result<Self,
+                    wasm_bindgen::JsValue> {
+                Self::try_from_js_value_ref(&value).ok_or(value)
+            }
+            fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+                -> wasm_bindgen::__rt::core::option::Option<Self> {
+                let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+                #[link(wasm_import_module = "__wbindgen_placeholder__")]
+                extern "C" {
+                    #[link_name =
+                    "__wbg_securitykeyenrolment_unwrap_e09cc0eb35f8b583"]
+                    fn __wbg_securitykeyenrolment_unwrap(ptr: u32)
+                    ->
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyEnrolment>>;
+                }
+                let ptr = unsafe { __wbg_securitykeyenrolment_unwrap(idx) };
+                if ptr.is_null() {
+                    wasm_bindgen::__rt::core::option::Option::None
+                } else {
+                    unsafe {
+                        wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                    }
+                }
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::describe::WasmDescribeVector for
+            SecurityKeyEnrolment {
+            fn describe_vector() {
+                use wasm_bindgen::describe::*;
+                inform(VECTOR);
+                <SecurityKeyEnrolment as
+                        wasm_bindgen::describe::WasmDescribe>::describe();
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::VectorIntoWasmAbi for SecurityKeyEnrolment
+            {
+            type Abi =
+                <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]>
+                as wasm_bindgen::convert::IntoWasmAbi>::Abi;
+            fn vector_into_abi(vector:
+                    wasm_bindgen::__rt::alloc::boxed::Box<[SecurityKeyEnrolment]>)
+                -> Self::Abi {
+                wasm_bindgen::convert::js_value_vector_into_abi(vector)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::VectorFromWasmAbi for SecurityKeyEnrolment
+            {
+            type Abi =
+                <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]>
+                as wasm_bindgen::convert::FromWasmAbi>::Abi;
+            unsafe fn vector_from_abi(js: Self::Abi)
+                ->
+                    wasm_bindgen::__rt::alloc::boxed::Box<[SecurityKeyEnrolment]> {
+                wasm_bindgen::convert::js_value_vector_from_abi(js)
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                static _INCLUDED_FILES: &[&str] = &[];
+                const _ENCODED_BYTES: &[u8] =
+                    {
+                        const _CHUNK_SLICES: [&[u8]; 1usize] =
+                            [b"\0\0\0\x01\x14SecurityKeyEnrolment\0\x01G A started enrolment: its id (base64url) and the creation options JSON.\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        #[allow(long_running_const_eval)]
+                        const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                        #[allow(long_running_const_eval)]
+                        const _CHUNKS: [u8; _CHUNK_LEN] =
+                            flat_byte_slices(_CHUNK_SLICES);
+                        const _LEN_BYTES: [u8; 4] =
+                            (_CHUNK_LEN as u32).to_le_bytes();
+                        const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                        #[allow(long_running_const_eval)]
+                        const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                            flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                        &_ENCODED_BYTES
+                    };
+                const _PREFIX_JSON_BYTES: &[u8] =
+                    b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                const _PREFIX_JSON_BYTES_LEN: usize =
+                    _PREFIX_JSON_BYTES.len();
+                const _LEN: usize =
+                    _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                #[link_section = "__wasm_bindgen_unstable"]
+                #[allow(long_running_const_eval)]
+                static _GENERATED: [u8; _LEN] =
+                    flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+            };
+        impl SecurityKeyEnrolment {
+            #[doc =
+            " The enrolment id, for [`Session::security_key_confirm_request`]."]
+            #[must_use]
+            pub fn enrolment_id(&self) -> String {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The enrolment id, for [`Session::security_key_confirm_request`]."]
+                        #[must_use]
+                        #[export_name =
+                        "securitykeyenrolment_enrolmentId_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SecurityKeyEnrolment_enrolmentId(me:
+                                <SecurityKeyEnrolment as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<String as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SecurityKeyEnrolment>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<SecurityKeyEnrolment>();
+                                                let me =
+                                                    unsafe {
+                                                        <SecurityKeyEnrolment as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.enrolment_id();
+                                                _ret
+                                            }
+                                        });
+                            <String as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The enrolment id, for [`Session::security_key_confirm_request`]."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_securitykeyenrolment_enrolmentId_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <String as WasmDescribe>::describe();
+                            <String as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x14SecurityKeyEnrolment\x01A The enrolment id, for [`Session::security_key_confirm_request`].\0\0\0\0\x0benrolmentId\x01\x01\0\0\0\0\x01\0\x02\x0benrolmentId\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.enrolment_id.clone()
+            }
+            #[doc =
+            " The options for `navigator.credentials.create` (`{\"publicKey\": {...}}`, base64url values)."]
+            #[must_use]
+            pub fn options(&self) -> String {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The options for `navigator.credentials.create` (`{\"publicKey\": {...}}`, base64url values)."]
+                        #[must_use]
+                        #[export_name =
+                        "securitykeyenrolment_options_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SecurityKeyEnrolment_options(me:
+                                <SecurityKeyEnrolment as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<String as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SecurityKeyEnrolment>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<SecurityKeyEnrolment>();
+                                                let me =
+                                                    unsafe {
+                                                        <SecurityKeyEnrolment as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.options();
+                                                _ret
+                                            }
+                                        });
+                            <String as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The options for `navigator.credentials.create` (`{\"publicKey\": {...}}`, base64url values)."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_securitykeyenrolment_options_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <String as WasmDescribe>::describe();
+                            <String as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x14SecurityKeyEnrolment\x01[ The options for `navigator.credentials.create` (`{\"publicKey\": {...}}`, base64url values).\0\0\0\0\x07options\x01\x01\0\0\0\0\x01\0\x02\x07options\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.options.clone()
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                static _INCLUDED_FILES: &[&str] = &[];
+                const _ENCODED_BYTES: &[u8] =
+                    {
+                        const _CHUNK_SLICES: [&[u8]; 1usize] =
+                            [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        #[allow(long_running_const_eval)]
+                        const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                        #[allow(long_running_const_eval)]
+                        const _CHUNKS: [u8; _CHUNK_LEN] =
+                            flat_byte_slices(_CHUNK_SLICES);
+                        const _LEN_BYTES: [u8; 4] =
+                            (_CHUNK_LEN as u32).to_le_bytes();
+                        const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                        #[allow(long_running_const_eval)]
+                        const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                            flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                        &_ENCODED_BYTES
+                    };
+                const _PREFIX_JSON_BYTES: &[u8] =
+                    b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                const _PREFIX_JSON_BYTES_LEN: usize =
+                    _PREFIX_JSON_BYTES.len();
+                const _LEN: usize =
+                    _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                #[link_section = "__wasm_bindgen_unstable"]
+                #[allow(long_running_const_eval)]
+                static _GENERATED: [u8; _LEN] =
+                    flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+            };
+        #[wasm_bindgen()]
+        #[__wasm_bindgen_retried]
+        #[doc =
+        " One enrolled security key, as the account\'s owner sees it."]
+        pub struct SecurityKeyRow {
+            #[doc =
+            " The credential id, base64url: the handle of [`Session::security_key_remove_request`]."]
+            credential_id: String,
+            #[doc = " The user\'s label."]
+            label: String,
+            #[doc = " When it was enrolled."]
+            created_ms: u64,
+        }
+        #[automatically_derived]
+        impl ::core::clone::Clone for SecurityKeyRow {
+            #[inline]
+            fn clone(&self) -> SecurityKeyRow {
+                SecurityKeyRow {
+                    credential_id: ::core::clone::Clone::clone(&self.credential_id),
+                    label: ::core::clone::Clone::clone(&self.label),
+                    created_ms: ::core::clone::Clone::clone(&self.created_ms),
+                }
+            }
+        }
+        #[automatically_derived]
+        impl ::core::fmt::Debug for SecurityKeyRow {
+            #[inline]
+            fn fmt(&self, f: &mut ::core::fmt::Formatter)
+                -> ::core::fmt::Result {
+                ::core::fmt::Formatter::debug_struct_field3_finish(f,
+                    "SecurityKeyRow", "credential_id", &self.credential_id,
+                    "label", &self.label, "created_ms", &&self.created_ms)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsConstructor for
+            SecurityKeyRow {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
+            SecurityKeyRow {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsStaticProperty for
+            SecurityKeyRow {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::describe::WasmDescribe for SecurityKeyRow {
+            fn describe() {
+                use wasm_bindgen::describe::*;
+                inform(RUST_STRUCT);
+                inform(14u32);
+                inform(83u32);
+                inform(101u32);
+                inform(99u32);
+                inform(117u32);
+                inform(114u32);
+                inform(105u32);
+                inform(116u32);
+                inform(121u32);
+                inform(75u32);
+                inform(101u32);
+                inform(121u32);
+                inform(82u32);
+                inform(111u32);
+                inform(119u32);
+                inform(27u32);
+                inform(114u32);
+                inform(105u32);
+                inform(122u32);
+                inform(122u32);
+                inform(121u32);
+                inform(45u32);
+                inform(119u32);
+                inform(97u32);
+                inform(115u32);
+                inform(109u32);
+                inform(45u32);
+                inform(101u32);
+                inform(48u32);
+                inform(57u32);
+                inform(99u32);
+                inform(99u32);
+                inform(48u32);
+                inform(101u32);
+                inform(98u32);
+                inform(51u32);
+                inform(53u32);
+                inform(102u32);
+                inform(56u32);
+                inform(98u32);
+                inform(53u32);
+                inform(56u32);
+                inform(51u32);
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::IntoWasmAbi for SecurityKeyRow {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyRow>>;
+            fn into_abi(self) -> Self::Abi {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+                WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self)))
+                        as *mut WasmRefCell<SecurityKeyRow>)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::FromWasmAbi for SecurityKeyRow {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyRow>>;
+            unsafe fn from_abi(js: Self::Abi) -> Self {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+                use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+                let ptr = js.into_ptr();
+                assert_not_null(ptr);
+                let rc = Rc::from_raw(ptr);
+                match Rc::try_unwrap(rc) {
+                    Ok(cell) => cell.into_inner(),
+                    Err(_) =>
+                        wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+                }
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::core::convert::From<SecurityKeyRow> for
+            wasm_bindgen::JsValue {
+            fn from(value: SecurityKeyRow) -> Self {
+                let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+                #[link(wasm_import_module = "__wbindgen_placeholder__")]
+                extern "C" {
+                    #[link_name = "__wbg_securitykeyrow_new_e09cc0eb35f8b583"]
+                    fn __wbg_securitykeyrow_new(ptr:
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyRow>>)
+                    -> u32;
+                }
+                unsafe {
+                    <wasm_bindgen::JsValue as
+                            wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_securitykeyrow_new(ptr))
+                }
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                #[export_name = "__wbg_securitykeyrow_free_e09cc0eb35f8b583"]
+                #[doc(hidden)]
+                pub unsafe extern "C-unwind" fn __wbg_securitykeyrow_free(ptr:
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyRow>>,
+                    allow_delayed: u32) {
+                    use wasm_bindgen::__rt::alloc::rc::Rc;
+                    if allow_delayed != 0 {
+                        let ptr = ptr.into_ptr();
+                        wasm_bindgen::__rt::assert_not_null(ptr);
+                        drop(Rc::from_raw(ptr));
+                    } else {
+                        let _ =
+                            <SecurityKeyRow as
+                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                    }
+                }
+            };
+        #[automatically_derived]
+        impl wasm_bindgen::convert::RefFromWasmAbi for SecurityKeyRow {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyRow>>;
+            type Anchor = wasm_bindgen::__rt::RcRef<SecurityKeyRow>;
+            unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                let js = js.into_ptr();
+                wasm_bindgen::__rt::assert_not_null(js);
+                Rc::increment_strong_count(js);
+                let rc = Rc::from_raw(js);
+                wasm_bindgen::__rt::RcRef::new(rc)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::RefMutFromWasmAbi for SecurityKeyRow {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyRow>>;
+            type Anchor = wasm_bindgen::__rt::RcRefMut<SecurityKeyRow>;
+            unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                let js = js.into_ptr();
+                wasm_bindgen::__rt::assert_not_null(js);
+                Rc::increment_strong_count(js);
+                let rc = Rc::from_raw(js);
+                wasm_bindgen::__rt::RcRefMut::new(rc)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::LongRefFromWasmAbi for SecurityKeyRow {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyRow>>;
+            type Anchor = wasm_bindgen::__rt::RcRef<SecurityKeyRow>;
+            unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+                <Self as
+                        wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::OptionIntoWasmAbi for SecurityKeyRow {
+            #[inline]
+            fn none() -> Self::Abi {
+                <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyRow>>>::null()
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::OptionFromWasmAbi for SecurityKeyRow {
+            #[inline]
+            fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::TryFromJsValue for SecurityKeyRow {
+            fn try_from_js_value(value: wasm_bindgen::JsValue)
+                ->
+                    wasm_bindgen::__rt::core::result::Result<Self,
+                    wasm_bindgen::JsValue> {
+                Self::try_from_js_value_ref(&value).ok_or(value)
+            }
+            fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+                -> wasm_bindgen::__rt::core::option::Option<Self> {
+                let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+                #[link(wasm_import_module = "__wbindgen_placeholder__")]
+                extern "C" {
+                    #[link_name =
+                    "__wbg_securitykeyrow_unwrap_e09cc0eb35f8b583"]
+                    fn __wbg_securitykeyrow_unwrap(ptr: u32)
+                    ->
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SecurityKeyRow>>;
+                }
+                let ptr = unsafe { __wbg_securitykeyrow_unwrap(idx) };
+                if ptr.is_null() {
+                    wasm_bindgen::__rt::core::option::Option::None
+                } else {
+                    unsafe {
+                        wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                    }
+                }
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::describe::WasmDescribeVector for SecurityKeyRow {
+            fn describe_vector() {
+                use wasm_bindgen::describe::*;
+                inform(VECTOR);
+                <SecurityKeyRow as
+                        wasm_bindgen::describe::WasmDescribe>::describe();
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::VectorIntoWasmAbi for SecurityKeyRow {
+            type Abi =
+                <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]>
+                as wasm_bindgen::convert::IntoWasmAbi>::Abi;
+            fn vector_into_abi(vector:
+                    wasm_bindgen::__rt::alloc::boxed::Box<[SecurityKeyRow]>)
+                -> Self::Abi {
+                wasm_bindgen::convert::js_value_vector_into_abi(vector)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::VectorFromWasmAbi for SecurityKeyRow {
+            type Abi =
+                <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]>
+                as wasm_bindgen::convert::FromWasmAbi>::Abi;
+            unsafe fn vector_from_abi(js: Self::Abi)
+                -> wasm_bindgen::__rt::alloc::boxed::Box<[SecurityKeyRow]> {
+                wasm_bindgen::convert::js_value_vector_from_abi(js)
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                static _INCLUDED_FILES: &[&str] = &[];
+                const _ENCODED_BYTES: &[u8] =
+                    {
+                        const _CHUNK_SLICES: [&[u8]; 1usize] =
+                            [b"\0\0\0\x01\x0eSecurityKeyRow\0\x01; One enrolled security key, as the account's owner sees it.\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        #[allow(long_running_const_eval)]
+                        const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                        #[allow(long_running_const_eval)]
+                        const _CHUNKS: [u8; _CHUNK_LEN] =
+                            flat_byte_slices(_CHUNK_SLICES);
+                        const _LEN_BYTES: [u8; 4] =
+                            (_CHUNK_LEN as u32).to_le_bytes();
+                        const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                        #[allow(long_running_const_eval)]
+                        const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                            flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                        &_ENCODED_BYTES
+                    };
+                const _PREFIX_JSON_BYTES: &[u8] =
+                    b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                const _PREFIX_JSON_BYTES_LEN: usize =
+                    _PREFIX_JSON_BYTES.len();
+                const _LEN: usize =
+                    _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                #[link_section = "__wasm_bindgen_unstable"]
+                #[allow(long_running_const_eval)]
+                static _GENERATED: [u8; _LEN] =
+                    flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+            };
+        impl SecurityKeyRow {
+            #[doc = " The credential id, base64url."]
+            #[must_use]
+            pub fn credential_id(&self) -> String {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The credential id, base64url."]
+                        #[must_use]
+                        #[export_name =
+                        "securitykeyrow_credentialId_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SecurityKeyRow_credentialId(me:
+                                <SecurityKeyRow as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<String as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SecurityKeyRow>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<SecurityKeyRow>();
+                                                let me =
+                                                    unsafe {
+                                                        <SecurityKeyRow as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.credential_id();
+                                                _ret
+                                            }
+                                        });
+                            <String as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The credential id, base64url."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_securitykeyrow_credentialId_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <String as WasmDescribe>::describe();
+                            <String as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x0eSecurityKeyRow\x01\x1e The credential id, base64url.\0\0\0\0\x0ccredentialId\x01\x01\0\0\0\0\x01\0\x02\x0ccredentialId\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.credential_id.clone()
+            }
+            #[doc = " The user\'s label."]
+            #[must_use]
+            pub fn label(&self) -> String {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The user\'s label."]
+                        #[must_use]
+                        #[export_name = "securitykeyrow_label_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SecurityKeyRow_label(me:
+                                <SecurityKeyRow as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<String as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SecurityKeyRow>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<SecurityKeyRow>();
+                                                let me =
+                                                    unsafe {
+                                                        <SecurityKeyRow as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.label();
+                                                _ret
+                                            }
+                                        });
+                            <String as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The user\'s label."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_securitykeyrow_label_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <String as WasmDescribe>::describe();
+                            <String as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x0eSecurityKeyRow\x01\x12 The user's label.\0\0\0\0\x05label\x01\x01\0\0\0\0\x01\0\x02\x05label\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.label.clone()
+            }
+            #[doc = " Enrolment time, Unix milliseconds."]
+            #[must_use]
+            pub fn created_ms(&self) -> u64 {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " Enrolment time, Unix milliseconds."]
+                        #[must_use]
+                        #[export_name = "securitykeyrow_createdMs_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SecurityKeyRow_createdMs(me:
+                                <SecurityKeyRow as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<u64 as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SecurityKeyRow>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<SecurityKeyRow>();
+                                                let me =
+                                                    unsafe {
+                                                        <SecurityKeyRow as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.created_ms();
+                                                _ret
+                                            }
+                                        });
+                            <u64 as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " Enrolment time, Unix milliseconds."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_securitykeyrow_createdMs_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <u64 as WasmDescribe>::describe();
+                            <u64 as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x0eSecurityKeyRow\x01# Enrolment time, Unix milliseconds.\0\0\0\0\tcreatedMs\x01\x01\0\0\0\0\x01\0\x02\tcreatedMs\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.created_ms
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                static _INCLUDED_FILES: &[&str] = &[];
+                const _ENCODED_BYTES: &[u8] =
+                    {
+                        const _CHUNK_SLICES: [&[u8]; 1usize] =
+                            [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        #[allow(long_running_const_eval)]
+                        const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                        #[allow(long_running_const_eval)]
+                        const _CHUNKS: [u8; _CHUNK_LEN] =
+                            flat_byte_slices(_CHUNK_SLICES);
+                        const _LEN_BYTES: [u8; 4] =
+                            (_CHUNK_LEN as u32).to_le_bytes();
+                        const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                        #[allow(long_running_const_eval)]
+                        const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                            flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                        &_ENCODED_BYTES
+                    };
+                const _PREFIX_JSON_BYTES: &[u8] =
+                    b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                const _PREFIX_JSON_BYTES_LEN: usize =
+                    _PREFIX_JSON_BYTES.len();
+                const _LEN: usize =
+                    _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                #[link_section = "__wasm_bindgen_unstable"]
+                #[allow(long_running_const_eval)]
+                static _GENERATED: [u8; _LEN] =
+                    flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+            };
+        /// A base64url value as its JSON string form, re-read through the wire type's strict decoder.
+        fn b64url<T: serde::de::DeserializeOwned>(text: &str)
+            -> CoreResult<T> {
+            serde_json::from_value(serde_json::Value::String(text.to_owned())).map_err(|_|
+                    ClientError::InvalidInput.into())
+        }
+        /// The base64url text of a wire value that serialises to a JSON string.
+        fn text_of<T: serde::Serialize>(value: &T) -> CoreResult<String> {
+            serde_json::to_value(value).ok().and_then(|v|
+                        v.as_str().map(str::to_owned)).ok_or_else(||
+                    ClientError::InvalidServerResponse.into())
+        }
+        impl Session {
+            #[doc =
+            " `webauthn/enrol/start` (ADR 0058 point 2): needs a fresh OPAQUE session."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`."]
+            pub fn security_key_enrol_request(&self)
+                -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " `webauthn/enrol/start` (ADR 0058 point 2): needs a fresh OPAQUE session."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[export_name =
+                        "session_securityKeyEnrolRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_securityKeyEnrolRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.security_key_enrol_request();
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " `webauthn/enrol/start` (ADR 0058 point 2): needs a fresh OPAQUE session."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_securityKeyEnrolRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04I `webauthn/enrol/start` (ADR 0058 point 2): needs a fresh OPAQUE session.\0\t # Errors\n `locked`.\0\0\0\0\x17securityKeyEnrolRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                Ok(HttpRequest::post_empty(paths::WEBAUTHN_ENROL_START,
+                        Some(&self.inner()?.token)))
+            }
+            #[doc =
+            " Reads the answer to [`Session::security_key_enrol_request`]."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; the server\'s code (`not_found` when this server cannot be a relying party,"]
+            #[doc = " `fresh_session_required`); `invalid_server_response`."]
+            pub fn security_key_enrol_response(&self, status: u16,
+                body: &[u8]) -> Result<SecurityKeyEnrolment, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Reads the answer to [`Session::security_key_enrol_request`]."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; the server\'s code (`not_found` when this server cannot be a relying party,"]
+                        #[doc =
+                        " `fresh_session_required`); `invalid_server_response`."]
+                        #[export_name =
+                        "session_securityKeyEnrolResponse_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_securityKeyEnrolResponse(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<SecurityKeyEnrolment,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u16>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <u16 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u16 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <[u8] as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let arg2 = &*arg2;
+                                                let _ret = me.security_key_enrol_response(arg1, arg2);
+                                                _ret
+                                            }
+                                        });
+                            <Result<SecurityKeyEnrolment, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Reads the answer to [`Session::security_key_enrol_request`]."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; the server\'s code (`not_found` when this server cannot be a relying party,"]
+                        #[doc =
+                        " `fresh_session_required`); `invalid_server_response`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_securityKeyEnrolResponse_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(2u32);
+                            <u16 as WasmDescribe>::describe();
+                            <&[u8] as WasmDescribe>::describe();
+                            <Result<SecurityKeyEnrolment, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<SecurityKeyEnrolment, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05= Reads the answer to [`Session::security_key_enrol_request`].\0\t # ErrorsU `locked`; the server's code (`not_found` when this server cannot be a relying party,6 `fresh_session_required`); `invalid_server_response`.\0\x02\x06status\0\0\0\x04body\0\0\0\0\0\x18securityKeyEnrolResponse\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.inner()?;
+                let answer: WebauthnEnrolStartResponse =
+                    http::json(status, body)?;
+                Ok(SecurityKeyEnrolment {
+                        enrolment_id: text_of(&answer.enrolment_id)?,
+                        options: answer.options.as_str().to_owned(),
+                    })
+            }
+            #[doc =
+            " `webauthn/enrol/confirm`: the browser\'s `create()` result as JSON, and the user\'s label;"]
+            #[doc = " its answer is an empty success."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for an empty or over-long label, a bad enrolment id, or JSON"]
+            #[doc = " outside the wire bounds."]
+            pub fn security_key_confirm_request(&self, enrolment_id: &str,
+                label: &str, credential_json: &str)
+                -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " `webauthn/enrol/confirm`: the browser\'s `create()` result as JSON, and the user\'s label;"]
+                        #[doc = " its answer is an empty success."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an empty or over-long label, a bad enrolment id, or JSON"]
+                        #[doc = " outside the wire bounds."]
+                        #[export_name =
+                        "session_securityKeyConfirmRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_securityKeyConfirmRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg3_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg3_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg3_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg3_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let arg2 = &*arg2;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg3 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                                arg3_3, arg3_4))
+                                                    };
+                                                let arg3 = &*arg3;
+                                                let _ret =
+                                                    me.security_key_confirm_request(arg1, arg2, arg3);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " `webauthn/enrol/confirm`: the browser\'s `create()` result as JSON, and the user\'s label;"]
+                        #[doc = " its answer is an empty success."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an empty or over-long label, a bad enrolment id, or JSON"]
+                        #[doc = " outside the wire bounds."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_securityKeyConfirmRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(3u32);
+                            <&str as WasmDescribe>::describe();
+                            <&str as WasmDescribe>::describe();
+                            <&str as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x06Y `webauthn/enrol/confirm`: the browser's `create()` result as JSON, and the user's label;  its answer is an empty success.\0\t # ErrorsW `locked`; `invalid_input` for an empty or over-long label, a bad enrolment id, or JSON\x19 outside the wire bounds.\0\x03\x0cenrolment_id\0\0\0\x05label\0\0\0\x0fcredential_json\0\0\0\0\0\x19securityKeyConfirmRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let id: Id = b64url(enrolment_id)?;
+                let request =
+                    enrol_confirm_request(id, label, credential_json)?;
+                HttpRequest::post(paths::WEBAUTHN_ENROL_CONFIRM, &request,
+                    Some(&self.inner()?.token))
+            }
+            #[doc = " `webauthn/list`: the account\'s security keys."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`."]
+            pub fn security_key_list_request(&self)
+                -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " `webauthn/list`: the account\'s security keys."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[export_name =
+                        "session_securityKeyListRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_securityKeyListRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.security_key_list_request();
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " `webauthn/list`: the account\'s security keys."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_securityKeyListRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04. `webauthn/list`: the account's security keys.\0\t # Errors\n `locked`.\0\0\0\0\x16securityKeyListRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                Ok(HttpRequest::post_empty(paths::WEBAUTHN_LIST,
+                        Some(&self.inner()?.token)))
+            }
+            #[doc =
+            " Reads the answer to [`Session::security_key_list_request`], oldest first. The server\'s"]
+            #[doc = " word, for display."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; the server\'s code; `invalid_server_response`."]
+            pub fn security_key_list_response(&self, status: u16, body: &[u8])
+                -> Result<Vec<SecurityKeyRow>, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Reads the answer to [`Session::security_key_list_request`], oldest first. The server\'s"]
+                        #[doc = " word, for display."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; the server\'s code; `invalid_server_response`."]
+                        #[export_name =
+                        "session_securityKeyListResponse_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_securityKeyListResponse(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<Vec<SecurityKeyRow>,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u16>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <u16 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u16 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <[u8] as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let arg2 = &*arg2;
+                                                let _ret = me.security_key_list_response(arg1, arg2);
+                                                _ret
+                                            }
+                                        });
+                            <Result<Vec<SecurityKeyRow>, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Reads the answer to [`Session::security_key_list_request`], oldest first. The server\'s"]
+                        #[doc = " word, for display."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; the server\'s code; `invalid_server_response`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_securityKeyListResponse_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(2u32);
+                            <u16 as WasmDescribe>::describe();
+                            <&[u8] as WasmDescribe>::describe();
+                            <Result<Vec<SecurityKeyRow>, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<Vec<SecurityKeyRow>, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05W Reads the answer to [`Session::security_key_list_request`], oldest first. The server's\x13 word, for display.\0\t # Errors8 `locked`; the server's code; `invalid_server_response`.\0\x02\x06status\0\0\0\x04body\0\0\0\0\0\x17securityKeyListResponse\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.inner()?;
+                let answer: WebauthnListResponse = http::json(status, body)?;
+                answer.credentials.as_slice().iter().map(|k|
+                            {
+                                Ok(SecurityKeyRow {
+                                        credential_id: text_of(&k.credential_id)?,
+                                        label: k.label.as_str().to_owned(),
+                                        created_ms: k.created_ms,
+                                    })
+                            }).collect()
+            }
+            #[doc =
+            " `webauthn/remove` for the key `credential_id` (base64url, from a listed row); needs a"]
+            #[doc = " fresh OPAQUE session; its answer is an empty success."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for an id that is not base64url of 1 to 1023 bytes."]
+            pub fn security_key_remove_request(&self, credential_id: &str)
+                -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " `webauthn/remove` for the key `credential_id` (base64url, from a listed row); needs a"]
+                        #[doc =
+                        " fresh OPAQUE session; its answer is an empty success."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id that is not base64url of 1 to 1023 bytes."]
+                        #[export_name =
+                        "session_securityKeyRemoveRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_securityKeyRemoveRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.security_key_remove_request(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " `webauthn/remove` for the key `credential_id` (base64url, from a listed row); needs a"]
+                        #[doc =
+                        " fresh OPAQUE session; its answer is an empty success."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id that is not base64url of 1 to 1023 bytes."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_securityKeyRemoveRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05V `webauthn/remove` for the key `credential_id` (base64url, from a listed row); needs a6 fresh OPAQUE session; its answer is an empty success.\0\t # ErrorsN `locked`; `invalid_input` for an id that is not base64url of 1 to 1023 bytes.\0\x01\rcredential_id\0\0\0\0\0\x18securityKeyRemoveRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let id: WebauthnCredentialId = b64url(credential_id)?;
+                let request = remove_request(id.as_slice())?;
+                HttpRequest::post(paths::WEBAUTHN_REMOVE, &request,
+                    Some(&self.inner()?.token))
             }
         }
         #[automatically_derived]

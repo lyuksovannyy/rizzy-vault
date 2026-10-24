@@ -5,7 +5,10 @@
 //!
 //! ```text
 //! LoginFlow.start ──login/start──► respond ──login/finish──► respond
-//!   ├─ second_factor_required ──► state "needs_totp" ──provideTotp──► (again from login/start)
+//!   ├─ second_factor_required ──webauthn/login/challenge──► respond
+//!   │    ├─ not_found ──► state "needs_totp" ──provideTotp──► (again from login/start)
+//!   │    └─ options ──► state "needs_security_key" ──provideSecurityKey──webauthn/login/finish──► respond
+//!   │         (or provideTotp when securityKeyTotp, or retrySecurityKey for a new challenge)
 //!   └─ verified ──devices/web-certificate (kind 4, 12 h)──► respond ──► state "done" ──finish──► Session
 //! ```
 //!
@@ -50,11 +53,13 @@ use rizzy_client::rizzy_proto::auth::{LoginFinishResponse, LoginStartResponse};
 use rizzy_client::rizzy_proto::change::ReregisterStartResponse;
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
-use rizzy_client::rizzy_proto::wire::SessionToken;
+use rizzy_client::rizzy_proto::webauthn::WebauthnLoginChallengeResponse;
+use rizzy_client::rizzy_proto::wire::{Id, SessionToken};
+use rizzy_client::webauthn::{self, SecondFactor};
 use wasm_bindgen::prelude::wasm_bindgen;
 use zeroize::Zeroizing;
 
-use crate::error::{CoreError, CoreResult, WRONG_STATE};
+use crate::error::{CoreError, CoreResult, SECURITY_KEY_REFUSED, WRONG_STATE};
 use crate::http::{self, HttpRequest};
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
@@ -101,7 +106,7 @@ enum Stage {
     /// `login/start` is outstanding.
     Start(Box<LoginStarted>),
     /// `login/finish` is outstanding.
-    Finish(LoginAwaitingSession),
+    Finish(LoginAwaitingSession, Id),
     /// `account/reregister/start` of the same-password re-registration is outstanding (ADR
     /// 0031 point 2).
     Reregister(Box<LoggedIn>, ReregistrationStarted),
@@ -111,6 +116,13 @@ enum Stage {
     Certificate(Box<WebSession>),
     /// The account has 2FA and the login carried no code.
     NeedsTotp,
+    /// `login/finish` answered `second_factor_required`: `webauthn/login/challenge` for the
+    /// login's `login_id` (its pending id, ADR 0058 point 3) is outstanding.
+    SecondFactor(LoginAwaitingSession, Id),
+    /// Waiting for the browser's assertion over [`LoginFlow::security_key_options`].
+    NeedsSecurityKey(LoginAwaitingSession, Id),
+    /// `webauthn/login/finish` is outstanding.
+    SecurityKeyFinish(LoginAwaitingSession),
     /// A session is ready.
     Done(Box<WebSession>),
     /// A re-authentication verified this account.
@@ -129,6 +141,8 @@ pub struct LoginFlow {
     input: Credentials,
     /// The second factor, if given.
     totp: Option<Zeroizing<String>>,
+    /// On `"needs_security_key"`: the request options and whether TOTP is offered too.
+    security_key: Option<(String, bool)>,
     /// Session or re-authentication.
     purpose: Purpose,
     /// Where the flow is.
@@ -183,18 +197,22 @@ impl LoginFlow {
         )
     }
 
-    /// `"request"` while a request is outstanding, `"needs_totp"`, `"done"`, or `"failed"`
+    /// `"request"` while a request is outstanding, `"needs_totp"`, `"needs_security_key"`,
+    /// `"done"`, or `"failed"`
     /// after an error or once the result was taken.
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn state(&self) -> String {
         match self.stage {
             Stage::Start(_)
-            | Stage::Finish(_)
+            | Stage::Finish(..)
+            | Stage::SecondFactor(..)
+            | Stage::SecurityKeyFinish(_)
             | Stage::Reregister(..)
             | Stage::ReregisterCommit(..)
             | Stage::Certificate(_) => "request",
             Stage::NeedsTotp => "needs_totp",
+            Stage::NeedsSecurityKey(..) => "needs_security_key",
             Stage::Done(_) | Stage::Reauthenticated(_) | Stage::Refreshed(..) => "done",
             Stage::Spent => "failed",
         }
@@ -244,11 +262,80 @@ impl LoginFlow {
     /// `wrong_state`; `invalid_input` for a code outside its bounds.
     #[wasm_bindgen(js_name = provideTotp)]
     pub fn provide_totp(&mut self, code: &str) -> Result<(), CoreError> {
-        if !matches!(self.stage, Stage::NeedsTotp) {
-            return Err(CoreError::new(WRONG_STATE));
+        let totp_offered = matches!(self.security_key, Some((_, true)));
+        match self.stage {
+            Stage::NeedsTotp => {}
+            Stage::NeedsSecurityKey(..) if totp_offered => {}
+            _ => return Err(CoreError::new(WRONG_STATE)),
         }
+        self.security_key = None;
         self.totp = Some(Zeroizing::new(code.to_owned()));
         self.restart()
+    }
+
+    /// On `"needs_security_key"`: the request options for `navigator.credentials.get`, as the
+    /// server's JSON (`{"publicKey": {...}}`, binary values as base64url).
+    #[wasm_bindgen(getter, js_name = securityKeyOptions)]
+    #[must_use]
+    pub fn security_key_options(&self) -> Option<String> {
+        self.security_key
+            .as_ref()
+            .map(|(options, _)| options.clone())
+    }
+
+    /// On `"needs_security_key"`: whether a TOTP code would also do ([`LoginFlow::provide_totp`]).
+    #[wasm_bindgen(getter, js_name = securityKeyTotp)]
+    #[must_use]
+    pub fn security_key_totp(&self) -> bool {
+        matches!(self.security_key, Some((_, true)))
+    }
+
+    /// On `"needs_security_key"`: the browser's assertion (`PublicKeyCredential` JSON) for
+    /// [`LoginFlow::security_key_options`]; then `"request"` again (`webauthn/login/finish`).
+    ///
+    /// # Errors
+    /// `wrong_state`; `invalid_input` for JSON outside the wire bounds.
+    #[wasm_bindgen(js_name = provideSecurityKey)]
+    pub fn provide_security_key(&mut self, credential_json: &str) -> Result<(), CoreError> {
+        let Stage::NeedsSecurityKey(_, login_id) = &self.stage else {
+            return Err(CoreError::new(WRONG_STATE));
+        };
+        let request = webauthn::login_finish_request(*login_id, credential_json)?;
+        self.pending = Some(HttpRequest::post(
+            paths::WEBAUTHN_LOGIN_FINISH,
+            &request,
+            None,
+        )?);
+        if let Stage::NeedsSecurityKey(awaiting, _) =
+            core::mem::replace(&mut self.stage, Stage::Spent)
+        {
+            self.stage = Stage::SecurityKeyFinish(awaiting);
+        }
+        Ok(())
+    }
+
+    /// On `"needs_security_key"`, after the browser prompt was cancelled or timed out: asks the
+    /// server for a fresh challenge (the pending row lives 60 s); then `"request"` again.
+    ///
+    /// # Errors
+    /// `wrong_state`.
+    #[wasm_bindgen(js_name = retrySecurityKey)]
+    pub fn retry_security_key(&mut self) -> Result<(), CoreError> {
+        let Stage::NeedsSecurityKey(_, login_id) = &self.stage else {
+            return Err(CoreError::new(WRONG_STATE));
+        };
+        let login_id = *login_id;
+        self.pending = Some(HttpRequest::post(
+            paths::WEBAUTHN_LOGIN_CHALLENGE,
+            &webauthn::login_challenge_request(login_id),
+            None,
+        )?);
+        if let Stage::NeedsSecurityKey(awaiting, _) =
+            core::mem::replace(&mut self.stage, Stage::Spent)
+        {
+            self.stage = Stage::SecondFactor(awaiting, login_id);
+        }
+        Ok(())
     }
 
     /// The session of a finished login. Consumes the flow.
@@ -274,6 +361,7 @@ impl LoginFlow {
         let mut flow = Self {
             input,
             totp,
+            security_key: None,
             purpose,
             stage: Stage::Spent,
             pending: None,
@@ -313,13 +401,19 @@ impl LoginFlow {
                 let totp = self.totp.as_ref().map(|t| t.as_str());
                 let (awaiting, finish) = (*started).finish(&mut self.rng, &answer, totp)?;
                 self.pending = Some(HttpRequest::post(paths::LOGIN_FINISH, &finish, None)?);
-                self.stage = Stage::Finish(awaiting);
+                self.stage = Stage::Finish(awaiting, finish.login_id);
                 Ok(())
             }
-            Stage::Finish(awaiting) => {
+            Stage::Finish(awaiting, login_id) => {
                 match http::server_code(status, body) {
                     Some(ErrorCode::SecondFactorRequired) if self.totp.is_none() => {
-                        self.stage = Stage::NeedsTotp;
+                        // ADR 0058 point 3: ask which second factor the account has.
+                        self.pending = Some(HttpRequest::post(
+                            paths::WEBAUTHN_LOGIN_CHALLENGE,
+                            &webauthn::login_challenge_request(login_id),
+                            None,
+                        )?);
+                        self.stage = Stage::SecondFactor(awaiting, login_id);
                         return Ok(());
                     }
                     Some(ErrorCode::Unauthorized) => {
@@ -328,11 +422,30 @@ impl LoginFlow {
                     _ => {}
                 }
                 let answer: LoginFinishResponse = http::json(status, body)?;
-                let logged_in = awaiting.complete(answer)?;
-                if self.purpose == Purpose::Session && logged_in.reregister() {
-                    return self.reregister(logged_in, now_ms);
+                self.verified(awaiting, answer, now_ms)
+            }
+            Stage::SecondFactor(awaiting, login_id) => {
+                let answer = match http::server_code(status, body) {
+                    Some(code) => Err(code),
+                    None => Ok(http::json::<WebauthnLoginChallengeResponse>(status, body)?),
+                };
+                match SecondFactor::from_challenge(answer).map_err(CoreError::server)? {
+                    SecondFactor::Totp => self.stage = Stage::NeedsTotp,
+                    SecondFactor::SecurityKey { options, totp } => {
+                        self.security_key = Some((options, totp));
+                        self.stage = Stage::NeedsSecurityKey(awaiting, login_id);
+                    }
                 }
-                self.logged_in(logged_in, now_ms)
+                Ok(())
+            }
+            Stage::SecurityKeyFinish(awaiting) => {
+                if http::server_code(status, body) == Some(ErrorCode::Unauthorized) {
+                    // The assertion was refused, or the pending row expired or was used: the
+                    // OPAQUE login must start again (ADR 0058 point 3: single use).
+                    return Err(CoreError::new(SECURITY_KEY_REFUSED));
+                }
+                let answer: LoginFinishResponse = http::json(status, body)?;
+                self.verified(awaiting, answer, now_ms)
             }
             Stage::Reregister(login, started) => {
                 let built = http::json::<ReregisterStartResponse>(status, body)
@@ -368,11 +481,27 @@ impl LoginFlow {
                 Ok(())
             }
             Stage::NeedsTotp
+            | Stage::NeedsSecurityKey(..)
             | Stage::Done(_)
             | Stage::Reauthenticated(_)
             | Stage::Refreshed(..)
             | Stage::Spent => Err(CoreError::new(WRONG_STATE)),
         }
+    }
+
+    /// A login whose KE3 and second factor verified: completes it, then re-registers or goes on.
+    fn verified(
+        &mut self,
+        awaiting: LoginAwaitingSession,
+        answer: LoginFinishResponse,
+        now_ms: u64,
+    ) -> CoreResult<()> {
+        self.security_key = None;
+        let logged_in = awaiting.complete(answer)?;
+        if self.purpose == Purpose::Session && logged_in.reregister() {
+            return self.reregister(logged_in, now_ms);
+        }
+        self.logged_in(logged_in, now_ms)
     }
 
     /// ADR 0031 point 2 (module docs): starts the same-password re-registration over the
