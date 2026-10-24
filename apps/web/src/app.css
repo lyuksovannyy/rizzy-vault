@@ -550,11 +550,12 @@ button.sidebar-item.active svg {
   gap: var(--space-6);
 }
 
-/* Opening an item (docs/design/README.md "Opening an item"): the detail pane's content is keyed
-   by the item (ItemsPane.tsx), so each open mounts it fresh and it slides in from the list's
-   side, the one shared-element-like step this design uses, a short travel on the emphasized
-   curve. Under reduced motion it only fades. */
-.item-detail > * {
+/* Opening an item (docs/design/README.md "Opening an item"): ItemsPane.tsx keys this wrapper by
+   what is open (the item and view/edit), so each open mounts it fresh and it slides in from the
+   list's side, the one shared-element-like step this design uses, a short travel on the
+   emphasized curve; a sync re-mounting the same item does not replay it. Under reduced motion
+   it only fades. */
+.item-detail-enter {
   animation: rv-slide-in-end var(--motion-duration-slow) var(--motion-easing-emphasized) backwards;
 }
 

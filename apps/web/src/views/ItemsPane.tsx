@@ -306,32 +306,43 @@ export function ItemsPane(props: {
             <IconBack /> Back
           </button>
         )}
-        {detail.kind === "view" && (
-          <ItemView
-            key={`${detail.id}-${ctx.revision}-${localRevision}`}
-            ctx={ctx}
-            id={detail.id}
-            onEdit={() => setDetail({ kind: "edit", id: detail.id })}
-            onWritten={(gone) => written(gone ? { kind: "none" } : detail)}
-          />
-        )}
-        {detail.kind === "edit" && (
-          <ItemEditor
-            key={`edit-${detail.id}`}
-            ctx={ctx}
-            id={detail.id}
-            onCancel={() => setDetail({ kind: "view", id: detail.id })}
-            onSaved={(id) => written({ kind: "view", id })}
-          />
-        )}
-        {detail.kind === "new" && (
-          <ItemEditor
-            key={`new-${detail.itemType}`}
-            ctx={ctx}
-            newType={detail.itemType}
-            onCancel={() => setDetail({ kind: "none" })}
-            onSaved={(id) => written({ kind: "view", id })}
-          />
+        {/* The entrance wrapper (docs/design/README.md "Opening an item"): keyed by what is open,
+            not by the item's revision, so opening an item or switching to its editor slides the
+            pane in, while a sync or save that re-mounts the same item's view does not replay
+            the motion. */}
+        {detail.kind !== "none" && (
+          <div
+            className="item-detail-enter"
+            key={detail.kind === "new" ? `new-${detail.itemType}` : `${detail.kind}-${detail.id}`}
+          >
+            {detail.kind === "view" && (
+              <ItemView
+                key={`${detail.id}-${ctx.revision}-${localRevision}`}
+                ctx={ctx}
+                id={detail.id}
+                onEdit={() => setDetail({ kind: "edit", id: detail.id })}
+                onWritten={(gone) => written(gone ? { kind: "none" } : detail)}
+              />
+            )}
+            {detail.kind === "edit" && (
+              <ItemEditor
+                key={`edit-${detail.id}`}
+                ctx={ctx}
+                id={detail.id}
+                onCancel={() => setDetail({ kind: "view", id: detail.id })}
+                onSaved={(id) => written({ kind: "view", id })}
+              />
+            )}
+            {detail.kind === "new" && (
+              <ItemEditor
+                key={`new-${detail.itemType}`}
+                ctx={ctx}
+                newType={detail.itemType}
+                onCancel={() => setDetail({ kind: "none" })}
+                onSaved={(id) => written({ kind: "view", id })}
+              />
+            )}
+          </div>
         )}
       </div>
     </div>
