@@ -278,7 +278,7 @@ impl Device {
             &answer,
             &self.state,
             &self.unlocked,
-            &[&self.vault],
+            &self.vaults.open_refs(),
         )?;
         // Secrets before commit (CRYPTO.md §11): the new kit is shown and confirmed first.
         let shown = show_kit(ui, &mut pending, recovery_on)?;

@@ -28,11 +28,11 @@ USAGE:
     rv login --server <url> --name <login>
     rv unlock
     rv sync
-    rv item list [--trash]
-    rv item search [<query>] [--trash]
+    rv item list [--trash] [--vault <vault>]
+    rv item search [<query>] [--trash] [--vault <vault>]
     rv item recent [--limit <n>]
     rv item show <item> [--reveal]
-    rv item create --type <type> [--field <key>=<value>]... [--secret <key>]...
+    rv item create --type <type> [--vault <vault>] [--field <key>=<value>]... [--secret <key>]...
                    [--uri <uri>]... [--tag <name>]... [<custom field>]...
                    [--generate [<identity option>]...]
     rv item edit <item> [--field <key>=<value>]... [--secret <key>]... [--clear <key>]...
@@ -43,13 +43,16 @@ USAGE:
                    [--move-custom <id>=<place>]...
     rv item trash <item> | restore <item> | purge <item>
     rv item restore-late <item> --type <type>
+    rv item move <item> --to <vault> | copy <item> --to <vault>
+    rv vault list | create <name> | rename <vault> <name>
+    rv vault delete <vault> --name <login> [--with-items]
     rv generate [--length <n>] [--no-symbols | --symbols <chars>] [--no-ambiguous]
                 [--exclude <chars>] | --words <n> [--passphrase-number]
     rv generate identity [<identity option>]... [--json]
     rv totp <item>
     rv cache reindex
-    rv export --out <file> --name <login> [--format encrypted|json|csv|cxf]
-    rv import --in <file> [--format <format>]
+    rv export --out <file> --name <login> [--format encrypted|json|csv|cxf] [--vault <vault>]
+    rv import --in <file> [--format <format>] [--vault <vault>]
     rv device list
     rv device revoke <device> --name <login> [--standard]
     rv device forget
@@ -72,7 +75,16 @@ OPTIONS:
     -V, --version    Print version
 
 <item>, <device> and <session> are hex ids or unique prefixes of one, as the list commands
-print them. `session end` ends another web or password login, or a recovery session; a
+print them; an item prefix is looked up in every vault, and one that matches items in two
+vaults is refused with each match listed. <vault> is Personal, a vault's name, or its hex id
+or a unique prefix of it; a name two vaults share is refused with their ids. Every item lives
+in one vault: item create, import and export use Personal unless --vault names another, and
+list and search span every vault unless --vault names one; each row shows its vault. item
+move copies the item into the other vault (attachments included) and removes the original
+once the server has stored the copy; item copy keeps the original. The Personal vault cannot
+be renamed or deleted. vault delete asks for the vault's name typed as confirmation and logs
+in again with the master password; it first moves every item of the vault, the trash
+included, to Personal, or with --with-items deletes them with the vault. `session end` ends another web or password login, or a recovery session; a
 device's session is ended by suspending or revoking the device (`device revoke`). `session end
 --others` ends every other one of those; devices stay logged in. rv ends its own session when
 a command exits.
@@ -168,6 +180,8 @@ pub enum ImportFormat {
 /// The field changes of `item create` and `item edit`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FieldArgs {
+    /// `--vault` (create only): the vault of the new item; `None` is Personal (ADR 0081 §A8).
+    pub vault: Option<String>,
     /// `--generate` (create only, `--type identity`): pre-fill the identity from the generator
     /// with these options (ADR 0079 §10). A `--field` of the same key wins.
     pub generate: Option<IdentityArgs>,
@@ -341,6 +355,8 @@ pub enum Command {
     ItemList {
         /// `--trash`: the trashed items instead of the active ones.
         trash: bool,
+        /// `--vault`: only this vault's items (ADR 0081 §A7).
+        vault: Option<String>,
     },
     /// `item search` (ADR 0056 §5).
     ItemSearch {
@@ -348,6 +364,8 @@ pub enum Command {
         query: String,
         /// `--trash`: the trashed items instead of the active ones.
         trash: bool,
+        /// `--vault`: only this vault's items (ADR 0081 §A7).
+        vault: Option<String>,
     },
     /// `item recent` (ADR 0056 §2).
     ItemRecent {
@@ -427,6 +445,8 @@ pub enum Command {
         name: String,
         /// `--format`.
         format: ExportFormat,
+        /// `--vault`: the vault to export; `None` is Personal (ADR 0081 §A8).
+        vault: Option<String>,
     },
     /// `import`.
     Import {
@@ -434,6 +454,37 @@ pub enum Command {
         input: PathBuf,
         /// `--format`: an override; `None` lets `rv` recognise the format.
         format: Option<ImportFormat>,
+        /// `--vault`: the vault to import into; `None` is Personal (ADR 0081 §A8).
+        vault: Option<String>,
+    },
+    /// `item move` (`keep_source` false) and `item copy` (ADR 0081 §A6).
+    ItemMove {
+        /// The item.
+        item: String,
+        /// `--to`: the target vault.
+        to: String,
+        /// Copy: keep the original.
+        keep_source: bool,
+    },
+    /// `vault list` (ADR 0081 §A8).
+    VaultList,
+    /// `vault create` (ADR 0081 §A3).
+    VaultCreate(String),
+    /// `vault rename` (ADR 0081 §A4).
+    VaultRename {
+        /// The vault.
+        vault: String,
+        /// The new name.
+        name: String,
+    },
+    /// `vault delete` (ADR 0081 §A5).
+    VaultDelete {
+        /// The vault.
+        vault: String,
+        /// `--name`: the login name, for the fresh login the delete needs.
+        name: String,
+        /// `--with-items`: delete the items with the vault instead of moving them to Personal.
+        with_items: bool,
     },
     /// `device list`.
     DeviceList,
@@ -646,6 +697,7 @@ pub fn parse(arguments: Vec<OsString>) -> Result<Invocation, CliError> {
         Some("generate") => generate(&mut args)?,
         Some("totp") => Command::Totp(args.positional("the item")?),
         Some("export") => export(&mut args)?,
+        Some("vault") => vault(&mut args)?,
         Some("import") => import(&mut args)?,
         Some("device") => device(&mut args)?,
         Some("session") => session(&mut args)?,
@@ -818,10 +870,12 @@ fn signup(args: &mut Args) -> Result<Command, CliError> {
 
 /// `item search [<query>] [--trash]`.
 fn item_search(args: &mut Args) -> Result<Command, CliError> {
-    let (mut query, mut trash) = (None, false);
+    let (mut query, mut trash, mut vault) = (None, false, None);
     while let Some(arg) = args.next() {
         if arg == "--trash" {
             trash = true;
+        } else if arg == "--vault" {
+            vault = Some(args.value("--vault")?);
         } else if query.is_none() {
             query = Some(arg);
         } else {
@@ -831,6 +885,7 @@ fn item_search(args: &mut Args) -> Result<Command, CliError> {
     Ok(Command::ItemSearch {
         query: query.unwrap_or_default(),
         trash,
+        vault,
     })
 }
 
@@ -854,12 +909,30 @@ fn item_recent(args: &mut Args) -> Result<Command, CliError> {
 fn item(args: &mut Args) -> Result<Command, CliError> {
     match args.next().as_deref() {
         Some("list") => {
-            let trash = match args.next().as_deref() {
-                None => false,
-                Some("--trash") => true,
+            let (mut trash, mut vault) = (false, None);
+            while let Some(option) = args.next() {
+                match option.as_str() {
+                    "--trash" => trash = true,
+                    "--vault" => vault = Some(args.value("--vault")?),
+                    other => return Err(unknown(other)),
+                }
+            }
+            Ok(Command::ItemList { trash, vault })
+        }
+        Some(word @ ("move" | "copy")) => {
+            let keep_source = word == "copy";
+            let item = args.positional("the item")?;
+            let to = match args.next().as_deref() {
+                Some("--to") => args.value("--to")?,
                 Some(other) => return Err(unknown(other)),
+                None => return Err(usage("--to is required")),
             };
-            Ok(Command::ItemList { trash })
+            args.done()?;
+            Ok(Command::ItemMove {
+                item,
+                to,
+                keep_source,
+            })
         }
         Some("search") => item_search(args),
         Some("recent") => item_recent(args),
@@ -942,6 +1015,7 @@ fn field_args(
         generate |= option == "--generate";
         match option.as_str() {
             "--type" if create => *item_type = Some(args.value("--type")?),
+            "--vault" if create => fields.vault = Some(args.value("--vault")?),
             "--generate" if create => {
                 fields.generate.get_or_insert_with(IdentityArgs::default);
             }
@@ -1094,10 +1168,11 @@ fn generate(args: &mut Args) -> Result<Command, CliError> {
 
 /// `export`.
 fn export(args: &mut Args) -> Result<Command, CliError> {
-    let (mut out, mut name, mut format) = (None, None, ExportFormat::Encrypted);
+    let (mut out, mut name, mut format, mut vault) = (None, None, ExportFormat::Encrypted, None);
     while let Some(option) = args.next() {
         match option.as_str() {
             "--out" => out = Some(args.value("--out")?),
+            "--vault" => vault = Some(args.value("--vault")?),
             "--name" => name = Some(args.value("--name")?),
             "--format" => {
                 format = match args.value("--format")?.as_str() {
@@ -1115,15 +1190,51 @@ fn export(args: &mut Args) -> Result<Command, CliError> {
         out: PathBuf::from(required(out, "--out")?),
         name: required(name, "--name")?,
         format,
+        vault,
     })
+}
+
+/// `vault list | create <name> | rename <vault> <name> | delete <vault> --name <login>
+/// [--with-items]` (ADR 0081 §A8).
+fn vault(args: &mut Args) -> Result<Command, CliError> {
+    let command = match args.next().as_deref() {
+        Some("list") => Command::VaultList,
+        Some("create") => Command::VaultCreate(args.positional("the vault's name")?),
+        Some("rename") => {
+            let vault = args.positional("the vault")?;
+            let name = args.positional("the new name")?;
+            Command::VaultRename { vault, name }
+        }
+        Some("delete") => {
+            let vault = args.positional("the vault")?;
+            let (mut name, mut with_items) = (None, false);
+            while let Some(option) = args.next() {
+                match option.as_str() {
+                    "--name" => name = Some(args.value("--name")?),
+                    "--with-items" => with_items = true,
+                    other => return Err(unknown(other)),
+                }
+            }
+            return Ok(Command::VaultDelete {
+                vault,
+                name: required(name, "--name")?,
+                with_items,
+            });
+        }
+        Some(other) => return Err(unknown(other)),
+        None => return Err(usage("vault needs list, create, rename or delete")),
+    };
+    args.done()?;
+    Ok(command)
 }
 
 /// `import`.
 fn import(args: &mut Args) -> Result<Command, CliError> {
-    let (mut input, mut format) = (None, None);
+    let (mut input, mut format, mut vault) = (None, None, None);
     while let Some(option) = args.next() {
         match option.as_str() {
             "--in" => input = Some(args.value("--in")?),
+            "--vault" => vault = Some(args.value("--vault")?),
             "--format" => {
                 format = Some(match args.value("--format")?.as_str() {
                     "bitwarden-json" => ImportFormat::BitwardenJson,
@@ -1147,6 +1258,7 @@ fn import(args: &mut Args) -> Result<Command, CliError> {
     Ok(Command::Import {
         input: PathBuf::from(required(input, "--in")?),
         format,
+        vault,
     })
 }
 
@@ -1214,14 +1326,16 @@ mod tests {
             command("item search"),
             Command::ItemSearch {
                 query: String::new(),
-                trash: false
+                trash: false,
+                vault: None
             }
         );
         assert_eq!(
             command("item search ПОЧТА --trash"),
             Command::ItemSearch {
                 query: "ПОЧТА".to_owned(),
-                trash: true
+                trash: true,
+                vault: None
             }
         );
         assert!(parsed("item search a b").is_err());
@@ -1348,21 +1462,24 @@ mod tests {
             Command::Export {
                 out: PathBuf::from("p.rizzy"),
                 name: "alice".to_owned(),
-                format: ExportFormat::Cxf
+                format: ExportFormat::Cxf,
+                vault: None
             }
         );
         assert_eq!(
             command("import --in a.json --format cxf-json"),
             Command::Import {
                 input: PathBuf::from("a.json"),
-                format: Some(ImportFormat::CxfJson)
+                format: Some(ImportFormat::CxfJson),
+                vault: None
             }
         );
         assert_eq!(
             command("import --in p.rizzy --format rizzy-cxf-encrypted"),
             Command::Import {
                 input: PathBuf::from("p.rizzy"),
-                format: Some(ImportFormat::RizzyCxfEncrypted)
+                format: Some(ImportFormat::RizzyCxfEncrypted),
+                vault: None
             }
         );
     }
@@ -1382,7 +1499,10 @@ mod tests {
         );
         assert_eq!(
             command("item list --trash"),
-            Command::ItemList { trash: true }
+            Command::ItemList {
+                trash: true,
+                vault: None
+            }
         );
         assert_eq!(
             command("item show ab12 --reveal"),
@@ -1423,21 +1543,24 @@ mod tests {
             Command::Export {
                 out: PathBuf::from("f.rvx"),
                 name: "alice".to_owned(),
-                format: ExportFormat::Encrypted
+                format: ExportFormat::Encrypted,
+                vault: None
             }
         );
         assert_eq!(
             command("import --format 1pux --in a.1pux"),
             Command::Import {
                 input: PathBuf::from("a.1pux"),
-                format: Some(ImportFormat::OnePux)
+                format: Some(ImportFormat::OnePux),
+                vault: None
             }
         );
         assert_eq!(
             command("import --in a.json"),
             Command::Import {
                 input: PathBuf::from("a.json"),
-                format: None
+                format: None,
+                vault: None
             }
         );
         assert_eq!(
@@ -1691,5 +1814,88 @@ mod tests {
         ] {
             assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
         }
+    }
+
+    #[test]
+    fn vault_commands_and_vault_options_parse() {
+        assert_eq!(command("vault list"), Command::VaultList);
+        assert_eq!(
+            command("vault create Work"),
+            Command::VaultCreate("Work".to_owned())
+        );
+        assert_eq!(
+            command("vault rename Work Job"),
+            Command::VaultRename {
+                vault: "Work".to_owned(),
+                name: "Job".to_owned()
+            }
+        );
+        assert_eq!(
+            command("vault delete Work --name alice --with-items"),
+            Command::VaultDelete {
+                vault: "Work".to_owned(),
+                name: "alice".to_owned(),
+                with_items: true
+            }
+        );
+        assert!(parsed("vault delete Work").is_err());
+        assert!(parsed("vault create").is_err());
+        assert!(parsed("vault list extra").is_err());
+        assert!(parsed("vault").is_err());
+        assert_eq!(
+            command("item move ab12 --to Personal"),
+            Command::ItemMove {
+                item: "ab12".to_owned(),
+                to: "Personal".to_owned(),
+                keep_source: false
+            }
+        );
+        assert_eq!(
+            command("item copy ab12 --to Work"),
+            Command::ItemMove {
+                item: "ab12".to_owned(),
+                to: "Work".to_owned(),
+                keep_source: true
+            }
+        );
+        assert!(parsed("item move ab12").is_err());
+        assert_eq!(
+            command("item list --vault Work --trash"),
+            Command::ItemList {
+                trash: true,
+                vault: Some("Work".to_owned())
+            }
+        );
+        assert_eq!(
+            command("item search mail --vault Work"),
+            Command::ItemSearch {
+                query: "mail".to_owned(),
+                trash: false,
+                vault: Some("Work".to_owned())
+            }
+        );
+        let Command::ItemCreate { fields, .. } = command("item create --type note --vault Work")
+        else {
+            panic!("not item create");
+        };
+        assert_eq!(fields.vault.as_deref(), Some("Work"));
+        assert!(parsed("item edit ab --vault Work").is_err());
+        assert_eq!(
+            command("import --in a.json --vault Work"),
+            Command::Import {
+                input: PathBuf::from("a.json"),
+                format: None,
+                vault: Some("Work".to_owned())
+            }
+        );
+        assert_eq!(
+            command("export --out f --name alice --vault Work"),
+            Command::Export {
+                out: PathBuf::from("f"),
+                name: "alice".to_owned(),
+                format: ExportFormat::Encrypted,
+                vault: Some("Work".to_owned())
+            }
+        );
     }
 }

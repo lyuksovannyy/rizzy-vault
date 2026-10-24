@@ -72,6 +72,7 @@ pub mod recover;
 pub mod sys;
 pub mod tls;
 pub mod ui;
+pub mod vaults;
 
 pub use error::CliError;
 

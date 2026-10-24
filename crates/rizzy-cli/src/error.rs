@@ -73,6 +73,9 @@ pub enum CliError {
     Import(ImportError),
     /// The answer to a prompt was not acceptable (a mismatched confirmation, an empty value).
     BadInput(&'static str),
+    /// A refusal that names what it refused: the ids of the vaults or items an ambiguous name
+    /// matches, or a confirmation that did not match (ADR 0081 §A5, §A8).
+    Refused(String),
 }
 
 /// The fixed kind of a TLS handshake failure (ADR 0030 Decision 6), from the rustls error's
@@ -200,6 +203,27 @@ impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage(what) => write!(f, "{what}"),
+            // ADR 0081 Part A: the vault errors say what to do next.
+            Self::Client(e @ ClientError::UnknownVault) => write!(
+                f,
+                "{e} ({}); `rv vault list` shows this device's vaults",
+                e.code()
+            ),
+            Self::Client(e @ ClientError::PersonalVaultProtected) => write!(
+                f,
+                "{e} ({}); it is always shown as \"Personal\"",
+                e.code()
+            ),
+            Self::Client(e @ ClientError::VaultLimitReached) => write!(
+                f,
+                "{e} ({}); delete a vault first (64 own vaults at most)",
+                e.code()
+            ),
+            Self::Client(e @ ClientError::VaultSetMismatch) => write!(
+                f,
+                "{e} ({}); no vault change is made until it matches again: run `rv sync` later",
+                e.code()
+            ),
             Self::Client(e) => write!(f, "{e} ({})", e.code()),
             // ADR 0048 §3: an upload past the account's storage quota. The op stays unsent on
             // this device and is sent again by the next `rv sync`.
@@ -247,6 +271,7 @@ impl fmt::Display for CliError {
             Self::Alarm(alarm) => write!(f, "this device is read-only: {}", alarm_text(*alarm)),
             Self::Import(e) => write!(f, "the file could not be imported: {e}"),
             Self::BadInput(what) => f.write_str(what),
+            Self::Refused(what) => f.write_str(what),
         }
     }
 }

@@ -78,7 +78,7 @@ use rizzy_core::generator::{
     CharClass, CharacterOptions, ClassRule, GeneratorError, MAX_LENGTH, MAX_WORDS, MIN_LENGTH,
     MIN_WORDS, PassphraseOptions, generate_passphrase, generate_password,
 };
-use rizzy_core::ids::DeviceId;
+use rizzy_core::ids::{DeviceId, VaultId};
 use rizzy_core::item::schema::{
     Concealment, Expected, ITEM_NAME, KeyClass, LIST_FIELD, LIST_PWHIST, LIST_URI, LOGIN_TOTP,
     SSH_PORT, classify, ssh_port,
@@ -101,6 +101,9 @@ use crate::paths::{AccountLock, cache_path, hex, read_limited, unhex, write_new_
 use crate::recover;
 use crate::sys::{now_ms, os_rng};
 use crate::ui::Ui;
+use crate::vaults::{
+    self, ordered_vaults, resolve_among, resolve_item, resolve_vault, target_vault, vault_label,
+};
 
 /// The word that confirms `device forget`.
 const FORGET_WORD: &str = "FORGET";
@@ -158,7 +161,7 @@ async fn run_command(invocation: Invocation, env: &mut Env<'_>) -> Result<(), Cl
             env.ui.note(&format!(
                 "Logged in. This device is enrolled as account {}; {} items.",
                 device.account_hex(),
-                visible_items(device.vault(), false).len()
+                item_count(&device)
             ));
             Ok(())
         }
@@ -166,20 +169,25 @@ async fn run_command(invocation: Invocation, env: &mut Env<'_>) -> Result<(), Cl
         Command::Sync => {
             let mut device = Device::open(env).await?;
             device.sync(env.ui).await?;
-            env.ui.note(&format!(
-                "Synced; {} items.",
-                visible_items(device.vault(), false).len()
-            ));
+            env.ui
+                .note(&format!("Synced; {} items.", item_count(&device)));
             print_notices(&device, env.ui);
             Ok(())
         }
-        Command::ItemList { trash } => {
+        Command::ItemList { trash, vault } => {
             let device = Device::open(env).await?;
-            item_list(&device, env.ui, trash)
+            let only = vault.map(|v| resolve_vault(&device, &v)).transpose()?;
+            item_list(&device, env.ui, trash, only)
         }
-        Command::ItemSearch { query, trash } => {
+        Command::ItemSearch {
+            query,
+            trash,
+            vault,
+        } => {
             let mut device = Device::open(env).await?;
-            let found = device.search(&query).await?;
+            let only = vault.map(|v| resolve_vault(&device, &v)).transpose()?;
+            let mut found = device.search(&query).await?;
+            found.retain(|(v, _)| only.is_none_or(|o| o == *v));
             print_items(&device, env.ui, &found, Some(trash))
         }
         Command::ItemRecent { limit } => {
@@ -199,8 +207,8 @@ async fn run_command(invocation: Invocation, env: &mut Env<'_>) -> Result<(), Cl
         }
         Command::ItemShow { item, reveal } => {
             let mut device = Device::open(env).await?;
-            let shown = item_show(&device, env.ui, &item, reveal)?;
-            device.record_use(shown).await
+            let (vault, shown) = item_show(&device, env.ui, &item, reveal)?;
+            device.record_use(vault, shown).await
         }
         Command::ItemCreate { item_type, fields } => {
             Box::pin(item_create(env, &item_type, &fields)).await
@@ -238,11 +246,33 @@ async fn run_command(invocation: Invocation, env: &mut Env<'_>) -> Result<(), Cl
         Command::GenerateIdentity { options, json } => generate_identity(env.ui, &options, json),
         Command::Totp(item) => {
             let mut device = Device::open(env).await?;
-            let shown = totp(&device, env.ui, &item)?;
-            device.record_use(shown).await
+            let (vault, shown) = totp(&device, env.ui, &item)?;
+            device.record_use(vault, shown).await
         }
-        Command::Export { out, name, format } => Box::pin(export(env, &out, &name, format)).await,
-        Command::Import { input, format } => Box::pin(import(env, &input, format)).await,
+        Command::Export {
+            out,
+            name,
+            format,
+            vault,
+        } => Box::pin(export(env, &out, &name, format, vault.as_deref())).await,
+        Command::Import {
+            input,
+            format,
+            vault,
+        } => Box::pin(import(env, &input, format, vault.as_deref())).await,
+        Command::ItemMove {
+            item,
+            to,
+            keep_source,
+        } => Box::pin(vaults::move_or_copy(env, &item, &to, keep_source)).await,
+        Command::VaultList => Box::pin(vaults::list(env)).await,
+        Command::VaultCreate(name) => Box::pin(vaults::create(env, &name)).await,
+        Command::VaultRename { vault, name } => Box::pin(vaults::rename(env, &vault, &name)).await,
+        Command::VaultDelete {
+            vault,
+            name,
+            with_items,
+        } => Box::pin(vaults::delete(env, &vault, &name, with_items)).await,
         Command::DeviceList => Box::pin(device_list(env)).await,
         Command::DeviceRevoke {
             device,
@@ -324,46 +354,22 @@ fn visible_items(vault: &VaultSync, trash: bool) -> Vec<ItemId> {
         .collect()
 }
 
-/// The item a hex id or a unique prefix of one names, among the active and trashed items.
-fn resolve_item(vault: &VaultSync, text: &str) -> Result<ItemId, CliError> {
-    resolve_among(vault, text, |item| {
-        matches!(
-            vault.item_lifecycle(item),
-            ItemLifecycle::Active | ItemLifecycle::Trashed
-        )
-    })
-}
-
-/// The item a hex id or a unique prefix of one names, among the items deleted permanently that
-/// hold late edits ([`print_notices`]).
-fn resolve_late_item(vault: &VaultSync, text: &str) -> Result<ItemId, CliError> {
-    resolve_among(vault, text, |item| {
+/// The purged item with late edits (ADR 0018 §3) `text` names, in any vault.
+fn resolve_late_item(device: &Device, text: &str) -> Result<(VaultId, ItemId), CliError> {
+    resolve_among(device, text, |vault, item| {
         vault.item_lifecycle(item) == ItemLifecycle::Purged
             && !vault.late_edit_devices(item).is_empty()
     })
 }
 
-/// The item a hex id or a unique prefix of one names, among the items `candidate` accepts.
-fn resolve_among(
-    vault: &VaultSync,
-    text: &str,
-    candidate: impl Fn(ItemId) -> bool,
-) -> Result<ItemId, CliError> {
-    let wanted = text.to_ascii_lowercase();
-    if wanted.is_empty() || !wanted.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(CliError::BadInput(
-            "an item is named by its hex id or a prefix of it",
-        ));
-    }
-    let mut matches = vault
-        .item_ids()
-        .into_iter()
-        .filter(|item| hex(item.as_bytes()).starts_with(&wanted) && candidate(*item));
-    match (matches.next(), matches.next()) {
-        (Some(item), None) => Ok(item),
-        (None, _) => Err(CliError::Client(ClientError::UnknownItem)),
-        (Some(_), Some(_)) => Err(CliError::BadInput("several items start with that id")),
-    }
+/// The active items over every vault this device holds.
+fn item_count(device: &Device) -> usize {
+    device
+        .vaults()
+        .all()
+        .iter()
+        .map(|v| visible_items(v, false).len())
+        .sum()
 }
 
 /// The name of an item type, as `--type` takes it.
@@ -446,10 +452,8 @@ async fn unlock(env: &mut Env<'_>) -> Result<(), CliError> {
         .print(&format!("device:   {}", hex(state.device_id().as_bytes())))?;
     env.ui
         .print(&format!("server:   {}", state.server_origin().as_str()))?;
-    env.ui.print(&format!(
-        "items:    {}",
-        visible_items(device.vault(), false).len()
-    ))?;
+    env.ui
+        .print(&format!("items:    {}", item_count(&device)))?;
     // ADR 0048 §5: the server's figure, not verified; shown only when this run went online.
     if let Some(usage) = device.usage() {
         env.ui.print(&format!("storage:  {}", usage_text(usage)))?;
@@ -476,16 +480,30 @@ pub(crate) fn usage_text(usage: rizzy_client::account::StorageUsage) -> String {
 }
 
 /// `item list`.
-fn item_list(device: &Device, ui: &mut dyn Ui, trash: bool) -> Result<(), CliError> {
-    let vault = device.vault();
-    for item in visible_items(vault, trash) {
-        let name = text_field(vault, item, ITEM_NAME).unwrap_or_default();
-        ui.print(&format!(
-            "{}  {:<16}  {}",
-            hex(item.as_bytes()),
-            type_name(vault.item_type(item)),
-            name.as_str()
-        ))?;
+fn item_list(
+    device: &Device,
+    ui: &mut dyn Ui,
+    trash: bool,
+    only: Option<VaultId>,
+) -> Result<(), CliError> {
+    for vault_id in ordered_vaults(device) {
+        if only.is_some_and(|o| o != vault_id) {
+            continue;
+        }
+        let Some(vault) = device.vaults().get(vault_id) else {
+            continue;
+        };
+        let label = vault_label(device, vault_id);
+        for item in visible_items(vault, trash) {
+            let name = text_field(vault, item, ITEM_NAME).unwrap_or_default();
+            let line = Zeroizing::new(format!(
+                "{}  {:<16}  {label:<16}  {}",
+                hex(item.as_bytes()),
+                type_name(vault.item_type(item)),
+                name.as_str()
+            ));
+            ui.print(&line)?;
+        }
     }
     Ok(())
 }
@@ -497,11 +515,14 @@ fn item_list(device: &Device, ui: &mut dyn Ui, trash: bool) -> Result<(), CliErr
 fn print_items(
     device: &Device,
     ui: &mut dyn Ui,
-    ids: &[ItemId],
+    ids: &[(VaultId, ItemId)],
     trash: Option<bool>,
 ) -> Result<(), CliError> {
-    let vault = device.vault();
-    for item in ids {
+    for (vault_id, item) in ids {
+        let Some(vault) = device.vaults().get(*vault_id) else {
+            continue;
+        };
+        let label = vault_label(device, *vault_id);
         let trashed = match vault.item_lifecycle(*item) {
             ItemLifecycle::Active => false,
             ItemLifecycle::Trashed => true,
@@ -519,7 +540,7 @@ fn print_items(
             ""
         };
         let line = Zeroizing::new(format!(
-            "{}  {:<16}  {}{mark}",
+            "{}  {:<16}  {label:<16}  {}{mark}",
             hex(item.as_bytes()),
             type_name(vault.item_type(*item)),
             name.as_str()
@@ -535,11 +556,13 @@ fn item_show(
     ui: &mut dyn Ui,
     item: &str,
     reveal: bool,
-) -> Result<ItemId, CliError> {
-    let vault = device.vault();
-    let item = resolve_item(vault, item)?;
+) -> Result<(VaultId, ItemId), CliError> {
+    let (vault_id, item) = resolve_item(device, item)?;
+    let vault = device.vaults().require(vault_id)?;
     ui.print(&format!("id:    {}", hex(item.as_bytes())))?;
     ui.print(&format!("type:  {}", type_name(vault.item_type(item))))?;
+    let label = Zeroizing::new(format!("vault: {}", vault_label(device, vault_id)));
+    ui.print(&label)?;
     if vault.item_lifecycle(item) == ItemLifecycle::Trashed {
         ui.print("state: in the trash")?;
     }
@@ -600,7 +623,7 @@ fn item_show(
         ui.print(&line)?;
     }
     print_password_history(vault, ui, item, reveal)?;
-    Ok(item)
+    Ok((vault_id, item))
 }
 
 /// The password-history section of `item show` (gap 01; ADR 0012 §5 "Password history is the
@@ -680,8 +703,8 @@ fn item_history(
     item: &str,
     reveal: bool,
 ) -> Result<(), CliError> {
-    let vault = device.vault();
-    let item = resolve_item(vault, item)?;
+    let (vault_id, item) = resolve_item(device, item)?;
+    let vault = device.vaults().require(vault_id)?;
     let history = vault.item_history(item);
     if history.is_empty() {
         ui.print("no field history")?;
@@ -725,10 +748,10 @@ async fn item_restore_history(
     entry: &str,
 ) -> Result<(), CliError> {
     let mut device = Device::open(env).await?;
-    let item = resolve_item(device.vault(), item)?;
+    let (vault_id, item) = resolve_item(&device, item)?;
     let dot = parse_dot(entry)?;
     device
-        .edit(|vault, rng, unlocked, now| {
+        .edit(vault_id, |vault, rng, unlocked, now| {
             vault.restore_field_history(rng, unlocked, item, field, dot, now)
         })
         .await?;
@@ -801,7 +824,7 @@ fn collect_writes(
 }
 
 /// Syncs after a local write; an unreachable server leaves the ops queued and is not an error.
-async fn sync_after_write(device: &mut Device, ui: &mut dyn Ui) -> Result<(), CliError> {
+pub(crate) async fn sync_after_write(device: &mut Device, ui: &mut dyn Ui) -> Result<(), CliError> {
     match device.sync(ui).await {
         Ok(()) => Ok(()),
         Err(CliError::Network) => {
@@ -836,13 +859,16 @@ async fn item_create(
         None => fields,
     };
     let mut device = Device::open(env).await?;
+    // ADR 0081 §A8: Personal unless `--vault` names another, every time.
+    let target = target_vault(&device, fields.vault.as_deref())?;
     // A new item has no element whose `order` a rewrite would write: one op at most.
-    let writes: Vec<(FieldKey, Value)> = collect_writes(env.ui, device.vault(), None, fields)?
-        .into_iter()
-        .flatten()
-        .collect();
+    let writes: Vec<(FieldKey, Value)> =
+        collect_writes(env.ui, device.vaults().require(target)?, None, fields)?
+            .into_iter()
+            .flatten()
+            .collect();
     let item = device
-        .edit(|vault, rng, unlocked, now| {
+        .edit(target, |vault, rng, unlocked, now| {
             let edits: Vec<FieldEdit<'_>> = writes
                 .iter()
                 .map(|(key, value)| FieldEdit { key, value })
@@ -857,13 +883,18 @@ async fn item_create(
 /// `item edit`.
 async fn item_edit(env: &mut Env<'_>, item: &str, fields: &FieldArgs) -> Result<(), CliError> {
     let mut device = Device::open(env).await?;
-    let item = resolve_item(device.vault(), item)?;
-    let ops = collect_writes(env.ui, device.vault(), Some(item), fields)?;
+    let (vault_id, item) = resolve_item(&device, item)?;
+    let ops = collect_writes(
+        env.ui,
+        device.vaults().require(vault_id)?,
+        Some(item),
+        fields,
+    )?;
     if ops.is_empty() {
         return Err(CliError::Usage("nothing to change".into()));
     }
     device
-        .edit(|vault, rng, unlocked, now| {
+        .edit(vault_id, |vault, rng, unlocked, now| {
             // The consecutive ops of a list rewrite too large for one op first (ADR 0018 §6),
             // then the edit.
             for writes in &ops {
@@ -892,9 +923,11 @@ async fn lifecycle(
     ) -> Result<(), ClientError>,
 ) -> Result<(), CliError> {
     let mut device = Device::open(env).await?;
-    let item = resolve_item(device.vault(), item)?;
+    let (vault_id, item) = resolve_item(&device, item)?;
     device
-        .edit(|vault, rng, unlocked, now| op(vault, rng, unlocked, item, now))
+        .edit(vault_id, |vault, rng, unlocked, now| {
+            op(vault, rng, unlocked, item, now)
+        })
         .await?;
     sync_after_write(&mut device, env.ui).await
 }
@@ -905,9 +938,9 @@ async fn lifecycle(
 async fn item_restore_late(env: &mut Env<'_>, item: &str, type_text: &str) -> Result<(), CliError> {
     let item_type = type_named(type_text)?;
     let mut device = Device::open(env).await?;
-    let item = resolve_late_item(device.vault(), item)?;
+    let (vault_id, item) = resolve_late_item(&device, item)?;
     let restored = device
-        .edit(|vault, rng, unlocked, now| {
+        .edit(vault_id, |vault, rng, unlocked, now| {
             vault.restore_late_as_new_item(rng, unlocked, item, item_type, now)
         })
         .await?;
@@ -925,7 +958,13 @@ async fn item_restore_late(env: &mut Env<'_>, item: &str, type_text: &str) -> Re
 /// every notice that still holds; a late-edit notice holds as long as the deleted item keeps
 /// its late edits, a trash notice until the next write of the item's lifecycle.
 fn print_notices(device: &Device, ui: &mut dyn Ui) {
-    let vault = device.vault();
+    for vault in device.vaults().all() {
+        print_vault_notices(device, vault, ui);
+    }
+}
+
+/// [`print_notices`] for one vault.
+fn print_vault_notices(device: &Device, vault: &VaultSync, ui: &mut dyn Ui) {
     for item in vault.item_ids() {
         let id = hex(item.as_bytes());
         let late = vault.late_edit_devices(item);
@@ -1140,9 +1179,9 @@ fn generator_usage(e: GeneratorError) -> CliError {
 /// `totp`: the current code of an item's `login.totp`, which holds an `otpauth://` URI or a
 /// bare Base32 secret (then SHA-1, 6 digits, 30 s; CRYPTO.md §11.15).
 /// `totp`; returns the item, for the use record (ADR 0056 §2: a code copied from it).
-fn totp(device: &Device, ui: &mut dyn Ui, item: &str) -> Result<ItemId, CliError> {
-    let vault = device.vault();
-    let item = resolve_item(vault, item)?;
+fn totp(device: &Device, ui: &mut dyn Ui, item: &str) -> Result<(VaultId, ItemId), CliError> {
+    let (vault_id, item) = resolve_item(device, item)?;
+    let vault = device.vaults().require(vault_id)?;
     let bad = || CliError::BadInput("the item's one-time-code secret is not valid");
     let stored = text_field(vault, item, LOGIN_TOTP)
         .ok_or(CliError::BadInput("the item has no one-time-code secret"))?;
@@ -1166,7 +1205,7 @@ fn totp(device: &Device, ui: &mut dyn Ui, item: &str) -> Result<ItemId, CliError
     let period = u64::from(params.period.get());
     ui.note(&format!("valid for {} s", period - seconds % period));
     ui.print(&code.to_digits())?;
-    Ok(item)
+    Ok((vault_id, item))
 }
 
 /// `export` (ADR 0027 §5; CRYPTO.md §11.14; owner decision 2026-10-05): the cache as it is, to
@@ -1191,6 +1230,7 @@ async fn export(
     out: &Path,
     login_name: &str,
     format: ExportFormat,
+    vault: Option<&str>,
 ) -> Result<(), CliError> {
     // Nothing is derived or typed for a path that cannot be written: the check the final
     // `create_new` makes again.
@@ -1198,7 +1238,9 @@ async fn export(
         return Err(CliError::FileExists);
     }
     let mut device = Device::open(env).await?;
-    let blockers = device.vault().export_blockers();
+    // ADR 0081 §A8: one payload is one vault; Personal unless `--vault` names another.
+    let source = target_vault(&device, vault)?;
+    let blockers = device.vaults().require(source)?.export_blockers();
     if !blockers.is_empty() {
         for item in blockers {
             env.ui.note(&format!(
@@ -1212,7 +1254,7 @@ async fn export(
     device
         .reauthenticate_for_export(env.ui, login_name, &mut gate)
         .await?;
-    let vault = device.vault();
+    let vault = device.vaults().require(source)?;
     match format {
         ExportFormat::Encrypted => {
             let password = new_export_password(env.ui)?;
@@ -1404,16 +1446,19 @@ async fn import(
     env: &mut Env<'_>,
     input: &Path,
     format: Option<ImportFormat>,
+    vault: Option<&str>,
 ) -> Result<(), CliError> {
     let file = Zeroizing::new(read_limited(input, MAX_IMPORT_FILE_LEN)?);
     let read_as = import_as(env.ui, &file, format)?;
     let mut device = Device::open(env).await?;
+    // ADR 0081 §A8: Personal unless `--vault` names another, every time.
+    let target = target_vault(&device, vault)?;
     match read_as {
         ImportAs::Foreign(format) => {
             let mut rng = os_rng();
             let parsed = rizzy_import::import(format, &file, &mut rng).map_err(CliError::Import)?;
             let done = device
-                .edit(|vault, rng, unlocked, now| {
+                .edit(target, |vault, rng, unlocked, now| {
                     vault.import_items(rng, unlocked, &parsed.items, now)
                 })
                 .await?;
@@ -1431,7 +1476,7 @@ async fn import(
                 .ui
                 .secret("Password of this export file (the one chosen when it was exported)")?;
             let done = device
-                .edit(|vault, rng, unlocked, now| {
+                .edit(target, |vault, rng, unlocked, now| {
                     vault.import_cxf_encrypted(rng, unlocked, &file, &password, now)
                 })
                 .await?;
@@ -1448,7 +1493,7 @@ async fn import(
                 .ui
                 .secret("Password of this export file (the one chosen when it was exported)")?;
             let done = device
-                .edit(|vault, rng, unlocked, now| {
+                .edit(target, |vault, rng, unlocked, now| {
                     vault.import_encrypted(rng, unlocked, &file, &password, now)
                 })
                 .await?;
@@ -1758,7 +1803,7 @@ async fn device_forget(env: &mut Env<'_>) -> Result<(), CliError> {
             } else {
                 env.ui
                     .note("The edits the server never acknowledged could not be uploaded now.");
-                device.vault().unacknowledged()
+                device.unacknowledged()
             };
             let (_, lock) = device.close().await;
             let lock = lock.ok_or(CliError::Client(ClientError::Internal))?;
