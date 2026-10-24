@@ -85,8 +85,11 @@ pub fn write_new_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 ///
 /// A `<path>.new` left behind by an earlier replace that crashed before its rename is removed
 /// first (it may hold secret material, and would otherwise block every later replace). The
-/// caller must make sure no other process replaces `path` at the same time: the one caller,
-/// `rizzy-vault secrets rotate`, holds the `SQLite` writer lock.
+/// caller must make sure no other process replaces `path` at the same time: every caller,
+/// `rizzy-vault secrets rotate`, `secrets retire-setups`, `secrets restore` and `secrets
+/// invalidate` ([ADR 0047](https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0047-opaque-secrets-operator-commands.md)),
+/// shuts every server process out first (the `SQLite` writer lock, or the `PostgreSQL`
+/// instance lock taken exclusively).
 ///
 /// # Errors
 /// The I/O error; `<path>.new` is removed again if the rename did not happen.

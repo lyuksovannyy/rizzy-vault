@@ -8,6 +8,8 @@
 //! rizzy-vault secrets init [--config <file>]
 //! rizzy-vault secrets rotate [--data-key | --backup-key] [--config <file>]
 //! rizzy-vault secrets retire-setups [--grace-days <n>] [--config <file>]
+//! rizzy-vault secrets restore --in <file|-> --passphrase-file <file|-> [--config <file>]
+//! rizzy-vault secrets invalidate [--confirm] [--config <file>]
 //! rizzy-vault backup-secrets --out <file> --passphrase-file <file|-> [--config <file>]
 //! rizzy-vault backup --out <file|-> [--encrypt] [--config <file>]
 //! rizzy-vault restore --in <file|-> [--config <file>]
@@ -37,6 +39,7 @@ use crate::admin::{self, Rotate};
 use crate::config::{self, Config, Sources};
 use crate::coredump;
 use crate::server;
+use rizzy_domain_auth::invalidation::LossCase;
 use rizzy_domain_auth::retirement::{DAY_MS, DEFAULT_GRACE_DAYS, MAX_GRACE_DAYS};
 
 /// The help text, printed on `--help` (stdout) and on a usage error (stderr).
@@ -49,6 +52,8 @@ USAGE:
     rizzy-vault secrets init [--config <file>]
     rizzy-vault secrets rotate [--data-key | --backup-key] [--config <file>]
     rizzy-vault secrets retire-setups [--grace-days <n>] [--config <file>]
+    rizzy-vault secrets restore --in <file|-> --passphrase-file <file|-> [--config <file>]
+    rizzy-vault secrets invalidate [--confirm] [--config <file>]
     rizzy-vault backup-secrets --out <file> --passphrase-file <file|-> [--config <file>]
     rizzy-vault backup --out <file|-> [--encrypt] [--config <file>]
     rizzy-vault restore --in <file|-> [--config <file>]
@@ -62,6 +67,8 @@ OPTIONS:
     --backup-key      secrets rotate: a new current backup key, for backup --encrypt
     --encrypt         backup: seal the file under the secrets file's current backup key
                       (format version 2); restore opens it with the same secrets file
+    --confirm         secrets invalidate: carry it out; without it, only report what it
+                      would discard
     -h, --help        Print this help
     -V, --version     Print version
 
@@ -111,6 +118,22 @@ pub enum Command {
         /// `--config`.
         config: Option<PathBuf>,
     },
+    /// `secrets restore` (ADR 0047).
+    SecretsRestore {
+        /// `--in`: a file, or `-` for stdin.
+        input: PathBuf,
+        /// `--passphrase-file`: a file, or `-` for stdin (never both from stdin).
+        passphrase_file: PathBuf,
+        /// `--config`.
+        config: Option<PathBuf>,
+    },
+    /// `secrets invalidate [--confirm]` (ADR 0047).
+    SecretsInvalidate {
+        /// `--confirm`.
+        confirm: bool,
+        /// `--config`.
+        config: Option<PathBuf>,
+    },
     /// `backup-secrets`.
     BackupSecrets {
         /// `--out`.
@@ -144,6 +167,10 @@ pub struct UsageError;
 
 /// The flags a subcommand accepts after its name.
 #[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one independent flag per command-line option"
+)]
 struct Flags {
     /// `--roles`.
     roles: Option<String>,
@@ -163,6 +190,8 @@ struct Flags {
     input: Option<PathBuf>,
     /// `--grace-days`.
     grace_days: Option<u32>,
+    /// `--confirm`.
+    confirm: bool,
 }
 
 /// Which flags a subcommand accepts.
@@ -188,6 +217,8 @@ struct Allowed {
     input: bool,
     /// `--grace-days`.
     grace_days: bool,
+    /// `--confirm`.
+    confirm: bool,
 }
 
 /// Parses the flags in `args` that `allowed` admits; each at most once.
@@ -206,6 +237,7 @@ fn flags(args: &[OsString], allowed: Allowed) -> Result<Flags, UsageError> {
             "--data-key" if allowed.data_key && !out.data_key => out.data_key = true,
             "--backup-key" if allowed.backup_key && !out.backup_key => out.backup_key = true,
             "--encrypt" if allowed.encrypt && !out.encrypt => out.encrypt = true,
+            "--confirm" if allowed.confirm && !out.confirm => out.confirm = true,
             "--out" if allowed.out && out.out.is_none() => {
                 out.out = Some(PathBuf::from(it.next().ok_or(UsageError)?));
             }
@@ -235,6 +267,7 @@ const NONE: Allowed = Allowed {
     passphrase_file: false,
     input: false,
     grace_days: false,
+    confirm: false,
 };
 
 /// Parses `secrets <sub>` with the arguments after `sub`.
@@ -272,6 +305,41 @@ fn parse_secrets(sub: &str, rest: &[OsString]) -> Result<Command, UsageError> {
             )?;
             Ok(Command::SecretsRetireSetups {
                 grace_days: f.grace_days.unwrap_or(DEFAULT_GRACE_DAYS),
+                config: f.config,
+            })
+        }
+        "restore" => {
+            let f = flags(
+                rest,
+                Allowed {
+                    input: true,
+                    passphrase_file: true,
+                    ..NONE
+                },
+            )?;
+            let (Some(input), Some(passphrase_file)) = (f.input, f.passphrase_file) else {
+                return Err(UsageError);
+            };
+            // Standard input carries one of the two at most.
+            if input.as_os_str() == "-" && passphrase_file.as_os_str() == "-" {
+                return Err(UsageError);
+            }
+            Ok(Command::SecretsRestore {
+                input,
+                passphrase_file,
+                config: f.config,
+            })
+        }
+        "invalidate" => {
+            let f = flags(
+                rest,
+                Allowed {
+                    confirm: true,
+                    ..NONE
+                },
+            )?;
+            Ok(Command::SecretsInvalidate {
+                confirm: f.confirm,
                 config: f.config,
             })
         }
@@ -413,6 +481,15 @@ fn runtime() -> io::Result<tokio::runtime::Runtime> {
         .build()
 }
 
+/// Success if the output was written, a runtime failure otherwise (a closed stdout).
+fn written(ok: bool) -> ExitCode {
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 /// The process entry point (module docs).
 #[must_use]
 pub fn main() -> ExitCode {
@@ -427,25 +504,20 @@ pub fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     let (config_path, roles) = match &command {
-        Command::Help => {
-            return if write!(io::stdout().lock(), "{USAGE}").is_ok() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            };
-        }
+        Command::Help => return written(write!(io::stdout().lock(), "{USAGE}").is_ok()),
         Command::Version => {
-            return if print_line(&format!("rizzy-vault {}", env!("CARGO_PKG_VERSION"))) {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            };
+            return written(print_line(&format!(
+                "rizzy-vault {}",
+                env!("CARGO_PKG_VERSION")
+            )));
         }
         Command::Serve { roles, config } => (config.clone(), roles.clone()),
         Command::Migrate { config }
         | Command::SecretsInit { config }
         | Command::SecretsRotate { config, .. }
         | Command::SecretsRetireSetups { config, .. }
+        | Command::SecretsRestore { config, .. }
+        | Command::SecretsInvalidate { config, .. }
         | Command::BackupSecrets { config, .. }
         | Command::Backup { config, .. }
         | Command::Restore { config, .. } => (config.clone(), None),
@@ -491,6 +563,14 @@ pub fn main() -> ExitCode {
         Command::SecretsRetireSetups { grace_days, .. } => {
             return run_retire_setups(&config, grace_days);
         }
+        Command::SecretsRestore {
+            input,
+            passphrase_file,
+            ..
+        } => return run_secrets_restore(&config, &input, &passphrase_file),
+        Command::SecretsInvalidate { confirm, .. } => {
+            return run_secrets_invalidate(&config, confirm);
+        }
         Command::BackupSecrets {
             out,
             passphrase_file,
@@ -503,13 +583,7 @@ pub fn main() -> ExitCode {
     };
     match outcome {
         Ok(message) if message.is_empty() => ExitCode::SUCCESS,
-        Ok(message) => {
-            if print_line(&message) {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            }
-        }
+        Ok(message) => written(print_line(&message)),
         Err(message) => {
             eprint_line(&message);
             ExitCode::FAILURE
@@ -644,6 +718,127 @@ pub fn retirement_message(report: &admin::RetiredSetups) -> String {
         ));
     }
     lines.join("\n")
+}
+
+/// `secrets restore` (ADR 0047): the report on stdout, or the failure on stderr.
+fn run_secrets_restore(
+    config: &Config,
+    input: &std::path::Path,
+    passphrase_file: &std::path::Path,
+) -> ExitCode {
+    let rt = match runtime() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprint_line(&format!("cannot start the runtime: {}", e.kind()));
+            return ExitCode::FAILURE;
+        }
+    };
+    match rt.block_on(admin::secrets_restore(config, input, passphrase_file)) {
+        Ok(restored) => {
+            if print_line(&secrets_restore_message(&restored)) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => admin_failure(&e),
+    }
+}
+
+/// The lines `secrets restore` prints (ADR 0047 step 4): what was written, and every setup the
+/// database's records name that the restored file lacks (ids and counts only).
+#[must_use]
+pub fn secrets_restore_message(restored: &admin::SecretsRestored) -> String {
+    let mut lines = vec![if restored.created {
+        "secrets file restored from the backup (created)".to_owned()
+    } else {
+        "secrets file restored from the backup (replaced)".to_owned()
+    }];
+    if restored.database_empty {
+        lines.push(
+            "the database is empty, so there was nothing to check the backup against; restore \
+             the database backup next (`rizzy-vault restore`), which checks it"
+                .to_owned(),
+        );
+    }
+    for (setup_id, records) in &restored.missing_setups {
+        lines.push(format!(
+            "OPAQUE setup {setup_id} is not in this backup: {records} account record(s) on it \
+             lose password login and log in through an enrolled device or with their recovery \
+             code"
+        ));
+    }
+    lines.join("\n")
+}
+
+/// `secrets invalidate [--confirm]` (ADR 0047): the report on stdout; without `--confirm`,
+/// the diagnosis on stderr with exit code 2; a refusal or failure on stderr with exit code 1.
+fn run_secrets_invalidate(config: &Config, confirm: bool) -> ExitCode {
+    let rt = match runtime() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprint_line(&format!("cannot start the runtime: {}", e.kind()));
+            return ExitCode::FAILURE;
+        }
+    };
+    match rt.block_on(admin::secrets_invalidate(config, confirm)) {
+        Ok(done) => {
+            if print_line(&secrets_invalidate_message(&done)) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => admin_failure(&e),
+    }
+}
+
+/// The lines `secrets invalidate --confirm` prints (ADR 0047 step 8): counts only, no names.
+#[must_use]
+pub fn secrets_invalidate_message(done: &admin::SecretsInvalidated) -> String {
+    match done {
+        admin::SecretsInvalidated::MarkerCleared { setup_id } => format!(
+            "an earlier `secrets invalidate` had already written the secrets file (OPAQUE setup \
+             {setup_id}); its leftover marker is cleared, nothing else changed"
+        ),
+        admin::SecretsInvalidated::Invalidated { outcome, resumed } => {
+            let mut lines = Vec::new();
+            if *resumed {
+                lines.push("resumed an interrupted `secrets invalidate`".to_owned());
+            }
+            lines.push(format!(
+                "{}: every OPAQUE setup is retired; new OPAQUE setup {} written to the secrets \
+                 file",
+                match outcome.case {
+                    LossCase::SetupOnly => "setup-only loss",
+                    LossCase::Whole => "whole loss",
+                },
+                outcome.setup_id
+            ));
+            lines.push(format!(
+                "{} account(s) need to re-register their password: they log in through an \
+                 enrolled device or with their recovery code, which moves them to the new setup",
+                outcome.accounts
+            ));
+            lines.push(format!(
+                "{} TOTP enrollment(s) to redo",
+                outcome.totp_rows_deleted
+            ));
+            if outcome.case == LossCase::Whole {
+                lines.push(
+                    "no bootstrap token was made, and encrypted database backups sealed under \
+                     the lost backup keys cannot be restored"
+                        .to_owned(),
+                );
+            }
+            lines.push(
+                "Make a new secrets backup and a new database backup: older ones no longer \
+                 match"
+                    .to_owned(),
+            );
+            lines.join("\n")
+        }
+    }
 }
 
 /// The exit code of a failed admin command: 2 for a usage error, 1 otherwise.
@@ -832,6 +1027,49 @@ mod tests {
                 config: Some(PathBuf::from("/etc/rv"))
             })
         );
+        // ADR 0047.
+        for (input, passphrase) in [("s.json", "-"), ("-", "p"), ("s.json", "p")] {
+            assert_eq!(
+                parse(&args(&[
+                    "secrets",
+                    "restore",
+                    "--passphrase-file",
+                    passphrase,
+                    "--in",
+                    input
+                ])),
+                Ok(Command::SecretsRestore {
+                    input: PathBuf::from(input),
+                    passphrase_file: PathBuf::from(passphrase),
+                    config: None
+                })
+            );
+        }
+        for (list, confirm) in [
+            (&["secrets", "invalidate"][..], false),
+            (&["secrets", "invalidate", "--confirm"], true),
+        ] {
+            assert_eq!(
+                parse(&args(list)),
+                Ok(Command::SecretsInvalidate {
+                    confirm,
+                    config: None
+                })
+            );
+        }
+        assert_eq!(
+            parse(&args(&[
+                "secrets",
+                "invalidate",
+                "--config",
+                "/etc/rv",
+                "--confirm"
+            ])),
+            Ok(Command::SecretsInvalidate {
+                confirm: true,
+                config: Some(PathBuf::from("/etc/rv"))
+            })
+        );
     }
 
     #[test]
@@ -883,6 +1121,52 @@ mod tests {
                 "--encrypt",
             ],
             &["--database-url", "postgres://u:p@h/d"],
+            // ADR 0047: both flags required, stdin for one of them at most, no other flag.
+            &["secrets", "restore"],
+            &["secrets", "restore", "--in", "s.json"],
+            &["secrets", "restore", "--passphrase-file", "p"],
+            &["secrets", "restore", "--in", "-", "--passphrase-file", "-"],
+            &[
+                "secrets",
+                "restore",
+                "--in",
+                "s",
+                "--passphrase-file",
+                "p",
+                "--confirm",
+            ],
+            &[
+                "secrets",
+                "restore",
+                "--in",
+                "s",
+                "--passphrase-file",
+                "p",
+                "--out",
+                "o",
+            ],
+            &[
+                "secrets",
+                "restore",
+                "--in",
+                "s",
+                "--in",
+                "t",
+                "--passphrase-file",
+                "p",
+            ],
+            &["secrets", "restore", "--in", "s", "--passphrase-file"],
+            &["secrets", "restore", "s.json"],
+            &["secrets", "invalidate", "--confirm", "--confirm"],
+            &["secrets", "invalidate", "--force"],
+            &["secrets", "invalidate", "--confirm=yes"],
+            &["secrets", "invalidate", "yes"],
+            &["secrets", "invalidate", "--grace-days", "0"],
+            &["secrets", "invalidate", "--data-key"],
+            &["secrets", "rotate", "--confirm"],
+            &["secrets", "retire-setups", "--confirm"],
+            &["restore", "--in", "f", "--confirm"],
+            &["secrets", "invalidat"],
         ] {
             assert_eq!(parse(&args(bad)), Err(UsageError), "{bad:?}");
         }

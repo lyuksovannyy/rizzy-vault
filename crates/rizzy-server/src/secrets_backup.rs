@@ -20,11 +20,13 @@
 //! and never overwrites; the docs tell the operator to store it apart from the database
 //! backups (ADR 0011).
 //!
-//! **Reading it back.** [`open`] decrypts a backup file. No Accepted ADR names a command that
-//! restores the secrets from it, so none exists; [`open`] is what such a command, and the tests,
-//! call. It checks every field's length before decoding it, as §11.14 "Field sizes" requires.
+//! **Reading it back.** [`open`] decrypts a backup file; `rizzy-vault secrets restore`
+//! ([ADR 0047], [`crate::admin::secrets_restore`]) calls it, parses the result as a secrets
+//! file, gates on the database and only then installs it. It checks every field's length
+//! before decoding it, as §11.14 "Field sizes" requires.
 //!
 //! [ADR 0011]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0011-storage.md
+//! [ADR 0047]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0047-opaque-secrets-operator-commands.md
 
 use core::fmt;
 

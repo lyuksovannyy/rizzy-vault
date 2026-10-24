@@ -10,6 +10,8 @@
 //! | `secrets rotate --data-key` | CRYPTO.md §5.11 "Rotation" | exclusive |
 //! | `secrets rotate --backup-key` | [ADR 0071] (a new current backup key); ADR 0010 §2 | exclusive |
 //! | `secrets retire-setups [--grace-days N]` | CRYPTO.md §5.8 "Rotating `server_setup`" step 4; [ADR 0031] points 4–6 | exclusive |
+//! | `secrets restore --in <file\|-> --passphrase-file <file\|->` | [ADR 0047] (ADR 0011 owner decision 3 as it supersedes the reader half) | exclusive |
+//! | `secrets invalidate --confirm` | [ADR 0047]; CRYPTO.md §5.8 "the admin marks the records invalid" | exclusive |
 //! | `backup-secrets` | ADR 0011 "Backups" and owner decision 3; CRYPTO.md §5.11 | none (reads the secrets file only) |
 //! | `migrate` | ADR 0011 point 9 | exclusive |
 //! | `backup --out <file\|-> [--encrypt]` | ADR 0011 "Backups"; [ADR 0023] §4, §6; with `--encrypt`, [ADR 0071] (format version 2, [`crate::db_backup`]) | none: the read-only reader on `SQLite`, a `REPEATABLE READ` transaction on `PostgreSQL` |
@@ -102,6 +104,56 @@
 //! retires by itself; its worker only reports setups past 90 days ([`crate::worker`]). A new
 //! secrets backup is due afterwards: an old one still holds the retired setup.
 //!
+//! # `secrets restore` ([ADR 0047])
+//!
+//! Installs a `backup-secrets` file, in this order:
+//! 1. Shut every server process out and open the database (no migration).
+//! 2. Read the backup (a path, or `-` for stdin, at most
+//!    [`secrets_backup::MAX_BACKUP_FILE_LEN`]) and the passphrase (a file or stdin, never the
+//!    command line; not both from stdin), and decrypt it ([`secrets_backup::open`]): one error
+//!    for a wrong passphrase and a changed file.
+//! 3. Parse the plaintext as a secrets file ([`secrets_file::parse`]): a damaged backup is
+//!    refused before any write.
+//! 4. **Gate on [`ServerSecrets::check_database_dry_run`]**, never on `check_database` (whose
+//!    success path writes): any refusal leaves everything untouched and says the backup does
+//!    not belong to this database. A database no migration was ever applied to holds no
+//!    record and passes; one behind this release's schema is refused. Setups that records name
+//!    but the backup lacks are reported, never blocking.
+//! 5. Write the plaintext, byte for byte, with [`fsutil::replace_private`]: an absent file is
+//!    created, an existing one replaced. Every member the file holds comes back, the backup
+//!    keys of [ADR 0071] included.
+//!
+//! Recovering both backups runs `secrets restore` first, then `restore` (unchanged).
+//!
+//! # `secrets invalidate --confirm` ([ADR 0047])
+//!
+//! For when the OPAQUE setup cannot be made to match the database and no secrets backup fits.
+//! With every server process shut out and the database at this release's schema:
+//! 1. **Diagnose.** A crash marker left by an earlier run
+//!    ([`invalidation::pending_invalidation`]) is followed, never re-derived: its case is
+//!    carried out again. If the secrets file already holds the marker's setup and passes the
+//!    dry run, that run wrote its file and only the marker is cleared. With no marker, the file
+//!    is loaded and dry-run checked:
+//!    - absent, or present but unparsable (too large, not the layout, a bad field or rule):
+//!      **whole loss**;
+//!    - `SetupMismatch` or `NoRecordedSetup`: **setup-only loss**;
+//!    - anything else (it matches, a data key is missing, a retired setup is still in it), or a
+//!      file that cannot be read for another reason (permissions, say): refused, nothing
+//!      touched.
+//! 2. **Without `--confirm`**, a usage error (exit 2) reports the case and the accounts and
+//!    TOTP enrollments it would cost; nothing is written.
+//! 3. **The database** ([`invalidation::invalidate_in_database`]): one transaction retires every
+//!    setup, deletes every login state (and on a whole loss every TOTP row), records a new
+//!    setup under the next unused `setup_id` and writes the marker. The `secrets_invalidated`
+//!    warning is logged just before it commits.
+//! 4. **The file**: a setup-only loss keeps `enum_key`, the data keys, the bootstrap token and
+//!    the backup keys; a whole loss gets fresh ones, with no bootstrap token (INV-69) and no
+//!    backup key ([`ServerSecrets::generate_after_loss`]). Written with
+//!    [`fsutil::replace_private`], then the marker is cleared.
+//!
+//! A crash after step 3 burns the minted `setup_id` (its key lived only in this process); the
+//! next run retires it and mints a fresh one.
+//!
 //! **Not here, and why** (reported to the owner):
 //! - A way to drop an unused data key without adding a new one (section above).
 //! - The bootstrap token (INV-69) is generated into the file by `secrets init` and never
@@ -111,6 +163,7 @@
 //! [ADR 0011]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0011-storage.md
 //! [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
 //! [ADR 0031]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0031-retiring-old-opaque-setups.md
+//! [ADR 0047]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0047-opaque-secrets-operator-commands.md
 //! [ADR 0071]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0071-encrypted-db-backup-format.md
 
 use core::fmt;
@@ -119,8 +172,12 @@ use std::path::Path;
 
 use rand_core::Rng as _;
 use rizzy_domain_auth::AuthError;
+use rizzy_domain_auth::invalidation::{
+    self, Invalidated, InvalidationCost, LossCase, PendingInvalidation,
+};
 use rizzy_domain_auth::retirement::{RetirableSetup, grace_days_allowed};
 use rizzy_domain_auth::secrets::SecretsError;
+use rizzy_domain_auth::types::ServerSetup;
 use rizzy_domain_auth::{ServerSecrets, StartupCheckError};
 use rizzy_storage::backup::file::{
     self as backup_file, DIGEST_LEN, FileError, MAX_BACKUP_FILE_LEN,
@@ -134,6 +191,7 @@ use zeroize::Zeroizing;
 use crate::config::{Config, DatabaseConfig};
 use crate::db_backup::{self, DbBackupError};
 use crate::fsutil::{self, ReadError};
+use crate::log::{self, Field};
 use crate::secrets_backup::{self, BackupError};
 use crate::secrets_file::{self, MAX_SECRETS_FILE_LEN, SecretsFileError};
 use crate::server::{self, ServeError};
@@ -188,6 +246,80 @@ pub enum AdminError {
     NoBackupKey,
     /// The format version 2 container could not be written or opened (ADR 0071).
     DbBackup(DbBackupError),
+    /// `secrets restore`: the decrypted backup is not a valid secrets file (ADR 0047 step 3).
+    BackupContents(SecretsFileError),
+    /// `secrets restore`: the backup does not belong to this database (ADR 0047 step 4).
+    SecretsBackupMismatch(StartupCheckError),
+    /// The secrets could not be checked against the database (a storage error).
+    SecretsCheck(AuthError),
+    /// `secrets invalidate` outside the two diagnosed cases (ADR 0047 step 2): `None` when
+    /// the secrets file matches the database, or the dry run's refusal.
+    InvalidateRefused(Option<StartupCheckError>),
+    /// `secrets invalidate` without `--confirm` (ADR 0047 step 3): what it would do. A usage
+    /// error.
+    ConfirmRequired(InvalidateDiagnosis),
+    /// `secrets invalidate` resumes an interrupted setup-only loss, whose keys come from the
+    /// secrets file, but the file cannot be read now.
+    ResumeNeedsFile(SecretsFileError),
+    /// `secrets invalidate` could not read or write the database.
+    Invalidate(AuthError),
+}
+
+/// What `secrets invalidate` found (ADR 0047 step 2), reported without `--confirm`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidateDiagnosis {
+    /// A loss to carry out, with what it costs.
+    Loss {
+        /// The case.
+        case: LossCase,
+        /// The marker of the interrupted run this one resumes, if any.
+        resumed: Option<PendingInvalidation>,
+        /// The accounts and TOTP enrollments affected.
+        cost: InvalidationCost,
+    },
+    /// An earlier run wrote its secrets file (setup `setup_id`); only its marker is left.
+    Finished {
+        /// The setup that run minted.
+        setup_id: u32,
+    },
+}
+
+impl fmt::Display for InvalidateDiagnosis {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Finished { setup_id } => write!(
+                f,
+                "an earlier `secrets invalidate` already wrote the secrets file (OPAQUE setup                  {setup_id}); with --confirm only its leftover marker is cleared, nothing else                  changes"
+            ),
+            Self::Loss {
+                case,
+                resumed,
+                cost,
+            } => {
+                match resumed {
+                    Some(p) => write!(
+                        f,
+                        "resuming an interrupted `secrets invalidate` (its OPAQUE setup {} was                          never written to the file and is lost): ",
+                        p.setup_id
+                    )?,
+                    None => f.write_str("diagnosis: ")?,
+                }
+                match case {
+                    LossCase::SetupOnly => f.write_str(
+                        "setup-only loss: the OPAQUE setup does not match the database;                          enum_key, the data keys, the bootstrap token and the backup keys are                          kept",
+                    )?,
+                    LossCase::Whole => f.write_str(
+                        "whole loss: the secrets file is absent or unreadable; nothing carries                          forward (no bootstrap token is made, and encrypted database backups                          sealed under the lost backup keys cannot be restored)",
+                    )?,
+                }
+                write!(
+                    f,
+                    ". With --confirm every OPAQUE setup is retired and a new one made: {}                      account(s) must re-register their password (through an enrolled device or                      their recovery code), and {} TOTP enrollment(s) are deleted. If any secrets                      backup exists, try `rizzy-vault secrets restore` first",
+                    cost.accounts, cost.totp_enrolments
+                )
+            }
+        }
+    }
 }
 
 impl AdminError {
@@ -197,7 +329,7 @@ impl AdminError {
     pub const fn is_usage(&self) -> bool {
         matches!(
             self,
-            Self::StdoutIsTerminal | Self::GraceDays | Self::NoBackupKey
+            Self::StdoutIsTerminal | Self::GraceDays | Self::NoBackupKey | Self::ConfirmRequired(_)
         )
     }
 }
@@ -256,6 +388,40 @@ impl fmt::Display for AdminError {
                  --backup-key` first, then make a new secrets backup",
             ),
             Self::DbBackup(e) => write!(f, "{e}"),
+            Self::BackupContents(e) => write!(
+                f,
+                "the backup does not hold a valid secrets file ({e}); nothing was written"
+            ),
+            Self::SecretsBackupMismatch(e) => write!(
+                f,
+                "this secrets backup does not belong to this database ({e}); nothing was                  written"
+            ),
+            Self::SecretsCheck(e) => write!(
+                f,
+                "cannot check the secrets against the database ({e}); nothing was written"
+            ),
+            Self::InvalidateRefused(None) => f.write_str(
+                "the secrets file matches the database: there is nothing to invalidate;                  nothing was changed",
+            ),
+            Self::InvalidateRefused(Some(e @ StartupCheckError::MissingDataKey { .. })) => {
+                write!(
+                    f,
+                    "{e}: `secrets invalidate` never discards data keys; restore the secrets                      file with `rizzy-vault secrets restore`. Nothing was changed"
+                )
+            }
+            Self::InvalidateRefused(Some(e)) => write!(
+                f,
+                "{e}. `secrets invalidate` only handles a setup that does not match the                  database or an absent or unreadable secrets file; nothing was changed"
+            ),
+            Self::ConfirmRequired(d) => write!(f, "secrets invalidate needs --confirm. {d}"),
+            Self::ResumeNeedsFile(e) => write!(
+                f,
+                "an interrupted setup-only `secrets invalidate` carries its keys forward from                  the secrets file, which cannot be read now ({e}); put the file back and run the                  command again"
+            ),
+            Self::Invalidate(e) => write!(
+                f,
+                "invalidating failed ({e}); if it failed after the database step, running the                  command again resumes it"
+            ),
         }
     }
 }
@@ -544,6 +710,314 @@ pub fn backup_secrets(
     let file = secrets_backup::seal(&mut os_rng(), &passphrase, &bytes, now_ms())
         .map_err(AdminError::Backup)?;
     fsutil::write_new_private(out, &file).map_err(|e| AdminError::Write(e.kind()))
+}
+
+/// What `secrets restore` did (ADR 0047).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecretsRestored {
+    /// Whether the secrets file was absent and is now created (else it was replaced).
+    pub created: bool,
+    /// Whether the database had no migration applied, so held no record to check against.
+    pub database_empty: bool,
+    /// The setups OPAQUE records name that the restored file lacks, with their record counts
+    /// (step 4: reported, never blocking).
+    pub missing_setups: Vec<(u32, u64)>,
+}
+
+/// Reads a secrets backup from `path`, or from standard input when `path` is `-`, refusing
+/// anything longer than [`secrets_backup::MAX_BACKUP_FILE_LEN`] without reading past it.
+fn read_secrets_backup(path: &Path) -> Result<Zeroizing<Vec<u8>>, AdminError> {
+    let max = secrets_backup::MAX_BACKUP_FILE_LEN;
+    if is_stdio(path) {
+        let mut buf = Zeroizing::new(Vec::new());
+        let limit = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
+        std::io::stdin()
+            .lock()
+            .take(limit)
+            .read_to_end(&mut buf)
+            .map_err(|e| AdminError::Input(e.kind()))?;
+        if buf.len() > max {
+            return Err(AdminError::Backup(BackupError::Malformed));
+        }
+        Ok(buf)
+    } else {
+        fsutil::read_limited(path, max).map_err(|e| match e {
+            ReadError::TooLarge => AdminError::Backup(BackupError::Malformed),
+            ReadError::Io(e) => AdminError::Input(e.kind()),
+        })
+    }
+}
+
+/// `rizzy-vault secrets restore --in <file|-> --passphrase-file <file|->` ([ADR 0047], module
+/// docs): decrypts a `backup-secrets` file, gates on the database, and only then installs it.
+///
+/// # Errors
+/// [`AdminError`]; the secrets file is then unchanged (or still absent).
+pub async fn secrets_restore(
+    config: &Config,
+    input: &Path,
+    passphrase_file: &Path,
+) -> Result<SecretsRestored, AdminError> {
+    check_location(config)?;
+    let (db, mut lock) = open_exclusive(config).await?;
+    let outcome = secrets_restore_excluded(config, &db, &mut lock, input, passphrase_file).await;
+    Exclusion::Database(db, lock).end().await;
+    outcome
+}
+
+/// [`secrets_restore`] on the database `lock` shuts every server process out of.
+async fn secrets_restore_excluded(
+    config: &Config,
+    db: &Database,
+    lock: &mut InstanceLock,
+    input: &Path,
+    passphrase_file: &Path,
+) -> Result<SecretsRestored, AdminError> {
+    // 2. Read and decrypt.
+    let file = read_secrets_backup(input)?;
+    let passphrase = read_passphrase(passphrase_file)?;
+    let plaintext = secrets_backup::open(&file, &passphrase).map_err(AdminError::Backup)?;
+    // 3. A damaged backup is refused before any write.
+    let secrets =
+        secrets_file::parse(plaintext.expose_secret()).map_err(AdminError::BackupContents)?;
+    // 4. The pure gate. A database no migration ever touched has no record to check.
+    let database_empty = db
+        .applied_migrations()
+        .await
+        .map_err(AdminError::Storage)?
+        .is_empty();
+    let missing_setups = if database_empty {
+        Vec::new()
+    } else {
+        if !schema_is_current(db).await {
+            return Err(AdminError::SchemaNotCurrent);
+        }
+        secrets
+            .check_database_dry_run(db)
+            .await
+            .map_err(AdminError::SecretsCheck)?
+            .map_err(AdminError::SecretsBackupMismatch)?;
+        secrets
+            .records_on_missing_setups(db)
+            .await
+            .map_err(AdminError::SecretsCheck)?
+    };
+    // 5. The servers must still be shut out when the write starts.
+    if !server::instance_lock_held(lock).await {
+        return Err(AdminError::Serve(ServeError::InstanceLockLost));
+    }
+    let created = std::fs::symlink_metadata(&config.secrets_file).is_err();
+    fsutil::replace_private(&config.secrets_file, plaintext.expose_secret())
+        .map_err(|e| AdminError::Write(e.kind()))?;
+    Ok(SecretsRestored {
+        created,
+        database_empty,
+        missing_setups,
+    })
+}
+
+/// What `secrets invalidate --confirm` did (ADR 0047).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecretsInvalidated {
+    /// A loss carried out (steps 4–6).
+    Invalidated {
+        /// What the database step did.
+        outcome: Invalidated,
+        /// Whether this run resumed an interrupted one.
+        resumed: bool,
+    },
+    /// An earlier run had already written its file; only its marker was cleared.
+    MarkerCleared {
+        /// The setup that run minted, now the file's only one.
+        setup_id: u32,
+    },
+}
+
+/// What step 2 found, with the parts a setup-only loss carries forward.
+enum Diagnosed {
+    /// A loss to carry out.
+    Loss {
+        /// The case.
+        case: LossCase,
+        /// The loaded secrets, on a setup-only loss.
+        carried: Option<ServerSecrets>,
+        /// The marker this run resumes, if any.
+        resumed: Option<PendingInvalidation>,
+    },
+    /// An earlier run wrote its file (module docs).
+    Finished {
+        /// Its setup.
+        setup_id: u32,
+    },
+}
+
+/// Step 2 of `secrets invalidate` (module docs): the marker first, then the file and the dry
+/// run. Reads only.
+async fn diagnose(config: &Config, db: &Database) -> Result<Diagnosed, AdminError> {
+    let pending = invalidation::pending_invalidation(db)
+        .await
+        .map_err(AdminError::Invalidate)?;
+    let loaded = secrets_file::load(&config.secrets_file);
+    if let Some(marker) = pending {
+        if let Ok(secrets) = &loaded
+            && secrets.setups().any(|(id, _)| id == marker.setup_id)
+            && secrets
+                .check_database_dry_run(db)
+                .await
+                .map_err(AdminError::Invalidate)?
+                .is_ok()
+        {
+            return Ok(Diagnosed::Finished {
+                setup_id: marker.setup_id,
+            });
+        }
+        let carried = match marker.case {
+            LossCase::Whole => None,
+            LossCase::SetupOnly => Some(loaded.map_err(AdminError::ResumeNeedsFile)?),
+        };
+        return Ok(Diagnosed::Loss {
+            case: marker.case,
+            carried,
+            resumed: Some(marker),
+        });
+    }
+    let secrets = match loaded {
+        Ok(secrets) => secrets,
+        // Absent, or unparsable: a whole loss.
+        Err(
+            SecretsFileError::Io(std::io::ErrorKind::NotFound)
+            | SecretsFileError::TooLarge
+            | SecretsFileError::Malformed
+            | SecretsFileError::BadField(_)
+            | SecretsFileError::Invalid(_),
+        ) => {
+            return Ok(Diagnosed::Loss {
+                case: LossCase::Whole,
+                carried: None,
+                resumed: None,
+            });
+        }
+        // Present but unreadable for another reason: not diagnosed, refused.
+        Err(e @ SecretsFileError::Io(_)) => return Err(AdminError::Secrets(e)),
+    };
+    match secrets
+        .check_database_dry_run(db)
+        .await
+        .map_err(AdminError::Invalidate)?
+    {
+        Err(StartupCheckError::SetupMismatch { .. } | StartupCheckError::NoRecordedSetup) => {
+            Ok(Diagnosed::Loss {
+                case: LossCase::SetupOnly,
+                carried: Some(secrets),
+                resumed: None,
+            })
+        }
+        Ok(()) => Err(AdminError::InvalidateRefused(None)),
+        Err(e) => Err(AdminError::InvalidateRefused(Some(e))),
+    }
+}
+
+/// `rizzy-vault secrets invalidate [--confirm]` ([ADR 0047], module docs). Without
+/// `confirm`, returns [`AdminError::ConfirmRequired`] with the diagnosis and writes nothing.
+///
+/// # Errors
+/// [`AdminError`]. A failure before the database step changes nothing; one after it leaves
+/// the marker, and the next run resumes.
+pub async fn secrets_invalidate(
+    config: &Config,
+    confirm: bool,
+) -> Result<SecretsInvalidated, AdminError> {
+    // Step 7: the first admin command that logs (ADR 0047).
+    log::init(config.log_level);
+    check_location(config)?;
+    let (db, mut lock) = open_exclusive(config).await?;
+    let outcome = invalidate_excluded(config, &db, &mut lock, confirm).await;
+    Exclusion::Database(db, lock).end().await;
+    outcome
+}
+
+/// [`secrets_invalidate`] on the database `lock` shuts every server process out of.
+async fn invalidate_excluded(
+    config: &Config,
+    db: &Database,
+    lock: &mut InstanceLock,
+    confirm: bool,
+) -> Result<SecretsInvalidated, AdminError> {
+    if !schema_is_current(db).await {
+        return Err(AdminError::SchemaNotCurrent);
+    }
+    let (case, carried, resumed) = match diagnose(config, db).await? {
+        Diagnosed::Finished { setup_id } => {
+            if !confirm {
+                return Err(AdminError::ConfirmRequired(InvalidateDiagnosis::Finished {
+                    setup_id,
+                }));
+            }
+            if !server::instance_lock_held(lock).await {
+                return Err(AdminError::Serve(ServeError::InstanceLockLost));
+            }
+            invalidation::clear_pending_invalidation(db)
+                .await
+                .map_err(AdminError::Invalidate)?;
+            return Ok(SecretsInvalidated::MarkerCleared { setup_id });
+        }
+        Diagnosed::Loss {
+            case,
+            carried,
+            resumed,
+        } => (case, carried, resumed),
+    };
+    // Step 3: the cost first, read only.
+    if !confirm {
+        let cost = invalidation::invalidation_cost(db, case)
+            .await
+            .map_err(AdminError::Invalidate)?;
+        return Err(AdminError::ConfirmRequired(InvalidateDiagnosis::Loss {
+            case,
+            resumed,
+            cost,
+        }));
+    }
+    // Step 4: the new setup in memory, then one transaction.
+    let mut rng = os_rng();
+    let setup = ServerSetup::generate(&mut rng);
+    let now_ms = now_ms();
+    let diagnosed_at_ms = resumed.map_or(now_ms, |p| p.diagnosed_at_ms);
+    if !server::instance_lock_held(lock).await {
+        return Err(AdminError::Serve(ServeError::InstanceLockLost));
+    }
+    let outcome = invalidation::invalidate_in_database(
+        db,
+        case,
+        &setup.public_key_hash(),
+        now_ms,
+        diagnosed_at_ms,
+        |o| {
+            log::warn(
+                "secrets_invalidated",
+                &[
+                    Field::Str("case", o.case.name()),
+                    Field::U64("setup_count", o.setups_retired),
+                    Field::U64("totp_rows_deleted", o.totp_rows_deleted),
+                    Field::U64("setup_id", u64::from(o.setup_id)),
+                ],
+            );
+        },
+    )
+    .await
+    .map_err(AdminError::Invalidate)?;
+    // Steps 5–6: the file, then the marker.
+    let secrets = ServerSecrets::generate_after_loss(&mut rng, outcome.setup_id, setup, carried);
+    let bytes = secrets_file::serialize(&secrets).map_err(AdminError::Secrets)?;
+    fsutil::replace_private(&config.secrets_file, &bytes)
+        .map_err(|e| AdminError::Write(e.kind()))?;
+    invalidation::clear_pending_invalidation(db)
+        .await
+        .map_err(AdminError::Invalidate)?;
+    Ok(SecretsInvalidated::Invalidated {
+        outcome,
+        resumed: resumed.is_some(),
+    })
 }
 
 /// `rizzy-vault migrate`: opens the database with every server process shut out (the writer

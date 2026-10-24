@@ -19,8 +19,9 @@
 //!   reconciliation epochs, compaction, `SQLite` space and the pre-migration copy ([`worker`]).
 //!
 //! It also carries the M1 admin subcommands the ADRs specify ([`admin`]): `secrets init`,
-//! `secrets rotate [--data-key]`, `backup-secrets`, `migrate`, and `backup` and `restore` with
-//! the logical backup file of ADR 0023 (`rizzy_storage::backup::file`).
+//! `secrets rotate [--data-key]`, `secrets restore` and `secrets invalidate` (ADR 0047),
+//! `backup-secrets`, `migrate`, and `backup` and `restore` with the logical backup file of
+//! ADR 0023 (`rizzy_storage::backup::file`).
 //!
 //! # Module map
 //!
