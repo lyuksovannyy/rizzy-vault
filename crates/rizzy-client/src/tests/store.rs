@@ -1009,6 +1009,55 @@ fn a_persisted_device_reloads_after_every_step() {
     }
 }
 
+/// A purge of an item another device edited, by this device, reloads after its upload (found
+/// by `rv`'s move tests, ADR 0081 §A6: a move purges the source, often edited elsewhere).
+/// The other device's op is covered only by this device's acknowledged tombstone snapshot,
+/// which the load cannot take before the own chain puts the Purge back; its body used to be
+/// pruned, and the load then refused the own Trash and Purge ops (`CacheCorrupt`). Also with an
+/// own snapshot from before the purge (op count) that covers the op: the load takes that one.
+#[test]
+fn a_purge_of_an_item_another_device_edited_reloads() {
+    let mut rng = ChaCha20Rng::seed_from_u64(7070);
+    let mut server = Server::new(7071);
+    let (mut a, sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    let right_after = a.create(&mut rng, "purged right after the other edit");
+    let later = a.create(&mut rng, "purged after an own snapshot");
+    a.upload(&mut server, &mut rng);
+    let mut b = Dev::enrolled(&mut server, &mut rng, &sk);
+    b.fetch(&server);
+    b.edit(&mut rng, right_after, "from b");
+    b.edit(&mut rng, later, "from b");
+    b.upload(&mut server, &mut rng);
+    a.refresh(&server);
+    a.fetch(&server);
+    a.assert_loads();
+    // More own ops than `SNAPSHOT_AFTER_OPS` on one item: an own snapshot covers B's op.
+    for i in 0..40 {
+        a.edit(&mut rng, later, &format!("from a {i}"));
+    }
+    a.upload(&mut server, &mut rng);
+    a.fetch(&server);
+    a.assert_loads();
+    for (n, item) in [right_after, later].into_iter().enumerate() {
+        let at = T0 + 30 + 10 * n as u64;
+        a.vault.trash_item(&mut rng, &a.unlocked, item, at).unwrap();
+        a.vault
+            .purge_item(&mut rng, &a.unlocked, item, at + 1)
+            .unwrap();
+        a.flush();
+        a.assert_loads();
+        a.upload(&mut server, &mut rng);
+        a.assert_loads();
+        a.fetch(&server);
+        a.assert_loads();
+        assert_eq!(
+            a.reload().vaults[0].item_lifecycle(item),
+            ItemLifecycle::Purged
+        );
+    }
+}
+
 /// A signup interrupted between the pending write and the acknowledgement: the file holds
 /// stage 2 and the commit; the restart resends the same bytes and finalises (ADR 0026 §2).
 #[test]
