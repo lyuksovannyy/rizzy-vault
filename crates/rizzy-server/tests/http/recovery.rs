@@ -178,7 +178,9 @@ fn a_recovery_rotates_replaces_the_credentials_and_enrols_the_device() {
         let item = a.create(&mut rng, "kept");
         assert!(a.sync(&server, &mut rng).await.is_empty());
 
+        let before = now_ms();
         let (done, new_sk, new_code) = recover(&server, &mut rng, &code, true).await;
+        let committed = now_ms();
         assert_eq!(done.dropped_items, 0);
         assert_eq!(done.device.pin().state().account_key_epoch, 1);
         assert_eq!(done.device.pin().state().password_epoch, 1);
@@ -235,7 +237,15 @@ fn a_recovery_rotates_replaces_the_credentials_and_enrols_the_device() {
         a.session = device_session(&server, &a.state, &a.unlocked)
             .await
             .unwrap();
-        let view = serde_json::from_value(a.account_view(&server).await).unwrap();
+        let view: rizzy_client::rizzy_proto::account::AccountView =
+            serde_json::from_value(a.account_view(&server).await).unwrap();
+        // ADR 0045: the device session sees the new pending recovery, with the time the one
+        // above committed (points 1, 4, 6).
+        let notice = view.pending_recovery.unwrap();
+        let last = notice.last_recovery_at_ms.unwrap();
+        assert!((before..=committed).contains(&last), "{notice:?}");
+        assert!(notice.opened_at_ms >= last);
+        assert_eq!(notice.available_at_ms, notice.opened_at_ms, "a zero wait");
         assert_eq!(
             verify_unlock(&mut a.state, &a.unlocked, &view, None).unwrap_err(),
             ClientError::AccountKeyRotated
@@ -285,6 +295,21 @@ fn a_recovery_rotates_replaces_the_credentials_and_enrols_the_device() {
         let again = awaiting.complete(reply.json()).unwrap();
         assert_eq!(again.account().state().recovery_epoch, 2);
         assert_eq!(again.account().certificates().len(), 2);
+        // An OPAQUE login never gets the notice, though a recovery is pending (point 4).
+        assert_eq!(again.account().recovery_notice(), None);
+        // Over that OPAQUE session `account/state` leaves it out too.
+        let opaque = copy_token(again.bearer_token());
+        let view: serde_json::Value = call(
+            &server,
+            "POST",
+            "/api/v1/account/state",
+            br#"{"known_bundle_seq":0,"known_settings_seq":0}"#.to_vec(),
+            Auth::Bearer(&opaque),
+        )
+        .await
+        .json();
+        assert!(view.get("account_state").is_some());
+        assert!(view.get("pending_recovery").is_none(), "{view}");
     });
 }
 
