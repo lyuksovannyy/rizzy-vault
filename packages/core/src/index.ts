@@ -722,7 +722,11 @@ export type ItemType =
 
 /** One row of an item list: no concealed value. */
 export interface ItemSummary {
+  /** The item reference, `<vault hex>:<item hex>` (ADR 0081 §A7, INV-103): what every item
+   * call takes. An item id alone names nothing: it is unique only within its vault. */
   readonly id: string;
+  /** The item's vault, 32 hex digits. */
+  readonly vaultId: string;
   readonly itemType: ItemType | "unknown";
   readonly title: string;
   readonly username: string | undefined;
@@ -733,6 +737,38 @@ export interface ItemSummary {
   readonly tags: readonly string[];
   /** The host of the item's first website, or `undefined`. Never the full URI. */
   readonly websiteHost: string | undefined;
+}
+
+/** What a vault is (ADR 0081 §A1, §A2): the Personal vault, an owned vault, or a kind this
+ * build only lists (`shared`/`joined` are Part B; `unknown` a kind it does not know). */
+export type VaultKind = "personal" | "owned" | "shared" | "joined" | "unknown";
+
+/** Whether a vault is opened here: `withheld` (listed, not served: read-only, an alarm) and
+ * `needs_update` ("This vault needs a newer rizzy-vault", §A12) are not. */
+export type VaultStatus = "open" | "withheld" | "needs_update";
+
+/** One vault of the account (the vault list, the switcher, the pickers). */
+export interface VaultInfo {
+  /** 32 hex digits. */
+  readonly id: string;
+  readonly kind: VaultKind;
+  /** The name of an owned vault; `undefined` for the Personal vault (shown as "Personal",
+   * localised) and for an owned vault without one (shown as "Untitled vault"). */
+  readonly name: string | undefined;
+  readonly status: VaultStatus;
+  /** Whether nothing can be written to it now. */
+  readonly readOnly: boolean;
+  /** Its items, active and trashed. */
+  readonly itemCount: number;
+  /** The server's counted bytes of it, if served. */
+  readonly bytesUsed: number | undefined;
+}
+
+/** One alarm of the vault completeness check (ADR 0081 §A2, INV-102). */
+export interface VaultAlarm {
+  readonly kind: "withheld" | "unlisted" | "no_directory";
+  /** The vault it names; `undefined` for `no_directory`. */
+  readonly vaultId: string | undefined;
 }
 
 /** What one custom field's autocomplete id does (ADR 0076 §2.4–§2.5, §3). */
@@ -1196,6 +1232,24 @@ function draftOf(changes: readonly ItemChange[]): ItemDraft {
 }
 
 /** Frees each element of a generated array after mapping it. */
+/** Plain objects of the core's vault views, freed at once. */
+function vaultInfos(views: { id: string; kind: string; name: string | undefined; status: string; readOnly: boolean; itemCount: number; bytesUsed: bigint | undefined; free(): void }[]): VaultInfo[] {
+  return mapFree(views, (v) => ({
+    id: v.id,
+    kind: v.kind as VaultKind,
+    name: v.name,
+    status: v.status as VaultStatus,
+    readOnly: v.readOnly,
+    itemCount: v.itemCount,
+    bytesUsed: v.bytesUsed === undefined ? undefined : Number(v.bytesUsed),
+  }));
+}
+
+/** Plain objects of the core's vault alarms, freed at once. */
+function vaultAlarms(views: { kind: string; vaultId: string | undefined; free(): void }[]): VaultAlarm[] {
+  return mapFree(views, (a) => ({ kind: a.kind as VaultAlarm["kind"], vaultId: a.vaultId }));
+}
+
 function mapFree<T extends { free(): void }, U>(items: T[], f: (item: T) => U): U[] {
   try {
     return items.map(f);
@@ -1544,6 +1598,7 @@ export class VaultSession {
       call(() => this.#s().items(trash)),
       (i) => ({
         id: i.id,
+        vaultId: i.vaultId,
         itemType: i.itemType as ItemType | "unknown",
         title: i.title,
         username: i.username,
@@ -1562,6 +1617,7 @@ export class VaultSession {
       call(() => this.#s().item(id)),
       (i) => ({
         id: i.id,
+        vaultId: i.vaultId,
         itemType: i.itemType as ItemType | "unknown",
         title: i.title,
         username: i.username,
@@ -1597,11 +1653,12 @@ export class VaultSession {
     return call(() => this.#s().revealField(id, key));
   }
 
-  /** Creates an item; returns its id. */
-  createItem(itemType: ItemType, changes: readonly ItemChange[]): string {
+  /** Creates an item in `vaultId` (the editor preselects {@link personalVaultId}, ADR 0081
+   * §A8); returns its reference. */
+  createItem(vaultId: string, itemType: ItemType, changes: readonly ItemChange[]): string {
     const draft = draftOf(changes);
     try {
-      return call(() => this.#s().createItem(itemType, draft, this.#now()));
+      return call(() => this.#s().createItem(vaultId, itemType, draft, this.#now()));
     } finally {
       draft.free();
     }
@@ -1828,17 +1885,17 @@ export class VaultSession {
    * to import it. Needs {@link reauthenticate} within five minutes, and spends it
    * (`reauth_required` otherwise).
    */
-  exportEncrypted(exportPassword: SecretInput): EncryptedExport {
+  exportEncrypted(vaultId: string, exportPassword: SecretInput): EncryptedExport {
     const s = this.#s();
     return mapOne(
-      withSecrets([exportPassword], (b) => call(() => s.exportEncrypted(at(b, 0), this.#now()))),
+      withSecrets([exportPassword], (b) => call(() => s.exportEncrypted(vaultId, at(b, 0), this.#now()))),
       (e) => ({ file: e.file, items: e.items, unresolved: e.unresolved }),
     );
   }
 
   /** How many passkeys a CXF export would hold now (ADR 0074 §2). */
-  cxfExportPasskeys(): number {
-    return call(() => this.#s().cxfExportPasskeys());
+  cxfExportPasskeys(vaultId: string): number {
+    return call(() => this.#s().cxfExportPasskeys(vaultId));
   }
 
   /**
@@ -1847,24 +1904,24 @@ export class VaultSession {
    * ({@link plaintextWarningShown}), its hold ended, {@link plaintextExportPhrase} typed, within
    * five minutes of {@link reauthenticate}.
    */
-  exportCxf(typedPhrase: string, exportPassword: SecretInput): CxfExport {
+  exportCxf(vaultId: string, typedPhrase: string, exportPassword: SecretInput): CxfExport {
     const s = this.#s();
     return mapOne(
       withSecrets([exportPassword], (b) =>
-        call(() => s.exportCxf(typedPhrase, at(b, 0), this.#now())),
+        call(() => s.exportCxf(vaultId, typedPhrase, at(b, 0), this.#now())),
       ),
       (e) => ({ file: e.file, passkeys: e.passkeys }),
     );
   }
 
   /** The ids of the items too large to export. */
-  exportBlockers(): string[] {
-    return call(() => this.#s().exportBlockers());
+  exportBlockers(vaultId: string): string[] {
+    return call(() => this.#s().exportBlockers(vaultId));
   }
 
   /** The warning to add before a CSV export. */
-  csvExportWarning(): string {
-    return call(() => this.#s().csvExportWarning());
+  csvExportWarning(vaultId: string): string {
+    return call(() => this.#s().csvExportWarning(vaultId));
   }
 
   /**
@@ -1912,32 +1969,32 @@ export class VaultSession {
    * ({@link plaintextWarningShown}), its hold of {@link plaintextExportHoldMs} ended, and the
    * user typed {@link plaintextExportPhrase}, within five minutes of {@link reauthenticate}.
    */
-  exportPlaintext(format: "json" | "csv", typedPhrase: string): Uint8Array {
-    return call(() => this.#s().exportPlaintext(format, typedPhrase, this.#now()));
+  exportPlaintext(vaultId: string, format: "json" | "csv", typedPhrase: string): Uint8Array {
+    return call(() => this.#s().exportPlaintext(vaultId, format, typedPhrase, this.#now()));
   }
 
   /** Imports another product's file, or our own plaintext JSON, as new items. */
-  importFile(format: ImportFormat, file: Uint8Array): ImportReport {
-    return mapOne(call(() => this.#s().importFile(format, file, this.#now())), report);
+  importFile(vaultId: string, format: ImportFormat, file: Uint8Array): ImportReport {
+    return mapOne(call(() => this.#s().importFile(vaultId, format, file, this.#now())), report);
   }
 
   /** Imports our own encrypted export as new items. */
-  importEncrypted(file: Uint8Array, exportPassword: SecretInput): ImportReport {
+  importEncrypted(vaultId: string, file: Uint8Array, exportPassword: SecretInput): ImportReport {
     const s = this.#s();
     return mapOne(
       withSecrets([exportPassword], (b) =>
-        call(() => s.importEncrypted(file, at(b, 0), this.#now())),
+        call(() => s.importEncrypted(vaultId, file, at(b, 0), this.#now())),
       ),
       report,
     );
   }
 
   /** Imports our own CXF passkey export (ADR 0074) as new Login items, one per passkey. */
-  importCxfEncrypted(file: Uint8Array, exportPassword: SecretInput): ImportReport {
+  importCxfEncrypted(vaultId: string, file: Uint8Array, exportPassword: SecretInput): ImportReport {
     const s = this.#s();
     return mapOne(
       withSecrets([exportPassword], (b) =>
-        call(() => s.importCxfEncrypted(file, at(b, 0), this.#now())),
+        call(() => s.importCxfEncrypted(vaultId, file, at(b, 0), this.#now())),
       ),
       report,
     );
@@ -2244,6 +2301,144 @@ export class VaultSession {
    * same change on top of it, once. The server takes the commit only within five minutes of the
    * login (`server_fresh_session_required` afterwards: log in again).
    */
+  // --- Vaults (ADR 0081 Part A) -------------------------------------------------------------
+
+  /** Every vault of the account: the Personal vault first, then the others by name. */
+  vaults(): VaultInfo[] {
+    return vaultInfos(call(() => this.#s().vaults()));
+  }
+
+  /** The Personal vault, preselected for every new item, import and export (§A8). */
+  get personalVaultId(): string | undefined {
+    return call(() => this.#s().personalVaultId);
+  }
+
+  /** The vault completeness check's alarms (INV-102); empty for an honest server. */
+  vaultAlarms(): VaultAlarm[] {
+    return vaultAlarms(call(() => this.#s().vaultAlarms()));
+  }
+
+  /** Unsent changes discarded with vaults deleted on another device, since the last call. */
+  takeDiscardedChanges(): number {
+    return call(() => this.#s().takeDiscardedChanges());
+  }
+
+  /** Creates an owned vault named `name` (§A3), then syncs; returns its id. */
+  async createVault(name: string): Promise<string> {
+    const s = this.#s();
+    let request = takeRequest(call(() => s.createVaultRequest(name)));
+    for (let attempt = 0; ; attempt++) {
+      const answer = await this.#transport(request);
+      try {
+        const id = call(() => s.vaultRespond(answer.status, answer.body, this.#now()));
+        await this.sync();
+        return id ?? "";
+      } catch (e) {
+        if (!(e instanceof CoreError) || e.code !== "server_state_conflict" || attempt > 0) {
+          throw e;
+        }
+      }
+      await this.sync();
+      request = takeRequest(call(() => s.vaultRetryRequest()));
+    }
+  }
+
+  /** Renames an owned vault (§A4; never the Personal vault), then syncs. */
+  async renameVault(vaultId: string, name: string): Promise<void> {
+    call(() => this.#s().renameVault(vaultId, name, this.#now()));
+    await this.sync();
+  }
+
+  /**
+   * Deletes an owned vault (§A5). With `keepItems` its items are first moved to the Personal
+   * vault (each copied there, attachments included, and synced; the vault's deletion removes
+   * the originals); without, they are deleted with it. Needs a fresh login:
+   * `server_fresh_session_required` otherwise — call {@link refreshSession} and call this
+   * again (moves already made are not made twice).
+   */
+  async deleteVault(vaultId: string, keepItems: boolean): Promise<void> {
+    const s = this.#s();
+    if (vaultId === this.personalVaultId) {
+      throw new CoreError("personal_vault_protected");
+    }
+    if (keepItems) {
+      const personal = this.personalVaultId;
+      if (personal === undefined) {
+        throw new CoreError("vault_set_mismatch");
+      }
+      const ids = [...this.items(false), ...this.items(true)]
+        .filter((i) => i.vaultId === vaultId)
+        .map((i) => i.id);
+      for (const id of ids) {
+        await this.#copyInto(id, personal, true);
+      }
+      await this.sync();
+    }
+    let request = takeRequest(call(() => s.deleteVaultRequest(vaultId)));
+    for (let attempt = 0; ; attempt++) {
+      const answer = await this.#transport(request);
+      try {
+        call(() => s.vaultRespond(answer.status, answer.body, this.#now()));
+        break;
+      } catch (e) {
+        if (!(e instanceof CoreError) || e.code !== "server_state_conflict" || attempt > 0) {
+          throw e;
+        }
+      }
+      await this.sync();
+      request = takeRequest(call(() => s.vaultRetryRequest()));
+    }
+    await this.sync();
+  }
+
+  /** Copies an item into another vault (§A6), attachments included; returns the copy's reference. */
+  async copyItem(id: string, targetVaultId: string): Promise<string> {
+    const copied = await this.#copyInto(id, targetVaultId, false);
+    await this.sync();
+    return copied;
+  }
+
+  /**
+   * Moves an item into another vault (§A6): the copy with its attachments, a sync, then the
+   * original trashed and purged and synced — only once the server stored the copy (INV-104).
+   * Returns the new reference.
+   */
+  async moveItem(id: string, targetVaultId: string): Promise<string> {
+    const moved = await this.#copyInto(id, targetVaultId, true);
+    await this.sync();
+    if (call(() => this.#s().finishMoves(this.#now())) > 0) {
+      await this.sync();
+    }
+    return moved;
+  }
+
+  /** The copy of `id` in `target` (a move's when `move`), with each attachment downloaded from
+   * the original and uploaded to the copy. */
+  async #copyInto(id: string, target: string, move: boolean): Promise<string> {
+    const s = this.#s();
+    const view = call(() => (move ? s.moveItem(id, target, this.#now()) : s.copyItem(id, target, this.#now())));
+    let copyId: string;
+    let attachments: { id: string; name: string; mime: string }[];
+    try {
+      copyId = view.id;
+      attachments = mapFree(view.attachments(), (a) => ({ id: a.id, name: a.name, mime: a.mime }));
+    } finally {
+      view.free();
+    }
+    for (const a of attachments) {
+      const data = await this.downloadAttachment(id, a.id);
+      try {
+        await this.addAttachment(copyId, a.name, a.mime, data);
+      } finally {
+        data.fill(0);
+      }
+    }
+    if (move && attachments.length > 0) {
+      call(() => this.#s().moveAttachmentsStored(copyId));
+    }
+    return copyId;
+  }
+
   async changeMatchSettings(change: SettingsChange): Promise<void> {
     const s = this.#s();
     let request = takeRequest(call(() => settingsRequest(s, change)));
@@ -3152,6 +3347,26 @@ export class DurableSession {
     return call(() => this.#inner.unsentChanges);
   }
 
+  /** Every vault of the account (ADR 0081 §A2): the save prompts' picker, the rows' vault. */
+  vaults(): VaultInfo[] {
+    return vaultInfos(call(() => this.#inner.vaults()));
+  }
+
+  /** The Personal vault, which every save prompt preselects (ADR 0081 §A8). */
+  get personalVaultId(): string | undefined {
+    return call(() => this.#inner.personalVaultId);
+  }
+
+  /** The vault completeness check's alarms (INV-102). */
+  vaultAlarms(): VaultAlarm[] {
+    return vaultAlarms(call(() => this.#inner.vaultAlarms()));
+  }
+
+  /** Unsent changes discarded with vaults deleted on another device, since the last call. */
+  takeDiscardedChanges(): number {
+    return call(() => this.#inner.takeDiscardedChanges());
+  }
+
   /** Whether a sync is running. */
   get syncing(): boolean {
     return this.#inner.syncing;
@@ -3213,6 +3428,7 @@ export class DurableSession {
       call(() => this.#inner.items(trash)),
       (i) => ({
         id: i.id,
+        vaultId: i.vaultId,
         itemType: i.itemType as ItemType | "unknown",
         title: i.title,
         username: i.username,
@@ -3231,6 +3447,7 @@ export class DurableSession {
       call(() => this.#inner.item(id)),
       (i) => ({
         id: i.id,
+        vaultId: i.vaultId,
         itemType: i.itemType as ItemType | "unknown",
         title: i.title,
         username: i.username,
@@ -3355,11 +3572,11 @@ export class DurableSession {
   }
 
   /** Creates an item; returns its id. Persisted before this resolves (class docs). */
-  async createItem(itemType: ItemType, changes: readonly ItemChange[]): Promise<string> {
+  async createItem(vaultId: string, itemType: ItemType, changes: readonly ItemChange[]): Promise<string> {
     const draft = draftOf(changes);
     let id: string;
     try {
-      id = call(() => this.#inner.createItem(itemType, draft, this.#now()));
+      id = call(() => this.#inner.createItem(vaultId, itemType, draft, this.#now()));
     } finally {
       draft.free();
     }
