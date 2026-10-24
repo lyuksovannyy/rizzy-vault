@@ -61,6 +61,7 @@ use rizzy_client::rizzy_proto::http::paths;
 use rizzy_client::rizzy_proto::vault::HealingResponse;
 use rizzy_client::store::rows::Alarm;
 use rizzy_client::unlock::catch_up_account_key;
+use rizzy_core::ids::VaultId;
 use rizzy_core::keys::AccountFingerprint;
 use rizzy_core::secret_key::RecoveryCode;
 use serde::Serialize;
@@ -90,13 +91,19 @@ impl Device {
              backup?). Sending the newer one back.",
         );
         // Step 3b (ADR 0032 §2): the vault's self-grant and its wrap set, before any record.
-        let vault_id = self.vault.vault_id().to_bytes();
+        // Every vault's self-grant this device holds (ADR 0081 §A7).
         let Ok(step_3b) = healing
             .self_grants
             .iter()
-            .find(|g| g.vault_id.to_bytes() == vault_id)
-            .map(|grant| self.vault.self_grant_healing_request(grant))
-            .transpose()
+            .filter_map(|grant| {
+                let vault_id = grant.vault_id.to_bytes();
+                self.vaults
+                    .all()
+                    .iter()
+                    .find(|v| v.vault_id().to_bytes() == vault_id)
+                    .map(|vault| vault.self_grant_healing_request(grant))
+            })
+            .collect::<Result<Vec<_>, _>>()
         else {
             ui.note(
                 "This device cannot send its vault key back to the server (it has not fetched \
@@ -111,7 +118,7 @@ impl Device {
                 .await?;
             self.call_empty(paths::HEALING_GRANTS, &healing.grants)
                 .await?;
-            if let Some(request) = &step_3b {
+            for request in &step_3b {
                 let _answer: HealingResponse = self.call(paths::VAULT_HEAL, request).await?;
             }
             Ok(())
@@ -132,7 +139,7 @@ impl Device {
 
     /// `POST path` over the device session, with the empty answer. A session the server
     /// ended is renewed once.
-    async fn call_empty<T: Serialize>(
+    pub(super) async fn call_empty<T: Serialize>(
         &mut self,
         path: &'static str,
         value: &T,
@@ -165,10 +172,19 @@ impl Device {
     /// [`ClientError::CannotHeal`] when no complete request can be built or the server is still
     /// behind after it was stored; the server's refusal; the transport's and the flows' errors.
     pub async fn heal(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
-        if !self.vault.needs_healing() {
+        // Per vault (ADR 0081 §A7).
+        for vault_id in self.vaults.open_ids() {
+            self.heal_vault(ui, vault_id).await?;
+        }
+        Ok(())
+    }
+
+    /// [`Device::heal`] for one vault.
+    async fn heal_vault(&mut self, ui: &mut dyn Ui, vault_id: VaultId) -> Result<(), CliError> {
+        if !self.vaults.require(vault_id)?.needs_healing() {
             return Ok(());
         }
-        let Some(request) = self.vault.healing_request()? else {
+        let Some(request) = self.vaults.require_mut(vault_id)?.healing_request()? else {
             return Ok(());
         };
         ui.note(
@@ -180,14 +196,17 @@ impl Device {
         let response = match answer {
             Ok(response) => response,
             Err(e) => {
-                self.vault.healing_refused();
+                self.vaults.require_mut(vault_id)?.healing_refused();
                 return Err(e);
             }
         };
-        let outcome = self.vault.apply_healing_response(&response)?;
+        let outcome = self
+            .vaults
+            .require_mut(vault_id)?
+            .apply_healing_response(&response)?;
         self.flush().await?;
         self.fetch().await?;
-        if self.vault.needs_healing() {
+        if self.vaults.require(vault_id)?.needs_healing() {
             return Err(CliError::Client(ClientError::CannotHeal));
         }
         ui.note(&format!(

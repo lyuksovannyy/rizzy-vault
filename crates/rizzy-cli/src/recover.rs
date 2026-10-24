@@ -48,6 +48,7 @@ use rizzy_client::rizzy_proto::recovery::{RecoveryCompleteResponse, RecoveryStar
 use rizzy_client::signup::DeviceKind;
 use rizzy_client::store::floors::Floors;
 use rizzy_client::sync::VaultSync;
+use rizzy_client::vaults::VaultCatalog;
 
 use crate::db::Db;
 use crate::device::{Device, Env, copy_token};
@@ -202,12 +203,17 @@ pub async fn complete(
     let mut floors = Floors::empty();
     floors.admit(&first)?;
     let db = Db::create(&cache_path(&env.data_dir, &account), &first).await?;
-    let mut vault_keys = done.vault_keys.into_iter();
-    // M1: one personal vault per account.
-    let (Some(vault_key), None) = (vault_keys.next(), vault_keys.next()) else {
+    // ADR 0081 §A7: a driver per recovered vault. Which one is Personal is the directory's word,
+    // read by the first sync; until then the legacy rule opens a lone vault and none of several.
+    let mut vaults = Vec::with_capacity(done.vault_keys.len());
+    for vault_key in done.vault_keys {
+        vaults.push(VaultSync::new(vault_key, &done.unlocked, 1)?);
+    }
+    if vaults.is_empty() {
         return Err(CliError::Client(ClientError::InvalidServerResponse));
-    };
-    let vault = VaultSync::new(vault_key, &done.unlocked, 1)?;
+    }
+    let ids: Vec<_> = vaults.iter().map(VaultSync::vault_id).collect();
+    let catalog = VaultCatalog::check(None, &ids);
     let mut device = Device::enrolled(
         lock,
         db,
@@ -216,7 +222,7 @@ pub async fn complete(
         done.device,
         done.unlocked,
         (done.certificates, done.revocations, done.authors),
-        vault,
+        (vaults, catalog),
         password,
         env.sign_outs.clone(),
     )?;

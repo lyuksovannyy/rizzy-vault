@@ -1073,7 +1073,10 @@ fn rv_end_to_end() {
     assert_eq!(mail.len(), 32);
     assert_eq!(
         a.items(),
-        vec![(mail.clone(), "login             Mail".to_owned())]
+        vec![(
+            mail.clone(),
+            "login             Personal          Mail".to_owned()
+        )]
     );
     // Shown without the secret unless asked; a unique prefix names the item.
     let shown = a.ok(&["item", "show", &mail[..6]], &[]);
@@ -2298,7 +2301,10 @@ fn forget_uploads_unsent_edits_first_and_is_refused_under_an_alarm() {
     let items = a.items();
     assert_eq!(
         items,
-        vec![(queued, "note              Written offline".to_owned())]
+        vec![(
+            queued,
+            "note              Personal          Written offline".to_owned()
+        )]
     );
 
     // A fork alarm in A's cache, written as the flow that detects one writes it.
@@ -4984,4 +4990,324 @@ fn item_search_recent_and_reindex() {
     assert!(reindexed.noted("2 items"), "{:?}", reindexed.notes);
     assert!(ids(&["item", "recent"]).is_empty());
     assert_eq!(ids(&["item", "search", "plan"]), [note]);
+}
+
+/// The ids and the rest of each row `item list <args>` prints.
+fn listed(rv: &Rv, args: &[&str]) -> Vec<(String, String)> {
+    let mut all = vec!["item", "list"];
+    all.extend_from_slice(args);
+    rv.ok(&all, &[])
+        .out
+        .iter()
+        .map(|line| {
+            let (id, rest) = line.split_once("  ").unwrap();
+            (id.to_owned(), rest.to_owned())
+        })
+        .collect()
+}
+
+/// ADR 0081 Part A through `rv` (§A3–§A8): a new account lists only Personal; `vault create`
+/// adds a named vault; `item create --vault` writes into it and the default stays Personal;
+/// every row shows its vault and `--vault` filters; the Personal vault is neither renamed nor
+/// deleted; `item copy` keeps the original and `item move` removes it once the copy is stored;
+/// a second device sees the vault, its items and the move; `vault delete` needs the vault's
+/// name typed, moves every item, the trash included, to Personal first, and the other device
+/// drops the vault.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one account's vault story, step by step, across two devices"
+)]
+fn vaults_create_move_copy_and_delete() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("vaults-a");
+    let (secret_key, _) = sign_up(&a, &origin, "alice");
+    let vaults = |rv: &Rv| rv.ok(&["vault", "list"], &[]).out;
+    let only = vaults(&a);
+    assert_eq!(only.len(), 1, "{only:?}");
+    assert!(only[0].contains("  Personal  0 items"), "{only:?}");
+
+    let work = a.ok(&["vault", "create", "Work"], &[]).out[0].clone();
+    assert_eq!(work.len(), 32);
+    let two = vaults(&a);
+    assert_eq!(two.len(), 2, "{two:?}");
+    assert!(two[0].contains("  Personal  "), "Personal first: {two:?}");
+    assert!(
+        two[1].starts_with(&format!("{work}  Work  0 items")),
+        "{two:?}"
+    );
+
+    let plan = create_note(&a, "Plan");
+    let secret = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "note",
+                "--vault",
+                "Work",
+                "--field",
+                "item.name=Secret",
+            ],
+            &[],
+        )
+        .out[0]
+        .clone();
+    let rows = a.items();
+    assert!(rows.contains(&(
+        plan.clone(),
+        "note              Personal          Plan".to_owned()
+    )));
+    assert!(rows.contains(&(
+        secret.clone(),
+        "note              Work              Secret".to_owned()
+    )));
+    assert_eq!(listed(&a, &["--vault", "Work"]).len(), 1);
+    assert_eq!(listed(&a, &["--vault", &work[..8]]).len(), 1);
+    assert_eq!(listed(&a, &["--vault", "Personal"]).len(), 1);
+    let shown = a.ok(&["item", "show", &secret], &[]);
+    assert_eq!(shown.printed("vault:"), "Work");
+
+    // The Personal vault is neither renamed nor deleted (INV-101, owner answer 3).
+    let (outcome, _) = a.try_run(
+        &["vault", "rename", "Personal", "Mine"],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(
+        matches!(
+            outcome,
+            Err(CliError::Client(ClientError::PersonalVaultProtected))
+        ),
+        "{outcome:?}"
+    );
+    let (outcome, _) = a.try_run(
+        &["vault", "delete", "Personal", "--name", "alice"],
+        &[PASSWORD],
+        &[],
+        &["Personal"],
+    );
+    assert!(
+        matches!(
+            outcome,
+            Err(CliError::Client(ClientError::PersonalVaultProtected))
+        ),
+        "{outcome:?}"
+    );
+    assert!(matches!(
+        a.try_run(&["vault", "rename", "Nope", "X"], &[PASSWORD], &[], &[])
+            .0,
+        Err(CliError::Client(ClientError::UnknownVault))
+    ));
+
+    // A copy is a new item; the original stays.
+    let copy = a
+        .ok(&["item", "copy", &secret, "--to", "Personal"], &[])
+        .out[0]
+        .clone();
+    assert_ne!(copy, secret);
+    assert_eq!(listed(&a, &["--vault", "Personal"]).len(), 2);
+    assert_eq!(listed(&a, &["--vault", "Work"]).len(), 1);
+    assert_eq!(a.field(&copy, "item.name"), "Secret");
+
+    // A second device sees the vault and its item.
+    let b = Rv::new("vaults-b");
+    log_in(&b, &origin, "alice", &secret_key);
+    let seen = vaults(&b);
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(
+        seen[1].starts_with(&format!("{work}  Work  1 item")),
+        "{seen:?}"
+    );
+    assert_eq!(
+        listed(&b, &["--vault", "Work"]),
+        listed(&a, &["--vault", "Work"])
+    );
+
+    // A move: the copy in Personal, the original purged from Work.
+    let moved = a.ok(&["item", "move", &secret[..10], "--to", "Personal"], &[]);
+    let moved_id = moved.out[0].clone();
+    assert_ne!(moved_id, secret);
+    assert!(listed(&a, &["--vault", "Work"]).is_empty());
+    assert_eq!(listed(&a, &["--vault", "Personal"]).len(), 3);
+    assert!(matches!(
+        a.try_run(&["item", "show", &secret], &[PASSWORD], &[], &[])
+            .0,
+        Err(CliError::Client(ClientError::UnknownItem))
+    ));
+    b.ok(&["sync"], &[]);
+    assert!(listed(&b, &["--vault", "Work"]).is_empty());
+    assert_eq!(listed(&b, &["--vault", "Personal"]).len(), 3);
+
+    // Delete, default: every item, the trash included, goes to Personal first.
+    let kept = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "note",
+                "--vault",
+                "Work",
+                "--field",
+                "item.name=Kept",
+            ],
+            &[],
+        )
+        .out[0]
+        .clone();
+    let binned = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "note",
+                "--vault",
+                "Work",
+                "--field",
+                "item.name=Binned",
+            ],
+            &[],
+        )
+        .out[0]
+        .clone();
+    a.ok(&["item", "trash", &binned], &[]);
+    let (outcome, script) = a.try_run(
+        &["vault", "delete", "Work", "--name", "alice"],
+        &[PASSWORD],
+        &[],
+        &["work"],
+    );
+    assert!(matches!(outcome, Err(CliError::Refused(_))), "{outcome:?}");
+    assert!(script.out.is_empty());
+    assert_eq!(vaults(&a).len(), 2, "a wrong confirmation changes nothing");
+    let (outcome, script) = a.try_run(
+        &["vault", "delete", "Work", "--name", "alice"],
+        &[PASSWORD],
+        &[],
+        &["Work"],
+    );
+    outcome.unwrap_or_else(|e| panic!("vault delete failed: {e:?}; {:?}", script.notes));
+    assert!(
+        script.noted("Moved 2 items to Personal"),
+        "{:?}",
+        script.notes
+    );
+    let left = vaults(&a);
+    assert_eq!(left.len(), 1, "{left:?}");
+    let names: Vec<String> = listed(&a, &[])
+        .into_iter()
+        .chain(listed(&a, &["--trash"]))
+        .map(|(_, rest)| rest)
+        .collect();
+    for name in ["Kept", "Binned", "Plan"] {
+        assert!(
+            names
+                .iter()
+                .any(|r| r.ends_with(name) && r.contains("Personal")),
+            "{name}: {names:?}"
+        );
+    }
+    assert!(!names.iter().any(|r| r.contains("  Work  ")));
+    assert!(matches!(
+        a.try_run(&["item", "show", &kept], &[PASSWORD], &[], &[]).0,
+        Err(CliError::Client(ClientError::UnknownItem))
+    ));
+    b.ok(&["sync"], &[]);
+    assert_eq!(vaults(&b).len(), 1);
+    assert_eq!(listed(&b, &[]).len() + listed(&b, &["--trash"]).len(), 5);
+}
+
+/// ADR 0081 §A5, §A8: a vault name two vaults share is refused with both ids listed, and each
+/// works by id; two vaults share no item (lists and search stay per vault with `--vault`);
+/// `vault delete --with-items` deletes the items with the vault; a rename shows everywhere.
+#[test]
+fn vault_names_ids_and_delete_with_items() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("vault-names");
+    sign_up(&a, &origin, "alice");
+    let one = a.ok(&["vault", "create", "Same"], &[]).out[0].clone();
+    let two = a.ok(&["vault", "create", "Same"], &[]).out[0].clone();
+    assert_ne!(one, two);
+    let (outcome, _) = a.try_run(
+        &[
+            "item",
+            "create",
+            "--type",
+            "note",
+            "--vault",
+            "Same",
+            "--field",
+            "item.name=X",
+        ],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    let Err(CliError::Refused(message)) = outcome else {
+        panic!("an ambiguous vault name was accepted: {outcome:?}");
+    };
+    assert!(
+        message.contains(&one) && message.contains(&two),
+        "{message}"
+    );
+
+    a.ok(&["vault", "rename", &one, "First"], &[]);
+    a.ok(&["vault", "rename", &two[..12], "Second"], &[]);
+    let listed_vaults = a.ok(&["vault", "list"], &[]).out;
+    assert!(listed_vaults[1].contains("  First  "), "{listed_vaults:?}");
+    assert!(listed_vaults[2].contains("  Second  "), "{listed_vaults:?}");
+
+    for (vault, name) in [("First", "alpha-one"), ("Second", "beta-two")] {
+        let field = format!("item.name={name}");
+        a.ok(
+            &[
+                "item", "create", "--type", "note", "--vault", vault, "--field", &field,
+            ],
+            &[],
+        );
+    }
+    let first = listed(&a, &["--vault", "First"]);
+    let second = listed(&a, &["--vault", "Second"]);
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 1);
+    assert!(first[0].1.ends_with("alpha-one") && second[0].1.ends_with("beta-two"));
+    assert_ne!(first[0].0, second[0].0);
+    let search = |args: &[&str]| -> Vec<String> {
+        let mut all = vec!["item", "search"];
+        all.extend_from_slice(args);
+        a.ok(&all, &[]).out
+    };
+    assert_eq!(search(&["alpha"]).len(), 1);
+    assert!(search(&["alpha", "--vault", "Second"]).is_empty());
+    assert!(search(&["beta", "--vault", "First"]).is_empty());
+    assert!(listed(&a, &["--vault", "Personal"]).is_empty());
+
+    let (outcome, script) = a.try_run(
+        &[
+            "vault",
+            "delete",
+            "Second",
+            "--name",
+            "alice",
+            "--with-items",
+        ],
+        &[PASSWORD],
+        &[],
+        &["Second"],
+    );
+    outcome.unwrap_or_else(|e| panic!("vault delete failed: {e:?}; {:?}", script.notes));
+    let left = a.ok(&["vault", "list"], &[]).out;
+    assert_eq!(left.len(), 2, "{left:?}");
+    assert!(
+        listed(&a, &[])
+            .iter()
+            .all(|(_, rest)| !rest.ends_with("beta-two"))
+    );
+    assert_eq!(listed(&a, &[]).len(), 1);
 }
