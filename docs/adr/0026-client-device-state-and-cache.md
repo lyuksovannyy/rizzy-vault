@@ -1,6 +1,6 @@
 # ADR 0026: Client device state and encrypted local cache
 
-- Status: Partially superseded by [ADR 0051](0051-equivalence-list-version-persistence.md) (§3 in part); [ADR 0056](0056-local-index-recently-used-search.md) (§1 in part, §3 in part); [ADR 0057](0057-device-state-v2-keystore.md) (§1 row "Device-state record"; §4 step 5)
+- Status: Partially superseded by [ADR 0051](0051-equivalence-list-version-persistence.md) (§3 in part); [ADR 0056](0056-local-index-recently-used-search.md) (§1 in part, §3 in part); [ADR 0057](0057-device-state-v2-keystore.md) (§1 row "Device-state record"; §4 step 5); [ADR 0046](0046-recovery-pending-device-stage.md) (§2, §3, §4 in part)
 - Date: 2026-09-29
 - Deciders: project owner
 - Milestone: M1 (`rv`) / M2 (extension, IndexedDB) / M3 (`rizzy-ffi`, `E_ks`)
