@@ -381,13 +381,13 @@ fn encoded_state(merge: &ItemMerge) -> Option<SecretBytes> {
 
 /// One new item built from a payload entry: what [`VaultSync::import_item_writes`] takes, and
 /// what was lost on the way.
-struct NewItem {
+pub(crate) struct NewItem {
     /// The item's type.
-    item_type: ItemType,
+    pub(crate) item_type: ItemType,
     /// The writes: where each comes from, its key and its value.
-    writes: Vec<(WriteSource, FieldKey, Value)>,
+    pub(crate) writes: Vec<(WriteSource, FieldKey, Value)>,
     /// Whether the exported item displayed Trashed.
-    trashed: bool,
+    pub(crate) trashed: bool,
     /// Fields whose concurrent values collapsed to the displayed one.
     collapsed: usize,
     /// History entries not carried.
@@ -528,6 +528,37 @@ pub fn preview_payload<R: CryptoRng + ?Sized>(
 }
 
 impl VaultSync {
+    /// The new item a copy of `item` into another vault writes ([ADR 0081] §A6 step 1): the
+    /// item's merged state as one export payload entry, through the importer path, exactly as
+    /// an import of an export of this vault would carry it.
+    ///
+    /// # Errors
+    /// [`ClientError::UnknownItem`] when the item is not live (Active or Trashed) or is the
+    /// vault-settings item, or when the import path would skip it;
+    /// [`ClientError::ExportOversizeItems`] when its state cannot be encoded.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    pub(crate) fn copy_of<R: CryptoRng + ?Sized>(
+        &self,
+        item: ItemId,
+        rng: &mut R,
+    ) -> Result<NewItem, ClientError> {
+        let (id, merge) = self
+            .exported_merges()
+            .find(|(id, _)| *id == item)
+            .ok_or(ClientError::UnknownItem)?;
+        let data = encoded_state(merge).ok_or(ClientError::ExportOversizeItems)?;
+        let payload = encode_payload(&[PayloadItem {
+            item_id: id,
+            covered: merge.covered(),
+            data: data.expose_secret(),
+        }])
+        .map_err(|_| ClientError::ExportOversizeItems)?;
+        let entries = parse_payload(payload.expose_secret()).map_err(|_| ClientError::Internal)?;
+        let entry = entries.first().ok_or(ClientError::Internal)?;
+        importable_item(entry, rng).ok_or(ClientError::UnknownItem)
+    }
+
     /// The merges an export holds (ADR 0027 §1 "What is exported"): every item whose state is
     /// live, Active or Trashed, ascending by id, without the vault-settings item.
     pub(crate) fn exported_merges(&self) -> impl Iterator<Item = (ItemId, &ItemMerge)> + '_ {

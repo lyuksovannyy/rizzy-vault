@@ -411,7 +411,36 @@ impl VaultSync {
         trashed: bool,
         now_ms: u64,
     ) -> Result<ItemId, ClientError> {
+        let item = ItemId::generate(rng);
+        self.import_item_writes_as(rng, unlocked, item, item_type, writes, trashed, now_ms)
+    }
+
+    /// [`VaultSync::import_item_writes`] under an item id the caller chose: a move's target,
+    /// whose id its pending-move row names before the copy is written ([ADR 0081] §A6 step 3).
+    ///
+    /// # Errors
+    /// As [`VaultSync::import_item_writes`]; [`ClientError::InvalidInput`] when this vault
+    /// already holds `item`.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "import_item_writes' inputs plus the chosen item id"
+    )]
+    pub(crate) fn import_item_writes_as<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        unlocked: &UnlockedDevice,
+        item: ItemId,
+        item_type: ItemType,
+        writes: &[ImportWrite<'_>],
+        trashed: bool,
+        now_ms: u64,
+    ) -> Result<ItemId, ClientError> {
         self.check_writable(unlocked)?;
+        if self.merge(item).is_some() || self.holds_unapplied(item) {
+            return Err(ClientError::InvalidInput);
+        }
         let type_value = Value::enumeration(item_type.id());
         let mut all: Vec<(WriteSource, &str, &[u8])> = writes
             .iter()
@@ -421,7 +450,6 @@ impl VaultSync {
             all.push((WriteSource::Entered, ITEM_TYPE, type_value.expose_secret()));
         }
         check_import(item_type, &mut all)?;
-        let item = ItemId::generate(rng);
         for (index, op) in split_ops(&all).iter().enumerate() {
             self.write_op(
                 rng,

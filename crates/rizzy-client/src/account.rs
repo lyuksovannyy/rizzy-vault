@@ -284,6 +284,24 @@ impl VerifiedAccount {
         self.vault_keys.iter().map(VaultKey::vault_id)
     }
 
+    /// The vaults whose self-grants this answer served, ascending by id: what the vault
+    /// directory's completeness check compares with the directory ([ADR 0081] §A2), whether or
+    /// not their keys were taken out since ([`VerifiedAccount::take_vault_key`]).
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    #[must_use]
+    pub fn served_vault_ids(&self) -> Vec<VaultId> {
+        let mut ids: Vec<VaultId> = self
+            .served
+            .self_grants
+            .iter()
+            .map(|(g, _)| VaultId::from_bytes(g.vault_id.to_bytes()))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
     /// Whether the identity keys changed with this answer (after the user confirmed them).
     #[must_use]
     pub const fn identity_changed(&self) -> bool {

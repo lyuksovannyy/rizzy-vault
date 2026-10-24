@@ -47,6 +47,7 @@ fn copy_rows(rows: &CacheRows) -> CacheRows {
         snapshots: rows.snapshots.clone(),
         item_index: rows.item_index.clone(),
         item_index_unreadable: rows.item_index_unreadable,
+        pending_moves: rows.pending_moves.clone(),
     }
 }
 

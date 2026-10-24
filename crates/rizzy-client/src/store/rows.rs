@@ -49,23 +49,38 @@ use crate::error::{ClientError, internal};
 use crate::store::index::{IndexEntry, IndexRow};
 
 /// `cache_meta.format` of this build (ADR 0026 §5). Format 2 added the
-/// [`meta::HIGHEST_EQUIVALENCE_LIST_VERSION`] row ([ADR 0051] §2); format 3 adds the
-/// `item_index` table ([ADR 0056] §3, [`ITEM_INDEX_TABLE`]). An older cache is upgraded by
+/// [`meta::HIGHEST_EQUIVALENCE_LIST_VERSION`] row ([ADR 0051] §2); format 3 added the
+/// `item_index` table ([ADR 0056] §3); format 4 re-keys it by `(vault_id, item_id)`
+/// ([`ITEM_INDEX_TABLE`]) and adds the `pending_move` table ([ADR 0081] §A7,
+/// [`PENDING_MOVE_TABLE`]). An older cache is upgraded by
 /// [`MIGRATIONS`] (or, for a host that stores raw rows,
 /// [`crate::store::load::migration_writes`]) before it is opened.
 ///
 /// [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
 /// [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
-pub const CACHE_FORMAT: u16 = 3;
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+pub const CACHE_FORMAT: u16 = 4;
 
-/// The `item_index` table of [ADR 0056] §3, the M3 local index ([`crate::store::index`]).
-/// Every column is cleartext; no envelope, no AAD, no purpose id. The primary key is also
-/// `NOT NULL`, as in [`SCHEMA`].
+/// The `item_index` table of [ADR 0056] §3 as [ADR 0081] §0 item 7 replaces it, the M3 local
+/// index ([`crate::store::index`]), keyed by `(vault_id, item_id)` (INV-103). Every column is
+/// cleartext; no envelope, no AAD, no purpose id. The key columns are also `NOT NULL`, as in
+/// [`SCHEMA`].
 ///
 /// [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
-pub const ITEM_INDEX_TABLE: &str = "CREATE TABLE item_index(item_id BLOB PRIMARY KEY NOT NULL, \
-     vault_id BLOB NOT NULL, item_type INTEGER NOT NULL, display_name TEXT NOT NULL, \
-     search_text TEXT NOT NULL, last_used_ms BLOB, use_count INTEGER NOT NULL DEFAULT 0)";
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+pub const ITEM_INDEX_TABLE: &str = "CREATE TABLE item_index(vault_id BLOB NOT NULL, \
+     item_id BLOB NOT NULL, item_type INTEGER NOT NULL, display_name TEXT NOT NULL, \
+     search_text TEXT NOT NULL, last_used_ms BLOB, use_count INTEGER NOT NULL DEFAULT 0, \
+     PRIMARY KEY (vault_id, item_id))";
+
+/// The `pending_move` table of [ADR 0081] §A7: one row per move in progress, written before
+/// the copy and deleted after the source is purged (INV-104, [`crate::vaults::PendingMove`]).
+/// Ids only, no user content.
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+pub const PENDING_MOVE_TABLE: &str = "CREATE TABLE pending_move(source_vault_id BLOB NOT NULL, \
+     source_item_id BLOB NOT NULL, target_vault_id BLOB NOT NULL, target_item_id BLOB NOT NULL, \
+     PRIMARY KEY (source_vault_id, source_item_id))";
 
 /// The statements of [`Write::IndexReset`]: the table dropped, whatever shape it had, and
 /// created again empty ([ADR 0056] §4: a corrupt table or a schema mismatch scoped to it is
@@ -96,8 +111,12 @@ pub struct Migration {
 /// - Format 2 → 3 ([ADR 0056] §3) creates the empty `item_index` table, through
 ///   [`INDEX_RESET`]: a table of that name already in the file (no format-2 writer makes one)
 ///   is dropped, never read or copied.
+/// - Format 3 → 4 ([ADR 0081] §A7, §A10) drops `item_index` and creates it again keyed by
+///   `(vault_id, item_id)` (its rows are rebuilt from the merged state at the next load, ADR
+///   0056 §4: no index data is migrated), and creates the empty `pending_move` table (a table
+///   of that name already in the file, which no format-3 writer makes, is dropped unread).
 ///
-/// Neither reads, re-parses or re-encrypts anything else, and neither copies a plaintext-bearing
+/// None reads, re-parses or re-encrypts anything else, and neither copies a plaintext-bearing
 /// row (ADR 0026 §5). [`crate::store::load::migration_writes`] is the same chain over
 /// [`CacheRows`], and the reference a host's SQL is tested against.
 ///
@@ -117,6 +136,16 @@ pub const MIGRATIONS: &[Migration] = &[
         from: 2,
         schema: INDEX_RESET,
         rows: &["UPDATE cache_meta SET v = X'0003' WHERE k = 'format' AND v = X'0002'"],
+    },
+    Migration {
+        from: 3,
+        schema: &[
+            "DROP TABLE IF EXISTS item_index",
+            ITEM_INDEX_TABLE,
+            "DROP TABLE IF EXISTS pending_move",
+            PENDING_MOVE_TABLE,
+        ],
+        rows: &["UPDATE cache_meta SET v = X'0004' WHERE k = 'format' AND v = X'0003'"],
     },
 ];
 
@@ -143,6 +172,7 @@ pub const SCHEMA: &[&str] = &[
      item_id BLOB NOT NULL, statement BLOB NOT NULL, envelope BLOB NOT NULL, key_wrap BLOB, \
      own INTEGER NOT NULL, sent_generation BLOB, PRIMARY KEY (vault_id, snapshot_id))",
     ITEM_INDEX_TABLE,
+    PENDING_MOVE_TABLE,
 ];
 
 /// The connection settings of ADR 0026 §3 "Settings", run on every connection before anything
@@ -518,6 +548,8 @@ pub enum Write {
     IndexPut(IndexEntry),
     /// Deletes the `item_index` row of an item: a purge, or an item no longer indexed.
     IndexDelete {
+        /// The item's vault.
+        vault_id: [u8; 16],
         /// The item.
         item_id: [u8; 16],
     },
@@ -526,14 +558,60 @@ pub enum Write {
     ///
     /// [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
     IndexUse {
+        /// The item's vault.
+        vault_id: [u8; 16],
         /// The item.
         item_id: [u8; 16],
         /// When, in ms since the Unix epoch.
         at_ms: u64,
     },
+    /// Copies `last_used_ms` and `use_count` of one item's row to another's ([ADR 0081] §A6
+    /// step 1: a copy keeps the source's usage). Changes nothing when either row is missing.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    IndexCopyUsage {
+        /// The source item's `(vault_id, item_id)`.
+        from: ([u8; 16], [u8; 16]),
+        /// The new item's `(vault_id, item_id)`.
+        to: ([u8; 16], [u8; 16]),
+    },
     /// Drops and recreates the `item_index` table empty ([`INDEX_RESET`]); the rows to rebuild
     /// it follow in the same changeset.
     IndexReset,
+    /// Inserts a `pending_move` row ([ADR 0081] §A6 step 3), or replaces the row of its source.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    PendingMovePut(PendingMoveRow),
+    /// Deletes the `pending_move` row of a source item, once the move is done.
+    PendingMoveDelete {
+        /// The source vault.
+        source_vault_id: [u8; 16],
+        /// The source item.
+        source_item_id: [u8; 16],
+    },
+    /// Deletes every row of a vault this account no longer holds ([ADR 0081] §A5: "Other
+    /// devices learn of it from the new directory and drop the vault's cache rows and index
+    /// rows"): its `vaults`, `wraps`, `ops`, `snapshots` and `item_index` rows, and every
+    /// `pending_move` row naming it.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    DropVault {
+        /// The vault.
+        vault_id: [u8; 16],
+    },
+}
+
+/// One `pending_move` row ([`PENDING_MOVE_TABLE`]): ids only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingMoveRow {
+    /// The vault the item leaves.
+    pub source_vault_id: [u8; 16],
+    /// The item that leaves it.
+    pub source_item_id: [u8; 16],
+    /// The vault it goes to.
+    pub target_vault_id: [u8; 16],
+    /// Its new id there.
+    pub target_item_id: [u8; 16],
 }
 
 impl fmt::Debug for Write {
@@ -561,7 +639,11 @@ impl fmt::Debug for Write {
             Self::IndexPut(_) => "Write::IndexPut([REDACTED])",
             Self::IndexDelete { .. } => "Write::IndexDelete",
             Self::IndexUse { .. } => "Write::IndexUse",
+            Self::IndexCopyUsage { .. } => "Write::IndexCopyUsage",
             Self::IndexReset => "Write::IndexReset",
+            Self::PendingMovePut(_) => "Write::PendingMovePut",
+            Self::PendingMoveDelete { .. } => "Write::PendingMoveDelete",
+            Self::DropVault { .. } => "Write::DropVault",
         })
     }
 }
@@ -643,6 +725,10 @@ pub struct CacheRows {
     /// Whether the host could not read `item_index` (a missing table, another shape, a column
     /// over its cap): the table is rebuilt alone and the load stands (ADR 0056 §4).
     pub item_index_unreadable: bool,
+    /// `pending_move` ([ADR 0081] §A7): the moves a restart resumes.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    pub pending_moves: Vec<PendingMoveRow>,
 }
 
 impl fmt::Debug for CacheRows {
@@ -823,10 +909,9 @@ impl CacheRows {
                 match self
                     .item_index
                     .iter_mut()
-                    .find(|r| r.item_id == fresh.item_id)
+                    .find(|r| r.vault_id == fresh.vault_id && r.item_id == fresh.item_id)
                 {
                     Some(held) => {
-                        held.vault_id = fresh.vault_id;
                         held.item_type = fresh.item_type;
                         held.display_name = fresh.display_name;
                         held.search_text = fresh.search_text;
@@ -834,16 +919,64 @@ impl CacheRows {
                     None => self.item_index.push(fresh),
                 }
             }
-            Write::IndexDelete { item_id } => self.item_index.retain(|r| r.item_id != *item_id),
-            Write::IndexUse { item_id, at_ms } => {
-                if let Some(held) = self.item_index.iter_mut().find(|r| r.item_id == *item_id) {
+            Write::IndexDelete { vault_id, item_id } => self
+                .item_index
+                .retain(|r| r.vault_id != *vault_id || r.item_id != *item_id),
+            Write::IndexUse {
+                vault_id,
+                item_id,
+                at_ms,
+            } => {
+                if let Some(held) = self
+                    .item_index
+                    .iter_mut()
+                    .find(|r| r.vault_id == *vault_id && r.item_id == *item_id)
+                {
                     held.last_used_ms = Some(at_ms.to_be_bytes().to_vec());
                     held.use_count = held.use_count.saturating_add(1);
+                }
+            }
+            Write::IndexCopyUsage { from, to } => {
+                let usage = self
+                    .item_index
+                    .iter()
+                    .find(|r| r.vault_id == from.0 && r.item_id == from.1)
+                    .map(|r| (r.last_used_ms.clone(), r.use_count));
+                if let Some((last_used_ms, use_count)) = usage
+                    && let Some(held) = self
+                        .item_index
+                        .iter_mut()
+                        .find(|r| r.vault_id == to.0 && r.item_id == to.1)
+                {
+                    held.last_used_ms = last_used_ms;
+                    held.use_count = use_count;
                 }
             }
             Write::IndexReset => {
                 self.item_index.clear();
                 self.item_index_unreadable = false;
+            }
+            Write::PendingMovePut(row) => {
+                self.pending_moves.retain(|m| {
+                    m.source_vault_id != row.source_vault_id
+                        || m.source_item_id != row.source_item_id
+                });
+                self.pending_moves.push(*row);
+            }
+            Write::PendingMoveDelete {
+                source_vault_id,
+                source_item_id,
+            } => self.pending_moves.retain(|m| {
+                m.source_vault_id != *source_vault_id || m.source_item_id != *source_item_id
+            }),
+            Write::DropVault { vault_id } => {
+                self.vaults.retain(|v| v.vault_id != *vault_id);
+                self.wraps.retain(|w| w.vault_id != *vault_id);
+                self.ops.retain(|o| o.vault_id != *vault_id);
+                self.snapshots.retain(|s| s.vault_id != *vault_id);
+                self.item_index.retain(|r| r.vault_id != *vault_id);
+                self.pending_moves
+                    .retain(|m| m.source_vault_id != *vault_id && m.target_vault_id != *vault_id);
             }
         }
     }

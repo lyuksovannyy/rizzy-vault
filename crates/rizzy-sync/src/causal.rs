@@ -809,6 +809,13 @@ impl VaultLog {
         self.cutoffs.get(&device).copied()
     }
 
+    /// Every revocation cut-off this log knows, ascending by device: what a client with
+    /// several vaults compares, over all of them, with each device's highest head (ADR 0081 §0
+    /// item 2, which replaces ADR 0021 §9 "Revoked and kind-4 authors").
+    pub fn cutoffs(&self) -> impl Iterator<Item = (DeviceId, u64)> + '_ {
+        self.cutoffs.iter().map(|(device, cut)| (*device, *cut))
+    }
+
     /// The first pass of the chain check over one response (ADR 0012 §7 "Chain check after
     /// compaction", ADR 0021 §4): the covers the client absorbs before [`VaultLog::commit`], and
     /// the cut the merge applies to them.

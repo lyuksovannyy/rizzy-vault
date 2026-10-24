@@ -92,7 +92,9 @@ impl fmt::Debug for Loaded {
 ///
 /// Format 1 → 2 adds `highest_equivalence_list_version` at `0`; format 2 → 3 ([ADR 0056] §3)
 /// adds the `item_index` table, which for raw rows is nothing to write (an empty
-/// [`CacheRows::item_index`]); the last write bumps `format`. Nothing else is read, re-parsed
+/// [`CacheRows::item_index`]); format 3 → 4 ([ADR 0081] §A7) drops every index row (the table
+/// is keyed by `(vault_id, item_id)` from now on and rebuilt at the next load) and adds the empty
+/// `pending_move` table; the last write bumps `format`. Nothing else is read, re-parsed
 /// or re-encrypted, and no plaintext-bearing row is copied. These writes are not
 /// [`Floors::admit`]ted: they
 /// run before any floor exists, and the format bump is the one change of a set-once row a
@@ -102,10 +104,11 @@ impl fmt::Debug for Loaded {
 /// [`ClientError::CacheUpdateRequired`] for a format newer than this build's;
 /// [`ClientError::CacheCorrupt`] for a missing or malformed format, format 0, a format-1
 /// cache that already holds a key format 1 does not have, or a format-2 cache that already
-/// holds `item_index` rows.
+/// holds `item_index` rows, or a cache below format 4 that holds `pending_move` rows.
 ///
 /// [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
 /// [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
 pub fn migration_writes(rows: &CacheRows) -> Result<Changeset, ClientError> {
     let corrupt = ClientError::CacheCorrupt;
     let format = rows.meta.get(meta::FORMAT).ok_or(corrupt)?;
@@ -130,9 +133,22 @@ pub fn migration_writes(rows: &CacheRows) -> Result<Changeset, ClientError> {
             });
         }
         2 => {
-            if !rows.item_index.is_empty() {
+            if !rows.item_index.is_empty() || !rows.pending_moves.is_empty() {
                 return Err(corrupt);
             }
+            changeset.push(Write::Meta {
+                key: meta::FORMAT,
+                value: CACHE_FORMAT.to_be_bytes().to_vec(),
+            });
+        }
+        // ADR 0081 §A7, §A10: the index rows keyed by item alone are dropped, never copied
+        // (rebuilt from the merged state at the next load, ADR 0056 §4); `pending_move` starts
+        // empty.
+        3 => {
+            if !rows.pending_moves.is_empty() {
+                return Err(corrupt);
+            }
+            changeset.push(Write::IndexReset);
             changeset.push(Write::Meta {
                 key: meta::FORMAT,
                 value: CACHE_FORMAT.to_be_bytes().to_vec(),

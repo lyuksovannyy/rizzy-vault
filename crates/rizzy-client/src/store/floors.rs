@@ -650,6 +650,10 @@ impl Pending<'_> {
             Write::IndexPut(_)
             | Write::IndexDelete { .. }
             | Write::IndexUse { .. }
+            | Write::IndexCopyUsage { .. }
+            | Write::PendingMovePut(_)
+            | Write::PendingMoveDelete { .. }
+            | Write::DropVault { .. }
             | Write::IndexReset => Ok(()),
         }
     }

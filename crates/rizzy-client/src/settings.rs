@@ -16,9 +16,11 @@
 //!   bytes(value)                 u32(len) ‖ value; len ≤ MAX_SETTINGS_ENTRY_LEN (1 MiB)
 //! ```
 //!
-//! - **Tags.** `0x0000` is invalid; `0x0001` is the matching section; `0x0004` is the identity
-//!   generator's defaults ([`crate::identity_gen::IdentityDefaults`], ADR 0079 Open question 7;
-//!   `0x0002` and `0x0003` are reserved by the Proposed ADR 0081); every other tag up to
+//! - **Tags.** `0x0000` is invalid; `0x0001` is the matching section; `0x0002` is the vault
+//!   directory ([`crate::vaults::VaultDirectory`], ADR 0081 §A2); `0x0003` is ADR 0081 Part B's
+//!   contact pins, unknown to this build and kept verbatim like any unknown tag; `0x0004` is the
+//!   identity generator's defaults ([`crate::identity_gen::IdentityDefaults`], ADR 0079 Open
+//!   question 7); every other tag up to
 //!   `0xFFFE` is unassigned; `0xFFFF` is reserved and never assigned, so no valid record holds it and it is
 //!   rejected like `0x0000`.
 //! - **Absent object or absent tag.** While `settings_seq = 0` there is no envelope, and a record
@@ -75,6 +77,7 @@ use crate::account::{AccountPin, VerifiedAccount};
 use crate::device::UnlockedDevice;
 use crate::error::{ClientError, internal};
 use crate::identity_gen::{IdentityDefaults, TAG_IDENTITY_DEFAULTS};
+use crate::vaults::{TAG_VAULT_DIRECTORY, VaultDirectory};
 use crate::wire::bytes;
 
 /// The only `format_version` this build reads and writes (ADR 0042 §2).
@@ -104,6 +107,11 @@ pub struct AccountSettingsRecord {
     /// The identity generator's defaults, tag `0x0004` (ADR 0079 Open question 7); absent until
     /// first set.
     identity_defaults: Option<IdentityDefaults>,
+    /// The vault directory, tag `0x0002` ([ADR 0081] §A2); absent until the first vault change
+    /// or settings write of a build that knows it (§A10).
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    directory: Option<VaultDirectory>,
     /// Every unrecognised entry, sorted by tag, value verbatim.
     unknown: Vec<(u16, Zeroizing<Vec<u8>>)>,
 }
@@ -114,6 +122,10 @@ impl fmt::Debug for AccountSettingsRecord {
             .field("matching", &self.matching)
             .field("matching_present", &self.matching_present)
             .field("identity_defaults", &self.identity_defaults.is_some())
+            .field(
+                "directory_entries",
+                &self.directory.as_ref().map(|d| d.entries().len()),
+            )
             .field("unknown_entries", &self.unknown.len())
             .finish()
     }
@@ -133,6 +145,18 @@ impl AccountSettingsRecord {
     }
 
     /// The tags of the entries this build does not know, in order.
+    /// The vault directory (tag `0x0002`, ADR 0081 §A2), if the record holds one.
+    #[must_use]
+    pub const fn vault_directory(&self) -> Option<&VaultDirectory> {
+        self.directory.as_ref()
+    }
+
+    /// This record with `directory` as its vault directory (ADR 0081 §A3, §A5, §A10).
+    pub(crate) fn set_vault_directory(&mut self, directory: VaultDirectory) {
+        self.directory = Some(directory);
+    }
+
+    /// Every unrecognised tag, ascending.
     pub fn unknown_tags(&self) -> impl Iterator<Item = u16> + '_ {
         self.unknown.iter().map(|(tag, _)| *tag)
     }
@@ -165,6 +189,8 @@ impl AccountSettingsRecord {
                 record.matching = MatchingSettings::decode(value)
                     .map_err(|_| ClientError::InvalidServerResponse)?;
                 record.matching_present = true;
+            } else if tag == TAG_VAULT_DIRECTORY {
+                record.directory = Some(VaultDirectory::decode(value)?);
             } else if tag == TAG_IDENTITY_DEFAULTS {
                 record.identity_defaults = Some(
                     IdentityDefaults::decode(value).ok_or(ClientError::InvalidServerResponse)?,
@@ -203,6 +229,14 @@ impl AccountSettingsRecord {
         };
         if let Some(i) = &identity {
             entries.push((TAG_IDENTITY_DEFAULTS, i.as_slice()));
+        }
+        let directory = self
+            .directory
+            .as_ref()
+            .map(VaultDirectory::encode)
+            .transpose()?;
+        if let Some(d) = &directory {
+            entries.push((TAG_VAULT_DIRECTORY, d.as_slice()));
         }
         entries.sort_by_key(|(tag, _)| *tag);
         let n = u16::try_from(entries.len()).map_err(|_| ClientError::SettingsLimitReached)?;
@@ -484,6 +518,13 @@ fn build<R: CryptoRng + ?Sized>(
 ) -> Result<PendingSettingsChange, ClientError> {
     let mut record = account_settings(account, unlocked)?;
     record.apply(&edit)?;
+    // ADR 0081 §A10: an account without a directory gets one with its next settings write,
+    // when the legacy rule names its Personal vault (exactly one self-grant).
+    if record.vault_directory().is_none()
+        && let [personal] = account.served_vault_ids().as_slice()
+    {
+        record.set_vault_directory(VaultDirectory::personal_only(*personal));
+    }
     let plaintext = record.encode()?;
     let (request, pin) = seal_commit(rng, account, unlocked, &plaintext)?;
     Ok(PendingSettingsChange {

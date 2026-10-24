@@ -770,6 +770,11 @@ fn search_rows(rows: &[(&str, &str, Option<u64>)]) -> (CacheRows, Vec<ItemId>) {
     (cache, ids)
 }
 
+/// The item ids of search results (the vault of each is the one vault of these rows).
+fn items(found: Vec<(rizzy_core::ids::VaultId, ItemId)>) -> Vec<ItemId> {
+    found.into_iter().map(|(_, item)| item).collect()
+}
+
 /// ADR 0056 §5, §6: the Cyrillic lower-casing vector — a query matches whatever its case, through
 /// Rust's Unicode `to_lowercase`, which `SQLite`'s ASCII-only `lower()` would not do.
 #[test]
@@ -781,13 +786,16 @@ fn a_cyrillic_query_matches_in_any_case() {
     ]);
     assert_eq!(index::normalize_query("  ИВАН ").as_str(), "иван");
     for query in ["иван", "ИВАН", "Иван", "иВаН"] {
-        assert_eq!(index::search(&rows, query, 10), [ids[0]], "{query}");
+        assert_eq!(items(index::search(&rows, query, 10)), [ids[0]], "{query}");
     }
     for query in ["пётр", "ПЁТР", "Пётр"] {
-        assert_eq!(index::search(&rows, query, 10), [ids[1]], "{query}");
+        assert_eq!(items(index::search(&rows, query, 10)), [ids[1]], "{query}");
     }
-    assert_eq!(index::search(&rows, "NAME", 10), [ids[2]]);
-    assert!(index::search(&rows, "петр", 10).is_empty(), "ё is not е");
+    assert_eq!(items(index::search(&rows, "NAME", 10)), [ids[2]]);
+    assert!(
+        items(index::search(&rows, "петр", 10)).is_empty(),
+        "ё is not е"
+    );
 }
 
 /// ADR 0056 §5: `%`, `_` and `\` in a query are literal; the empty query matches every row,
@@ -802,15 +810,15 @@ fn wildcards_are_literal_and_the_empty_query_is_recently_used() {
         ("c", "", Some(T0 + 5)),
         ("d", "", None),
     ]);
-    assert_eq!(index::search(&rows, "%", 10), [ids[0]]);
-    assert_eq!(index::search(&rows, "_", 10), [ids[1]]);
-    assert!(index::search(&rows, "x%y", 10).is_empty());
+    assert_eq!(items(index::search(&rows, "%", 10)), [ids[0]]);
+    assert_eq!(items(index::search(&rows, "_", 10)), [ids[1]]);
+    assert!(items(index::search(&rows, "x%y", 10)).is_empty());
     assert_eq!(
-        index::search(&rows, "", 10),
+        items(index::search(&rows, "", 10)),
         [ids[2], ids[0], ids[1], ids[3]]
     );
-    assert_eq!(index::search(&rows, "", 2), [ids[2], ids[0]]);
-    assert_eq!(index::recent(&rows, 10), [ids[2], ids[0]]);
+    assert_eq!(items(index::search(&rows, "", 2)), [ids[2], ids[0]]);
+    assert_eq!(items(index::recent(&rows, 10)), [ids[2], ids[0]]);
 }
 
 /// Format 2 → 3 (ADR 0056 §3, §6): one write, the format bump, and nothing else — no other row
@@ -892,7 +900,9 @@ fn a_corrupt_index_is_rebuilt_alone() {
     rows.item_index.push(stray);
     let writes = rebuilt_from(&rows, &mut fleet);
     assert_eq!(writes.writes().len(), 1);
-    assert!(matches!(writes.writes()[0], Write::IndexDelete { item_id } if item_id == [0xEE; 16]));
+    assert!(
+        matches!(writes.writes()[0], Write::IndexDelete { item_id, .. } if item_id == [0xEE; 16])
+    );
     rows.apply(&writes);
     assert_eq!(rows.item_index.len(), 2);
     let used = rows
@@ -1037,10 +1047,10 @@ proptest! {
         }
         let found = index::search(&cache, &query, limit);
         prop_assert!(found.len() <= limit);
-        prop_assert!(found.iter().all(|id| ids.contains(id.as_bytes())));
+        prop_assert!(found.iter().all(|(_, id)| ids.contains(id.as_bytes())));
         let used = index::recent(&cache, limit);
         prop_assert!(used.len() <= limit);
-        prop_assert!(used.iter().all(|id| ids.contains(id.as_bytes())));
+        prop_assert!(used.iter().all(|(_, id)| ids.contains(id.as_bytes())));
         let writes = index::reconcile(&cache, &mut []);
         if all_parse {
             let deletes = writes
