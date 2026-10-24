@@ -88,12 +88,47 @@ impl GroupId {
 /// [ADR 0044]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0044-equivalence-group-member-rules.md
 #[must_use]
 pub fn is_valid_member(domain: &str) -> bool {
+    member_rule_violation(domain).is_none()
+}
+
+/// Which [ADR 0044] member rule an already-normalised domain breaks, as
+/// [`member_rule_violation`] reports it, so a tool can name the rule a source line breaks
+/// (`cargo xtask equivalence-list`; ADR 0080 §8).
+///
+/// [ADR 0044]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0044-equivalence-group-member-rules.md
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MemberRuleViolation {
+    /// Rule 1: an IP literal in any notation, or a string the WHATWG host parser does not read
+    /// as a domain at all.
+    NotADomain,
+    /// Rule 2: a public suffix (or above one) with no registrable label beneath it, such as
+    /// `co.uk` or `github.io`.
+    PublicSuffix,
+    /// Rule 2: below its registrable domain (a subdomain such as `mail.example.com`), whose
+    /// registrable domain is carried.
+    NotRegistrable {
+        /// The registrable domain the member sits under.
+        registrable: String,
+    },
+}
+
+/// The [ADR 0044] member rule an already-normalised domain breaks, or `None` when it may be an
+/// [`EquivalenceGroup`] member. [`is_valid_member`] is exactly `member_rule_violation(d)
+/// .is_none()`.
+///
+/// [ADR 0044]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0044-equivalence-group-member-rules.md
+#[must_use]
+pub fn member_rule_violation(domain: &str) -> Option<MemberRuleViolation> {
     if !matches!(url::Host::parse(domain), Ok(url::Host::Domain(_))) {
-        return false;
+        return Some(MemberRuleViolation::NotADomain);
     }
-    let registrable = suffix::registrable_domain(domain)
-        .or_else(|| (!domain.contains('.')).then(|| domain.to_owned()));
-    registrable.as_deref() == Some(domain)
+    match suffix::registrable_domain(domain) {
+        Some(registrable) if registrable == domain => None,
+        Some(registrable) => Some(MemberRuleViolation::NotRegistrable { registrable }),
+        // A dotless name is its own registrable domain (the gate compares it as one).
+        None if !domain.contains('.') => None,
+        None => Some(MemberRuleViolation::PublicSuffix),
+    }
 }
 
 /// One equivalence group: two or more registrable domains that are the same login, with the
@@ -776,6 +811,45 @@ mod tests {
         assert!(!"2130706433".contains('.'));
         assert!(!is_valid_member("2130706433"));
         assert!(is_valid_member("nas"));
+    }
+
+    #[test]
+    fn member_rule_violation_names_the_rule() {
+        for ip in ["192.168.1.1", "2130706433", "0x7f.1", "foo.123"] {
+            assert_eq!(
+                member_rule_violation(ip),
+                Some(MemberRuleViolation::NotADomain),
+                "{ip}"
+            );
+        }
+        for suffix in ["co.uk", "github.io", "net.cn", "myshopify.com"] {
+            assert_eq!(
+                member_rule_violation(suffix),
+                Some(MemberRuleViolation::PublicSuffix),
+                "{suffix}"
+            );
+        }
+        assert_eq!(
+            member_rule_violation("mail.example.com"),
+            Some(MemberRuleViolation::NotRegistrable {
+                registrable: "example.com".to_owned()
+            })
+        );
+        // ADR 0080 §2: the PSL lists `be` but not `com.be`.
+        assert_eq!(
+            member_rule_violation("amazon.com.be"),
+            Some(MemberRuleViolation::NotRegistrable {
+                registrable: "com.be".to_owned()
+            })
+        );
+        for good in ["example.com", "example.co.uk", "nas"] {
+            assert_eq!(member_rule_violation(good), None, "{good}");
+        }
+        for bad in HOSTILE_MEMBERS {
+            if let Ok(normalised) = normalize_domain(bad) {
+                assert!(member_rule_violation(&normalised).is_some(), "{bad}");
+            }
+        }
     }
 
     #[test]
