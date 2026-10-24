@@ -16,6 +16,10 @@ export interface FixedField {
   readonly multiline?: boolean;
   /** What an empty field means, shown as the input's placeholder (`ssh.port`: 22). */
   readonly placeholder?: string;
+  /** A Text key with its own control (ADR 0079 §1, §10): `sex` is a Male/Female select and
+   * `date` a date input, each only while the stored value is one they can show; any other text
+   * stays a text input, shown and edited as entered. */
+  readonly kind?: "sex" | "date";
 }
 
 /** A type this web vault creates: its menu and sidebar label, and the noun of "New …". */
@@ -91,6 +95,9 @@ export const FIXED_FIELDS: Readonly<Partial<Record<ItemType, readonly FixedField
     { key: "identity.first_name", label: "First name" },
     { key: "identity.middle_name", label: "Middle name" },
     { key: "identity.last_name", label: "Last name" },
+    // ADR 0079 §1: Text keys; a picked value is exactly `male`/`female` or `YYYY-MM-DD`.
+    { key: "identity.sex", label: "Sex", kind: "sex" },
+    { key: "identity.birthday", label: "Birthday", kind: "date" },
     { key: "identity.company", label: "Company" },
     { key: "identity.email", label: "Email" },
     { key: "identity.phone", label: "Phone" },
@@ -190,6 +197,65 @@ export const MATCH_MODE_REGEX = 0x0005;
 export function matchModeLabel(value: string | undefined): string {
   const n = value === undefined ? 0 : Number.parseInt(value, 10);
   return MATCH_MODE_OPTIONS.find((o) => o.value === n)?.label ?? `Unknown (${value ?? ""})`;
+}
+
+/** The two values a sex picker writes (ADR 0079 §1), with their labels. */
+export const SEX_OPTIONS: readonly { readonly value: string; readonly label: string }[] = [
+  { value: "male", label: "Male" },
+  { value: "female", label: "Female" },
+];
+
+/** `identity.sex` as shown: "Male" and "Female" for the picked values, any other text as entered. */
+export function sexLabel(value: string): string {
+  return SEX_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
+/** Whether `value` is an RFC 3339 `full-date` (`YYYY-MM-DD`) naming a real calendar day. */
+export function isIsoDate(value: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
+  if (m === null) {
+    return false;
+  }
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (mo < 1 || mo > 12 || d < 1) {
+    return false;
+  }
+  // Day 0 of the next month is the last day of this one (UTC: a civil date has no zone).
+  return d <= new Date(Date.UTC(y, mo, 0)).getUTCDate();
+}
+
+/** A `YYYY-MM-DD` date in the reader's locale, read as a civil date (no time zone shift). */
+export function formatIsoDate(value: string, locale?: string): string {
+  const [y, mo, d] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(y ?? 1970, (mo ?? 1) - 1, d ?? 1));
+  // `Date.UTC` maps years 0–99 to 1900–1999; set the year itself.
+  date.setUTCFullYear(y ?? 1970);
+  return date.toLocaleDateString(locale, { timeZone: "UTC", dateStyle: "long" });
+}
+
+/** A field's value as the item view shows it (ADR 0079 §1): the sex and birthday localized
+ * when they hold a picked value, every other value as entered. */
+export function displayValue(key: string, value: string): string {
+  if (key === "identity.sex") {
+    return sexLabel(value);
+  }
+  if (key === "identity.birthday" && isIsoDate(value)) {
+    return formatIsoDate(value);
+  }
+  return value;
+}
+
+/** Which control a fixed field is edited with, decided once from its value when the form opens
+ * (switching while the user types would move the focus): the select or date input only for a
+ * value they can show unchanged, else a text input (ADR 0079 §1: never silently rewritten). */
+export function controlOf(field: FixedField, value: string): "sex" | "date" | "text" {
+  if (field.kind === "sex" && (value === "" || SEX_OPTIONS.some((o) => o.value === value))) {
+    return "sex";
+  }
+  if (field.kind === "date" && (value === "" || isIsoDate(value))) {
+    return "date";
+  }
+  return "text";
 }
 
 /** The label of a fixed key, or the key itself. */

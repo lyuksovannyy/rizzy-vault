@@ -124,6 +124,7 @@ function fakeContext(): VaultContext {
     afterWrite: () => Promise.resolve(),
     revision: 0,
     generator: undefined as unknown as VaultContext["generator"],
+    identity: undefined as unknown as VaultContext["identity"],
     icons: undefined as unknown as VaultContext["icons"],
   };
 }

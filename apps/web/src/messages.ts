@@ -9,10 +9,12 @@
 // Generator refusals (`generator_*`) use the core's own wording, copied into
 // `generator-constants.ts` rather than imported at runtime (that module's docs: the UI thread
 // imports only types from `@rizzy-vault/core`, ADR 0013 §4), so every `ErrorText` in the app,
-// not just the generator views, shows the same sentence for the same code.
+// not just the generator views, shows the same sentence for the same code. Identity generator
+// refusals (`identity_*`, ADR 0079) do the same through `identity-constants.ts`.
 import { isMessageKey, t } from "@rizzy-vault/i18n";
 
 import { generatorErrorMessage } from "./generator-constants.ts";
+import { identityErrorMessage } from "./identity-constants.ts";
 
 /** The text for `code`. */
 export function messageFor(code: string): string {
@@ -22,6 +24,9 @@ export function messageFor(code: string): string {
   }
   if (code.startsWith("generator_")) {
     return generatorErrorMessage(code);
+  }
+  if (code.startsWith("identity_")) {
+    return identityErrorMessage(code);
   }
   return t("common.unknownError", { code });
 }

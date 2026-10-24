@@ -20,6 +20,8 @@
 // later call answers `core_crashed`, and the UI asks for a reload.
 import {
   CoreError,
+  type IdentityDraft,
+  type IdentityGeneratorOptions,
   Signup,
   type Transport,
   type VaultSession,
@@ -31,10 +33,13 @@ import {
   fetchTransport,
   generatePassphraseWithOptions,
   generatePasswordWithOptions,
+  generateIdentity,
   generatorLimits,
+  identityCountries,
   init,
   login,
   newElementId,
+  normalizeEmailDomain,
   othersEndedNotice,
   passphraseEntropy,
   passwordEntropy,
@@ -46,16 +51,19 @@ import {
 } from "@rizzy-vault/core";
 
 import { BoundedTransport } from "./bounded-fetch.ts";
+import { DraftRegistry } from "./identity-drafts.ts";
 import {
   BAD_MESSAGE,
   CORE_CRASHED,
   type CallMessage,
+  type IdentityDraftMessage,
   SESSION_ENDED,
   type CoreApi,
   type FromWorker,
   type KitMessage,
   type SessionInfo,
   TOTP_CANCELLED,
+  isIdentityOptions,
   isSettingsChange,
   isToWorker,
   transferables,
@@ -82,6 +90,8 @@ const transport: Transport = bounded.transport;
 let session: VaultSession | undefined;
 let signup: Signup | undefined;
 let crashed = false;
+/** The identity drafts of open "New identity" forms (`identity-drafts.ts`); freed on lock. */
+const drafts = new DraftRegistry<IdentityDraft>();
 /** Counts locks, so that a login that finishes after a lock does not unlock. */
 let lockEpoch = 0;
 
@@ -120,8 +130,30 @@ function current(): VaultSession {
 function lockSession(): void {
   lockEpoch += 1;
   bounded.abortAll();
+  drafts.clear();
   session?.lock();
   session = undefined;
+}
+
+/** Identity options from the UI, rebuilt from their checked fields (no `today`: the Worker's
+ * clock), or `invalid_input`. */
+function identityOptions(v: unknown): IdentityGeneratorOptions {
+  if (!isIdentityOptions(v)) {
+    throw new CoreError("invalid_input");
+  }
+  return {
+    sex: v.sex,
+    country: v.country,
+    ageMin: v.ageMin,
+    ageMax: v.ageMax,
+    emailStyle: v.emailStyle,
+    emailDomain: v.emailDomain ?? null,
+  };
+}
+
+/** A draft kept under `handle`, as it crosses to the UI. */
+function draftMessage(handle: number, draft: IdentityDraft): IdentityDraftMessage {
+  return { handle, fields: { ...draft.fields }, itemName: draft.itemName };
 }
 
 /** The current signup, or `wrong_state`. */
@@ -368,7 +400,26 @@ async function run(m: CallMessage): Promise<unknown> {
     plaintextExportWarning: () => plaintextExportWarning(),
     plaintextExportPhrase: () => plaintextExportPhrase(),
     cxfExportWarning: () => cxfExportWarning(),
-  } satisfies { [K in keyof CoreApi]: () => unknown };
+      identityCountries: () => identityCountries(),
+      identityDefaults: () => current().identityDefaults(),
+      normalizeEmailDomain: () => normalizeEmailDomain(str(a[0])),
+      identityGenerate: () => {
+        const draft = generateIdentity(identityOptions(a[0]));
+        return draftMessage(drafts.add(draft), draft);
+      },
+      identityRegenerate: () => {
+        const handle = index(a[0]);
+        const old = drafts.get(handle);
+        if (old === undefined) {
+          throw new CoreError("wrong_state");
+        }
+        const draft = old.regenerate(str(a[1]), identityOptions(a[2]));
+        return draftMessage(drafts.replace(handle, draft), draft);
+      },
+      identityRelease: () => {
+        drafts.release(index(a[0]));
+      },
+    } satisfies { [K in keyof CoreApi]: () => unknown };
   try {
     return await api[m.method]();
   } finally {

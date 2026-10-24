@@ -42,6 +42,8 @@ import {
   type Grouped,
   CREATABLE_TYPES,
   FIXED_FIELDS,
+  SEX_OPTIONS,
+  controlOf,
   fixedChanges,
   group,
   MATCH_MODE_OPTIONS,
@@ -50,6 +52,7 @@ import {
 import { GENERATOR_LIMITS } from "../generator-constants.ts";
 import { fillGenerated, generateValue } from "../generator-flow.ts";
 import { messageFor } from "../messages.ts";
+import { useIdentityGenerator } from "./IdentityGenerator.tsx";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, peekSecret, useAction } from "./common.tsx";
 
@@ -149,6 +152,10 @@ export function ItemEditor(props: {
   const [generateErrors, setGenerateErrors] = useState<Record<string, string>>({});
 
   const type: ItemType | "unknown" = props.newType ?? summary?.itemType ?? "unknown";
+  // A new identity opens pre-filled, with the generator bar (ADR 0079 §10); never on edit.
+  const identityGen = useIdentityGenerator(ctx, props.id === undefined && props.newType === "identity");
+  /** A shown field's text: the generator's while it holds the key, else the form's. */
+  const textOf = (key: string): string => (identityGen.owns(key) ? identityGen.value(key) : (texts[key] ?? ""));
 
   /** Reloads the item's current fields (after an initial mount, or after an immediate reorder). */
   const reload = useRef<() => Promise<void>>(async () => undefined);
@@ -388,7 +395,7 @@ export function ItemEditor(props: {
       fields.map((f) => {
         const before = held.get(f.key);
         const concealed = before?.concealed ?? f.secret === true;
-        const text = concealed ? peek(secrets.current.get(f.key)) : (texts[f.key] ?? "");
+        const text = concealed ? peek(secrets.current.get(f.key)) : textOf(f.key);
         return {
           key: f.key,
           text,
@@ -542,6 +549,7 @@ export function ItemEditor(props: {
           return;
         }
         id = await ctx.client.call("createItem", props.newType, changes);
+        identityGen.saved();
       } else if (changes.length > 0) {
         await ctx.client.call("editItem", id, changes);
       }
@@ -560,6 +568,7 @@ export function ItemEditor(props: {
       <h2 id="editor-title">
         {props.id === undefined ? `New ${CREATABLE_TYPES.find((t) => t.type === type)?.noun ?? type}` : "Edit item"}
       </h2>
+      {identityGen.bar}
       {fieldsOf(type).map((f) => {
         const before = held.get(f.key);
         const concealed = before?.concealed ?? f.secret === true;
@@ -602,20 +611,60 @@ export function ItemEditor(props: {
           );
         }
         const id = `edit-${f.key}`;
+        const extras = identityGen.extras(f.key, id);
         const common = {
           id,
           name: f.key,
           autoComplete: "off",
-          value: texts[f.key] ?? "",
-          onChange: (e: { currentTarget: { value: string } }) =>
-            setTexts({ ...texts, [f.key]: e.currentTarget.value }),
+          value: textOf(f.key),
+          onChange: (e: { currentTarget: { value: string } }) => {
+            const value = e.currentTarget.value;
+            if (identityGen.owns(f.key)) {
+              identityGen.type(f.key, value);
+            } else {
+              setTexts((t) => ({ ...t, [f.key]: value }));
+            }
+          },
           // What an empty field means (`ssh.port`: 22, never stored; ADR 0055 §1).
           ...(f.placeholder !== undefined ? { placeholder: f.placeholder } : {}),
+          ...(extras.describedBy !== undefined ? { "aria-describedby": extras.describedBy } : {}),
         };
+        // Sex and Birthday (ADR 0079 §1): a select or a date input only for a value they show
+        // unchanged, decided from the stored value (or, on create, the form's), else as entered.
+        const control = controlOf(f, before !== undefined ? (before.value ?? "") : textOf(f.key));
+        const input =
+          f.multiline === true ? (
+            <textarea rows={4} {...common} />
+          ) : control === "sex" ? (
+            <select {...common}>
+              <option value="">Not set</option>
+              {SEX_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          ) : control === "date" ? (
+            <input type="date" {...common} />
+          ) : (
+            <input {...common} />
+          );
         return (
           <div key={f.key} className="field-edit">
             <label htmlFor={id}>{f.label}</label>
-            {f.multiline === true ? <textarea rows={4} {...common} /> : <input {...common} />}
+            {extras.after === null ? (
+              input
+            ) : extras.describedBy !== undefined ? (
+              <>
+                {input}
+                {extras.after}
+              </>
+            ) : (
+              <div className="field-edit-row">
+                {input}
+                {extras.after}
+              </div>
+            )}
           </div>
         );
       })}

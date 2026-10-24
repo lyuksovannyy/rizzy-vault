@@ -41,6 +41,7 @@ import { type CoreClient, codeOf } from "../core-client.ts";
 import { useDismissableMenu } from "../dismissable-menu.ts";
 import { CREATABLE_TYPES, tagCounts } from "../fields.ts";
 import { type GeneratorMemory, useGeneratorMemory } from "../generator-memory.ts";
+import { type IdentityMemory, useIdentityMemory } from "../identity-memory.ts";
 import { messageFor } from "../messages.ts";
 import { mergeNotices, noticeKey } from "../notices.ts";
 import type { SessionInfo } from "../protocol.ts";
@@ -101,6 +102,8 @@ export interface VaultContext {
   readonly revision: number;
   /** The generator's in-memory, session-only state (generator-memory.ts module docs). */
   readonly generator: GeneratorMemory;
+  /** The identity generator's session-only memory (identity-memory.ts module docs). */
+  readonly identity: IdentityMemory;
   /** Item icons from the server's `icons` role, for this unlocked session (packages/ui
    * `itemIcons.ts`). */
   readonly icons: IconLoader | undefined;
@@ -135,6 +138,7 @@ export function VaultView(props: {
   const [tags, setTags] = useState<readonly { readonly tag: string; readonly count: number }[]>([]);
   const clipboard = useMemo(() => new ClipboardGuard(browserClipboard), []);
   const generator = useGeneratorMemory();
+  const identity = useIdentityMemory();
   // One loader per unlocked session: the vault view unmounts on lock, which revokes every icon
   // URL and stops the queue (packages/ui `itemIcons.ts`).
   const [icons, setIcons] = useState<IconLoader | undefined>(undefined);
@@ -362,7 +366,7 @@ export function VaultView(props: {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [section, session.readOnly, shortcutsOpen, accountMenuOpen, sidebarOpen, paletteOpen]);
 
-  const ctx: VaultContext = { client, clipboard, session, afterWrite: sync, revision, generator, icons };
+  const ctx: VaultContext = { client, clipboard, session, afterWrite: sync, revision, generator, identity, icons };
 
   /** Chooses an item filter and switches to the item list. */
   const chooseScope = (next: Scope) => {
