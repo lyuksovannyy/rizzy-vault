@@ -302,6 +302,7 @@ async fn run_command(invocation: Invocation, env: &mut Env<'_>) -> Result<(), Cl
             rotate,
         } => Box::pin(recover::complete(env, &server, &name, rotate)).await,
         Command::RecoveryCancel => Box::pin(recover::cancel(env)).await,
+        Command::AccountStatus => Box::pin(recover::status(env)).await,
         Command::RecoveryRepair { name, retype } => {
             Box::pin(recover::repair(env, &name, retype)).await
         }

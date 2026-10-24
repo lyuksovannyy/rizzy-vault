@@ -1154,6 +1154,126 @@ fn unlock_detects_rollback_fork_and_hidden_devices() {
     assert_eq!(a_state.pin().state().state_seq, 2);
 }
 
+/// Malicious server, INV-70 (ADR 0045 point 7): the advisory `pending_recovery` notice is the
+/// server's word. Forged, missing or modified, it changes nothing the client verifies or
+/// trusts: an honest answer verifies to the same pin with any notice, and a rollback, a fork, a
+/// hidden device or a bad signature is refused whatever the notice says. A notice reaches the
+/// host only with an answer that verified in full.
+///
+/// ETH class: none. Threat model §5 gives an unsigned display notice no ETH class; the signed
+/// checks it cannot touch keep theirs (`unlock_detects_rollback_fork_and_hidden_devices`).
+#[test]
+fn a_forged_recovery_notice_cannot_change_what_the_client_trusts() {
+    use crate::account::RecoveryNotice;
+    use rizzy_proto::account::PendingRecoveryNotice;
+
+    let mut rng = ChaCha20Rng::seed_from_u64(31);
+    let mut server = Server::new(32);
+    let a = signup(&mut server, &mut rng, DeviceKind::DesktopCli);
+    let mut a_state = a.device.unwrap();
+    let first_view = server.view();
+    let sk = secret_key_text(&a_state);
+    let _b = login_and_enrol(&mut server, &mut rng, &sk);
+    let a_unlocked = a_state.unlock(PASSWORD).unwrap();
+    let invented = PendingRecoveryNotice {
+        opened_at_ms: T0,
+        available_at_ms: T0 + 72 * 3_600_000,
+        last_recovery_at_ms: Some(T0 - 1),
+    };
+    let nonsense = PendingRecoveryNotice {
+        opened_at_ms: u64::MAX,
+        available_at_ms: 0,
+        last_recovery_at_ms: Some(u64::MAX),
+    };
+    let with = |notice: Option<PendingRecoveryNotice>, mut view: AccountView| {
+        view.pending_recovery = notice;
+        view
+    };
+
+    // An honest answer: the same verified result with no notice, a forged one or nonsense.
+    let plain = verify_unlock(&mut a_state, &a_unlocked, &server.view(), None).unwrap();
+    assert_eq!(plain.recovery_notice(), None);
+    let pin = a_state.pin().clone();
+    for notice in [invented, nonsense] {
+        let account = verify_unlock(
+            &mut a_state,
+            &a_unlocked,
+            &with(Some(notice), server.view()),
+            None,
+        )
+        .unwrap();
+        assert!(*a_state.pin() == pin, "the notice moved the pin");
+        assert_eq!(account.state(), plain.state());
+        assert_eq!(account.certificates().len(), plain.certificates().len());
+        assert_eq!(account.revocations().len(), plain.revocations().len());
+        // It is handed to the host as served, for display only.
+        assert_eq!(
+            account.recovery_notice(),
+            Some(RecoveryNotice {
+                opened_at_ms: notice.opened_at_ms,
+                available_at_ms: notice.available_at_ms,
+                last_recovery_at_ms: notice.last_recovery_at_ms,
+            })
+        );
+    }
+
+    // A dishonest answer stays refused whatever the notice says, present or absent.
+    let mut forked: AccountState = plain.state().clone();
+    forked.mail_key_epoch = 7;
+    let fork_wire = forked.sign(plain.identity.signing_key()).unwrap();
+    let mut fork = server.view();
+    fork.account_state = bytes(&fork_wire);
+    let mut hidden = server.view();
+    hidden.device_certificates =
+        List::new(vec![hidden.device_certificates.as_slice()[0].clone()]).unwrap();
+    let mut tampered = server.view();
+    let mut sig = tampered.account_state.as_slice().to_vec();
+    let last = sig.len() - 1;
+    sig[last] ^= 1;
+    tampered.account_state = bytes(&sig);
+    for notice in [None, Some(invented), Some(nonsense)] {
+        assert_eq!(
+            verify_unlock(
+                &mut a_state,
+                &a_unlocked,
+                &with(notice, first_view.clone()),
+                None
+            )
+            .unwrap_err(),
+            ClientError::Rollback
+        );
+        assert_eq!(
+            verify_unlock(&mut a_state, &a_unlocked, &with(notice, fork.clone()), None)
+                .unwrap_err(),
+            ClientError::Fork
+        );
+        assert_eq!(
+            verify_unlock(
+                &mut a_state,
+                &a_unlocked,
+                &with(notice, hidden.clone()),
+                None
+            )
+            .unwrap_err(),
+            ClientError::InvalidServerResponse
+        );
+        assert_eq!(
+            verify_unlock(
+                &mut a_state,
+                &a_unlocked,
+                &with(notice, tampered.clone()),
+                None
+            )
+            .unwrap_err(),
+            ClientError::InvalidServerResponse
+        );
+    }
+    // The pin did not move.
+    assert_eq!(a_state.pin().state().state_seq, 2);
+    // A view rebuilt from the cache never carries one (ADR 0045 point 9: nothing is cached).
+    assert_eq!(RecoveryNotice::of_view(&first_view), None);
+}
+
 /// Malicious server: names a refused `kdf_id`, or relays the login under a foreign origin
 /// (CRYPTO.md §15 item 5).
 ///

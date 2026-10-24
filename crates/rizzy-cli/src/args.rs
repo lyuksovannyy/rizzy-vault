@@ -58,6 +58,7 @@ USAGE:
     rv device forget
     rv session list
     rv session end <session> | end --others
+    rv account status
     rv rotate --name <login> [--full]
     rv recovery start --server <url> --name <login>
     rv recovery complete --server <url> --name <login> [--skip-rotation]
@@ -530,6 +531,9 @@ pub enum Command {
     },
     /// `recovery cancel`.
     RecoveryCancel,
+    /// `account status` (ADR 0045): the account as this device verified it, with the server's
+    /// recovery notice.
+    AccountStatus,
     /// `recovery repair`: the recovery repair after a restore (ADR 0032 §4 step 6).
     RecoveryRepair {
         /// `--name`: the login name, for the re-authentication.
@@ -701,6 +705,7 @@ pub fn parse(arguments: Vec<OsString>) -> Result<Invocation, CliError> {
         Some("import") => import(&mut args)?,
         Some("device") => device(&mut args)?,
         Some("session") => session(&mut args)?,
+        Some("account") => account_status(&mut args)?,
         Some("cache") => match args.next().as_deref() {
             Some("reindex") => {
                 args.done()?;
@@ -1287,6 +1292,17 @@ fn device(args: &mut Args) -> Result<Command, CliError> {
     }
 }
 
+/// `account …` (ADR 0045 owner answer 2).
+fn account_status(args: &mut Args) -> Result<Command, CliError> {
+    match args.next().as_deref() {
+        Some("status") => match args.next() {
+            None => Ok(Command::AccountStatus),
+            Some(other) => Err(unknown(&other)),
+        },
+        _ => Err(usage("account needs status")),
+    }
+}
+
 /// `session …` (ADR 0075 §9).
 fn session(args: &mut Args) -> Result<Command, CliError> {
     match args.next().as_deref() {
@@ -1428,6 +1444,20 @@ mod tests {
             "item restore-history ab12 --field login.password",
             "item restore-history ab12 --entry cd34",
             "item restore-history ab12 --field login.password --entry",
+        ] {
+            assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
+        }
+    }
+
+    /// ADR 0045 owner answer 2: `account status`.
+    #[test]
+    fn account_status_parses() {
+        assert_eq!(command("account status"), Command::AccountStatus);
+        for line in [
+            "account",
+            "account state",
+            "account status --all",
+            "account status x",
         ] {
             assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
         }

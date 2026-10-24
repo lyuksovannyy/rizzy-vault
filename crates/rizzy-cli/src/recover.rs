@@ -15,6 +15,13 @@
 //!   open gap" below).
 //! - `rv recovery cancel`, on an enrolled device: cancels a pending recovery (§11.9 step 2:
 //!   "Any enrolled device with a device-authenticated session can cancel").
+//! - Every command that goes online on an enrolled device warns, loudly and every time, while
+//!   the server reports a pending recovery ([ADR 0045] open question 3), and `rv account
+//!   status` shows it ([`notice_warning`], [`status`]). The notice is the server's word,
+//!   never verified and never read by a check (INV-70); `item list`/`show`/`totp` and
+//!   `generate` stay offline and never see it (ADR 0045 point 9).
+//!
+//! [ADR 0045]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0045-recovery-pending-notification.md
 //! - `rv recovery repair`, on an enrolled device, after the server was restored from a backup
 //!   (ADR 0032 §4 step 6): replaces the server's `H_rec` and `E_rec` together, with a new code
 //!   and kit, or with `--retype` the current code ([`repair`]).
@@ -41,6 +48,8 @@
 //! exactly that ([`complete`]).
 
 use rizzy_client::ClientError;
+use rizzy_client::account::RecoveryNotice;
+use rizzy_client::identity_gen::CivilDate;
 use rizzy_client::recovery::{RecoveryInput, RecoveryOptions, start_recovery};
 use rizzy_client::rizzy_proto::change::ReregisterStartResponse;
 use rizzy_client::rizzy_proto::http::paths;
@@ -255,6 +264,104 @@ pub async fn cancel(env: &mut Env<'_>) -> Result<(), CliError> {
     Ok(())
 }
 
+/// A time the server reported, in UTC to the minute ("2026-10-24 13:05 UTC"): `rv` cannot read
+/// the local time zone (see `today_utc` in `commands.rs`). A value no calendar date holds (a
+/// forged one) prints as seconds since the Unix epoch.
+#[must_use]
+pub fn utc_text(ms: u64) -> String {
+    let day_ms = 86_400_000;
+    let date = i64::try_from(ms / day_ms)
+        .ok()
+        .and_then(CivilDate::from_days);
+    match date {
+        Some(date) => {
+            let minutes = (ms % day_ms) / 60_000;
+            format!("{date} {:02}:{:02} UTC", minutes / 60, minutes % 60)
+        }
+        None => format!("{} s after the Unix epoch", ms / 1000),
+    }
+}
+
+/// The loud warning every online command prints while the server reports a pending recovery
+/// (ADR 0045 open question 3): when it was requested, when it can complete, and how to cancel
+/// it. It says what it is: the server's word, which rv's own checks never use (INV-70).
+#[must_use]
+pub fn notice_warning(notice: RecoveryNotice, now_ms: u64) -> String {
+    let when = if notice.wait_over(now_ms) {
+        "Its waiting period is over: it can be completed now.".to_owned()
+    } else {
+        let hours = (notice.available_at_ms - now_ms).div_ceil(3_600_000);
+        format!(
+            "It can be completed from {} (in about {hours} h).",
+            utc_text(notice.available_at_ms)
+        )
+    };
+    let mut text = format!(
+        "WARNING: the server reports that a recovery of this account with the Emergency Kit was \
+         requested on {}. {when} Whoever completes it gets a new master password and Secret \
+         Key for this account. If you did not request it, run `rv recovery cancel` now.",
+        utc_text(notice.opened_at_ms)
+    );
+    if let Some(last) = notice.last_recovery_at_ms {
+        text.push_str(" The account was last recovered on ");
+        text.push_str(&utc_text(last));
+        text.push('.');
+    }
+    text.push_str(
+        " (This notice is the server's word, not verified: rv's checks of the account never \
+         depend on it, and a server could also hide a recovery.)",
+    );
+    text
+}
+
+/// `account status` (ADR 0045, owner answer 2): goes online on this device, so the account
+/// answer is verified as every online command verifies it, then prints the account, the
+/// server, the storage figure and the recovery notice the server reported, all of the last
+/// three as the server's word.
+///
+/// # Errors
+/// As [`Device::open`] and [`Device::online`].
+pub async fn status(env: &mut Env<'_>) -> Result<(), CliError> {
+    let mut device = Device::open(env).await?;
+    device.online(env.ui).await?;
+    env.ui
+        .print(&format!("account:  {}", device.account_hex()))?;
+    env.ui.print(&format!(
+        "server:   {}",
+        device.state().server_origin().as_str()
+    ))?;
+    env.ui
+        .print("state:    verified (signed by the account's identity key)")?;
+    if let Some(usage) = device.usage() {
+        env.ui
+            .print(&format!("storage:  {}", crate::commands::usage_text(usage)))?;
+    }
+    match device.recovery_notice() {
+        Some(notice) => {
+            let now = now_ms();
+            let when = if notice.wait_over(now) {
+                "can be completed now".to_owned()
+            } else {
+                format!("can be completed from {}", utc_text(notice.available_at_ms))
+            };
+            env.ui.print(&format!(
+                "recovery: PENDING, requested {}, {when}",
+                utc_text(notice.opened_at_ms)
+            ))?;
+            if let Some(last) = notice.last_recovery_at_ms {
+                env.ui
+                    .print(&format!("last recovery: {}", utc_text(last)))?;
+            }
+        }
+        None => env.ui.print("recovery: none pending")?,
+    }
+    env.ui.note(
+        "The recovery status is the server's word, not verified: a server can hide a recovery or \
+         invent one. Cancel one you did not request with `rv recovery cancel`.",
+    );
+    Ok(())
+}
+
 /// `recovery repair`, on an enrolled device (ADR 0032 §4 step 6): after a restore the server's
 /// `H_rec` and `E_rec` may lag the account, and recovery is refused until the user repairs them.
 /// The device goes online (healing the server first if it is behind), re-authenticates with
@@ -266,4 +373,74 @@ pub async fn cancel(env: &mut Env<'_>) -> Result<(), CliError> {
 pub async fn repair(env: &mut Env<'_>, name: &str, retype: bool) -> Result<(), CliError> {
     let mut device = Device::open(env).await?;
     Box::pin(device.repair_recovery(env.ui, name, retype)).await
+}
+
+#[cfg(test)]
+mod tests {
+    //! The texts of the recovery notice (ADR 0045), including the values a forged notice can
+    //! carry (INV-70: whatever it says, it is printed, never trusted, and never panics).
+
+    use super::*;
+
+    /// 2026-09-21 14:13:20 UTC.
+    const T0: u64 = 1_790_000_000_000;
+    /// 72 h.
+    const WAIT: u64 = 72 * 3_600_000;
+
+    #[test]
+    fn times_print_in_utc_to_the_minute() {
+        assert_eq!(utc_text(0), "1970-01-01 00:00 UTC");
+        assert_eq!(utc_text(T0), "2026-09-21 14:13 UTC");
+        assert_eq!(utc_text(T0 + WAIT), "2026-09-24 14:13 UTC");
+        // Beyond any calendar date the generator knows: seconds, no panic.
+        assert_eq!(
+            utc_text(u64::MAX),
+            format!("{} s after the Unix epoch", u64::MAX / 1000)
+        );
+    }
+
+    #[test]
+    fn the_warning_says_when_and_how_to_cancel() {
+        let notice = RecoveryNotice {
+            opened_at_ms: T0,
+            available_at_ms: T0 + WAIT,
+            last_recovery_at_ms: None,
+        };
+        let waiting = notice_warning(notice, T0 + 1);
+        assert!(waiting.starts_with("WARNING: "), "{waiting}");
+        assert!(
+            waiting.contains("requested on 2026-09-21 14:13 UTC"),
+            "{waiting}"
+        );
+        assert!(
+            waiting.contains("from 2026-09-24 14:13 UTC (in about 72 h)"),
+            "{waiting}"
+        );
+        assert!(waiting.contains("rv recovery cancel"), "{waiting}");
+        assert!(waiting.contains("not verified"), "{waiting}");
+        assert!(!waiting.contains("last recovered"), "{waiting}");
+        let over = notice_warning(notice, T0 + WAIT);
+        assert!(over.contains("it can be completed now"), "{over}");
+        let last = notice_warning(
+            RecoveryNotice {
+                last_recovery_at_ms: Some(1_789_000_000_000),
+                ..notice
+            },
+            T0,
+        );
+        assert!(
+            last.contains("last recovered on 2026-09-10 00:26 UTC"),
+            "{last}"
+        );
+        // A forged, impossible notice still prints.
+        let forged = notice_warning(
+            RecoveryNotice {
+                opened_at_ms: u64::MAX,
+                available_at_ms: u64::MAX,
+                last_recovery_at_ms: Some(u64::MAX),
+            },
+            0,
+        );
+        assert!(forged.contains("rv recovery cancel"), "{forged}");
+    }
 }

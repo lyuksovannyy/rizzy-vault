@@ -1034,6 +1034,25 @@ fn rv_end_to_end() {
     assert!(requested.noted("Recovery requested"));
     let available_at: u64 = requested.out[0].parse().unwrap();
     assert!(available_at > rizzy_cli::sys::now_ms() + 71 * 3_600_000);
+    // ADR 0045: the enrolled device sees it. `account status` shows it; every command that goes
+    // online warns, loudly and every time (open question 3); an offline read never sees it
+    // (point 9). It is the server's word, and says so (INV-70).
+    let warning = "WARNING: the server reports that a recovery of this account";
+    let status = a.ok(&["account", "status"], &[]);
+    let line = status.printed("recovery:");
+    assert!(line.starts_with("PENDING, requested "), "{line}");
+    assert!(line.contains(" UTC, can be completed from "), "{line}");
+    assert_eq!(
+        status.printed("state:"),
+        "verified (signed by the account's identity key)"
+    );
+    assert!(status.noted(warning));
+    assert!(status.noted("rv recovery cancel"));
+    assert!(status.noted("the server's word, not verified"));
+    for _ in 0..2 {
+        assert!(a.ok(&["sync"], &[]).noted(warning));
+    }
+    assert!(!a.ok(&["item", "list"], &[]).noted(warning));
     let (outcome, _) = r.try_run(
         &[
             "recovery", "complete", "--server", &origin, "--name", "alice",
@@ -1052,6 +1071,11 @@ fn rv_end_to_end() {
     let (outcome, cancelled) = a.try_run(&["recovery", "cancel"], &[PASSWORD], &[], &[]);
     outcome.unwrap();
     assert!(cancelled.noted("No recovery was pending"));
+    // Cancelled: the notice is gone, and so is the warning (ADR 0045 point 3).
+    let status = a.ok(&["account", "status"], &[]);
+    assert_eq!(status.printed("recovery:"), "none pending");
+    assert!(!status.noted(warning));
+    assert!(!a.ok(&["sync"], &[]).noted(warning));
 
     // A wrong master password is "wrong password", offline.
     let (outcome, _) = a.try_run(&["item", "list"], &["not the password"], &[], &[]);
@@ -4339,6 +4363,9 @@ struct MitmState {
     /// Consumed one per accepted connection, in arrival order; [`MitmOp::Pass`] once empty.
     ops: VecDeque<MitmOp>,
     log: Vec<MitmExchange>,
+    /// While set, every JSON answer to this path is rewritten by the function before it is
+    /// relayed (a lying server, not consumed: [`MitmProxy::rewrite`]).
+    rewrite: Option<(&'static str, fn(&mut serde_json::Value))>,
 }
 
 /// A connection registered at a [`MitmOp::Rendezvous`] gate, waiting for its partner.
@@ -4394,6 +4421,38 @@ impl MitmProxy {
     /// Every exchange completed so far, in arrival order.
     fn log(&self) -> Vec<MitmExchange> {
         self.state.lock().unwrap().log.clone()
+    }
+
+    /// Rewrites the JSON body of every answer to `path` with `edit` from now on, or stops
+    /// with `None`.
+    fn rewrite(&self, rule: Option<(&'static str, fn(&mut serde_json::Value))>) {
+        self.state.lock().unwrap().rewrite = rule;
+    }
+
+    /// `answer` (a whole HTTP/1.1 response) with its JSON body passed through `edit` and its
+    /// `Content-Length` set to the new length. An answer without a JSON body is unchanged.
+    fn rewritten(answer: &[u8], edit: fn(&mut serde_json::Value)) -> Vec<u8> {
+        let Some(at) = answer.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return answer.to_vec();
+        };
+        let (head, body) = (&answer[..at], &answer[at + 4..]);
+        let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return answer.to_vec();
+        };
+        edit(&mut value);
+        let body = serde_json::to_vec(&value).unwrap();
+        let mut out = Vec::new();
+        for line in String::from_utf8_lossy(head).split("\r\n") {
+            if line.to_ascii_lowercase().starts_with("content-length:") {
+                out.extend_from_slice(format!("content-length: {}", body.len()).as_bytes());
+            } else {
+                out.extend_from_slice(line.as_bytes());
+            }
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"\r\n");
+        out.extend_from_slice(&body);
+        out
     }
 
     /// Connects to `upstream`, sends `head` and `body`, and returns the whole raw answer.
@@ -4512,6 +4571,13 @@ impl MitmProxy {
                 let request = [head.as_slice(), &body].concat();
                 Self::rendezvous(gate, swap, &request, upstream, rendezvous).map(Some)
             }
+        };
+        let rewrite = state.lock().unwrap().rewrite;
+        let outcome = match (outcome, rewrite) {
+            (Ok(Some(answer)), Some((on, edit))) if path == on => {
+                Ok(Some(Self::rewritten(&answer, edit)))
+            }
+            (outcome, _) => outcome,
         };
         if let Ok(Some(answer)) = outcome {
             state.lock().unwrap().log.push(MitmExchange {
@@ -4720,6 +4786,102 @@ fn run_hostile_sync_rounds(
         want_items = a.items().len();
     }
     (violations, want_items)
+}
+
+/// INV-70 (ADR 0045 point 7) through `rv`: a server that lies in the advisory
+/// `pending_recovery` notice cannot change what `rv` trusts. An invented notice is shown as
+/// the warning and in `account status`, and nothing else moves: the account state verifies,
+/// the items are the same, no alarm is raised. A notice riding on an answer whose signed state
+/// was tampered with is never shown, and the answer is refused as it is without one. A real
+/// pending recovery the server hides is simply not shown (AR-9: a malicious server can
+/// suppress it), and verification is again unchanged.
+#[test]
+fn a_lying_recovery_notice_changes_nothing_rv_trusts() {
+    use rizzy_client::rizzy_proto::http::paths;
+
+    let (proxy, server) = MitmProxy::start();
+    let origin = server.origin();
+    let a = Rv::new("inv70-a");
+    let (_, recovery_code) = sign_up(&a, &origin, "alice");
+    let note = create_note(&a, "kept");
+    let warning = "WARNING: the server reports that a recovery of this account";
+    let honest = a.ok(&["account", "status"], &[]);
+    assert_eq!(honest.printed("recovery:"), "none pending");
+    assert!(!honest.noted(warning));
+
+    // An invented notice: shown, and only shown.
+    fn invent(view: &mut serde_json::Value) {
+        view["pending_recovery"] = serde_json::json!({
+            "opened_at_ms": 1_790_000_000_000_u64,
+            "available_at_ms": 1_790_259_200_000_u64,
+            "last_recovery_at_ms": 1_789_000_000_000_u64,
+        });
+    }
+    proxy.rewrite(Some((paths::ACCOUNT_STATE, invent)));
+    let lied = a.ok(&["account", "status"], &[]);
+    assert_eq!(
+        lied.printed("recovery:"),
+        "PENDING, requested 2026-09-21 14:13 UTC, can be completed now"
+    );
+    assert_eq!(lied.printed("last recovery:"), "2026-09-10 00:26 UTC");
+    assert_eq!(
+        lied.printed("state:"),
+        "verified (signed by the account's identity key)"
+    );
+    assert_eq!(lied.printed("account:"), honest.printed("account:"));
+    assert!(lied.noted(warning));
+    let synced = a.ok(&["sync"], &[]);
+    assert!(synced.noted(warning));
+    assert_eq!(a.ok(&["item", "list"], &[]).out.len(), 1);
+    assert!(a.ok(&["item", "list"], &[]).out[0].contains(&note[..8]));
+
+    // A notice on a tampered signed state: the answer is refused exactly as without one, and
+    // the notice never reaches the user.
+    fn tamper(view: &mut serde_json::Value) {
+        invent(view);
+        let state = view["account_state"].as_str().unwrap().to_owned();
+        let mut chars: Vec<char> = state.chars().collect();
+        let mid = chars.len() / 2;
+        chars[mid] = if chars[mid] == 'A' { 'B' } else { 'A' };
+        view["account_state"] = chars.into_iter().collect::<String>().into();
+    }
+    proxy.rewrite(Some((paths::ACCOUNT_STATE, tamper)));
+    let (outcome, refused) = a.try_run(&["account", "status"], &[], &[], &[]);
+    assert!(
+        outcome.is_err(),
+        "a tampered state was accepted: {:?}",
+        refused.out
+    );
+    assert!(!refused.noted(warning));
+    assert!(refused.out.iter().all(|l| !l.starts_with("recovery:")));
+
+    // A real pending recovery the server hides: not shown; verification unchanged.
+    proxy.rewrite(None);
+    let r = Rv::new("inv70-r");
+    let (outcome, _) = r.try_run(
+        &["recovery", "start", "--server", &origin, "--name", "alice"],
+        &[&recovery_code],
+        &[],
+        &[],
+    );
+    outcome.unwrap();
+    assert!(a.ok(&["sync"], &[]).noted(warning));
+    fn hide(view: &mut serde_json::Value) {
+        view.as_object_mut().unwrap().remove("pending_recovery");
+    }
+    proxy.rewrite(Some((paths::ACCOUNT_STATE, hide)));
+    let hidden = a.ok(&["account", "status"], &[]);
+    assert_eq!(hidden.printed("recovery:"), "none pending");
+    assert_eq!(
+        hidden.printed("state:"),
+        "verified (signed by the account's identity key)"
+    );
+    assert!(!hidden.noted(warning));
+    proxy.rewrite(None);
+    let (outcome, cancelled) = a.try_run(&["recovery", "cancel"], &[PASSWORD], &[], &[]);
+    outcome.unwrap();
+    assert!(cancelled.noted("was cancelled"));
+    drop(server);
 }
 
 /// PR budget: a fixed, small set of mutation rounds on `sync` (cheap: no OPAQUE), plus one

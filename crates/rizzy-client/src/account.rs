@@ -167,6 +167,52 @@ pub struct VerifiedAccount {
     ///
     /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
     pub(crate) vault_bytes: Vec<(VaultId, u64)>,
+    /// The server's notice of a pending recovery ([ADR 0045]): unsigned, for display only
+    /// ([`RecoveryNotice`], INV-70).
+    ///
+    /// [ADR 0045]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0045-recovery-pending-notification.md
+    pub(crate) recovery_notice: Option<RecoveryNotice>,
+}
+
+/// The server's notice that a recovery of the account is pending ([ADR 0045]): when it opened,
+/// when its wait ends, and when the account's last recovery committed.
+///
+/// **Not verified, and never verifiable (INV-70).** Nothing signs it; it is the server's word.
+/// A host shows it to the user, prompting them to cancel a recovery they did not start, and
+/// nothing else: its presence, absence or content is never proof that a recovery is, or is not,
+/// pending or happened, and no check reads it. [`verify_account_view`] decides exactly as it
+/// would without it, and a notice reaches the host only on an answer that verified in full.
+/// A malicious server can hide a real recovery from it or invent one, as it can hide the
+/// web-vault session notice (CRYPTO.md §11.4, AR-9).
+///
+/// [ADR 0045]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0045-recovery-pending-notification.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecoveryNotice {
+    /// When the recovery opened, in Unix milliseconds (the server's clock).
+    pub opened_at_ms: u64,
+    /// When its wait ends and it may complete, in Unix milliseconds (the server's clock).
+    pub available_at_ms: u64,
+    /// When the account's previous recovery committed, if one did.
+    pub last_recovery_at_ms: Option<u64>,
+}
+
+impl RecoveryNotice {
+    /// The notice of `view`, as served.
+    #[must_use]
+    pub fn of_view(view: &AccountView) -> Option<Self> {
+        view.pending_recovery.map(|n| Self {
+            opened_at_ms: n.opened_at_ms,
+            available_at_ms: n.available_at_ms,
+            last_recovery_at_ms: n.last_recovery_at_ms,
+        })
+    }
+
+    /// Whether the server says the wait is over at `now_ms` (this device's clock): the recovery
+    /// can complete now unless an enrolled device cancels it.
+    #[must_use]
+    pub const fn wait_over(&self, now_ms: u64) -> bool {
+        now_ms >= self.available_at_ms
+    }
 }
 
 /// The account's storage usage as the server reports it with every account answer (ADR 0048
@@ -336,6 +382,13 @@ impl VerifiedAccount {
     #[must_use]
     pub const fn usage(&self) -> Option<StorageUsage> {
         self.usage
+    }
+
+    /// The server's notice of a pending recovery that came with this answer (ADR 0045);
+    /// unverified, for display only ([`RecoveryNotice`], INV-70).
+    #[must_use]
+    pub const fn recovery_notice(&self) -> Option<RecoveryNotice> {
+        self.recovery_notice
     }
 
     /// Takes the vault key of `vault_id` out of this answer, to build that vault's
@@ -523,6 +576,8 @@ pub(crate) fn verify_account_view(
     Ok(VerifiedAccount {
         served,
         usage: StorageUsage::of_view(view),
+        // INV-70: copied after every check passed, never read by one.
+        recovery_notice: RecoveryNotice::of_view(view),
         vault_bytes: view
             .vaults
             .as_slice()

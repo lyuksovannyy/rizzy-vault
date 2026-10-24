@@ -115,7 +115,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use rizzy_client::ClientError;
-use rizzy_client::account::{CertifiedDevice, RevokedDevice, StorageUsage, VerifiedAccount};
+use rizzy_client::account::{
+    CertifiedDevice, RecoveryNotice, RevokedDevice, StorageUsage, VerifiedAccount,
+};
 use rizzy_client::credentials::PendingCredentialChange;
 use rizzy_client::device::{DeviceState, UnlockedDevice};
 use rizzy_client::export::gate::ExportGate;
@@ -488,6 +490,9 @@ pub struct Device {
     /// The storage usage the server reported with the last answer adopted in this run (ADR
     /// 0048 §5); unverified, for display only, and never stored.
     usage: Option<StorageUsage>,
+    /// The server's notice of a pending recovery that came with the last answer adopted in this
+    /// run (ADR 0045); unverified, for display only (INV-70), and never stored (point 9).
+    recovery_notice: Option<RecoveryNotice>,
     /// Whether this run authenticated with the reconciliation objects (a restored server that
     /// did not know this device).
     reconciled: bool,
@@ -631,6 +636,7 @@ impl Device {
             session: None,
             refreshed: false,
             usage: None,
+            recovery_notice: None,
             reconciled: false,
             reregistered: false,
             password,
@@ -686,6 +692,7 @@ impl Device {
             session: None,
             refreshed: false,
             usage: None,
+            recovery_notice: None,
             reconciled: false,
             reregistered: false,
             password,
@@ -710,6 +717,13 @@ impl Device {
     #[must_use]
     pub const fn usage(&self) -> Option<StorageUsage> {
         self.usage
+    }
+
+    /// The server's notice of a pending recovery that came with the account answer adopted in
+    /// this run (ADR 0045), if one was: the server's word, for display only (INV-70).
+    #[must_use]
+    pub const fn recovery_notice(&self) -> Option<RecoveryNotice> {
+        self.recovery_notice
     }
 
     /// The alarms raised.
@@ -1071,6 +1085,11 @@ impl Device {
                  time; the next rv command that goes online tries again.",
             ),
         }
+        // ADR 0045 open question 3 (its recommendation stands): loud, on every command that
+        // went online, for as long as the server reports it.
+        if let Some(notice) = self.recovery_notice {
+            ui.note(&crate::recover::notice_warning(notice, now_ms()));
+        }
         Ok(())
     }
 
@@ -1335,6 +1354,7 @@ impl Device {
         }
         changeset.append(store::account_writes(&account));
         self.usage = account.usage();
+        self.recovery_notice = account.recovery_notice();
         self.authors = Authors::from_account(&account)?;
         self.certificates = account.certificates().to_vec();
         self.revocations = account.revocations().to_vec();
