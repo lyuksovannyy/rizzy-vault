@@ -18,6 +18,12 @@
 //! No key is derived and nothing is decrypted: the envelope path is covered by
 //! `export_fields` and the file's JSON by `client_export`.
 //!
+//! Seed for the retired Bank account type (ADR 0078 §3: the payload carries a `0x0009` item
+//! byte for byte, and the import skips it and counts it): a payload of one live snapshot whose
+//! registers are `@lifecycle` (active), `bank.account_number` (Text), `item.name` (Text) and
+//! `item.type` (`Enum` `0x0009`), as `rizzy-client`'s
+//! `payload_import_flattens_conflicts_and_reports_what_it_left` builds it.
+//!
 //! ```text
 //! cargo +nightly fuzz run client_export_payload
 //! ```

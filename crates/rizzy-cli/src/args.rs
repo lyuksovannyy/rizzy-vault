@@ -83,8 +83,8 @@ concealed fields are never searched. Without a query it lists every item, most r
 first. `item recent` lists the items viewed here (`item show`, `totp`), most recent first.
 Searching and use tracking run on this device only, over a search index kept in its cache
 unencrypted; `cache reindex` rebuilds that index and forgets the use history.
-<type> is login, note, card, identity, ssh-key, api-credential, software-license, wifi,
-bank-account or passkey. Field keys are the item schema's (item.name, item.notes,
+<type> is login, note, card, identity, ssh-key, api-credential, software-license, wifi
+or passkey. Field keys are the item schema's (item.name, item.notes,
 login.username, login.password, login.totp, card.number, …).
 Every export first asks for the master password again and checks it with the server. An
 encrypted export then asks for a new password for that file, needed to import it. A cxf

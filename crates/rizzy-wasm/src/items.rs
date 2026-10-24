@@ -80,7 +80,10 @@ pub const MAX_DRAFT_ENTRIES: usize = 1024;
 /// No `"passkey"` entry: `0x000A` (the standalone-passkey candidate ADR 0018 reserved) was
 /// released back to unassigned by ADR 0039 §1, which puts passkeys on the `passkey/<id>/…` list
 /// of an existing Login item instead (`rizzy-core`'s `item::schema::LIST_PASSKEY`).
-pub const TYPES: [(&str, ItemType); 9] = [
+///
+/// No `"bank-account"` entry either: ADR 0078 §1 retired `0x0009`, so a Bank account an older
+/// build wrote is `unknown` here and shows as "Unsupported item" (ADR 0018 §8).
+pub const TYPES: [(&str, ItemType); 8] = [
     ("login", ItemType::LOGIN),
     ("note", ItemType::SECURE_NOTE),
     ("card", ItemType::CARD),
@@ -89,7 +92,6 @@ pub const TYPES: [(&str, ItemType); 9] = [
     ("api-credential", ItemType::API_CREDENTIAL),
     ("software-license", ItemType::SOFTWARE_LICENSE),
     ("wifi", ItemType::WIFI),
-    ("bank-account", ItemType::BANK_ACCOUNT),
 ];
 
 /// The name of an item type; `unknown` for one this build does not name.
@@ -231,7 +233,8 @@ impl ItemSummary {
     }
 
     /// The type's name: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`,
-    /// `software-license`, `wifi`, `bank-account`, `passkey`, or `unknown`.
+    /// `software-license`, `wifi`, `passkey`, or `unknown` (a retired Bank account, ADR 0078
+    /// §1, included).
     #[wasm_bindgen(getter, js_name = itemType)]
     #[must_use]
     pub fn item_type(&self) -> String {
@@ -1547,10 +1550,15 @@ mod tests {
         // A type no ADR assigns yet shows generically (ADR 0018 §8, §11), as the M3 types did
         // in a build before ADR 0055.
         assert_eq!(type_name(Some(ItemType::from_id(0x000B))), "unknown");
+        // The Bank account type ADR 0078 §1 retired is unknown here, and not a name a create
+        // takes.
+        assert_eq!(type_name(Some(ItemType::RETIRED_BANK_ACCOUNT)), "unknown");
+        assert!(type_from_name("bank-account").is_err());
     }
 
-    /// ADR 0055 §4: the eight concealed M3 keys cross only through a reveal; the other 14 are
-    /// shown in the item view.
+    /// ADR 0055 §4: the six concealed M3 keys cross only through a reveal; the other 11 are
+    /// shown in the item view. Every key under the `bank.` prefix ADR 0078 §2 retired is
+    /// reserved, so concealed, the two ADR 0055 concealed and the three it showed alike.
     #[test]
     fn m3_keys_are_concealed_as_the_schema_says() {
         let key = |k: &str| FieldKey::parse(k.as_bytes()).unwrap();
@@ -1561,10 +1569,15 @@ mod tests {
             "api.secret",
             "license.key",
             "wifi.password",
-            "bank.account_number",
-            "bank.routing_number",
             // Unassigned under an M3 prefix: reserved, so concealed to be safe.
             "ssh.key_type",
+            // Retired (ADR 0078 §2): reserved, so concealed.
+            "bank.bank_name",
+            "bank.account_holder",
+            "bank.account_number",
+            "bank.routing_number",
+            "bank.account_type",
+            "bank.other",
         ] {
             assert!(concealed(&key(k)), "{k}");
         }
@@ -1580,9 +1593,6 @@ mod tests {
             "license.expires",
             "wifi.ssid",
             "wifi.security_type",
-            "bank.bank_name",
-            "bank.account_holder",
-            "bank.account_type",
         ] {
             assert!(!concealed(&key(k)), "{k}");
         }

@@ -575,7 +575,7 @@ struct UriParts<'a> {
 }
 
 /// The CSV row of one item; `None` for an item CSV leaves out (trashed, or of a type other
-/// than Login, Secure Note, Card and Identity).
+/// than Login, Secure Note, Card and Identity, an unsupported or retired one included).
 fn csv_row<'a>(live: &LiveSnapshot<'a>, keys: &[&'static str]) -> Option<CsvRow<'a>> {
     if state::trashed(live) != Some(false) {
         return None;
@@ -586,12 +586,12 @@ fn csv_row<'a>(live: &LiveSnapshot<'a>, keys: &[&'static str]) -> Option<CsvRow<
         SupportedType::Card => "card",
         SupportedType::Identity => "identity",
         // ADR 0027 §4: "other types are left out of CSV"; the M3 types of ADR 0055 are such
-        // types (the JSON form carries them whole).
+        // types (the JSON form carries them whole), and so is every unsupported type, the
+        // retired `0x0009` included (ADR 0078 §3), through the `?` above.
         SupportedType::SshKey
         | SupportedType::ApiCredential
         | SupportedType::SoftwareLicense
         | SupportedType::Wifi
-        | SupportedType::BankAccount
         | SupportedType::VaultSettings => return None,
     };
     let mut row = CsvRow {

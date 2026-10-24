@@ -19594,14 +19594,16 @@ pub mod items {
     /// No `"passkey"` entry: `0x000A` (the standalone-passkey candidate ADR 0018 reserved) was
     /// released back to unassigned by ADR 0039 §1, which puts passkeys on the `passkey/<id>/…` list
     /// of an existing Login item instead (`rizzy-core`'s `item::schema::LIST_PASSKEY`).
-    pub const TYPES: [(&str, ItemType); 9] =
+    ///
+    /// No `"bank-account"` entry either: ADR 0078 §1 retired `0x0009`, so a Bank account an older
+    /// build wrote is `unknown` here and shows as "Unsupported item" (ADR 0018 §8).
+    pub const TYPES: [(&str, ItemType); 8] =
         [("login", ItemType::LOGIN), ("note", ItemType::SECURE_NOTE),
                 ("card", ItemType::CARD), ("identity", ItemType::IDENTITY),
                 ("ssh-key", ItemType::SSH_KEY),
                 ("api-credential", ItemType::API_CREDENTIAL),
                 ("software-license", ItemType::SOFTWARE_LICENSE),
-                ("wifi", ItemType::WIFI),
-                ("bank-account", ItemType::BANK_ACCOUNT)];
+                ("wifi", ItemType::WIFI)];
     /// The name of an item type; `unknown` for one this build does not name.
     pub(crate) fn type_name(item_type: Option<ItemType>) -> &'static str {
         TYPES.iter().find(|(_, t)|
@@ -20161,7 +20163,8 @@ pub mod items {
         #[doc =
         " The type\'s name: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`,"]
         #[doc =
-        " `software-license`, `wifi`, `bank-account`, `passkey`, or `unknown`."]
+        " `software-license`, `wifi`, `passkey`, or `unknown` (a retired Bank account, ADR 0078"]
+        #[doc = " §1, included)."]
         #[must_use]
         pub fn item_type(&self) -> String {
             #[automatically_derived]
@@ -20170,7 +20173,8 @@ pub mod items {
                     #[doc =
                     " The type\'s name: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`,"]
                     #[doc =
-                    " `software-license`, `wifi`, `bank-account`, `passkey`, or `unknown`."]
+                    " `software-license`, `wifi`, `passkey`, or `unknown` (a retired Bank account, ADR 0078"]
+                    #[doc = " §1, included)."]
                     #[must_use]
                     #[export_name = "itemsummary_itemType_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ItemSummary_itemType(me:
@@ -20208,7 +20212,8 @@ pub mod items {
                     #[doc =
                     " The type\'s name: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`,"]
                     #[doc =
-                    " `software-license`, `wifi`, `bank-account`, `passkey`, or `unknown`."]
+                    " `software-license`, `wifi`, `passkey`, or `unknown` (a retired Bank account, ADR 0078"]
+                    #[doc = " §1, included)."]
                     #[must_use]
                     #[no_mangle]
                     #[doc(hidden)]
@@ -20230,7 +20235,7 @@ pub mod items {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x0bItemSummary\x02S The type's name: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`,E `software-license`, `wifi`, `bank-account`, `passkey`, or `unknown`.\0\0\0\0\x08itemType\x01\x01\0\0\0\0\x01\0\x02\x08itemType\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x0bItemSummary\x03S The type's name: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`,V `software-license`, `wifi`, `passkey`, or `unknown` (a retired Bank account, ADR 0078\x10 \xc2\xa71, included).\0\0\0\0\x08itemType\x01\x01\0\0\0\0\x01\0\x02\x08itemType\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]

@@ -1294,8 +1294,14 @@ fn rizzy_json_per_item_failures_skip_the_item_only() {
         ),
         // Types the schema refuses, and the vault-settings type.
         (r#"{"type":0,"fields":[]}"#, WarningKind::UnsupportedItemType),
-        // `0x0005`–`0x0009` are the M3 types of ADR 0055 (imported, below); `0x000B` is
-        // unassigned.
+        // `0x0005`–`0x0008` are the M3 types of ADR 0055 (imported, below); `0x0009` is the
+        // Bank account type ADR 0078 §1 retired, read back like any unsupported type (§3);
+        // `0x000B` is unassigned.
+        (r#"{"type":9,"fields":[]}"#, WarningKind::UnsupportedItemType),
+        (
+            r#"{"type":9,"fields":[{"key":"bank.account_number","value":{"text":"1"}}]}"#,
+            WarningKind::UnsupportedItemType,
+        ),
         (r#"{"type":11,"fields":[]}"#, WarningKind::UnsupportedItemType),
         (r#"{"type":999,"fields":[]}"#, WarningKind::UnsupportedItemType),
         (
@@ -1313,7 +1319,7 @@ fn rizzy_json_per_item_failures_skip_the_item_only() {
             WarningKind::MalformedEntry,
         ),
         (
-            r#"{"type":8,"fields":[{"key":"bank.account_number","value":{"text":"1"}}]}"#,
+            r#"{"type":8,"fields":[{"key":"ssh.host","value":{"text":"h"}}]}"#,
             WarningKind::MalformedEntry,
         ),
         (
@@ -1465,7 +1471,9 @@ fn rizzy_json_per_item_failures_skip_the_item_only() {
 }
 
 /// ADR 0055: an item of each M3 type is imported with its type and every key of its type; the
-/// concealed ones are carried like any other value (concealment is display, never import).
+/// concealed ones are carried like any other value (concealment is display, never import). The
+/// retired Bank account type (`0x0009`, ADR 0078 §1) is not among them: see the per-item
+/// failures, where it is skipped as unsupported.
 #[test]
 fn rizzy_json_imports_the_m3_types() {
     let items = [
@@ -1499,17 +1507,6 @@ fn rizzy_json_imports_the_m3_types() {
             8,
             ["wifi.ssid", "wifi.password", "wifi.security_type"].as_slice(),
         ),
-        (
-            9,
-            [
-                "bank.bank_name",
-                "bank.account_holder",
-                "bank.account_number",
-                "bank.routing_number",
-                "bank.account_type",
-            ]
-            .as_slice(),
-        ),
     ];
     let doc = rizzy_doc(
         &items
@@ -1526,7 +1523,7 @@ fn rizzy_json_imports_the_m3_types() {
     );
     let import = run(Format::RizzyPlaintextJson, doc.as_bytes()).unwrap();
     assert_eq!(warns(&import), vec![]);
-    assert_eq!(import.items.len(), 5);
+    assert_eq!(import.items.len(), 4);
     for (item, (id, keys)) in import.items.iter().zip(items) {
         assert_eq!(item.item_type(), ItemType::from_id(id));
         let w = carried(item);

@@ -41,7 +41,7 @@
 //!
 //! | Member | Rule |
 //! |---|---|
-//! | `type` | required; an integer 0–65,535. A type the schema refuses (unknown, reserved, `0x0000`) and the vault-settings type `0xF001` skip the item ([`WarningKind::UnsupportedItemType`]) |
+//! | `type` | required; an integer 0–65,535. A type the schema refuses (unknown, reserved, `0x0000`, the retired `0x0009` of ADR 0078 §1) and the vault-settings type `0xF001` skip the item ([`WarningKind::UnsupportedItemType`]) |
 //! | `fields` | required; an array of ≤ 4,096 entries ([`MAX_ITEM_FIELDS`]) |
 //! | `trashed` | optional boolean, default false |
 //! | `created_ms` | optional integer fitting a `u64`; written as `import.created_ms` |
@@ -73,9 +73,10 @@
 //!   another item type (`WrongItemType`: a `ssh.host` on a Login, a `card.number` on an
 //!   Identity); the whole item is skipped ([`WarningKind::MalformedEntry`]), like any other
 //!   per-item write failure (ADR 0055 owner answer 4, option (a), under ADR 0027 §6 "Per-item
-//!   failures skip the item, never the file"). The `ssh.`, `api.`, `license.`, `wifi.` and
-//!   `bank.` keys are known keys of their own types since ADR 0055; before, they were reserved
-//!   and carried on any type.
+//!   failures skip the item, never the file"). The `ssh.`, `api.`, `license.` and `wifi.`
+//!   keys are known keys of their own types since ADR 0055; before, they were reserved and
+//!   carried on any type. The `bank.` keys ADR 0055 also assigned are reserved again since
+//!   ADR 0078 §2 retired them, so they are carried on any type.
 //! - **A write the op may not make.** `check_carried` refuses a key this client never writes
 //!   (`share/<id>/secret`, M5's; `uri/<id>/match` was the same in M1, owner decision 2, and
 //!   carries from M2 once ADR 0037, Accepted, assigned its enum values) with `NotWritable`.
