@@ -14,7 +14,6 @@ use rizzy_proto::webauthn::{
     WebauthnLoginChallengeRequest, WebauthnLoginFinishRequest, WebauthnRemoveRequest,
 };
 use rizzy_proto::wire::{Bytes, Id};
-use rizzy_storage::Conn;
 use serde_json::{Value, json};
 use sqlx::Row as _;
 
@@ -304,56 +303,70 @@ async fn login_with(
     finish(env, pending, credential).await
 }
 
-/// Runs `sql` with `binds` on the test database (a database writer, for the state tests).
+/// Runs `sql` with `binds` on the test database (a database writer, for the state tests), on
+/// either engine.
 async fn sql_exec(env: &Env, sql: &'static str, binds: &[i64]) {
     let mut tx = env.db.begin_write().await.unwrap();
-    let Conn::Sqlite(c) = tx.conn() else {
-        panic!("the tests run on SQLite")
-    };
-    let mut q = sqlx::query(sql);
-    for b in binds {
-        q = q.bind(*b);
-    }
-    q.execute(&mut *c).await.unwrap();
+    rizzy_storage::on_engine!(tx.conn(), |c| {
+        let mut q = sqlx::query(sql);
+        for b in binds {
+            q = q.bind(*b);
+        }
+        q.execute(&mut *c).await.map(|_| ()).unwrap()
+    });
     tx.commit().await.unwrap();
+}
+
+/// Runs `sql` with one text bind.
+async fn sql_exec_text(env: &Env, sql: &'static str, text: String) {
+    let mut tx = env.db.begin_write().await.unwrap();
+    rizzy_storage::on_engine!(tx.conn(), |c| sqlx::query(sql)
+        .bind(text.clone())
+        .execute(&mut *c)
+        .await
+        .map(|_| ())
+        .unwrap());
+    tx.commit().await.unwrap();
+}
+
+/// One `i64` from `sql`.
+async fn sql_i64(env: &Env, sql: &'static str) -> i64 {
+    let mut tx = env.db.begin_write().await.unwrap();
+    let value: i64 = rizzy_storage::on_engine!(tx.conn(), |c| sqlx::query(sql)
+        .fetch_one(&mut *c)
+        .await
+        .unwrap()
+        .get(0));
+    tx.commit().await.unwrap();
+    value
 }
 
 /// The `sign_count` and `security_key` of the only credential row.
 async fn stored_row(env: &Env) -> (i64, String) {
     let mut tx = env.db.begin_write().await.unwrap();
-    let Conn::Sqlite(c) = tx.conn() else {
-        panic!("the tests run on SQLite")
-    };
-    let row = sqlx::query("SELECT sign_count, security_key FROM auth_webauthn_credentials")
-        .fetch_one(&mut *c)
-        .await
-        .unwrap();
-    (row.get(0), row.get(1))
+    let row: (i64, String) = rizzy_storage::on_engine!(tx.conn(), |c| {
+        let row = sqlx::query("SELECT sign_count, security_key FROM auth_webauthn_credentials")
+            .fetch_one(&mut *c)
+            .await
+            .unwrap();
+        (row.get(0), row.get(1))
+    });
+    tx.commit().await.unwrap();
+    row
 }
 
 /// The number of ceremony states and pending rows.
 async fn live_rows(env: &Env) -> (i64, i64) {
-    let mut tx = env.db.begin_write().await.unwrap();
-    let Conn::Sqlite(c) = tx.conn() else {
-        panic!("the tests run on SQLite")
-    };
-    let states: i64 = sqlx::query("SELECT COUNT(*) FROM auth_webauthn_challenges")
-        .fetch_one(&mut *c)
-        .await
-        .unwrap()
-        .get(0);
-    let pending: i64 = sqlx::query("SELECT COUNT(*) FROM auth_webauthn_pending")
-        .fetch_one(&mut *c)
-        .await
-        .unwrap()
-        .get(0);
-    (states, pending)
+    (
+        sql_i64(env, "SELECT COUNT(*) FROM auth_webauthn_challenges").await,
+        sql_i64(env, "SELECT COUNT(*) FROM auth_webauthn_pending").await,
+    )
 }
 
 #[test]
 fn enrolment_login_list_and_removal() {
     block_on(async {
-        let mut env = Env::new(81).await;
+        let mut env = Env::on_either_engine(81, |_| {}).await;
         let client = env.signup("wen", "pw").await;
         let session = fresh(&mut env, &client).await;
         let key = SoftKey::new(&mut env, 1);
@@ -488,7 +501,7 @@ fn enrolment_login_list_and_removal() {
 #[test]
 fn state_and_pending_rows_are_single_use_and_expire() {
     block_on(async {
-        let mut env = Env::new(82).await;
+        let mut env = Env::on_either_engine(82, |_| {}).await;
         let client = env.signup("ada", "pw").await;
         let session = fresh(&mut env, &client).await;
         let key = SoftKey::new(&mut env, 2);
@@ -551,20 +564,32 @@ fn state_and_pending_rows_are_single_use_and_expire() {
         ));
 
         // An unknown state_format, and an oversized state, are refused (fail closed).
-        for tamper in [
-            "UPDATE auth_webauthn_challenges SET state_format = 2",
-            "UPDATE auth_webauthn_challenges SET state = state || printf('%.*c', 65536, ' ')",
-        ] {
+        for oversized in [false, true] {
             let pending = env.login_pending(&client).await;
             let options = challenge(&mut env, pending).await.unwrap();
-            sql_exec(&env, tamper, &[]).await;
+            if oversized {
+                let padding = format!("{{\"pad\":\"{}\"}}", " ".repeat(64 * 1024));
+                sql_exec_text(
+                    &env,
+                    "UPDATE auth_webauthn_challenges SET state = $1",
+                    padding,
+                )
+                .await;
+            } else {
+                sql_exec(
+                    &env,
+                    "UPDATE auth_webauthn_challenges SET state_format = 2",
+                    &[],
+                )
+                .await;
+            }
             let ok = key.assert(&options, UP, 2);
             assert!(
                 matches!(
                     finish(&mut env, pending, ok).await,
                     Err(AuthError::Unauthorized)
                 ),
-                "{tamper}"
+                "oversized: {oversized}"
             );
         }
         // An unknown pending id gets nothing; worker purges what expired.
@@ -583,7 +608,7 @@ fn state_and_pending_rows_are_single_use_and_expire() {
 #[test]
 fn inv_83_is_decided_against_the_counter_of_record() {
     block_on(async {
-        let mut env = Env::new(83).await;
+        let mut env = Env::on_either_engine(83, |_| {}).await;
         let client = env.signup("lin", "pw").await;
         let session = fresh(&mut env, &client).await;
         let key = SoftKey::new(&mut env, 3);
@@ -645,7 +670,7 @@ fn inv_83_is_decided_against_the_counter_of_record() {
 #[test]
 fn a_key_removed_mid_ceremony_is_refused() {
     block_on(async {
-        let mut env = Env::new(84).await;
+        let mut env = Env::on_either_engine(84, |_| {}).await;
         let client = env.signup("rae", "pw").await;
         let session = fresh(&mut env, &client).await;
         let (one, two) = (SoftKey::new(&mut env, 4), SoftKey::new(&mut env, 5));
@@ -680,7 +705,7 @@ fn a_key_removed_mid_ceremony_is_refused() {
 #[test]
 fn rp_id_origin_and_type_are_bound() {
     block_on(async {
-        let mut env = Env::new(85).await;
+        let mut env = Env::on_either_engine(85, |_| {}).await;
         let client = env.signup("ivo", "pw").await;
         let session = fresh(&mut env, &client).await;
         let key = SoftKey::new(&mut env, 6);
@@ -757,7 +782,7 @@ fn rp_id_origin_and_type_are_bound() {
 #[test]
 fn attestation_and_algorithms() {
     block_on(async {
-        let mut env = Env::new(86).await;
+        let mut env = Env::on_either_engine(86, |_| {}).await;
         let client = env.signup("oz", "pw").await;
         let session = fresh(&mut env, &client).await;
         let confirm = async |env: &mut Env, key: &SoftKey, statement, alg| {
@@ -815,7 +840,7 @@ fn attestation_and_algorithms() {
 #[test]
 fn user_verification_follows_enrolment() {
     block_on(async {
-        let mut env = Env::new(87).await;
+        let mut env = Env::on_either_engine(87, |_| {}).await;
         let client = env.signup("uma", "pw").await;
         let session = fresh(&mut env, &client).await;
         // A key that performed UV at enrolment must perform it at every assertion.
@@ -835,8 +860,10 @@ fn user_verification_follows_enrolment() {
             login_with(&mut env, &client, &pin, UV, 3).await,
             Err(AuthError::Unauthorized)
         ));
+        // One database at a time on PostgreSQL: the first account's environment goes first.
+        drop(env);
 
-        let mut env = Env::new(88).await;
+        let mut env = Env::on_either_engine(88, |_| {}).await;
         let client = env.signup("vic", "pw").await;
         let session = fresh(&mut env, &client).await;
         // A key enrolled with UP alone asserts with UP alone.
@@ -851,7 +878,7 @@ fn user_verification_follows_enrolment() {
 #[test]
 fn totp_and_a_key_each_satisfy_the_second_factor() {
     block_on(async {
-        let mut env = Env::new(89).await;
+        let mut env = Env::on_either_engine(89, |_| {}).await;
         let client = env.signup("tess", "pw").await;
         let session = fresh(&mut env, &client).await;
         let key = SoftKey::new(&mut env, 30);
@@ -899,7 +926,7 @@ fn totp_and_a_key_each_satisfy_the_second_factor() {
 #[test]
 fn assertions_are_rate_limited_per_account() {
     block_on(async {
-        let mut env = Env::with_config(90, |c| {
+        let mut env = Env::on_either_engine(90, |c| {
             c.rate_limits.webauthn_per_account.max_attempts = 2;
         })
         .await;
@@ -937,7 +964,7 @@ fn committed_fixture_rows_still_verify() {
             serde_json::from_str(include_str!("fixtures/webauthn_security_keys_0_5_5.json"))
                 .unwrap();
         for (i, fixture) in fixtures.as_array().unwrap().iter().enumerate() {
-            let mut env = Env::new(100 + u64::try_from(i).unwrap()).await;
+            let mut env = Env::on_either_engine(100 + u64::try_from(i).unwrap(), |_| {}).await;
             let client = env.signup("fix", "pw").await;
             let key = SoftKey {
                 signing: Es256SigningKey::from_bytes(&unb64(
@@ -947,21 +974,21 @@ fn committed_fixture_rows_still_verify() {
                 cred_id: unb64(fixture["credential_id"].as_str().unwrap()),
             };
             let mut tx = env.db.begin_write().await.unwrap();
-            let Conn::Sqlite(c) = tx.conn() else {
-                panic!("the tests run on SQLite")
-            };
-            sqlx::query(
+            let security_key = fixture["security_key"].as_str().unwrap().to_owned();
+            let sign_count = fixture["sign_count"].as_i64().unwrap();
+            rizzy_storage::on_engine!(tx.conn(), |c| sqlx::query(
                 "INSERT INTO auth_webauthn_credentials (account_id, credential_id, alg, \
                  security_key, security_key_format, sign_count, label, created_ms) \
                  VALUES ($1, $2, 1, $3, 1, $4, 'fixture', 1)",
             )
-            .bind(&client.account_id.as_bytes()[..])
-            .bind(&key.cred_id)
-            .bind(fixture["security_key"].as_str().unwrap())
-            .bind(fixture["sign_count"].as_i64().unwrap())
+            .bind(client.account_id.as_bytes().to_vec())
+            .bind(key.cred_id.clone())
+            .bind(security_key.clone())
+            .bind(sign_count)
             .execute(&mut *c)
             .await
-            .unwrap();
+            .map(|_| ())
+            .unwrap());
             tx.commit().await.unwrap();
             let flags = u8::try_from(fixture["flags"].as_u64().unwrap()).unwrap();
             let next = u32::try_from(fixture["sign_count"].as_u64().unwrap()).unwrap() + 1;
