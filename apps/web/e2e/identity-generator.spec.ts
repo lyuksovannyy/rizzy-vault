@@ -452,7 +452,15 @@ test("settings defaults and domain; a remembered exact age; saving persists acro
   const checkView = async (p: Page) => {
     for (const key of keys) {
       const value = saved[key] ?? "";
-      const expected = key === "identity.sex" ? "Female" : key === "identity.birthday" ? longDate(value) : value;
+      const expected =
+        key === "identity.sex"
+          ? "Female"
+          : key === "identity.birthday"
+            ? longDate(value)
+            : key === "identity.country"
+              ? // ADR 0079 §1: a two-letter code with the country's name next to it, in the browser's locale.
+                await p.evaluate((v) => `${v} (${new Intl.DisplayNames(undefined, { type: "region" }).of(v) ?? v})`, value)
+              : value;
       await expect(shown(p, key), key).toHaveText(expected);
     }
   };

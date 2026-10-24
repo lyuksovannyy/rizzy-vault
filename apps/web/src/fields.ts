@@ -233,11 +233,31 @@ export function formatIsoDate(value: string, locale?: string): string {
   return date.toLocaleDateString(locale, { timeZone: "UTC", dateStyle: "long" });
 }
 
+/** The name of a two-letter region code, in any case, in the reader's locale; `undefined` for
+ * anything else or a code the browser does not know (ADR 0079 §1 `identity.country`). */
+export function countryName(value: string, locale?: string): string | undefined {
+  if (!/^[A-Za-z]{2}$/.test(value)) {
+    return undefined;
+  }
+  const code = value.toUpperCase();
+  try {
+    const name = new Intl.DisplayNames(locale === undefined ? undefined : [locale], { type: "region" }).of(code);
+    return name === undefined || name === code ? undefined : name;
+  } catch {
+    return undefined;
+  }
+}
+
 /** A field's value as the item view shows it (ADR 0079 §1): the sex and birthday localized
- * when they hold a picked value, every other value as entered. */
+ * when they hold a picked value, a two-letter country code with the country's name next to it,
+ * every other value as entered. */
 export function displayValue(key: string, value: string): string {
   if (key === "identity.sex") {
     return sexLabel(value);
+  }
+  if (key === "identity.country") {
+    const name = countryName(value);
+    return name === undefined ? value : `${value} (${name})`;
   }
   if (key === "identity.birthday" && isIsoDate(value)) {
     return formatIsoDate(value);
