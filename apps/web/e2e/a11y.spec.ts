@@ -334,6 +334,10 @@ test("a11y: an item's attachments section, its error and its delete dialog (ADR 
   await expectAccessible(page, "item view: one attachment");
   await input.setInputFiles({ name: "big.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(25 * 1024 * 1024 + 1) });
   await expect(section.getByRole("alert")).toBeVisible();
+  // The "Attached" toast is dismissed before the audits below: under load it can still be on
+  // screen, mid-update, while the colour scheme switches, which the focusable-element check
+  // reports as a race rather than a real finding (it passes when run alone).
+  await dismissToasts(page);
   await expectAccessible(page, "item view: attachment too large");
   await page.emulateMedia({ colorScheme: "dark" });
   await expectAccessible(page, "item view: attachments (dark)");
