@@ -11,7 +11,8 @@
 //! row with `$1 … $n`; both list the columns in the order of [`TableSpec::columns`].
 //!
 //! **Not backed up** (the conservative reading of "every table as rows"; see the crate docs):
-//! - `auth_sessions`, `auth_login_states` and `auth_device_challenges`: a restore must not
+//! - `auth_sessions`, `auth_login_states`, `auth_device_challenges` and the WebAuthn
+//!   `auth_webauthn_pending`/`auth_webauthn_challenges` rows (ADR 0077 §2): a restore must not
 //!   revive sessions that were ended after the backup (for example those of a device revoked
 //!   since, INV-59), and 60 s login state and challenges mean nothing after a restore. Every
 //!   user signs in again.
@@ -70,6 +71,8 @@ pub const NOT_BACKED_UP: &[&str] = &[
     "auth_sessions",
     "auth_login_states",
     "auth_device_challenges",
+    "auth_webauthn_pending",
+    "auth_webauthn_challenges",
     "storage_meta",
     "storage_reconciliation",
 ];
@@ -218,6 +221,21 @@ pub const TABLES: &[TableSpec] = &[
             col("sender_device_id", Kind::Blob, false),
             col("grant_record", Kind::Blob, false),
             col("stored_at_ms", Kind::Integer, false),
+        ],
+    },
+    TableSpec {
+        name: "auth_webauthn_credentials",
+        select: include_str!("../queries/backup/auth_webauthn_credentials.select.sql"),
+        insert: include_str!("../queries/backup/auth_webauthn_credentials.insert.sql"),
+        columns: &[
+            col("account_id", Kind::Blob, false),
+            col("credential_id", Kind::Blob, false),
+            col("alg", Kind::Integer, false),
+            col("security_key", Kind::Text, false),
+            col("security_key_format", Kind::Integer, false),
+            col("sign_count", Kind::Integer, false),
+            col("label", Kind::Text, false),
+            col("created_ms", Kind::Integer, false),
         ],
     },
     TableSpec {

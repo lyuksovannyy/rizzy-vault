@@ -190,6 +190,20 @@ pub(crate) fn fixture() -> Dump {
             "auth_key_grants",
             vec![vec![a1(), d1(), int(1), d3(), blob(15, 160), int(23)]],
         ),
+        // ADR 0077 §4: one ES256 security key, its SecurityKey JSON opaque to storage.
+        (
+            "auth_webauthn_credentials",
+            vec![vec![
+                a1(),
+                blob(46, 64),
+                int(1),
+                Value::Text("{\"cred\":{}}".to_owned()),
+                int(1),
+                int(7),
+                Value::Text("YubiKey".to_owned()),
+                int(47),
+            ]],
+        ),
         (
             "auth_totp_credentials",
             vec![vec![
