@@ -11,6 +11,7 @@ import { MAX_PALETTE_ITEMS, actionLabel, actionsFor, itemRowsFor, matchesLabel }
 function item(over: Partial<ItemSummary>): ItemSummary {
   return {
     id: "1",
+    vaultId: "v",
     itemType: "login",
     title: "Example",
     username: undefined,

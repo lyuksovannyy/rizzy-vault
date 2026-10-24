@@ -26,6 +26,7 @@ import { MAX_GROUP_DOMAINS, METHODS, isSettingsChange } from "../src/protocol.ts
 function item(id: string, title: string): ItemSummary {
   return {
     id,
+    vaultId: "v",
     itemType: "login",
     title,
     username: undefined,

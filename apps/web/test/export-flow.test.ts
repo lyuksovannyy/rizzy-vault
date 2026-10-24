@@ -41,11 +41,11 @@ function fakeCore(): { client: Caller; calls: string[] } {
         if (!fresh) {
           return Promise.reject(new CallError("reauth_required"));
         }
-        if (args[0] !== "EXPORT PLAINTEXT") {
+        if (args[1] !== "EXPORT PLAINTEXT") {
           return Promise.reject(new CallError("plaintext_export_not_acknowledged"));
         }
         fresh = false;
-        const password = new TextDecoder().decode(args[1] as Uint8Array);
+        const password = new TextDecoder().decode(args[2] as Uint8Array);
         return Promise.resolve({ file: new TextEncoder().encode(password), passkeys: 2 });
       }
       default:
@@ -58,7 +58,7 @@ function fakeCore(): { client: Caller; calls: string[] } {
 describe("the export gate", () => {
   it("asks the core for nothing without a re-authentication", async () => {
     const { client, calls } = fakeCore();
-    await expect(encryptedExport(client, "file pw", "file pw")).rejects.toMatchObject({
+    await expect(encryptedExport(client, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "file pw", "file pw")).rejects.toMatchObject({
       code: "reauth_required",
     });
     expect(calls).not.toContain("exportEncrypted");
@@ -69,7 +69,7 @@ describe("the export gate", () => {
     await expect(confirmIdentity(client, "RV1-…", "wrong")).rejects.toMatchObject({
       code: "wrong_password_or_secret_key",
     });
-    await expect(encryptedExport(client, "file pw", "file pw")).rejects.toMatchObject({
+    await expect(encryptedExport(client, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "file pw", "file pw")).rejects.toMatchObject({
       code: "reauth_required",
     });
     expect(calls).not.toContain("exportEncrypted");
@@ -78,9 +78,9 @@ describe("the export gate", () => {
   it("allows one export per re-authentication", async () => {
     const { client } = fakeCore();
     await confirmIdentity(client, "RV1-…", "master password");
-    const out = await encryptedExport(client, "file pw", "file pw");
+    const out = await encryptedExport(client, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "file pw", "file pw");
     expect(out.items).toBe(1);
-    await expect(encryptedExport(client, "file pw", "file pw")).rejects.toMatchObject({
+    await expect(encryptedExport(client, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "file pw", "file pw")).rejects.toMatchObject({
       code: "reauth_required",
     });
   });
@@ -88,7 +88,7 @@ describe("the export gate", () => {
   it("wants the file's password twice, the same", async () => {
     const { client, calls } = fakeCore();
     await confirmIdentity(client, "RV1-…", "master password");
-    await expect(encryptedExport(client, "file pw", "file pwd")).rejects.toMatchObject({
+    await expect(encryptedExport(client, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "file pw", "file pwd")).rejects.toMatchObject({
       code: "passwords_differ",
     });
     expect(calls).not.toContain("exportEncrypted");
@@ -98,11 +98,11 @@ describe("the export gate", () => {
 describe("the CXF passkey export (ADR 0074 §2)", () => {
   it("needs a re-authentication and the file's password twice, the same", async () => {
     const { client, calls } = fakeCore();
-    await expect(cxfExport(client, "file pw", "file pw", "EXPORT PLAINTEXT")).rejects.toMatchObject({
+    await expect(cxfExport(client, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "file pw", "file pw", "EXPORT PLAINTEXT")).rejects.toMatchObject({
       code: "reauth_required",
     });
     await confirmIdentity(client, "RV1-…", "master password");
-    await expect(cxfExport(client, "file pw", "other", "EXPORT PLAINTEXT")).rejects.toMatchObject({
+    await expect(cxfExport(client, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "file pw", "other", "EXPORT PLAINTEXT")).rejects.toMatchObject({
       code: "passwords_differ",
     });
     expect(calls).not.toContain("exportCxf");
@@ -111,13 +111,13 @@ describe("the CXF passkey export (ADR 0074 §2)", () => {
   it("hands the typed phrase and the password bytes to the core, once", async () => {
     const { client } = fakeCore();
     await confirmIdentity(client, "RV1-…", "master password");
-    await expect(cxfExport(client, "file pw", "file pw", "export plaintext")).rejects.toMatchObject({
+    await expect(cxfExport(client, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "file pw", "file pw", "export plaintext")).rejects.toMatchObject({
       code: "plaintext_export_not_acknowledged",
     });
-    const out = await cxfExport(client, "file pw", "file pw", "EXPORT PLAINTEXT");
+    const out = await cxfExport(client, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "file pw", "file pw", "EXPORT PLAINTEXT");
     expect(out.passkeys).toBe(2);
     expect(new TextDecoder().decode(out.file)).toBe("file pw");
-    await expect(cxfExport(client, "file pw", "file pw", "EXPORT PLAINTEXT")).rejects.toMatchObject({
+    await expect(cxfExport(client, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "file pw", "file pw", "EXPORT PLAINTEXT")).rejects.toMatchObject({
       code: "reauth_required",
     });
   });

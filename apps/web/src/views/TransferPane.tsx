@@ -21,12 +21,13 @@
 import type { DetectedImportFormat, ImportReport } from "@rizzy-vault/core";
 import { t } from "@rizzy-vault/i18n";
 import { SecretField, setModalOpen, trapTab } from "@rizzy-vault/ui";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 
 import { codeOf, secretBytes } from "../core-client.ts";
 import { dateStamp, saveFile } from "../download.ts";
 import { FORMAT_LABELS, confirmIdentity, cxfExport, encryptedExport, importPlan } from "../export-flow.ts";
 import { confirmEnabled, startCountdown } from "../hold.ts";
+import { defaultVault, vaultLabel, writableVaults } from "../vaults.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, takeSecret, useAction } from "./common.tsx";
 
@@ -80,6 +81,8 @@ function Reauthenticate(props: { readonly ctx: VaultContext; readonly onDone: ()
 /** The encrypted export form, after the re-authentication. */
 function EncryptedExport(props: {
   readonly ctx: VaultContext;
+  /** The vault exported (ADR 0081 §A8: one export is one vault). */
+  readonly vaultId: string;
   readonly onDone: (message: string | undefined, code: string | undefined) => void;
 }) {
   const { ctx } = props;
@@ -93,8 +96,8 @@ function EncryptedExport(props: {
     const again = takeSecret(repeat.current);
     void run(async () => {
       try {
-        const blockers = await ctx.client.call("exportBlockers");
-        const out = await encryptedExport(ctx.client, pw, again);
+        const blockers = await ctx.client.call("exportBlockers", props.vaultId);
+        const out = await encryptedExport(ctx.client, props.vaultId, pw, again);
         saveFile(`rizzy-vault-export-${dateStamp()}.json`, out.file, "application/json");
         props.onDone(
           `Exported ${out.items} item(s). Keep the file's password: it is needed to import the file.` +
@@ -147,6 +150,7 @@ function EncryptedExport(props: {
  */
 function PlaintextDialog(props: {
   readonly ctx: VaultContext;
+  readonly vaultId: string;
   readonly format: "json" | "csv";
   readonly onClose: (message: string | undefined, code: string | undefined) => void;
 }) {
@@ -179,7 +183,7 @@ function PlaintextDialog(props: {
     void Promise.all([
       ctx.client.call("plaintextExportWarning"),
       ctx.client.call("plaintextExportPhrase"),
-      format === "csv" ? ctx.client.call("csvExportWarning") : Promise.resolve(""),
+      format === "csv" ? ctx.client.call("csvExportWarning", props.vaultId) : Promise.resolve(""),
     ]).then(async ([w, p, c]) => {
       if (!live) {
         return;
@@ -197,13 +201,13 @@ function PlaintextDialog(props: {
       live = false;
       stop();
     };
-  }, [ctx.client, format]);
+  }, [ctx.client, format, props.vaultId]);
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
     void run(async () => {
       try {
-        const bytes = await ctx.client.call("exportPlaintext", format, typed);
+        const bytes = await ctx.client.call("exportPlaintext", props.vaultId, format, typed);
         saveFile(
           `rizzy-vault-plaintext-${dateStamp()}.${format}`,
           bytes,
@@ -285,6 +289,7 @@ function PlaintextDialog(props: {
 /** The plaintext export: the format, and the button that opens the dialog. */
 function PlaintextExport(props: {
   readonly ctx: VaultContext;
+  readonly vaultId: string;
   readonly onDone: (message: string | undefined, code: string | undefined) => void;
 }) {
   const [format, setFormat] = useState<"json" | "csv">("json");
@@ -315,6 +320,7 @@ function PlaintextExport(props: {
       {open && (
         <PlaintextDialog
           ctx={props.ctx}
+          vaultId={props.vaultId}
           format={format}
           onClose={(message, code) => {
             setOpen(false);
@@ -336,6 +342,7 @@ function PlaintextExport(props: {
  */
 function CxfDialog(props: {
   readonly ctx: VaultContext;
+  readonly vaultId: string;
   readonly onClose: (message: string | undefined, code: string | undefined) => void;
 }) {
   const { ctx, onClose } = props;
@@ -389,7 +396,7 @@ function CxfDialog(props: {
     const again = takeSecret(repeat.current);
     void run(async () => {
       try {
-        const exported = await cxfExport(ctx.client, pw, again, typed);
+        const exported = await cxfExport(ctx.client, props.vaultId, pw, again, typed);
         saveFile(`rizzy-vault-passkeys-${dateStamp()}.json`, exported.file, "application/json");
         onClose(t("transfer.cxfWritten", { count: String(exported.passkeys) }), undefined);
       } catch (err) {
@@ -465,6 +472,7 @@ function CxfDialog(props: {
  * dialog. */
 function CxfExport(props: {
   readonly ctx: VaultContext;
+  readonly vaultId: string;
   readonly onDone: (message: string | undefined, code: string | undefined) => void;
 }) {
   const { ctx } = props;
@@ -472,7 +480,7 @@ function CxfExport(props: {
   const [count, setCount] = useState<number | undefined>();
   useEffect(() => {
     let live = true;
-    ctx.client.call("cxfExportPasskeys").then(
+    ctx.client.call("cxfExportPasskeys", props.vaultId).then(
       (n) => {
         if (live) {
           setCount(n);
@@ -483,7 +491,7 @@ function CxfExport(props: {
     return () => {
       live = false;
     };
-  }, [ctx.client]);
+  }, [ctx.client, props.vaultId]);
   return (
     <div aria-labelledby="export-cxf-choice-title">
       <h2 id="export-cxf-choice-title">{t("transfer.cxfTitle")}</h2>
@@ -497,6 +505,7 @@ function CxfExport(props: {
       {open && (
         <CxfDialog
           ctx={ctx}
+          vaultId={props.vaultId}
           onClose={(message, code) => {
             setOpen(false);
             if (message !== undefined || code !== undefined) {
@@ -511,7 +520,15 @@ function CxfExport(props: {
 
 /** Export: the re-authentication, then the encrypted, plaintext and passkey exports. */
 function Export(props: { readonly ctx: VaultContext }) {
+  const { ctx } = props;
   const [authed, setAuthed] = useState(false);
+  /** The vault exported (ADR 0081 §A8: one export is one vault), Personal preselected. */
+  const [vaultId, setVaultId] = useState<string | undefined>(() =>
+    ctx.vaults.find((v) => v.id === ctx.personalVaultId && v.status === "open")?.id ??
+    ctx.vaults.find((v) => v.status === "open")?.id,
+  );
+  const exportVaultSelect = useId();
+  const exportable = ctx.vaults.filter((v) => v.status === "open");
   const [result, setResult] = useState<string | undefined>();
   const [code, setCode] = useState<string | undefined>();
   // One export per re-authentication: whatever an export did, the next one asks again.
@@ -534,13 +551,28 @@ function Export(props: { readonly ctx: VaultContext }) {
           }}
         />
       ) : (
-        <>
-          <EncryptedExport ctx={props.ctx} onDone={done} />
-          <hr />
-          <PlaintextExport ctx={props.ctx} onDone={done} />
-          <hr />
-          <CxfExport ctx={props.ctx} onDone={done} />
-        </>
+        vaultId !== undefined && (
+          <>
+            <label htmlFor={exportVaultSelect}>{t("vaults.picker")}</label>
+            <select
+              id={exportVaultSelect}
+              name="export-vault"
+              value={vaultId}
+              onChange={(e) => setVaultId(e.currentTarget.value)}
+            >
+              {exportable.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {vaultLabel(v)}
+                </option>
+              ))}
+            </select>
+            <EncryptedExport ctx={props.ctx} vaultId={vaultId} onDone={done} />
+            <hr />
+            <PlaintextExport ctx={props.ctx} vaultId={vaultId} onDone={done} />
+            <hr />
+            <CxfExport ctx={props.ctx} vaultId={vaultId} onDone={done} />
+          </>
+        )
       )}
     </section>
   );
@@ -559,6 +591,9 @@ export function ImportForm(props: {
   const [detected, setDetected] = useState<DetectedImportFormat | undefined>();
   const [chosen, setChosen] = useState<DetectedImportFormat | "auto">("auto");
   const [report, setReport] = useState<ImportReport | undefined>();
+  /** The import's target vault (ADR 0081 §A8): the Personal vault, preselected every time. */
+  const [vaultId, setVaultId] = useState<string | undefined>(() => defaultVault(ctx.vaults, ctx.personalVaultId));
+  const importVaultSelect = useId();
   const password = useRef<HTMLInputElement>(null);
   const { busy, error, setError, run } = useAction();
 
@@ -595,14 +630,19 @@ export function ImportForm(props: {
     }
     const sealed = plan.kind === "encrypted" || plan.kind === "cxf-encrypted";
     const pw = sealed ? takeSecret(password.current) : undefined;
+    const target = vaultId ?? defaultVault(ctx.vaults, ctx.personalVaultId);
+    if (target === undefined) {
+      setError("vault_set_mismatch");
+      return;
+    }
     void run(async () => {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const r =
         plan.kind === "encrypted"
-          ? await ctx.client.call("importEncrypted", bytes, secretBytes(pw ?? ""))
+          ? await ctx.client.call("importEncrypted", target, bytes, secretBytes(pw ?? ""))
           : plan.kind === "cxf-encrypted"
-            ? await ctx.client.call("importCxfEncrypted", bytes, secretBytes(pw ?? ""))
-            : await ctx.client.call("importFile", plan.format, bytes);
+            ? await ctx.client.call("importCxfEncrypted", target, bytes, secretBytes(pw ?? ""))
+            : await ctx.client.call("importFile", target, plan.format, bytes);
       setReport(r);
       await ctx.afterWrite();
     });
@@ -633,6 +673,23 @@ export function ImportForm(props: {
           </option>
         ))}
       </select>
+      {writableVaults(ctx.vaults).length > 0 && (
+        <>
+          <label htmlFor={importVaultSelect}>{t("vaults.picker")}</label>
+          <select
+            id={importVaultSelect}
+            name="import-vault"
+            value={vaultId ?? ""}
+            onChange={(e) => setVaultId(e.currentTarget.value)}
+          >
+            {writableVaults(ctx.vaults).map((v) => (
+              <option key={v.id} value={v.id}>
+                {vaultLabel(v)}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
       {(plan?.kind === "encrypted" || plan?.kind === "cxf-encrypted") && (
         <SecretField
           label="Password of this export file"

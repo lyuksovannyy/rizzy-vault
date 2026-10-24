@@ -21,6 +21,7 @@
 // needs no reveal and puts no value on this thread.
 import type { FieldView, HistoryEntry, ItemSummary, TotpCode } from "@rizzy-vault/core";
 import { ConfirmDialog, IconStarFilled, IconStarOutline, ItemIcon, SecretField, useToast } from "@rizzy-vault/ui";
+import { t } from "@rizzy-vault/i18n";
 import { type ReactNode, useEffect, useId, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
@@ -45,6 +46,7 @@ import { LargeType } from "./LargeType.tsx";
 import { NoteMarkdown } from "./NoteMarkdown.tsx";
 import { BreachCheckButton } from "./PasswordHealth.tsx";
 import { PasswordHistory } from "./PasswordHistory.tsx";
+import { VaultPickDialog } from "./VaultDialogs.tsx";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, useAction } from "./common.tsx";
 
@@ -272,6 +274,8 @@ export function ItemView(props: {
   readonly id: string;
   readonly onEdit: () => void;
   readonly onWritten: (gone: boolean) => Promise<void>;
+  /** After "Move to…" (ADR 0081 §A6): the item now has a new reference in its new vault. */
+  readonly onMoved?: (newId: string) => Promise<void>;
 }) {
   const { ctx, id } = props;
   const [summary, setSummary] = useState<ItemSummary | undefined>();
@@ -279,6 +283,8 @@ export function ItemView(props: {
   const { busy, error, setError, run } = useAction();
   const { notify } = useToast();
   const titleId = useId();
+  /** "Move to…" / "Copy to…" (ADR 0081 §A6), when open. */
+  const [vaultAction, setVaultAction] = useState<"move" | "copy" | undefined>();
   /** Which confirm dialog, if any, is open (module docs, item 2 of the redesign follow-up:
    * trash and purge both confirm, now through the accessible dialog rather than
    * `window.confirm`). `{ kind: "deletePasskey", element }` names which `passkey/<element>/…`
@@ -316,7 +322,10 @@ export function ItemView(props: {
       }
     });
 
-  const writable = !ctx.session.readOnly;
+  // ADR 0081 §A2, §A12: an item is writable when its own vault is (a withheld vault or one
+  // that needs a newer rizzy-vault is read-only).
+  const itemVault = ctx.vaults.find((x) => x.id === summary?.vaultId);
+  const writable = itemVault === undefined ? !ctx.session.readOnly : itemVault.status === "open" && !itemVault.readOnly;
 
   /** Toggles favorite through the same `editItem` op the editor's checkbox writes (`fields.ts`
    * `item.favorite`): a one-op change over the existing write path, not a new one. */
@@ -475,12 +484,33 @@ export function ItemView(props: {
                   Edit
                 </button>
               )}
+              <button type="button" className="secondary" disabled={busy} onClick={() => setVaultAction("move")}>
+                {t("vaults.moveTo")}
+              </button>
+              <button type="button" className="secondary" disabled={busy} onClick={() => setVaultAction("copy")}>
+                {t("vaults.copyTo")}
+              </button>
               <button type="button" className="secondary" disabled={busy} onClick={() => setConfirming({ kind: "trash" })}>
                 Move to trash
               </button>
             </>
           )}
         </div>
+      )}
+      {vaultAction !== undefined && (
+        <VaultPickDialog
+          ctx={ctx}
+          mode={vaultAction}
+          itemId={id}
+          sourceVaultId={summary.vaultId}
+          onCancel={() => setVaultAction(undefined)}
+          onDone={(newId) => {
+            setVaultAction(undefined);
+            if (vaultAction === "move") {
+              void props.onMoved?.(newId);
+            }
+          }}
+        />
       )}
       <ConfirmDialog
         open={confirming?.kind === "trash"}

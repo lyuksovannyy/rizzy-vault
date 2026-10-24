@@ -25,7 +25,8 @@
 // resolved only when the whole draft is first saved.
 import type { CustomFieldAutofill, ItemChange, ItemSummary, ItemType } from "@rizzy-vault/core";
 import { PasswordGenerateSlot, SecretField } from "@rizzy-vault/ui";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { t } from "@rizzy-vault/i18n";
+import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 
 import {
   type AutocompleteRow,
@@ -35,7 +36,7 @@ import {
   lowercaseAscii,
   shadowedText,
 } from "../autocomplete.ts";
-import { codeOf } from "../core-client.ts";
+import { CallError, codeOf } from "../core-client.ts";
 import {
   type Element,
   type FixedField,
@@ -53,6 +54,7 @@ import { GENERATOR_LIMITS } from "../generator-constants.ts";
 import { fillGenerated, generateValue } from "../generator-flow.ts";
 import { messageFor } from "../messages.ts";
 import { useIdentityGenerator } from "./IdentityGenerator.tsx";
+import { defaultVault, vaultLabel, writableVaults } from "../vaults.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, peekSecret, useAction } from "./common.tsx";
 
@@ -119,6 +121,11 @@ export function ItemEditor(props: {
   readonly onSaved: (id: string) => Promise<void>;
 }) {
   const { ctx } = props;
+  /** The new item's vault (ADR 0081 §A8): the Personal vault, preselected every time. */
+  const vaultSelectId = useId();
+  const [targetVault, setTargetVault] = useState<string | undefined>(() =>
+    defaultVault(ctx.vaults, ctx.personalVaultId),
+  );
   const [summary, setSummary] = useState<ItemSummary | undefined>();
   const [current, setCurrent] = useState<Grouped | undefined>();
   const [texts, setTexts] = useState<Record<string, string>>({});
@@ -548,7 +555,11 @@ export function ItemEditor(props: {
         if (props.newType === undefined) {
           return;
         }
-        id = await ctx.client.call("createItem", props.newType, changes);
+        const vault = targetVault ?? defaultVault(ctx.vaults, ctx.personalVaultId) ?? ctx.personalVaultId;
+        if (vault === undefined) {
+          throw new CallError("vault_set_mismatch");
+        }
+        id = await ctx.client.call("createItem", vault, props.newType, changes);
         identityGen.saved();
       } else if (changes.length > 0) {
         await ctx.client.call("editItem", id, changes);
@@ -568,6 +579,23 @@ export function ItemEditor(props: {
       <h2 id="editor-title">
         {props.id === undefined ? `New ${CREATABLE_TYPES.find((t) => t.type === type)?.noun ?? type}` : "Edit item"}
       </h2>
+      {props.id === undefined && writableVaults(ctx.vaults).length > 0 && (
+        <div className="field-edit">
+          <label htmlFor={vaultSelectId}>{t("vaults.picker")}</label>
+          <select
+            id={vaultSelectId}
+            name="item-vault"
+            value={targetVault ?? ""}
+            onChange={(e) => setTargetVault(e.currentTarget.value)}
+          >
+            {writableVaults(ctx.vaults).map((v) => (
+              <option key={v.id} value={v.id}>
+                {vaultLabel(v)}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       {identityGen.bar}
       {fieldsOf(type).map((f) => {
         const before = held.get(f.key);

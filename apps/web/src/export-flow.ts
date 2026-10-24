@@ -37,6 +37,7 @@ export async function confirmIdentity(
  */
 export async function encryptedExport(
   client: Caller,
+  vaultId: string,
   password: string,
   repeat: string,
 ): Promise<EncryptedExport> {
@@ -46,7 +47,7 @@ export async function encryptedExport(
   if (!(await client.call("reauthFresh"))) {
     throw new CallError("reauth_required");
   }
-  return client.call("exportEncrypted", secretBytes(password));
+  return client.call("exportEncrypted", vaultId, secretBytes(password));
 }
 
 /**
@@ -57,6 +58,7 @@ export async function encryptedExport(
  */
 export async function cxfExport(
   client: Caller,
+  vaultId: string,
   password: string,
   repeat: string,
   typedPhrase: string,
@@ -67,7 +69,7 @@ export async function cxfExport(
   if (!(await client.call("reauthFresh"))) {
     throw new CallError("reauth_required");
   }
-  return client.call("exportCxf", typedPhrase, secretBytes(password));
+  return client.call("exportCxf", vaultId, typedPhrase, secretBytes(password));
 }
 
 /** What the import form does with a recognised (or chosen) format. */

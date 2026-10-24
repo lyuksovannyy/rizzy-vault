@@ -45,6 +45,8 @@ import type {
   StorageUsage,
   TotpCode,
   TwoFactorSetup,
+  VaultAlarm,
+  VaultInfo,
 } from "@rizzy-vault/core";
 
 /** The session state the UI shows. */
@@ -111,7 +113,26 @@ export interface CoreApi {
   /** What each custom field's autocomplete id does (ADR 0076 §2.5): no value. */
   customFieldAutofill(id: string): CustomFieldAutofill[];
   reveal(id: string, key: string): string;
-  createItem(itemType: ItemType, changes: ItemChange[]): string;
+  /** Creates an item in `vaultId` (ADR 0081 §A8); returns its reference. */
+  createItem(vaultId: string, itemType: ItemType, changes: ItemChange[]): string;
+  /** Every vault (ADR 0081 §A2): Personal first, then the others by name. */
+  vaults(): VaultInfo[];
+  /** The Personal vault, preselected everywhere (§A8). */
+  personalVaultId(): string | undefined;
+  /** The vault completeness check's alarms (INV-102). */
+  vaultAlarms(): VaultAlarm[];
+  /** Unsent changes discarded with vaults deleted elsewhere, since the last call. */
+  takeDiscardedChanges(): number;
+  /** Creates an owned vault (§A3); returns its id. */
+  createVault(name: string): string;
+  /** Renames an owned vault (§A4). */
+  renameVault(vaultId: string, name: string): void;
+  /** Deletes an owned vault (§A5), its items moved to Personal first with `keepItems`. */
+  deleteVault(vaultId: string, keepItems: boolean): void;
+  /** Copies an item into another vault (§A6); returns the copy's reference. */
+  copyItem(id: string, targetVaultId: string): string;
+  /** Moves an item into another vault (§A6); returns the new reference. */
+  moveItem(id: string, targetVaultId: string): string;
   editItem(id: string, changes: ItemChange[]): void;
   trashItem(id: string): void;
   restoreItem(id: string): void;
@@ -161,22 +182,22 @@ export interface CoreApi {
    * the core checked, or `null` when there is none to show. Only the hostname is sent. Runs
    * beside the call queue (it touches no session state), and only while unlocked. */
   itemIcon(websiteHost: string): Uint8Array | null;
-  exportEncrypted(password: Uint8Array): EncryptedExport;
-  exportBlockers(): string[];
-  csvExportWarning(): string;
+  exportEncrypted(vaultId: string, password: Uint8Array): EncryptedExport;
+  exportBlockers(vaultId: string): string[];
+  csvExportWarning(vaultId: string): string;
   reauthenticate(secretKey: Uint8Array, password: Uint8Array): void;
   reauthFresh(): boolean;
   plaintextWarningShown(): number;
-  exportPlaintext(format: "json" | "csv", typedPhrase: string): Uint8Array;
+  exportPlaintext(vaultId: string, format: "json" | "csv", typedPhrase: string): Uint8Array;
   detectImportFormat(file: Uint8Array): DetectedImportFormat;
-  importFile(format: ImportFormat, file: Uint8Array): ImportReport;
-  importEncrypted(file: Uint8Array, password: Uint8Array): ImportReport;
+  importFile(vaultId: string, format: ImportFormat, file: Uint8Array): ImportReport;
+  importEncrypted(vaultId: string, file: Uint8Array, password: Uint8Array): ImportReport;
   /** How many passkeys a CXF export would hold now (ADR 0074 §2). */
-  cxfExportPasskeys(): number;
+  cxfExportPasskeys(vaultId: string): number;
   /** The CXF passkey export (ADR 0074 §2), gated like {@link exportPlaintext}. */
-  exportCxf(typedPhrase: string, password: Uint8Array): CxfExport;
+  exportCxf(vaultId: string, typedPhrase: string, password: Uint8Array): CxfExport;
   /** Imports our own CXF passkey export with its file password (ADR 0074 §3). */
-  importCxfEncrypted(file: Uint8Array, password: Uint8Array): ImportReport;
+  importCxfEncrypted(vaultId: string, file: Uint8Array, password: Uint8Array): ImportReport;
   devices(): DeviceView[];
   /** The account's live sessions (ADR 0075 R1): the server's word, for display. */
   sessions(): SessionListView;
@@ -263,6 +284,15 @@ export const METHODS: readonly Method[] = [
   "customFieldAutofill",
   "reveal",
   "createItem",
+  "vaults",
+  "personalVaultId",
+  "vaultAlarms",
+  "takeDiscardedChanges",
+  "createVault",
+  "renameVault",
+  "deleteVault",
+  "copyItem",
+  "moveItem",
   "editItem",
   "trashItem",
   "restoreItem",
