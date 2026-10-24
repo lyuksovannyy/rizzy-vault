@@ -13,6 +13,7 @@ import {
   canEditFields,
   compareFavoriteFirst,
   controlOf,
+  countryName,
   displayValue,
   formatIsoDate,
   isIsoDate,
@@ -372,6 +373,17 @@ describe("Sex and Birthday (ADR 0079 §1, §10)", () => {
     expect(formatIsoDate("1998-04-17", "en-US")).toBe("April 17, 1998");
     expect(displayValue("identity.birthday", "04/17/1998")).toBe("04/17/1998");
     expect(displayValue("identity.city", "male")).toBe("male");
+  });
+
+  it("show a two-letter country code with its name next to it, in any case (ADR 0079 §1)", () => {
+    expect(countryName("de", "en")).toBe("Germany");
+    expect(countryName("US", "en")).toBe("United States");
+    expect(countryName("Germany", "en")).toBeUndefined();
+    expect(countryName("D1", "en")).toBeUndefined();
+    expect(countryName("", "en")).toBeUndefined();
+    const name = countryName("DE");
+    expect(displayValue("identity.country", "DE")).toBe(`DE (${name ?? ""})`);
+    expect(displayValue("identity.country", "Deutschland")).toBe("Deutschland");
   });
 
   it("read a date as a civil day: no time zone shift, real days only", () => {
