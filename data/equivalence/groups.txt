@@ -1,51 +1,156 @@
-# Human-editable source for the global equivalence list (ADR 0038 §1, §4).
+# Human-editable source for the global equivalence list (ADR 0038 §1, §4): the "default site
+# groups" of ADR 0080, on for every account unless the account turns a group off.
 #
 # NOT TOML, despite the filename ADR 0038 §1 suggests ("data/equivalence/groups.toml"): no
 # TOML (or other structured-text) crate is in [workspace.dependencies], and adding one is out
-# of scope for this change (CLAUDE.md "Dependencies": a new crate is justified and reviewed on
-# its own). ADR 0038 §1's own fallback applies instead: "a minimal hand-written line format
-# documented in the file." This is that format, kept deliberately small.
+# of scope (CLAUDE.md "Dependencies"). ADR 0038 §1's own fallback applies instead: "a minimal
+# hand-written line format documented in the file." This is that format, kept deliberately
+# small (ADR 0080 §4 keeps it).
 #
 # FORMAT. One group per line:
 #
 #   group_id (32 hex characters, 16 bytes) | third_party_hostable (0 or 1) | domain,domain,...
 #
-# - group_id: random, generated with a CSPRNG (e.g. `python3 -c "import secrets;
-#   print(secrets.token_hex(16))"`), assigned once and never reused or reassigned (ADR 0038
-#   §1). Changing a group's domains or its flag on an existing line never changes its id.
+# - group_id: random, generated with an OS CSPRNG (e.g. `head -c 16 /dev/urandom | od -An
+#   -tx1 | tr -d ' \n'`, or `python3 -c "import secrets; print(secrets.token_hex(16))"`),
+#   assigned once and never reused or reassigned (ADR 0038 §1). Changing a group's domains or
+#   its flag on an existing line never changes its id. Never derive an id from an upstream
+#   `type` number (ADR 0080 §2).
 # - third_party_hostable: 1 only for a domain the Public Suffix List already splits by
-#   registrant (ADR 0037 §3; ADR 0038 §1, §4 point 3); 0 for everything else. None of the
-#   starter groups below need it.
-# - domains: two or more, comma-separated, no spaces required (surrounding whitespace is
-#   trimmed), each a registrable domain. `cargo xtask equivalence-list` normalises each to its
-#   IDNA A-label form and rejects the line if a domain does not normalise, is an IP literal,
+#   registrant (ADR 0037 §3; ADR 0038 §1, §4 point 3); 0 for everything else. No group below
+#   needs it.
+# - domains: two to 64, comma-separated (surrounding whitespace is trimmed), each a registrable
+#   domain. `cargo xtask equivalence-list` normalises each to its IDNA A-label form and rejects
+#   the line, naming the member and the rule, if a domain does not normalise, is an IP literal,
 #   is not its own registrable domain (a bare public suffix such as co.uk, or a subdomain such
 #   as mail.example.com; ADR 0044), there are fewer than two domains, or two domains normalise
 #   to the same value.
+# - Across lines (ADR 0080 §2): no group id on two lines, and NO DOMAIN IN TWO GROUPS. Overlap
+#   would make "turn this group off" misleading, because the other group would still match.
 # - Blank lines and lines starting with `#` are ignored.
 # - Line order does not matter: `cargo xtask equivalence-list` sorts groups by id itself.
 #   Append a new group anywhere; do not renumber or reorder existing lines.
+# - `cargo test -p xtask` parses this committed file, so a Public Suffix List bump that turns a
+#   member into a suffix fails the pull request that makes it (ADR 0044, ADR 0080 §8).
 #
-# REVIEW RULES (ADR 0038 §4, restated — every group below still needs this before it is ever
-# signed into a real list):
+# REVIEW RULES (ADR 0038 §4, restated; ADR 0080 §3 adds no waiver for the seed batch):
 #   1. Proof of common ownership for every entry (shared WHOIS registrant/organisation, or a
 #      cross-referencing public statement on both domains). "Looks plausible" is not proof.
 #   2. Two-maintainer review once a second maintainer exists; until then, the sole maintainer's
-#      review is recorded in the PR with the ownership evidence cited.
+#      review, with the evidence recorded. When a second maintainer joins, the seed batch below
+#      is the first thing they review, retroactively, group by group (ADR 0080 §3).
 #   3. No domain a third party can host content on, unless flagged `third_party_hostable = 1`.
 #   4. ccTLD variants proven per variant, not assumed from the base brand.
 #   5. Scheduled re-verification at least once per release cycle; a lapsed domain is removed.
+#      At each re-check, diff the shipped groups against bitwarden/server's current
+#      StaticStore.cs: an upstream removal triggers re-verification of that entry before the
+#      next release; an upstream addition is only a candidate for a normal proposal (ADR 0080 §3).
 #   6. Small list, high bar: well-known multi-domain brands with clear public evidence, not a
 #      crowd-sourced long tail.
+# The evidence for every member lives in data/equivalence/EVIDENCE.md (ADR 0080 §3), one section
+# per group; a member with no evidence there is dropped before signing, not waived.
 #
-# STATUS OF THE GROUPS BELOW: starter examples named in ROADMAP §4.4 and ADR 0038's own
-# Context, added here unsigned, with ownership evidence NOT independently re-verified as part
-# of this change (the owner's review, rule 2 above, is still outstanding for all three). They
-# exist so `cargo xtask equivalence-list` has something to compile and sign once the owner has
-# an offline key (docs/equivalence-list.md) — not as a claim that review is already done.
-# `google.co.uk` and `google.de` in particular need their own ccTLD ownership proof (rule 4)
-# before any real signing; they are common knowledge, not independently verified here (U).
+# PROVENANCE OF THE SEED (ADR 0080 §2, §4). The groups below are derived from:
+#   Vaultwarden src/static/global_domains.json
+#     https://github.com/dani-garcia/vaultwarden/blob/b71cb7a832080d9fdfdd97bcccf065307cf73236/src/static/global_domains.json
+#     at Vaultwarden main = b71cb7a832080d9fdfdd97bcccf065307cf73236 (file last changed in
+#     dde63e209e00e4e1a02d8e43175976386a31c53b), SHA-256
+#     3f2c8a39c8c1a8dd9a8c9f4c6b14201afd7113d4fea2b22a27e1847e95e7933a, 15,910 bytes.
+#   which is generated from bitwarden/server src/Core/Utilities/StaticStore.cs and
+#   src/Core/Enums/GlobalEquivalentDomainsType.cs, group for group identical to bitwarden/server
+#   41ae9acb7b92fc8eef0b73c6cfa6eb2106a326f2.
+#   The subset taken is the 22 groups bitwarden/server still maintains after PR #8404
+#   (https://github.com/bitwarden/server/pull/8404, e1f32b96a33f0f5d63170690f0b83cce0b901d36:
+#   "69 entries cut from StaticStore.GlobalDomains, 22 live"); each is member for member the
+#   same `type` in Vaultwarden's file. The 69 cut groups are not imported.
+#   Licence: AGPL-3.0 (Vaultwarden AGPL-3.0-only; Bitwarden server's default licence), compatible
+#   with this project's AGPL-3.0-only (ADR 0017). Attribution: THIRD_PARTY_NOTICES.md. No
+#   Bitwarden trademark is used beyond that attribution.
+#   Changes from upstream: the subset above; the members removed below (amazon.com.be, net.cn,
+#   atlassian.net, statuspage.io, jira.com, yandex.ua); upstream's Google group merged with the
+#   starter YouTube and Google groups; fresh random group ids (upstream `type` values and
+#   `excluded` are not imported).
+#
+# STATUS: UNSIGNED, AND THE OWNER'S REVIEW IS OUTSTANDING. The evidence in EVIDENCE.md is still
+# "TODO (owner)" for every member. Nothing here is a claim that review is done. The owner signs
+# offline with the dedicated ADR 0038 §3 key (docs/equivalence-list.md); the first signed list
+# is list_version 1 (ADR 0080 §5).
+#
+# RETIRED IDS (never reuse): 8ce962df007bc44d8d1bb3817570df24 (the starter YouTube group, merged
+# into Google by ADR 0080 §2; it never shipped).
 
-8ce962df007bc44d8d1bb3817570df24 | 0 | youtube.com,youtu.be,youtube-nocookie.com
-ad39c37cee45d28736adc53bcafa8db2 | 0 | google.com,google.co.uk,google.de
+# upstream: Bitwarden GlobalEquivalentDomainsType.Google = 0; evidence: EVIDENCE.md#google-type-0
+# merged (ADR 0080 §2): upstream youtube.com, google.com, gmail.com plus the starter youtu.be,
+# youtube-nocookie.com, google.co.uk, google.de; keeps the starter Google id.
+ad39c37cee45d28736adc53bcafa8db2 | 0 | google.com,gmail.com,youtube.com,youtu.be,youtube-nocookie.com,google.co.uk,google.de
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Apple = 1; evidence: EVIDENCE.md#apple-type-1
+# equal to the starter Apple group; keeps its id.
 1e683ea6d91b48d95a602cf7e6b71747 | 0 | apple.com,icloud.com
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Merrill = 6; evidence: EVIDENCE.md#merrill-type-6
+f8163dba26dad5bd2f92eb9f2c09b2e6 | 0 | mymerrill.com,ml.com,merrilledge.com
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Microsoft = 10; evidence: EVIDENCE.md#microsoft-type-10
+adcb58afc60e3e9e86e3ff4556329040 | 0 | bing.com,hotmail.com,live.com,microsoft.com,msn.com,passport.net,windows.com,microsoftonline.com,office.com,office365.com,microsoftstore.com,xbox.com,azure.com,windowsazure.com,cloud.microsoft
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.PayPal = 14; evidence: EVIDENCE.md#paypal-type-14
+014f2b81d24e470658e2c9035a0244fd | 0 | paypal.com,paypal-search.com
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Amazon = 18; evidence: EVIDENCE.md#amazon-type-18
+# removed: amazon.com.be (ADR 0044, not its own registrable domain (the PSL lists be, not com.be))
+d1ba74c84d4a2b50f728bc56b20a9829 | 0 | amazon.com,amazon.ae,amazon.ca,amazon.co.uk,amazon.com.au,amazon.com.br,amazon.com.mx,amazon.com.tr,amazon.de,amazon.es,amazon.fr,amazon.in,amazon.it,amazon.nl,amazon.pl,amazon.sa,amazon.se,amazon.sg
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Comcast = 36; evidence: EVIDENCE.md#comcast-type-36
+ebfc3dce9b5af467ffacb7bbf89e8c2c | 0 | comcast.com,comcast.net,xfinity.com
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Alibaba = 41; evidence: EVIDENCE.md#alibaba-type-41
+# removed: net.cn (ADR 0044, a bare public suffix)
+6bc8f6284fdf69705322ea67f921bc57 | 0 | alibaba.com,aliexpress.com,aliyun.com
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Autodesk = 45; evidence: EVIDENCE.md#autodesk-type-45
+1bc2b3512ae358f9bcb26b7df9f0dd06 | 0 | autodesk.com,tinkercad.com
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Facebook = 51; evidence: EVIDENCE.md#facebook-type-51
+9f1ab17bf502904784ae3263d612e8f0 | 0 | facebook.com,messenger.com
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Disney = 54; evidence: EVIDENCE.md#disney-type-54
+# disneymoviesanywhere.com redirects to a multi-studio service: evidence or drop (ADR 0080 §2).
+5b9b1db9a822709f67db336adbb0e667 | 0 | disneymoviesanywhere.com,go.com,disney.com,dadt.com,disneyplus.com
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Turbotax = 62; evidence: EVIDENCE.md#turbotax-type-62
+8a7a0b4c1a723be04d3166b115132b69 | 0 | turbotax.com,intuit.com
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Ebay = 64; evidence: EVIDENCE.md#ebay-type-64
+e984482b3e754289c4a60dad0acd01d8 | 0 | ebay.com,ebay.at,ebay.be,ebay.ca,ebay.ch,ebay.cn,ebay.co.jp,ebay.co.th,ebay.co.uk,ebay.com.au,ebay.com.hk,ebay.com.my,ebay.com.sg,ebay.com.tw,ebay.de,ebay.es,ebay.fr,ebay.ie,ebay.in,ebay.it,ebay.nl,ebay.ph,ebay.pl
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.MorganStanley = 69; evidence: EVIDENCE.md#morganstanley-type-69
+7d535ea3307bba120e627555c82681fe | 0 | morganstanley.com,morganstanleyclientserv.com,stockplanconnect.com,ms.com
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Airbnb = 72; evidence: EVIDENCE.md#airbnb-type-72
+80fe4e616a573676a346482b3427fde4 | 0 | airbnb.at,airbnb.be,airbnb.ca,airbnb.ch,airbnb.cl,airbnb.co.cr,airbnb.co.id,airbnb.co.in,airbnb.co.kr,airbnb.co.nz,airbnb.co.uk,airbnb.co.ve,airbnb.com,airbnb.com.ar,airbnb.com.au,airbnb.com.bo,airbnb.com.br,airbnb.com.bz,airbnb.com.co,airbnb.com.ec,airbnb.com.gt,airbnb.com.hk,airbnb.com.hn,airbnb.com.mt,airbnb.com.my,airbnb.com.ni,airbnb.com.pa,airbnb.com.pe,airbnb.com.py,airbnb.com.sg,airbnb.com.sv,airbnb.com.tr,airbnb.com.tw,airbnb.cz,airbnb.de,airbnb.dk,airbnb.es,airbnb.fi,airbnb.fr,airbnb.gr,airbnb.gy,airbnb.hu,airbnb.ie,airbnb.is,airbnb.it,airbnb.jp,airbnb.mx,airbnb.nl,airbnb.no,airbnb.pl,airbnb.pt,airbnb.ru,airbnb.se
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.StackExchange = 74; evidence: EVIDENCE.md#stackexchange-type-74
+c04a4ddfdd7745333a57c05c29d1bd71 | 0 | stackexchange.com,superuser.com,stackoverflow.com,serverfault.com,mathoverflow.net,askubuntu.com,stackapps.com
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Docusign = 75; evidence: EVIDENCE.md#docusign-type-75
+df92fb07c5935f2c563916a35dfd56d6 | 0 | docusign.com,docusign.net
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Ubiquiti = 80; evidence: EVIDENCE.md#ubiquiti-type-80
+b4ca2866e0a5a09d38da09277b211664 | 0 | ubnt.com,ui.com
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Yandex = 83; evidence: EVIDENCE.md#yandex-type-83
+# removed: yandex.ua (not delegated, no ownership evidence)
+f530841b54dfd626a7fc90bcc95d889b | 0 | yandex.com,ya.ru,yandex.az,yandex.by,yandex.co.il,yandex.com.am,yandex.com.ge,yandex.com.tr,yandex.ee,yandex.fi,yandex.fr,yandex.kg,yandex.kz,yandex.lt,yandex.lv,yandex.md,yandex.pl,yandex.ru,yandex.tj,yandex.tm,yandex.uz
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Proton = 85; evidence: EVIDENCE.md#proton-type-85
+ec26724894c5367e7c4ef8841603b448 | 0 | proton.me,protonmail.com,protonvpn.com
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Atlassian = 89; evidence: EVIDENCE.md#atlassian-type-89
+# removed: statuspage.io (ADR 0038 §4 point 3, third-party-hostable and not PSL-split)
+# removed: atlassian.net (ADR 0038 §4 point 3, third-party-hostable and not PSL-split)
+# removed: jira.com (ADR 0038 §4 point 3, legacy tenant host, not PSL-split)
+addad629d1f976de3286a858cbab9ce2 | 0 | atlassian.com,bitbucket.org,trello.com
+
+# upstream: Bitwarden GlobalEquivalentDomainsType.Twitter = 91; evidence: EVIDENCE.md#twitter-type-91
+4aa14f4e767d633f60a88f4d96c08c09 | 0 | twitter.com,x.com
