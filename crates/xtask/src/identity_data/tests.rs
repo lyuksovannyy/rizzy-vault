@@ -18,9 +18,11 @@ const TABLE: &str = include_str!("../../../../data/identity/translit.txt");
 /// A fresh scratch directory under the OS temp dir (the pattern of the other xtask tests).
 fn scratch_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "rizzy-xtask-identity-test-{name}-{}-{:?}",
+        "rizzy-xtask-identity-test-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
     ));
     fs::create_dir_all(&dir).expect("create scratch dir");
     dir

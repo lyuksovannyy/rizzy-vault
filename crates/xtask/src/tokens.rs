@@ -2463,9 +2463,11 @@ mod tests {
     /// copies).
     fn scratch_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "rizzy-xtask-tokens-test-{name}-{}-{:?}",
+            "rizzy-xtask-tokens-test-{name}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
         ));
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         dir
