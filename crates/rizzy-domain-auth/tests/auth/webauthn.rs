@@ -609,7 +609,7 @@ fn inv_83_is_decided_against_the_counter_of_record() {
         for received in [6, 3] {
             assert!(matches!(
                 login_with(&mut env, &client, &key, UP, received).await,
-                Err(AuthError::PossibleClone)
+                Err(AuthError::PossibleClone { .. })
             ));
             assert_eq!(stored_row(&env).await.0, 6);
         }
@@ -625,7 +625,7 @@ fn inv_83_is_decided_against_the_counter_of_record() {
         let assertion = key.assert(&options, UP, 8);
         assert!(matches!(
             finish(&mut env, pending, assertion).await,
-            Err(AuthError::PossibleClone)
+            Err(AuthError::PossibleClone { .. })
         ));
         login_with(&mut env, &client, &key, UP, 11).await.unwrap();
         assert_eq!(stored_row(&env).await.0, 11);

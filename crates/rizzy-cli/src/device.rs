@@ -140,6 +140,7 @@ use rizzy_client::rizzy_proto::http::paths;
 use rizzy_client::rizzy_proto::recovery::RecoveryCancelResponse;
 use rizzy_client::rizzy_proto::session::{EndSessionRequest, SessionListResponse};
 use rizzy_client::rizzy_proto::vault::{FetchResponse, UploadResponse};
+use rizzy_client::rizzy_proto::webauthn::WebauthnLoginChallengeResponse;
 use rizzy_client::rizzy_proto::wire::{Id, SessionToken};
 use rizzy_client::rotation::{
     ConflictOutcome, PendingRotation, RevokeDevice, RotationDone, RotationLevel, RotationOptions,
@@ -160,6 +161,7 @@ use rizzy_client::sync::{Authors, VaultSync};
 use rizzy_client::unlock::{
     account_state_query, apply_device_grants, identity_change_fingerprint, verify_unlock,
 };
+use rizzy_client::webauthn::{self, SecondFactor};
 use rizzy_core::ids::DeviceId;
 use rizzy_core::keys::AccountFingerprint;
 use serde::Serialize;
@@ -375,6 +377,20 @@ pub(crate) async fn opaque_login(
         match finished {
             Ok(response) => return Ok(awaiting.complete(response)?),
             Err(CliError::Server(ErrorCode::SecondFactorRequired)) if totp.is_none() => {
+                // ADR 0058 point 3: an account with a security key kept this login as a pending
+                // row named by its `login_id`. rv has no `WebAuthn` (it is not a browser on the
+                // server's origin), so it can finish only with a TOTP code; ask the server which
+                // kinds the account has, so that a key-only account gets an explanation rather
+                // than a prompt for a code that does not exist.
+                if second_factor_is_key_only(http, finish.login_id).await? {
+                    ui.note(
+                        "This account's second factor is a security key. rv cannot complete a \
+                         security-key login: log in with the web vault instead, or add an \
+                         authenticator app (TOTP) in the web vault under Settings, Two-factor \
+                         authentication, and use its code here.",
+                    );
+                    return Err(CliError::Server(ErrorCode::SecondFactorRequired));
+                }
                 totp = Some(ui.secret("Two-factor code")?);
             }
             // The server answers a wrong password and an unknown name alike (§5.9).
@@ -395,6 +411,32 @@ pub(crate) async fn opaque_login(
         }
     }
     Err(CliError::Server(ErrorCode::SecondFactorRequired))
+}
+
+/// Whether the login `login_id`, which the server answered `second_factor_required`, can finish
+/// only with a security key: the account holds one and no confirmed TOTP enrolment
+/// (`webauthn/login/challenge`, ADR 0058 point 3). The challenge it issues is never used.
+///
+/// # Errors
+/// The transport's errors, and a server error other than `not_found`.
+async fn second_factor_is_key_only(http: &Http, login_id: Id) -> Result<bool, CliError> {
+    let answer: Result<WebauthnLoginChallengeResponse, CliError> = http
+        .post(
+            paths::WEBAUTHN_LOGIN_CHALLENGE,
+            &webauthn::login_challenge_request(login_id),
+            Auth::None,
+        )
+        .await;
+    let answer = match answer {
+        Ok(response) => Ok(response),
+        Err(CliError::Server(code)) => Err(code),
+        Err(e) => return Err(e),
+    };
+    match SecondFactor::from_challenge(answer) {
+        Ok(SecondFactor::SecurityKey { totp, .. }) => Ok(!totp),
+        Ok(SecondFactor::Totp) => Ok(false),
+        Err(code) => Err(CliError::Server(code)),
+    }
 }
 
 /// An enrolled device, unlocked and loaded (module docs).

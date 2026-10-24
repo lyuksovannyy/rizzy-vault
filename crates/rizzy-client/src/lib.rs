@@ -47,6 +47,7 @@
 //! | [`rotation`] | CRYPTO.md §11.6, §11.8 steps 1–3; ADR 0025 §2 | Standard and full key rotation with an optional revocation: new keys, the auth half, the vault half, the retry rule |
 //! | [`credentials`] | CRYPTO.md §11.5, §11.3 step 5 | Master password and Secret Key change, with or without a rotation; following a change made elsewhere |
 //! | [`two_factor`] | CRYPTO.md §5.10, §11.15 | Server-side 2FA enrolment (the otpauth URI) and removal requests |
+//! | [`webauthn`] | CRYPTO.md §11.17; ADRs 0058, 0077 | Security keys: enrolment, list and removal requests; which second factor a login can finish with |
 //! | [`breach`] | CRYPTO.md §11.16; ADR 0053 | The breach check: the prefix request, the constant-time verdict |
 //! | [`icons`] | ADR 0052 point 6 | Item icons: the hostname-only request, the answer check |
 //! | [`session`] | CRYPTO.md §5.10; ADR 0012 §7 "A device enrolled after the backup" | Device authentication (also certificate-carrying, after a restore) and request signing |
@@ -133,6 +134,7 @@ pub mod store;
 pub mod sync;
 pub mod two_factor;
 pub mod unlock;
+pub mod webauthn;
 mod wire;
 
 pub use error::ClientError;

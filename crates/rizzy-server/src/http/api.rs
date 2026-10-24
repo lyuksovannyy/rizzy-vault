@@ -41,6 +41,12 @@
 //! | `POST /api/v1/totp/enrol/start` | no body → `TotpEnrolStartResponse` | OPAQUE or device (fresh OPAQUE; checked by the domain) |
 //! | `POST /api/v1/totp/enrol/confirm` | `TotpEnrolConfirmRequest` → 204 | OPAQUE or device (fresh OPAQUE; checked by the domain) |
 //! | `POST /api/v1/totp/disable` | `TotpDisableRequest` → 204 | OPAQUE or device (fresh OPAQUE; checked by the domain) |
+//! | `POST /api/v1/webauthn/enrol/start` | no body → `WebauthnEnrolStartResponse` | OPAQUE or device (fresh OPAQUE; checked by the domain) |
+//! | `POST /api/v1/webauthn/enrol/confirm` | `WebauthnEnrolConfirmRequest` → 204 | OPAQUE or device (fresh OPAQUE; checked by the domain) |
+//! | `POST /api/v1/webauthn/list` | no body → `WebauthnListResponse` | OPAQUE or device |
+//! | `POST /api/v1/webauthn/remove` | `WebauthnRemoveRequest` → 204 | OPAQUE or device (fresh OPAQUE; checked by the domain) |
+//! | `POST /api/v1/webauthn/login/challenge` | `WebauthnLoginChallengeRequest` → `WebauthnLoginChallengeResponse` | none |
+//! | `POST /api/v1/webauthn/login/finish` | `WebauthnLoginFinishRequest` → `LoginFinishResponse` | optional (as `login/finish`) |
 //! | `POST /api/v1/sessions/list` | no body → `SessionListResponse` | OPAQUE or device |
 //! | `POST /api/v1/sessions/current/end` | no body → 204 | any (OPAQUE, device or recovery-only) |
 //! | `POST /api/v1/sessions/end` | `EndSessionRequest` → 204 | fresh OPAQUE or device (checked by the domain) |
@@ -379,6 +385,18 @@ pub enum Endpoint {
     TotpEnrolConfirm,
     /// TOTP removal.
     TotpDisable,
+    /// Security-key enrolment start (ADR 0058 point 2).
+    WebauthnEnrolStart,
+    /// Security-key enrolment confirmation (ADR 0058 point 2).
+    WebauthnEnrolConfirm,
+    /// The account's security keys.
+    WebauthnList,
+    /// Security-key removal.
+    WebauthnRemove,
+    /// A login's security-key challenge (ADR 0058 point 3).
+    WebauthnLoginChallenge,
+    /// A login's security-key assertion (ADR 0058 point 3).
+    WebauthnLoginFinish,
     /// The account's live sessions (ADR 0075 R1).
     SessionsList,
     /// Sign-out of the caller's own session (ADR 0075 R2).
@@ -432,6 +450,12 @@ impl Endpoint {
         Self::TotpEnrolStart,
         Self::TotpEnrolConfirm,
         Self::TotpDisable,
+        Self::WebauthnEnrolStart,
+        Self::WebauthnEnrolConfirm,
+        Self::WebauthnList,
+        Self::WebauthnRemove,
+        Self::WebauthnLoginChallenge,
+        Self::WebauthnLoginFinish,
         Self::SessionsList,
         Self::SessionsCurrentEnd,
         Self::SessionsEnd,
@@ -474,6 +498,12 @@ impl Endpoint {
             Self::TotpEnrolStart => paths::TOTP_ENROL_START,
             Self::TotpEnrolConfirm => paths::TOTP_ENROL_CONFIRM,
             Self::TotpDisable => paths::TOTP_DISABLE,
+            Self::WebauthnEnrolStart => paths::WEBAUTHN_ENROL_START,
+            Self::WebauthnEnrolConfirm => paths::WEBAUTHN_ENROL_CONFIRM,
+            Self::WebauthnList => paths::WEBAUTHN_LIST,
+            Self::WebauthnRemove => paths::WEBAUTHN_REMOVE,
+            Self::WebauthnLoginChallenge => paths::WEBAUTHN_LOGIN_CHALLENGE,
+            Self::WebauthnLoginFinish => paths::WEBAUTHN_LOGIN_FINISH,
             Self::SessionsList => paths::SESSIONS_LIST,
             Self::SessionsCurrentEnd => paths::SESSIONS_CURRENT_END,
             Self::SessionsEnd => paths::SESSIONS_END,
@@ -507,7 +537,10 @@ impl Endpoint {
             | Self::DeviceAuthFinish
             | Self::RecoveryStart
             | Self::RecoveryComplete => SessionNeed::None,
-            Self::LoginStart | Self::LoginFinish => SessionNeed::Optional,
+            Self::LoginStart | Self::LoginFinish | Self::WebauthnLoginFinish => {
+                SessionNeed::Optional
+            }
+            Self::WebauthnLoginChallenge => SessionNeed::None,
             Self::AccountState
             | Self::EnrolDevice
             | Self::WebCertificate
@@ -525,6 +558,10 @@ impl Endpoint {
             | Self::TotpEnrolStart
             | Self::TotpEnrolConfirm
             | Self::TotpDisable
+            | Self::WebauthnEnrolStart
+            | Self::WebauthnEnrolConfirm
+            | Self::WebauthnList
+            | Self::WebauthnRemove
             | Self::SessionsList
             | Self::SessionsEnd
             | Self::SessionsOthersEnd
@@ -550,7 +587,11 @@ impl Endpoint {
     pub const fn body_limit(self, max_upload_bytes: usize) -> usize {
         match self {
             Self::Upload | Self::Heal | Self::CommitChange => max_upload_bytes,
-            Self::DeviceGrants | Self::RecoveryCancel | Self::TotpEnrolStart => 0,
+            Self::DeviceGrants
+            | Self::RecoveryCancel
+            | Self::TotpEnrolStart
+            | Self::WebauthnEnrolStart
+            | Self::WebauthnList => 0,
             _ => BODY_LIMIT,
         }
     }
@@ -684,8 +725,19 @@ fn parse<T: DeserializeOwned>(body: &[u8]) -> Result<T, ErrorCode> {
 }
 
 /// The answer to an auth-domain error: its code and, for a rate limit, its retry time. A
-/// storage or internal failure is logged first.
+/// storage or internal failure is logged first. A security key's possible clone (INV-83) is
+/// logged as a security event: the per-account security event log (THREAT_MODEL R-row, INV-48)
+/// is not built yet, so this log line is where ADR 0058 owner answer 4's signal goes for now.
 fn auth_code(endpoint: Endpoint, e: &AuthError) -> Failure {
+    if let AuthError::PossibleClone { account_id } = e {
+        log::warn(
+            "webauthn_possible_clone",
+            &[
+                Field::Str("route", endpoint.path()),
+                Field::Id("account", account_id),
+            ],
+        );
+    }
     if matches!(e, AuthError::Storage(_) | AuthError::Internal(_)) {
         log::error(
             "auth_failure",
@@ -1164,6 +1216,37 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
                 .map_err(ae)?;
             Ok(Reply::Empty)
         }
+        Endpoint::WebauthnEnrolStart => json(
+            &auth
+                .webauthn_enrol_start(&mut rng, need()?, now)
+                .await
+                .map_err(ae)?,
+        ),
+        Endpoint::WebauthnEnrolConfirm => {
+            auth.webauthn_enrol_confirm(need()?, &parse(&body)?, now)
+                .await
+                .map_err(ae)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::WebauthnList => json(&auth.webauthn_list(need()?).await.map_err(ae)?),
+        Endpoint::WebauthnRemove => {
+            auth.webauthn_remove(need()?, &parse(&body)?, now)
+                .await
+                .map_err(ae)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::WebauthnLoginChallenge => json(
+            &auth
+                .webauthn_login_challenge(&parse(&body)?, now)
+                .await
+                .map_err(ae)?,
+        ),
+        Endpoint::WebauthnLoginFinish => json(
+            &auth
+                .webauthn_login_finish(&mut rng, &parse(&body)?, &source, session.as_ref(), now)
+                .await
+                .map_err(ae)?,
+        ),
         Endpoint::SessionsList => json(&auth.list_sessions(need()?, now).await.map_err(ae)?),
         Endpoint::SessionsCurrentEnd => {
             auth.end_current_session(need()?, now).await.map_err(ae)?;
@@ -1299,6 +1382,12 @@ mod tests {
             | Endpoint::TotpEnrolStart
             | Endpoint::TotpEnrolConfirm
             | Endpoint::TotpDisable
+            | Endpoint::WebauthnEnrolStart
+            | Endpoint::WebauthnEnrolConfirm
+            | Endpoint::WebauthnList
+            | Endpoint::WebauthnRemove
+            | Endpoint::WebauthnLoginChallenge
+            | Endpoint::WebauthnLoginFinish
             | Endpoint::SessionsList
             | Endpoint::SessionsCurrentEnd
             | Endpoint::SessionsEnd
@@ -1316,7 +1405,7 @@ mod tests {
 
     #[test]
     fn all_is_complete_and_paths_unique() {
-        assert_eq!(Endpoint::ALL.len(), 36);
+        assert_eq!(Endpoint::ALL.len(), 42);
         assert!(Endpoint::ALL.iter().all(|e| listed(*e)));
         let unique: HashSet<_> = Endpoint::ALL.iter().copied().map(Endpoint::path).collect();
         assert_eq!(unique.len(), Endpoint::ALL.len());
@@ -1508,6 +1597,10 @@ mod tests {
             Endpoint::TotpEnrolStart,
             Endpoint::TotpEnrolConfirm,
             Endpoint::TotpDisable,
+            Endpoint::WebauthnEnrolStart,
+            Endpoint::WebauthnEnrolConfirm,
+            Endpoint::WebauthnList,
+            Endpoint::WebauthnRemove,
             Endpoint::SessionsList,
             Endpoint::SessionsEnd,
             Endpoint::SessionsOthersEnd,
@@ -1537,7 +1630,11 @@ mod tests {
         for e in Endpoint::ALL {
             let expected = match e {
                 Endpoint::Upload | Endpoint::Heal | Endpoint::CommitChange => upload,
-                Endpoint::DeviceGrants | Endpoint::RecoveryCancel | Endpoint::TotpEnrolStart => 0,
+                Endpoint::DeviceGrants
+                | Endpoint::RecoveryCancel
+                | Endpoint::TotpEnrolStart
+                | Endpoint::WebauthnEnrolStart
+                | Endpoint::WebauthnList => 0,
                 _ => BODY_LIMIT,
             };
             assert_eq!(e.body_limit(upload), expected, "{e:?}");
