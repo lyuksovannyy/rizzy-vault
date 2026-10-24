@@ -54,8 +54,8 @@ allow-wildcard-paths = true
 highlight = "all"
 deny = [
   # TLS is rustls-only: static musl builds, no system OpenSSL in the container image.
-  { crate = "openssl", reason = "use rustls" },
-  { crate = "openssl-sys", reason = "use rustls" },
+  { crate = "openssl", wrappers = ["webauthn-attestation-ca", "webauthn-rs-core"], reason = "ADR 0009 owner decision 1, ADR 0059, ADR 0077 §1" },
+  { crate = "openssl-sys", wrappers = ["openssl", "webauthn-attestation-ca", "webauthn-rs-core"], reason = "ADR 0009 owner decision 1, ADR 0059, ADR 0077 §1" },
   # Deprecated/unmaintained crypto-adjacent crates we never want pulled in.
   { crate = "rust-crypto", reason = "unmaintained; use RustCrypto crates" },
   { crate = "sodiumoxide", reason = "unmaintained; use RustCrypto crates" },

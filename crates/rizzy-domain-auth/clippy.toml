@@ -19,10 +19,17 @@ doc-valid-idents = ["SQLite", "PostgreSQL", "THREAT_MODEL", ".."]
 disallowed-types = [
   { path = "sqlx::AssertSqlSafe", reason = "ADR 0011 point 2, INV-53: query text is a &'static str from a .sql file" },
   { path = "sqlx::QueryBuilder", reason = "ADR 0011 point 2, INV-53: QueryBuilder::push appends any Display value to the SQL text" },
+  # ADR 0077 §3's deterministic-RNG allow-list: webauthn-rs-core 0.5.5 seeds a ChaCha8Rng from
+  # HMAC-SHA-256(key, username) here; our flow never serves a credential id before KE3, so it has no
+  # caller. Defining item paths (re-exported as webauthn_rs::fake). Re-review on every version change.
+  { path = "webauthn_rs_core::fake::WebauthnFakeCredentialGenerator", reason = "ADR 0077 §3: deterministic, username-seeded RNG; never called" },
 ]
 
 disallowed-methods = [
   { path = "sqlx::AssertSqlSafe", reason = "ADR 0011 point 2: disallowed-types does not flag the tuple-constructor call" },
   { path = "std::string::String::leak", reason = "ADR 0011 point 2: turns a runtime string into a &'static str query" },
   { path = "std::boxed::Box::leak", reason = "ADR 0011 point 2: turns a runtime string into a &'static str query" },
+  { path = "webauthn_rs_core::fake::WebauthnFakeCredentialGenerator::new", reason = "ADR 0077 §3: deterministic, username-seeded RNG; never called" },
+  { path = "webauthn_rs_core::fake::WebauthnFakeCredentialGenerator::new_hmac_key", reason = "ADR 0077 §3: deterministic, username-seeded RNG; never called" },
+  { path = "webauthn_rs_core::fake::WebauthnFakeCredentialGenerator::generate", reason = "ADR 0077 §3: deterministic, username-seeded RNG; never called" },
 ]
