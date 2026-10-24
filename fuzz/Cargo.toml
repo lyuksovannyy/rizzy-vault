@@ -46,6 +46,8 @@
 #   auth_rules         rizzy-domain-auth's rules on untrusted statements and transitions: the
 #                      request-counter window, `account-state` steps, bundle-chain extension
 #                      (CRYPTO.md §5.10, §10.2, §11; ADR 0012 §7)
+#   webauthn_stored    rizzy-domain-auth's decoders of stored webauthn-rs JSON: the credential's
+#                      SecurityKey and the ceremony state (ADR 0077 §§2, 4)
 #   server_headers     rizzy-server's request-header parsers: bearer token, request-signing
 #                      headers, Content-Length, Rizzy-Client, X-Forwarded-For (ADR 0028 items 4, 5,
 #                      7, 11, 14; CRYPTO.md §5.10; threat model §7.6 "S")
@@ -54,6 +56,9 @@
 #   db_backup_parse    rizzy-storage's logical backup file parser and writer (ADR 0023 §3):
 #                      arbitrary bytes, with and without a valid digest, and generated dumps
 #                      round-tripped
+#   db_backup_container rizzy-server's encrypted backup container, format version 2 (ADR 0071,
+#                      CRYPTO.md §9.8): arbitrary bytes, with and without the magic and
+#                      version, and sealed files mutated (flips, truncation, header edits)
 #   client_export      rizzy-client's export-file JSON reader: the whole-file cap, the strict
 #                      parser and the header checks (§11.14)
 #   client_export_payload rizzy-client's export payload reader and the import mapping behind
@@ -63,8 +68,17 @@
 #                      agreement with the encrypted export's strict reader
 #   client_device_state rizzy-client's device-state record codec (ADR 0026 §2): arbitrary bytes,
 #                      and the lifecycle steps on every record that parses
+#   client_attachment_reassembly rizzy-client's attachment download (ADR 0054 §8): wraps,
+#                      indices and chunk envelopes a hostile server serves; assembles only
+#                      exactly every chunk in its place, byte for byte
 #   client_cache_load  rizzy-client's cache loader (ADR 0026 §3-§6): the rows of a valid cache
 #                      mutated in every column, then opened and loaded
+#   client_account_settings rizzy-client's ACCOUNT_SETTINGS record parser and rizzy-match's
+#                      matching section (ADR 0042 §2-§4): arbitrary bytes, one encoding per
+#                      value, the bounds, and the host's edits on every record that parses
+#   client_vault_directory rizzy-client's vault directory, ACCOUNT_SETTINGS tag 0x0002 (ADR 0081
+#                      §A2): arbitrary bytes, one encoding per value, the shape, the host's
+#                      edits, and the completeness check against any served set (INV-102)
 #   import_bitwarden   rizzy-import's Bitwarden JSON importer and its JSON reader (ADR 0002
 #                      point 2; threat model A16)
 #   import_1pux        rizzy-import's 1PUX importer: the zip reader, the DEFLATE decoder and
@@ -79,6 +93,8 @@
 #   import_aliasvault_csv rizzy-import's AliasVault CSV importer and its CSV reader
 #   import_aliasvault_avux rizzy-import's AliasVault .avux importer: the zip reader and the
 #                      manifest.json mapping
+#   import_cxf         rizzy-import's CXF (passkey) importer, for bare CXF files and the
+#                      decrypted payload of our CXF export alike (ADR 0074 §3)
 #   wasm_host_input    rizzy-wasm's readers of what JavaScript hands in: response status and
 #                      body (`checkMeta`, `expectNoContent`), hex ids, item-draft entries, and
 #                      the start of a login and a signup (ADR 0013 §3 rule 8)
@@ -94,6 +110,21 @@
 #   passkey_ceremony   rizzy-client's WebAuthn passkey ceremonies (ADR 0039 §1, §2, §4): never
 #                      panic on an attacker/relying-party-controlled origin, rpId or challenge;
 #                      a created credential's assertion signature verifies under its own key
+#   breach_range       the breach-check range response (CRYPTO.md §11.16, ADR 0053): rizzy-proto's
+#                      bounded `SUFFIX:COUNT` parser on arbitrary bytes and JSON, and
+#                      rizzy-client's constant-time verdict over what it accepts
+#   identity_data      rizzy-client's identity data parser (ADR 0079 §5): never panic on
+#                      arbitrary bytes; an accepted file generates for each of its countries
+#   identity_options   the identity generator's options (ADR 0079 §3, OQ7): age text (preset,
+#                      range, exact), email domain, country, and the tag 0x0004 defaults layout
+#   passkey_pkcs8      rizzy-core's hand-written PKCS#8 reader and writers for CXF passkey keys
+#                      (ADR 0074 §4): never panic; what parses writes back to a fixed point
+#   icon_decode        the icons role's image path (ADR 0052 point 4, INV-76): rizzy-icon-proxy's
+#                      decode-under-limits and PNG re-encode on arbitrary bytes (crafted and
+#                      oversized headers, decompression bombs); output is a bounded 128×128 PNG
+#   icon_discover      the icons role's page scan and URL resolution (ADR 0052 points 2–3): the
+#                      bounded <link rel="icon"> scan and the Location/href resolver on arbitrary
+#                      bytes; every accepted target is http(s), an RFC 1123 host, port 80 or 443
 #
 # The `import_*` targets share `fuzz_targets/import_common/mod.rs` (the checks on an import
 # result and a counting RNG), included with `#[path]`; it is not a target.
@@ -158,6 +189,7 @@ rizzy-cli = { path = "../crates/rizzy-cli" }
 # crate over rizzy-core; its external crates (url, idna and the ICU4X stack, psl) are the ones
 # the main workspace already locks and `cargo deny` already checks.
 rizzy-match = { path = "../crates/rizzy-match" }
+rizzy-icon-proxy = { path = "../crates/rizzy-icon-proxy" }
 
 # One [[bin]] per target. `test`, `doc` and `bench` are off because a libFuzzer entry point
 # (`#![no_main]` with `fuzz_target!`) is not a test, has no API to document and is not a benchmark.
@@ -295,6 +327,27 @@ doc = false
 bench = false
 
 [[bin]]
+name = "breach_range"
+path = "fuzz_targets/breach_range.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "icon_decode"
+path = "fuzz_targets/icon_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "icon_discover"
+path = "fuzz_targets/icon_discover.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "proto_json"
 path = "fuzz_targets/proto_json.rs"
 test = false
@@ -304,6 +357,13 @@ bench = false
 [[bin]]
 name = "auth_rules"
 path = "fuzz_targets/auth_rules.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webauthn_stored"
+path = "fuzz_targets/webauthn_stored.rs"
 test = false
 doc = false
 bench = false
@@ -332,6 +392,13 @@ bench = false
 [[bin]]
 name = "db_backup_parse"
 path = "fuzz_targets/db_backup_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "db_backup_container"
+path = "fuzz_targets/db_backup_container.rs"
 test = false
 doc = false
 bench = false
@@ -421,8 +488,29 @@ doc = false
 bench = false
 
 [[bin]]
+name = "import_cxf"
+path = "fuzz_targets/import_cxf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "client_device_state"
 path = "fuzz_targets/client_device_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_item_index"
+path = "fuzz_targets/client_item_index.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_attachment_reassembly"
+path = "fuzz_targets/client_attachment_reassembly.rs"
 test = false
 doc = false
 bench = false
@@ -472,6 +560,41 @@ bench = false
 [[bin]]
 name = "passkey_ceremony"
 path = "fuzz_targets/passkey_ceremony.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "passkey_pkcs8"
+path = "fuzz_targets/passkey_pkcs8.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_account_settings"
+path = "fuzz_targets/client_account_settings.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_vault_directory"
+path = "fuzz_targets/client_vault_directory.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "identity_data"
+path = "fuzz_targets/identity_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "identity_options"
+path = "fuzz_targets/identity_options.rs"
 test = false
 doc = false
 bench = false

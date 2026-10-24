@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The auth domain's configuration: the canonical origin, the signup policy, session
 //! lifetimes, the recovery waiting period and the rate limits.
 //!
@@ -140,6 +142,15 @@ pub struct RateLimits {
     /// rate limiting to the caller). Only a client that verified KE3 or holds a fresh OPAQUE
     /// session reaches a check, so this bounds guessing by someone who knows the password.
     pub totp_per_account: RateRule,
+    /// Security-key assertions per account at `webauthn/login/finish` (CRYPTO.md §11.17). Only
+    /// a client that verified KE3 reaches one; cleared by a successful assertion.
+    pub webauthn_per_account: RateRule,
+    /// Vault creations per account ([ADR 0081] §D: "20 per account per 24 h"): a fixed window,
+    /// `max_attempts` creations per `window_ms`, then `rate_limited` until the window ends. The
+    /// backoff fields are not used.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    pub vault_create_per_account: RateRule,
 }
 
 impl Default for RateLimits {
@@ -160,6 +171,13 @@ impl Default for RateLimits {
             recovery_per_name_source: backoff(5, 60 * 60_000),
             recovery_per_name: backoff(20, 60 * 60_000),
             totp_per_account: backoff(10, 15 * 60_000),
+            webauthn_per_account: backoff(10, 15 * 60_000),
+            vault_create_per_account: RateRule {
+                max_attempts: 20,
+                window_ms: 24 * 60 * 60_000,
+                backoff_base_ms: 0,
+                backoff_max_ms: 0,
+            },
         }
     }
 }
@@ -212,6 +230,10 @@ pub struct AuthConfig {
     pub max_web_certificates: usize,
     /// The rate limits.
     pub rate_limits: RateLimits,
+    /// The instance's per-account storage quota (ADR 0048 §1), served in every
+    /// [`AccountView`](rizzy_proto::account::AccountView) beside the account's counted bytes
+    /// (§5). `rizzy-server` sets it from `RIZZY_ACCOUNT_QUOTA_BYTES`; the bound is checked there.
+    pub account_quota_bytes: u64,
 }
 
 impl AuthConfig {
@@ -228,6 +250,7 @@ impl AuthConfig {
             reconciliation_limit_ms: DEFAULT_RECONCILIATION_LIMIT_MS,
             max_web_certificates: MAX_WEB_CERTIFICATES,
             rate_limits: RateLimits::default(),
+            account_quota_bytes: rizzy_storage::quota::DEFAULT_QUOTA_BYTES,
         }
     }
 

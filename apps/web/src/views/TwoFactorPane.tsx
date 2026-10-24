@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Server two-factor authentication (TOTP at login, CRYPTO.md §11.15): enrol with an
 // authenticator app, confirm with its current code, or remove it with a current code. The
 // enrolment secret is shown once, in the secret-field component. There is no QR code in M1:
@@ -8,6 +10,7 @@ import { ConfirmDialog, SecretField } from "@rizzy-vault/ui";
 import { type FormEvent, useId, useState } from "react";
 
 import type { VaultContext } from "./VaultView.tsx";
+import { SecurityKeysSection } from "./SecurityKeysSection.tsx";
 import { ErrorText, useAction } from "./common.tsx";
 
 /** The two-factor settings (module docs). */
@@ -115,6 +118,7 @@ export function TwoFactorPane(props: { readonly ctx: VaultContext }) {
         onConfirm={disable}
         onCancel={() => setConfirmDisable(false)}
       />
+      <SecurityKeysSection ctx={ctx} />
     </div>
   );
 }

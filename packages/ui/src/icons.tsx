@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Inline SVG icon components for the web vault (ADR 0014 §2: static markup only, no icon
 // font, no third-party origin). Every icon is `aria-hidden` and carries no text of its own: the
 // visible label beside it (a button's own accessible name) is what screen readers announce, so
@@ -22,7 +24,6 @@ export type IconItemType =
   | "api-credential"
   | "software-license"
   | "wifi"
-  | "bank-account"
   | "passkey";
 
 function base(children: ReactNode, props: IconProps) {
@@ -90,6 +91,54 @@ export function IconIdentity(props: IconProps) {
   );
 }
 
+/** An SSH key (ADR 0055): a terminal prompt. */
+export function IconSshKey(props: IconProps) {
+  return base(
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M7 9l3 3-3 3M12 15h5" />
+    </>,
+    props,
+  );
+}
+
+/** An API credential (ADR 0055): code brackets. */
+export function IconApiCredential(props: IconProps) {
+  return base(
+    <>
+      <path d="M8 6l-6 6 6 6M16 6l6 6-6 6" />
+      <path d="M14 4l-4 16" />
+    </>,
+    props,
+  );
+}
+
+/** A software license (ADR 0055): a certificate with a seal. */
+export function IconSoftwareLicense(props: IconProps) {
+  return base(
+    <>
+      <path d="M4 4h16v11H4z" />
+      <path d="M8 8h8M8 11h4" />
+      <circle cx="16" cy="17" r="2.5" />
+      <path d="M14.5 19l-1 3 2.5-1.2 2.5 1.2-1-3" />
+    </>,
+    props,
+  );
+}
+
+/** A Wi-Fi network (ADR 0055): signal arcs. */
+export function IconWifi(props: IconProps) {
+  return base(
+    <>
+      <path d="M2 8.5a15 15 0 0 1 20 0" />
+      <path d="M5 12a10.5 10.5 0 0 1 14 0" />
+      <path d="M8.5 15.5a5.5 5.5 0 0 1 7 0" />
+      <path d="M12 19h.01" />
+    </>,
+    props,
+  );
+}
+
 /** An unrecognised item type. */
 export function IconUnknown(props: IconProps) {
   return base(
@@ -112,6 +161,14 @@ export function TypeIcon(props: IconProps & { readonly type: IconItemType | "unk
       return <IconCard className={props.className} />;
     case "identity":
       return <IconIdentity className={props.className} />;
+    case "ssh-key":
+      return <IconSshKey className={props.className} />;
+    case "api-credential":
+      return <IconApiCredential className={props.className} />;
+    case "software-license":
+      return <IconSoftwareLicense className={props.className} />;
+    case "wifi":
+      return <IconWifi className={props.className} />;
     default:
       return <IconUnknown className={props.className} />;
   }

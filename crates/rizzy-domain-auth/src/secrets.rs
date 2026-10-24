@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The server secrets (CRYPTO.md §5.8, §5.11; ADR 0010 §4; threat model INV-50, INV-69).
 //!
 //! CRYPTO.md §5.11 is "the single normative list" of the secrets file's contents, in a
@@ -5,7 +7,9 @@
 //! - `server_setup` per `setup_id` (§5.8);
 //! - `enum_key` (§5.9);
 //! - `server_data_key` per `data_key_id`, 32 random bytes each, one marked current;
-//! - the first-run bootstrap token (INV-69).
+//! - the first-run bootstrap token (INV-69);
+//! - `backup_keys` per `backup_key_id`, 32 random bytes each, with `current_backup_key_id`,
+//!   present only once a backup key exists (M8, ADR 0071; threat model INV-98).
 //!
 //! [`ServerSecrets`] holds exactly that list in memory, with the generation primitive
 //! ([`ServerSecrets::generate`], `rizzy-vault secrets init`), the rotation primitives
@@ -31,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rizzy_core::opaque::{EnumKey, ServerSetup};
 use rizzy_core::rng::CryptoRng;
-use rizzy_core::server_seal::ServerDataKey;
+use rizzy_core::server_seal::{ServerDataKey, ServerDbBackupKey};
 use rizzy_storage::tables::TABLES;
 use rizzy_storage::{Database, Dump, Value};
 use zeroize::Zeroizing;
@@ -61,6 +65,11 @@ pub enum SecretsError {
     DuplicateId,
     /// An id is exhausted (a rotation past `u32::MAX`).
     IdOverflow,
+    /// Backup keys without one marked current, or a `current_backup_key_id` no backup key has
+    /// (ADR 0071).
+    NoCurrentBackupKey,
+    /// A backup key equals a `server_data_key` or the `enum_key` (threat model INV-98).
+    BackupKeyReused,
 }
 
 impl fmt::Display for SecretsError {
@@ -69,8 +78,10 @@ impl fmt::Display for SecretsError {
             Self::UnsupportedFormat => "unsupported secrets format",
             Self::NoSetup => "no OPAQUE server setup",
             Self::NoCurrentDataKey => "no current server data key",
-            Self::DuplicateId => "duplicate setup or data key id",
-            Self::IdOverflow => "setup or data key id overflow",
+            Self::DuplicateId => "duplicate setup, data key or backup key id",
+            Self::IdOverflow => "setup, data key or backup key id overflow",
+            Self::NoCurrentBackupKey => "no current backup key",
+            Self::BackupKeyReused => "a backup key equals another server key",
         })
     }
 }
@@ -155,6 +166,12 @@ pub struct ServerSecrets {
     current_data_key_id: u32,
     /// The first-run bootstrap token (INV-69), if the file still carries one.
     bootstrap_token: Option<Zeroizing<Vec<u8>>>,
+    /// The backup keys per `backup_key_id` (M8, ADR 0071). Empty until the first
+    /// `secrets rotate --backup-key`.
+    backup_keys: BTreeMap<u32, ServerDbBackupKey>,
+    /// The `backup_key_id` marked current: new format version 2 backups are sealed under it.
+    /// `Some` exactly when `backup_keys` is not empty.
+    current_backup_key_id: Option<u32>,
 }
 
 impl fmt::Debug for ServerSecrets {
@@ -168,6 +185,11 @@ impl fmt::Debug for ServerSecrets {
                 "bootstrap_token",
                 &self.bootstrap_token.as_ref().map(|_| "[REDACTED]"),
             )
+            .field(
+                "backup_key_ids",
+                &self.backup_keys.keys().collect::<Vec<_>>(),
+            )
+            .field("current_backup_key_id", &self.current_backup_key_id)
             .finish_non_exhaustive()
     }
 }
@@ -190,6 +212,8 @@ impl ServerSecrets {
             data_keys,
             current_data_key_id: 1,
             bootstrap_token: Some(token),
+            backup_keys: BTreeMap::new(),
+            current_backup_key_id: None,
         }
     }
 
@@ -233,7 +257,51 @@ impl ServerSecrets {
             data_keys: key_map,
             current_data_key_id,
             bootstrap_token,
+            backup_keys: BTreeMap::new(),
+            current_backup_key_id: None,
         })
+    }
+
+    /// Adds the secrets file's `backup_keys` and `current_backup_key_id` (M8, ADR 0071) to
+    /// secrets assembled by [`ServerSecrets::from_parts`]. A file without them is simply not
+    /// passed through here: the two members are present together or absent together (ADR
+    /// 0028 item 13), which the file reader checks.
+    ///
+    /// # Errors
+    /// [`SecretsError::DuplicateId`] for two backup keys with one id,
+    /// [`SecretsError::NoCurrentBackupKey`] when no backup key has `current_backup_key_id`
+    /// (an empty list included), and [`SecretsError::BackupKeyReused`] when a backup key
+    /// equals a `server_data_key` or the `enum_key` (threat model INV-98).
+    pub fn with_backup_keys(
+        mut self,
+        backup_keys: Vec<ServerDbBackupKey>,
+        current_backup_key_id: u32,
+    ) -> Result<Self, SecretsError> {
+        let mut map = BTreeMap::new();
+        for key in backup_keys {
+            if self.reuses_a_key(&key) {
+                return Err(SecretsError::BackupKeyReused);
+            }
+            if map.insert(key.backup_key_id(), key).is_some() {
+                return Err(SecretsError::DuplicateId);
+            }
+        }
+        if !map.contains_key(&current_backup_key_id) {
+            return Err(SecretsError::NoCurrentBackupKey);
+        }
+        self.backup_keys = map;
+        self.current_backup_key_id = Some(current_backup_key_id);
+        Ok(self)
+    }
+
+    /// Whether `key`'s bytes equal the `enum_key` or a `server_data_key` (INV-98), compared in
+    /// constant time.
+    fn reuses_a_key(&self, key: &ServerDbBackupKey) -> bool {
+        key.key_equals(self.enum_key.expose_secret())
+            || self
+                .data_keys
+                .values()
+                .any(|d| key.key_equals(d.expose_secret()))
     }
 
     /// Adds a new `server_setup` under the next `setup_id`, which new registrations then use
@@ -275,6 +343,34 @@ impl ServerSecrets {
             .ok_or(SecretsError::IdOverflow)?;
         self.data_keys.insert(id, ServerDataKey::generate(rng, id));
         self.current_data_key_id = id;
+        Ok(id)
+    }
+
+    /// Adds a new backup key under the next `backup_key_id`, 32 bytes from the injected CSPRNG,
+    /// and marks it current (`rizzy-vault secrets rotate --backup-key`, ADR 0071). Returns the
+    /// new id. New format version 2 backups are sealed under it; the older keys stay, since
+    /// backups sealed under them must remain restorable (owner answer 3 of ADR 0071: none is
+    /// dropped automatically).
+    ///
+    /// # Errors
+    /// [`SecretsError::IdOverflow`]; [`SecretsError::BackupKeyReused`] if the drawn key equals
+    /// a `server_data_key` or the `enum_key` (INV-98), which leaves the secrets unchanged.
+    pub fn rotate_backup_key<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<u32, SecretsError> {
+        let id = self
+            .backup_keys
+            .keys()
+            .next_back()
+            .map_or(Some(1), |last| last.checked_add(1))
+            .ok_or(SecretsError::IdOverflow)?;
+        let key = ServerDbBackupKey::generate(rng, id);
+        if self.reuses_a_key(&key) {
+            return Err(SecretsError::BackupKeyReused);
+        }
+        self.backup_keys.insert(id, key);
+        self.current_backup_key_id = Some(id);
         Ok(id)
     }
 
@@ -409,6 +505,33 @@ impl ServerSecrets {
     #[must_use]
     pub fn bootstrap_token(&self) -> Option<&[u8]> {
         self.bootstrap_token.as_deref().map(Vec::as_slice)
+    }
+
+    /// Every backup key, by ascending `backup_key_id` (M8, ADR 0071). Empty until the first
+    /// `secrets rotate --backup-key`.
+    pub fn backup_keys(&self) -> impl Iterator<Item = &ServerDbBackupKey> {
+        self.backup_keys.values()
+    }
+
+    /// The `backup_key_id` marked current, if any backup key exists.
+    #[must_use]
+    pub const fn current_backup_key_id(&self) -> Option<u32> {
+        self.current_backup_key_id
+    }
+
+    /// The backup key marked current: `backup --encrypt` seals under it. `None` until the
+    /// first `secrets rotate --backup-key`.
+    #[must_use]
+    pub fn current_backup_key(&self) -> Option<&ServerDbBackupKey> {
+        self.current_backup_key_id
+            .and_then(|id| self.backup_keys.get(&id))
+    }
+
+    /// The backup key with `backup_key_id`, which a format version 2 backup's header names and
+    /// which may no longer be the current one (CRYPTO.md §9.8 "Key").
+    #[must_use]
+    pub fn backup_key(&self, backup_key_id: u32) -> Option<&ServerDbBackupKey> {
+        self.backup_keys.get(&backup_key_id)
     }
 
     /// The startup checks of CRYPTO.md §5.8 and §5.11, run after migrating and before serving

@@ -1,6 +1,10 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Login (CRYPTO.md §11.4: every web-vault session is an OPAQUE login with the login name, the
 // Secret Key and the master password; the second factor is asked for when the server wants
 // it). Also the "unlock" screen after a lock: the login name stays in memory, nothing else.
+// Its text is the `login.*` entries of `@rizzy-vault/i18n`.
+import { t } from "@rizzy-vault/i18n";
 import { SecretField } from "@rizzy-vault/ui";
 import { type FormEvent, useRef, useState } from "react";
 
@@ -35,9 +39,9 @@ export function LoginView(props: {
 
   return (
     <form className="panel narrow" onSubmit={submit} aria-labelledby="login-title">
-      <h1 id="login-title">{unlock ? "Unlock rizzy-vault" : "Log in to rizzy-vault"}</h1>
+      <h1 id="login-title">{unlock ? t("login.unlockTitle") : t("login.title")}</h1>
       {props.notice !== undefined && <p className="notice">{props.notice}</p>}
-      <label htmlFor="login-name">Login name</label>
+      <label htmlFor="login-name">{t("login.loginName")}</label>
       <input
         id="login-name"
         name="username"
@@ -50,30 +54,27 @@ export function LoginView(props: {
         onChange={(e) => setLoginName(e.currentTarget.value)}
       />
       <SecretField
-        label="Secret Key"
+        label={t("login.secretKey")}
         name="secret-key"
         inputRef={secretKey}
         required
-        hint="From your Emergency Kit. It starts with RV1-."
+        hint={t("login.secretKeyHint")}
       />
       <SecretField
-        label="Master password"
+        label={t("login.masterPassword")}
         name="master-password"
         inputRef={password}
         required
         autoFocus={unlock}
       />
-      <p className="hint">
-        Do not let the browser save your master password or Secret Key. This web vault keeps
-        nothing after a reload or a lock: you log in again each time.
-      </p>
+      <p className="hint">{t("login.noSavingHint")}</p>
       <ErrorText code={error} />
       <div className="actions">
         <button type="submit" disabled={busy}>
-          {busy ? "Logging in…" : unlock ? "Unlock" : "Log in"}
+          {busy ? t("login.busy") : unlock ? t("login.unlock") : t("login.submit")}
         </button>
         <button type="button" className="link" onClick={props.onSignup} disabled={busy}>
-          Create an account
+          {t("login.createAccount")}
         </button>
       </div>
     </form>

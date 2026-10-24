@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-client` — the sans-I/O client core of rizzy-vault ([ADR 0013] §1–§2, [ADR 0016] §3
 //! row `rizzy-client`, [ADR 0019] §5).
 //!
@@ -45,13 +47,20 @@
 //! | [`rotation`] | CRYPTO.md §11.6, §11.8 steps 1–3; ADR 0025 §2 | Standard and full key rotation with an optional revocation: new keys, the auth half, the vault half, the retry rule |
 //! | [`credentials`] | CRYPTO.md §11.5, §11.3 step 5 | Master password and Secret Key change, with or without a rotation; following a change made elsewhere |
 //! | [`two_factor`] | CRYPTO.md §5.10, §11.15 | Server-side 2FA enrolment (the otpauth URI) and removal requests |
+//! | [`webauthn`] | CRYPTO.md §11.17; ADRs 0058, 0077 | Security keys: enrolment, list and removal requests; which second factor a login can finish with |
+//! | [`breach`] | CRYPTO.md §11.16; ADR 0053 | The breach check: the prefix request, the constant-time verdict |
+//! | [`icons`] | ADR 0052 point 6 | Item icons: the hostname-only request, the answer check |
 //! | [`session`] | CRYPTO.md §5.10; ADR 0012 §7 "A device enrolled after the backup" | Device authentication (also certificate-carrying, after a restore) and request signing |
+//! | [`sessions`] | ADR 0075 §5, §6, §8, §9 | Listing and ending sessions: the rows, which may be ended, sign-out, the ended-session rule |
+//! | [`attachments`] | ADR 0054 §1–§4, §7; INV-78, INV-79 | Encrypted attachments: the item op first, the sealed upload, the download verified against the item's own size and assembled only complete, deletion |
 //! | [`healing`] | ADR 0012 §7 steps 1–3 as ADR 0032 §1–§4 replace them; ADR 0021 §9 "Server behind" | Account-side restore healing: the older-chain rollback, the bundle chain, the newest `account-state` with `E_id` and the settings, the self-grants of step 3b; the recovery repair; the reconciliation objects |
 //! | [`matching`] | ADR 0037, ADR 0038 | URL matching for autofill, over `rizzy-match` |
+//! | [`settings`] | ADR 0042; ADR 0037 §6–§7 | The `ACCOUNT_SETTINGS` plaintext: its record, reading it, and changing the match default and equivalence groups by whole-record replace |
 //! | [`passkey`] | ADR 0039 §2; `THREAT_MODEL.md` INV-64 | Checking a `WebAuthn` `rpId` against the browser-verified origin, over `rizzy-match`'s PSL |
 //! | [`sync`] | ADR 0012 §4, §7; ADR 0018 §3, §10; ADR 0021 §2, §4, §9 | The sync driver of one vault |
 //! | [`items`] | ADR 0018 §2, §6–§9; ADR 0012 §5; ADR 0027 §2 steps 3–5 | Item create, edit, trash, restore, purge and reads; the import path, which splits an item over a create op and the ops that follow |
 //! | [`lists`] | ADR 0018 §6 "List elements", "List order" | The writes that add, edit and remove URIs, custom fields, password-history entries and tags of an item |
+//! | [`conflicts`] | ADR 0012 §4 step 5; ADR 0018 §6 "Display"; ROADMAP §4.5 | A conflicting field's values, and its resolution as an ordinary edit: "pick one" or "keep both" |
 //! | [`export`] | CRYPTO.md §11.14 | The encrypted export file writer and bounded reader |
 //! | [`export::payload`] | ADR 0027 §1–§2 | The export payload: encoding, bounded reader, import of our own export as new items |
 //! | [`export::plaintext`] | ADR 0027 §3–§5 | Plaintext JSON and CSV behind the typed acknowledgement; the frozen warning texts |
@@ -98,11 +107,17 @@
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
 pub mod account;
+pub mod attachments;
+pub mod autofill;
+pub mod breach;
+pub mod conflicts;
 pub mod credentials;
 pub mod device;
 pub mod error;
 pub mod export;
 pub mod healing;
+pub mod icons;
+pub mod identity_gen;
 pub mod items;
 pub mod lists;
 pub mod login;
@@ -112,11 +127,15 @@ pub mod recovery;
 pub mod reregister;
 pub mod rotation;
 pub mod session;
+pub mod sessions;
+pub mod settings;
 pub mod signup;
 pub mod store;
 pub mod sync;
 pub mod two_factor;
 pub mod unlock;
+pub mod vaults;
+pub mod webauthn;
 mod wire;
 
 pub use error::ClientError;

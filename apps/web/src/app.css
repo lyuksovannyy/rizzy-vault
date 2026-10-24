@@ -1,6 +1,11 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+
 /* The web vault's styles: static CSS only (ADR 0014 §2 "No runtime CSS-in-JS"; the INV-49 CSP
-   refuses inline styles). Colours, spacing, type and radius come from the token properties of
-   packages/ui (tokens.css). */
+   refuses inline styles). Colours, spacing, type, radius, elevation and motion come from the token
+   properties of packages/ui (tokens.css, generated) and the keyframes of packages/ui motion.css;
+   docs/design/README.md is the design language they implement. Every animation and transition
+   here runs on a --motion-* token, so `prefers-reduced-motion: reduce` turns each into a short
+   crossfade without movement (tokens.css redefines the tokens there). */
 
 *,
 *::before,
@@ -14,7 +19,14 @@ body {
   color: var(--color-text);
   font-family: var(--font-body);
   font-size: var(--font-size-body);
-  line-height: 1.45;
+  line-height: var(--line-height-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--color-accent-subtle);
+  color: var(--color-text);
 }
 
 main {
@@ -43,26 +55,35 @@ main:has(.shell) {
   white-space: nowrap;
 }
 
+h1,
+h2,
+h3 {
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  letter-spacing: -0.01em;
+}
+
 h1 {
   font-size: var(--font-size-title);
   margin: 0 0 var(--space-4);
 }
 
 h2 {
-  font-size: 1.15rem;
+  font-size: var(--font-size-heading);
   margin: 0 0 var(--space-3);
 }
 
 h3 {
-  font-size: 1rem;
+  font-size: var(--font-size-body);
   margin: var(--space-4) 0 var(--space-2);
 }
 
 .panel {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-2);
+  border-radius: var(--radius-3);
   padding: var(--space-6);
+  box-shadow: var(--shadow-1);
 }
 
 .narrow {
@@ -70,10 +91,22 @@ h3 {
   margin: var(--space-8) auto;
 }
 
+/* The screens before the vault (login, unlock, signup) and the status/error screens rise into
+   place once, on mount. */
+main > .panel,
+main > .status {
+  animation: rv-rise-in var(--motion-duration-slow) var(--motion-easing-emphasized) backwards;
+}
+
+main > .panel.narrow {
+  margin-top: var(--space-12);
+  box-shadow: var(--shadow-2);
+}
+
 label {
   display: block;
   margin: var(--space-3) 0 var(--space-1);
-  font-weight: 600;
+  font-weight: var(--font-weight-medium);
 }
 
 label.check {
@@ -83,16 +116,32 @@ label.check {
   font-weight: 400;
 }
 
+/* Form controls: a WCAG 1.4.11 boundary (--color-border-strong, ≥3:1 against every surface, a
+   declared token pair), a hover step and a focus ring that eases in. */
 input,
 select,
 textarea {
   width: 100%;
-  padding: var(--space-2);
-  border: 1px solid var(--color-border);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-1);
   background: var(--color-surface);
   color: var(--color-text);
   font: inherit;
+  transition:
+    border-color var(--motion-duration-fast) var(--motion-easing-standard),
+    box-shadow var(--motion-duration-fast) var(--motion-easing-standard);
+}
+
+input:hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: var(--color-text-muted);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-text-muted);
 }
 
 input[type="checkbox"],
@@ -108,6 +157,15 @@ button:focus-visible {
   outline-offset: 2px;
 }
 
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  border-color: var(--color-focus);
+  outline-offset: 0;
+}
+
+/* Buttons: the primary action is the accent fill; hover deepens it, press settles it by
+   --motion-scale-press (1 under reduced motion, so only the colour changes). */
 button {
   padding: var(--space-2) var(--space-4);
   border: 1px solid var(--color-accent);
@@ -115,7 +173,25 @@ button {
   background: var(--color-accent);
   color: var(--color-on-accent);
   font: inherit;
+  font-weight: var(--font-weight-medium);
   cursor: pointer;
+  transition:
+    background-color var(--motion-duration-fast) var(--motion-easing-standard),
+    border-color var(--motion-duration-fast) var(--motion-easing-standard),
+    color var(--motion-duration-fast) var(--motion-easing-standard),
+    box-shadow var(--motion-duration-fast) var(--motion-easing-standard),
+    transform var(--motion-duration-instant) var(--motion-easing-standard);
+}
+
+/* Only the primary buttons (no class, or just `small`) take the accent hover; every other kind
+   sets its own below. */
+button:is(:not([class]), [class="small"]):hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+button:active:not(:disabled, .dialog-backdrop, .sidebar-backdrop) {
+  transform: scale(var(--motion-scale-press));
 }
 
 button:disabled {
@@ -128,7 +204,14 @@ button.tab,
 button.row {
   background: var(--color-surface);
   color: var(--color-text);
-  border-color: var(--color-border);
+  border-color: var(--color-border-strong);
+}
+
+button.secondary:hover:not(:disabled),
+button.tab:hover:not(:disabled),
+button.row:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+  border-color: var(--color-border-strong);
 }
 
 button.danger {
@@ -137,12 +220,21 @@ button.danger {
   color: var(--color-on-danger);
 }
 
+button.danger:hover:not(:disabled) {
+  box-shadow: var(--shadow-2);
+}
+
 button.link {
   background: none;
   border: none;
   color: var(--color-text);
   text-decoration: underline;
+  text-underline-offset: 0.2em;
   padding: var(--space-2);
+}
+
+button.link:hover:not(:disabled) {
+  color: var(--color-accent);
 }
 
 button.small {
@@ -177,9 +269,12 @@ hr {
   font-size: var(--font-size-small);
 }
 
+/* An error message nudges once as it appears (docs/design/README.md "Feedback"): 4px each way,
+   none under reduced motion. Its words and colour carry the meaning; the nudge only draws the eye. */
 .error {
   color: var(--color-danger);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
+  animation: rv-nudge var(--motion-duration-slow) var(--motion-easing-standard);
 }
 
 .notice {
@@ -191,7 +286,7 @@ hr {
   background: var(--color-warning-bg);
   color: var(--color-warning-text);
   padding: var(--space-3);
-  border-radius: var(--radius-1);
+  border-radius: var(--radius-2);
 }
 
 .mono,
@@ -213,6 +308,18 @@ code {
   font-family: var(--font-mono);
 }
 
+/* A multi-line secret (an SSH private key, ADR 0055): a textarea, masked until "Show"
+ * (`SecretField`'s module docs). */
+.secret-field-row textarea.secret-multiline {
+  font-family: var(--font-mono);
+  flex: 1;
+  min-width: 0;
+}
+
+.secret-masked {
+  -webkit-text-security: disc;
+}
+
 .caps-lock-hint {
   color: var(--color-warning-text);
   background: var(--color-warning-bg);
@@ -221,12 +328,25 @@ code {
   display: inline-block;
 }
 
+/* Modal dialogs (docs/design/README.md "Dialogs"): the scrim fades in, the dialog pops in from
+   just below its resting place on the emphasized curve. Exit is immediate (React unmounts the
+   dialog), which the motion rules allow: an exit never delays the next action. */
 .overlay {
   position: fixed;
   inset: 0;
+  z-index: 50;
   display: grid;
   place-items: center;
-  background: rgb(0 0 0 / 0.45);
+  padding: var(--space-4);
+  background: rgb(5 6 10 / 0.6);
+  animation: rv-fade-in var(--motion-duration-base) var(--motion-easing-standard) backwards;
+}
+
+.overlay > .panel {
+  border-color: var(--color-border);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-3);
+  animation: rv-pop-in var(--motion-duration-base) var(--motion-easing-emphasized) backwards;
 }
 
 .dialog {
@@ -253,8 +373,10 @@ code {
   margin-left: var(--space-2);
   padding: 0 var(--space-2);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-1);
-  font-size: var(--font-size-small);
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-caption);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-muted);
 }
 
 /* The app shell (item 1): a fixed sidebar beside the main column (topbar + the section's own
@@ -283,13 +405,13 @@ code {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  padding: var(--space-4);
+  padding: var(--space-4) var(--space-3);
   background: var(--color-surface);
   border-right: 1px solid var(--color-border);
 }
 
 .sidebar-brand {
-  padding-bottom: var(--space-2);
+  padding: 0 var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -309,30 +431,52 @@ code {
   padding-top: 0;
 }
 
+/* Sidebar entries: a quiet hover tint, and the current section marked by the accent-tinted
+   fill plus an accent bar at its start edge (a shape, not only a colour; under forced colours
+   the border below draws it). */
 button.sidebar-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-2);
   width: 100%;
   justify-content: flex-start;
+  padding: var(--space-2) var(--space-3);
   background: none;
   border: 1px solid transparent;
   color: var(--color-text);
   border-radius: var(--radius-1);
+  font-weight: var(--font-weight-regular);
+}
+
+button.sidebar-item svg {
+  color: var(--color-text-muted);
+  transition: color var(--motion-duration-fast) var(--motion-easing-standard);
+}
+
+button.sidebar-item:hover:not(:disabled) {
+  background: var(--color-surface-hover);
 }
 
 button.sidebar-item.active {
-  background: var(--color-accent);
-  color: var(--color-on-accent);
-  border-color: var(--color-accent);
+  background: var(--color-accent-subtle);
+  color: var(--color-text);
+  border-color: transparent;
+  font-weight: var(--font-weight-medium);
+  box-shadow: inset 3px 0 0 var(--color-accent);
+}
+
+button.sidebar-item.active svg {
+  color: var(--color-accent);
 }
 
 .sidebar-group-label {
-  padding: 0 var(--space-2);
+  padding: 0 var(--space-3);
   color: var(--color-text-muted);
-  font-size: var(--font-size-small);
+  font-size: var(--font-size-caption);
+  font-weight: var(--font-weight-semibold);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
 }
 
 .main {
@@ -374,12 +518,13 @@ button.sidebar-item.active {
     z-index: 25;
     width: 16rem;
     transform: translateX(-100%);
-    transition: transform 120ms ease-out;
-    box-shadow: 0 0 24px rgb(0 0 0 / 0.25);
+    transition: transform var(--motion-duration-base) var(--motion-easing-accelerate);
+    box-shadow: var(--shadow-3);
   }
 
   .shell.sidebar-open .sidebar {
     transform: translateX(0);
+    transition: transform var(--motion-duration-slow) var(--motion-easing-emphasized);
   }
 
   .shell.sidebar-open .sidebar-backdrop {
@@ -389,7 +534,8 @@ button.sidebar-item.active {
     z-index: 20;
     border: none;
     padding: 0;
-    background: rgb(0 0 0 / 0.4);
+    background: rgb(8 10 16 / 0.45);
+    animation: rv-fade-in var(--motion-duration-base) var(--motion-easing-standard) backwards;
   }
 
   .main {
@@ -401,7 +547,16 @@ button.sidebar-item.active {
 .items {
   display: grid;
   grid-template-columns: minmax(14rem, 22rem) 1fr;
-  gap: var(--space-4);
+  gap: var(--space-6);
+}
+
+/* Opening an item (docs/design/README.md "Opening an item"): ItemsPane.tsx keys this wrapper by
+   what is open (the item and view/edit), so each open mounts it fresh and it slides in from the
+   list's side, the one shared-element-like step this design uses, a short travel on the
+   emphasized curve; a sync re-mounting the same item does not replay it. Under reduced motion
+   it only fades. */
+.item-detail-enter {
+  animation: rv-slide-in-end var(--motion-duration-slow) var(--motion-easing-emphasized) backwards;
 }
 
 /* Hidden above the single-pane breakpoint, where the list and detail panes show side by side
@@ -485,20 +640,103 @@ button.row {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-3);
   text-align: left;
   margin-bottom: var(--space-1);
+  font-weight: var(--font-weight-regular);
 }
 
-button.row.selected {
+/* The item list (docs/design/README.md "Lists"): rows sit flat on the page, tint on hover, and
+   the open item takes the accent-tinted fill with an accent edge (a shape as well as a colour).
+   On mount the rows rise in, staggered by --motion-stagger-step for the first
+   --motion-stagger-max-items rows only (8 x 30ms: a long list never makes its last row wait). */
+.item-list button.row {
+  padding: var(--space-2) var(--space-3);
+  border-color: transparent;
+  border-radius: var(--radius-2);
+  background: transparent;
+}
+
+.item-list button.row:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+  border-color: transparent;
+}
+
+button.row.selected,
+.item-list button.row.selected,
+.item-list button.row.selected:hover:not(:disabled) {
+  background: var(--color-accent-subtle);
   border-color: var(--color-accent);
+}
+
+.item-list button.row.selected .row-icon {
+  color: var(--color-accent);
+}
+
+.item-list li {
+  animation: rv-rise-in var(--motion-duration-base) var(--motion-easing-emphasized) backwards;
+}
+
+.item-list li:nth-child(2) {
+  animation-delay: calc(1 * var(--motion-stagger-step));
+}
+
+.item-list li:nth-child(3) {
+  animation-delay: calc(2 * var(--motion-stagger-step));
+}
+
+.item-list li:nth-child(4) {
+  animation-delay: calc(3 * var(--motion-stagger-step));
+}
+
+.item-list li:nth-child(5) {
+  animation-delay: calc(4 * var(--motion-stagger-step));
+}
+
+.item-list li:nth-child(6) {
+  animation-delay: calc(5 * var(--motion-stagger-step));
+}
+
+.item-list li:nth-child(7) {
+  animation-delay: calc(6 * var(--motion-stagger-step));
+}
+
+.item-list li:nth-child(n + 8) {
+  animation-delay: calc(7 * var(--motion-stagger-step));
 }
 
 .row-icon {
   flex: none;
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--radius-1);
+  background: var(--color-surface-hover);
   color: var(--color-text-muted);
-  font-size: 1.15rem;
+  font-size: 1.05rem;
+  transition: color var(--motion-duration-fast) var(--motion-easing-standard);
+}
+
+.item-list button.row.selected .row-icon,
+.item-list button.row:hover .row-icon {
+  background: var(--color-surface);
+}
+
+.dropdown-menu .row-icon,
+.command-palette .row-icon {
+  width: auto;
+  height: auto;
+  background: none;
+}
+
+/* A site icon from the `icons` role (packages/ui `ItemIcon.tsx`): a server-re-encoded PNG of at most
+   128×128, shown in the type icon's place at a fixed size, so a row never shifts when it loads. */
+.item-favicon {
+  display: block;
+  object-fit: contain;
+  border-radius: var(--radius-sm, 4px);
 }
 
 .row-text {
@@ -511,6 +749,7 @@ button.row.selected {
 }
 
 .row-title {
+  font-weight: var(--font-weight-medium);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -540,7 +779,7 @@ button.row.selected {
   flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
-  padding: var(--space-2) 0;
+  padding: var(--space-3) 0;
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -550,7 +789,9 @@ button.row.selected {
 
 .field-label {
   min-width: 9rem;
-  font-weight: 600;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-small);
+  font-weight: var(--font-weight-medium);
 }
 
 .field-value {
@@ -569,6 +810,128 @@ button.row.selected {
   gap: var(--space-1);
 }
 
+/* A Secure Note's notes rendered from their Markdown (NoteMarkdown.tsx; ADR 0062 §8): every
+   element carries one of these fixed classes and nothing from the note. Code blocks wrap
+   rather than scroll, so the rendered note never holds a scrollable region that would need
+   its own keyboard focus. */
+.md-note {
+  min-width: 0;
+  white-space: normal;
+}
+
+.md-note > :first-child {
+  margin-top: 0;
+}
+
+.md-note > :last-child {
+  margin-bottom: 0;
+}
+
+.md-h1,
+.md-h2,
+.md-h3,
+.md-h4,
+.md-h5,
+.md-h6 {
+  margin: var(--space-3) 0 var(--space-1);
+  line-height: 1.25;
+}
+
+.md-h1 {
+  font-size: 1.5rem;
+}
+
+.md-h2 {
+  font-size: 1.3rem;
+}
+
+.md-h3 {
+  font-size: 1.15rem;
+}
+
+.md-h4,
+.md-h5,
+.md-h6 {
+  font-size: 1rem;
+}
+
+.md-p,
+.md-ul,
+.md-ol,
+.md-pre,
+.md-blockquote {
+  margin: var(--space-2) 0;
+}
+
+.md-ul,
+.md-ol {
+  padding-left: var(--space-6);
+}
+
+.md-code,
+.md-pre {
+  font-family: var(--font-mono);
+  background: var(--color-bg);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+}
+
+.md-code {
+  padding: 0 var(--space-1);
+}
+
+.md-pre {
+  padding: var(--space-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.md-pre-code {
+  font-family: inherit;
+}
+
+.md-blockquote {
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--color-border);
+}
+
+.md-blockquote > .md-p {
+  margin: var(--space-1) 0;
+}
+
+.md-hr {
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  margin: var(--space-3) 0;
+}
+
+/* The conflict chooser (ConflictChooser.tsx): a full-width box under the conflicting field. */
+.conflict-chooser {
+  flex: 1 1 100%;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+}
+
+.conflict-values {
+  list-style: none;
+  margin: 0 0 var(--space-2);
+  padding: 0;
+}
+
+.conflict-value {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-1) 0;
+}
+
+.conflict-value .secret-field {
+  flex: 1 1 100%;
+}
+
 .tags {
   display: flex;
   flex-wrap: wrap;
@@ -585,12 +948,19 @@ button.row.selected {
 .item-header h2 {
   margin: 0;
   flex: 1;
+  font-size: var(--font-size-title);
 }
 
 .item-icon {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: var(--radius-2);
+  background: var(--color-accent-subtle);
   font-size: 1.4rem;
-  color: var(--color-text-muted);
+  color: var(--color-accent);
 }
 
 .favorite-toggle {
@@ -615,11 +985,21 @@ button.row.selected {
   transition: stroke-dashoffset 1s linear;
 }
 
+/* The countdown ring is a running clock, not decoration: under reduced motion it steps once a
+   second instead of gliding. */
+@media (prefers-reduced-motion: reduce) {
+  .totp-ring-progress {
+    transition: none;
+  }
+}
+
 .tag {
-  padding: 0 var(--space-2);
+  padding: 0 var(--space-3);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-2);
-  font-size: var(--font-size-small);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-hover);
+  font-size: var(--font-size-caption);
+  font-weight: var(--font-weight-medium);
 }
 
 table {
@@ -752,16 +1132,19 @@ a.icon-button:focus-visible {
   display: none;
 }
 
+/* A toast rises in from the stack's edge (docs/design/README.md "Toasts"); it leaves at once when
+   dismissed or timed out, so the stack never holds a ghost a screen reader could still reach. */
 .toast {
   display: flex;
   align-items: flex-start;
-  gap: var(--space-2);
+  gap: var(--space-3);
   padding: var(--space-3);
   border-radius: var(--radius-2);
   border: 1px solid var(--color-border);
-  background: var(--color-surface);
+  background: var(--color-surface-raised);
   color: var(--color-text);
-  box-shadow: 0 4px 16px rgb(0 0 0 / 0.2);
+  box-shadow: var(--shadow-2);
+  animation: rv-rise-in var(--motion-duration-base) var(--motion-easing-emphasized) backwards;
 }
 
 .toast-icon {
@@ -777,8 +1160,9 @@ a.icon-button:focus-visible {
 }
 
 .toast-success .toast-icon {
-  background: var(--color-accent);
-  color: var(--color-on-accent);
+  background: var(--color-success);
+  color: var(--color-on-success);
+  animation: rv-settle var(--motion-duration-slow) var(--motion-easing-emphasized) backwards;
 }
 
 .toast-error {
@@ -791,7 +1175,7 @@ a.icon-button:focus-visible {
 }
 
 .toast-info .toast-icon {
-  background: var(--color-border);
+  background: var(--color-accent-subtle);
   color: var(--color-text);
 }
 
@@ -806,6 +1190,11 @@ a.icon-button:focus-visible {
   border: none;
   color: var(--color-text-muted);
   padding: 0;
+  border-radius: var(--radius-1);
+}
+
+.toast-dismiss:hover:not(:disabled) {
+  color: var(--color-text);
 }
 
 /* The accessible confirm dialog (redesign slice 2, item 2): the same `.overlay`/`.dialog`
@@ -836,8 +1225,10 @@ a.icon-button:focus-visible {
 
 .shortcuts-list dt {
   font-family: var(--font-mono);
+  font-size: var(--font-size-small);
   background: var(--color-bg);
   border: 1px solid var(--color-border);
+  border-bottom-width: 2px;
   border-radius: var(--radius-1);
   padding: 0 var(--space-2);
   justify-self: start;
@@ -865,9 +1256,16 @@ a.icon-button:focus-visible {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-2);
   padding: var(--space-1);
-  box-shadow: 0 4px 16px rgb(0 0 0 / 0.2);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-2);
   display: flex;
   flex-direction: column;
+  transform-origin: top left;
+  animation: rv-pop-in var(--motion-duration-fast) var(--motion-easing-emphasized) backwards;
+}
+
+.account-menu .dropdown-menu {
+  transform-origin: top right;
 }
 
 .account-menu .dropdown-menu {
@@ -876,8 +1274,126 @@ a.icon-button:focus-visible {
 
 .dropdown-menu button.row {
   margin-bottom: 0;
+  padding: var(--space-2) var(--space-3);
   border: none;
+  border-radius: var(--radius-1);
   background: none;
+}
+
+.dropdown-menu button.row:hover:not(:disabled),
+.dropdown-menu button.row:focus-visible {
+  background: var(--color-surface-hover);
+}
+
+/* The large-type password display (ROADMAP §4.5; `views/LargeType.tsx`): each character of an
+   already-revealed value in its own bordered cell, monospace and oversized so it reads
+   unambiguously at a glance, digits and symbols given a distinct colour from plain letters (the
+   grid itself is `aria-hidden`; `LargeType.tsx`'s own module docs explain why). */
+.large-type {
+  width: min(40rem, 92vw);
+}
+
+.large-type-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: var(--space-4) 0;
+  font-family: var(--font-mono);
+  font-size: 1.75rem;
+}
+
+.large-type-cell {
+  min-width: 2.25rem;
+  text-align: center;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: var(--color-bg);
+}
+
+.large-type-digit {
+  color: var(--color-accent);
+}
+
+.large-type-symbol {
+  color: var(--color-danger);
+}
+
+/* The command palette (Ctrl/Cmd+K; `views/CommandPalette.tsx`): the same overlay/dialog shell
+   as every other dialog, widened for its search box and results list. Its options
+   (`<li role="option">`) reuse `.row`/`.row-icon`/`.row-text`/`.row-title`/`.row-sub` from the
+   item list for a consistent look, with their own selector here since they are not
+   `button.row` (module docs: a combobox's options are not separately focusable). */
+.command-palette {
+  width: min(34rem, 92vw);
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+}
+
+.command-palette {
+  padding: var(--space-3);
+}
+
+.command-palette-combobox {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-2);
+  padding: 0 var(--space-3);
+  transition: border-color var(--motion-duration-fast) var(--motion-easing-standard);
+}
+
+.command-palette-combobox:focus-within {
+  border-color: var(--color-focus);
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.command-palette-combobox svg {
+  flex: none;
+  color: var(--color-text-muted);
+}
+
+.command-palette-combobox input {
+  flex: 1;
+  border: none;
+  padding: var(--space-3) 0;
+  font-size: var(--font-size-heading);
+}
+
+/* The combobox draws the focus ring around the whole field (focus-within above) instead. */
+.command-palette-combobox input:focus-visible {
+  outline: none;
+}
+
+.command-palette ul {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  overflow-y: auto;
+}
+
+.command-palette li.row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  transition: background-color var(--motion-duration-instant) var(--motion-easing-standard);
+}
+
+.command-palette li.row:hover {
+  background: var(--color-surface-hover);
+}
+
+.command-palette li.row.selected {
+  background: var(--color-accent-subtle);
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
 }
 
 /* The Tags sidebar section (item 6). */
@@ -913,11 +1429,13 @@ button.sidebar-item .sidebar-item-count {
   left: 0;
   margin-top: var(--space-2);
   width: max(18rem, 100%);
-  background: var(--color-surface);
+  background: var(--color-surface-raised);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-2);
+  border-radius: var(--radius-3);
   padding: var(--space-4);
-  box-shadow: 0 4px 16px rgb(0 0 0 / 0.2);
+  box-shadow: var(--shadow-2);
+  transform-origin: top left;
+  animation: rv-pop-in var(--motion-duration-base) var(--motion-easing-emphasized) backwards;
 }
 
 /* The item editor (ItemEditor.tsx): fixed fields, secret fields, and the websites/custom-field/
@@ -932,6 +1450,22 @@ button.sidebar-item .sidebar-item-count {
 .field-edit,
 .secret-edit {
   margin-bottom: var(--space-3);
+}
+
+/* A generated identity field and its Regenerate button (ADR 0079 §10). */
+.field-edit-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.field-edit-row > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.field-edit-row > button {
+  flex: none;
 }
 
 .secret-edit .actions {
@@ -985,4 +1519,229 @@ button.sidebar-item .sidebar-item-count {
 .row-actions label.check {
   margin: 0;
   white-space: nowrap;
+}
+
+/* The late-edit and trash notices after a sync (gap 02; NoticesPanel.tsx). */
+.notices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+}
+
+.notice {
+  background: var(--color-surface);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-2);
+  padding: var(--space-3);
+  animation: rv-rise-in var(--motion-duration-base) var(--motion-easing-emphasized) backwards;
+}
+
+.notice p {
+  margin: 0 0 var(--space-2);
+}
+
+/* An item's encrypted attachments (ADR 0054; AttachmentsSection.tsx). */
+.attachments {
+  margin: var(--space-3) 0;
+}
+
+.attachment-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.attachment {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-1) 0;
+}
+
+.attachment-name {
+  overflow-wrap: anywhere;
+}
+
+.attachment-add {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
+/* An item's password history (gap 01; PasswordHistory.tsx). */
+.password-history {
+  margin: var(--space-3) 0;
+}
+
+.password-history summary {
+  cursor: pointer;
+}
+
+/* The getting-started guide (OnboardingView.tsx): the steps as a short progress track, the
+   current one marked by weight and an accent dot (a shape, so it reads in forced colours too),
+   each step's content rising in as the guide moves on. */
+.onboarding-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  padding: 0;
+  list-style: none;
+  counter-reset: onboarding;
+}
+
+.onboarding-steps li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  counter-increment: onboarding;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-small);
+}
+
+.onboarding-steps li::before {
+  content: counter(onboarding);
+  display: inline-grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-caption);
+  font-weight: var(--font-weight-semibold);
+  transition:
+    background-color var(--motion-duration-base) var(--motion-easing-standard),
+    color var(--motion-duration-base) var(--motion-easing-standard);
+}
+
+.onboarding-steps li[aria-current="step"] {
+  color: var(--color-text);
+  font-weight: var(--font-weight-semibold);
+}
+
+.onboarding-steps li[aria-current="step"]::before {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.onboarding-steps + * {
+  animation: rv-rise-in var(--motion-duration-slow) var(--motion-easing-emphasized) backwards;
+}
+
+/* Each dt/dd pair is wrapped in a div (valid in a dl); the wrapper takes no box, so the pairs
+   sit in the .kit grid as if unwrapped. */
+.onboarding-fields .onboarding-field {
+  display: contents;
+}
+
+/* Settings → Website matching (MatchingPane.tsx): one group per row, its button beside it. */
+.matching-list {
+  list-style: none;
+  margin: 0 0 var(--space-2);
+  padding: 0;
+}
+
+.matching-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-1) 0;
+}
+
+/* A long group (ADR 0080): "airbnb.com and 52 more", then a disclosure listing every site. */
+.matching-list .group-domains {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.matching-list .group-domains ul {
+  list-style: none;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  columns: 12rem auto;
+}
+
+.matching-list .group-domains li {
+  display: block;
+  padding: 0;
+}
+
+/* Settings → Third-party notices (@rizzy-vault/ui ThirdPartyNotices): long URLs wrap. */
+.third-party-notices li {
+  overflow-wrap: anywhere;
+}
+
+/* The breach check (PasswordHealth.tsx; ADR 0053): the result line under the check button, and
+   the report's list of breached items. A found result is marked by its words, not by colour
+   alone; the danger colour only reinforces them. */
+.breach-check {
+  margin: var(--space-1) 0 var(--space-2);
+}
+
+.breach-check [role="status"]:empty {
+  display: none;
+}
+
+.breach-found {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.breach-found .hint {
+  font-weight: normal;
+}
+
+.health-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.health-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+  padding: var(--space-1) 0;
+}
+
+.password-health progress {
+  width: 100%;
+  accent-color: var(--color-accent);
+}
+
+/* Reduced motion (WCAG 2.3.3; docs/design/README.md "Accessibility"): the tokens already make
+   every animation above a short crossfade without movement. These are the transitions that move
+   by a fixed amount rather than a distance token, so they are switched off outright. */
+@media (prefers-reduced-motion: reduce) {
+  .shell .sidebar,
+  .shell.sidebar-open .sidebar {
+    transition: none;
+  }
+}
+
+/* Forced colours (Windows High Contrast): box shadows and background tints are dropped by the
+   browser, so every state they carried here is redrawn with a border in a system colour. Nothing
+   opts out of forced colours (e2e/a11y.ts checks it). */
+@media (forced-colors: active) {
+  button.sidebar-item.active,
+  .item-list button.row.selected,
+  .command-palette li.row.selected {
+    border: 2px solid Highlight;
+  }
+
+  .overlay > .panel,
+  .dropdown-menu,
+  .popover,
+  .toast {
+    border: 1px solid CanvasText;
+  }
+
+  .onboarding-steps li[aria-current="step"]::before {
+    border: 2px solid Highlight;
+  }
 }

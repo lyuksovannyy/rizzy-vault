@@ -1,79 +1,180 @@
-/* The M1 token set (ADR 0014 §5): hand-written CSS custom properties, light and dark. M3
-   replaces this file with CSS generated from the platform-neutral token source, keeping the
-   property names where possible. Components use only these properties, in the declared
-   text/background pairs below (the contrast check over them is M3). */
+/* SPDX-License-Identifier: AGPL-3.0-only */
+
+/* GENERATED FILE — do not edit by hand. Source: packages/ui/tokens/tokens.json; regenerate with
+   `cargo xtask generate-tokens` (ADR 0014 §5, ADR 0019 §13). `cargo xtask
+   generate-tokens --check` fails CI if this file is stale. Every custom property name is
+   kept from the M1 hand-written set, so nothing that reads this file changes.
+
+   Colour: the WCAG AA pairs `cargo xtask generate-tokens` checks
+   (ADR 0014 §5; it covers the declared pairs only) are (--color-text, --color-bg),
+   (--color-text, --color-surface), (--color-text, --color-surface-raised),
+   (--color-text, --color-surface-hover), (--color-text, --color-accent-subtle),
+   (--color-text-muted, --color-bg), (--color-text-muted, --color-surface),
+   (--color-text-muted, --color-surface-raised),
+   (--color-text-muted, --color-surface-hover),
+   (--color-text-muted, --color-accent-subtle), (--color-on-accent, --color-accent),
+   (--color-on-accent, --color-accent-hover), (--color-accent, --color-surface),
+   (--color-accent, --color-bg), (--color-accent, --color-accent-subtle),
+   (--color-on-danger, --color-danger), (--color-danger, --color-bg),
+   (--color-danger, --color-surface), (--color-danger, --color-surface-raised),
+   (--color-on-success, --color-success), (--color-success, --color-surface),
+   (--color-success, --color-bg), (--color-warning-text, --color-warning-bg),
+   (--color-focus, --color-bg), (--color-focus, --color-surface),
+   (--color-focus, --color-surface-raised), (--color-focus, --color-accent-subtle),
+   (--color-focus, --color-surface-hover), (--color-border-strong, --color-bg),
+   (--color-border-strong, --color-surface) and
+   (--color-border-strong, --color-surface-raised). --color-border is not declared and not
+   checked. */
 
 :root {
   color-scheme: light dark;
 
-  /* Colour: declared pairs are (--color-text, --color-bg), (--color-text, --color-surface),
-     (--color-text-muted, --color-bg), (--color-on-accent, --color-accent),
-     (--color-on-danger, --color-danger), (--color-warning-text, --color-warning-bg). */
-  --color-bg: #f7f7f8;
+  --color-bg: #f4f5f8;
   --color-surface: #ffffff;
-  --color-border: #c9cad1;
-  --color-text: #17181c;
-  --color-text-muted: #4d505b;
-  --color-accent: #2f4fd6;
+  --color-surface-raised: #ffffff;
+  --color-surface-hover: #eceef3;
+  --color-border: #dcdfe6;
+  --color-border-strong: #858b99;
+  --color-text: #14161b;
+  --color-text-muted: #525866;
+  --color-accent: #4051d8;
+  --color-accent-hover: #3242c2;
+  --color-accent-subtle: #e8ebff;
   --color-on-accent: #ffffff;
-  --color-danger: #b3261e;
+  --color-danger: #c0271d;
   --color-on-danger: #ffffff;
-  --color-warning-bg: #fff4d6;
+  --color-success: #147a4a;
+  --color-on-success: #ffffff;
+  --color-warning-bg: #fff3d1;
   --color-warning-text: #4a3500;
-  --color-focus: #2f4fd6;
+  --color-focus: #4051d8;
 
-  /* Spacing. */
   --space-1: 0.25rem;
   --space-2: 0.5rem;
   --space-3: 0.75rem;
   --space-4: 1rem;
+  --space-5: 1.25rem;
   --space-6: 1.5rem;
   --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
 
-  /* Type: system fonts only (no third-party origin, no font files). */
   --font-body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-size-caption: 0.75rem;
   --font-size-small: 0.875rem;
   --font-size-body: 1rem;
+  --font-size-heading: 1.125rem;
   --font-size-title: 1.375rem;
+  --font-size-display: 1.75rem;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --line-height-tight: 1.25;
+  --line-height-body: 1.5;
 
-  /* Radius. */
-  --radius-1: 4px;
-  --radius-2: 8px;
+  --radius-1: 6px;
+  --radius-2: 10px;
+  --radius-3: 14px;
+  --radius-full: 999px;
+
+  --shadow-1: 0 1px 2px rgba(16, 20, 32, 0.06), 0 1px 3px rgba(16, 20, 32, 0.08);
+  --shadow-2: 0 2px 4px rgba(16, 20, 32, 0.06), 0 8px 20px rgba(16, 20, 32, 0.1);
+  --shadow-3: 0 4px 8px rgba(16, 20, 32, 0.08), 0 20px 48px rgba(16, 20, 32, 0.18);
+
+  --motion-duration-instant: 90ms;
+  --motion-duration-fast: 150ms;
+  --motion-duration-base: 220ms;
+  --motion-duration-slow: 320ms;
+  --motion-duration-shimmer: 1400ms;
+  --motion-easing-standard: cubic-bezier(0.2, 0, 0, 1);
+  --motion-easing-emphasized: cubic-bezier(0.16, 1, 0.3, 1);
+  --motion-easing-decelerate: cubic-bezier(0, 0, 0.2, 1);
+  --motion-easing-accelerate: cubic-bezier(0.4, 0, 1, 1);
+  --motion-distance-1: 4px;
+  --motion-distance-2: 8px;
+  --motion-distance-3: 16px;
+  --motion-scale-enter: 0.96;
+  --motion-scale-press: 0.97;
+  --motion-stagger-step: 30ms;
+  --motion-stagger-max-items: 8;
+  --motion-loop-max-iterations: 3;
+  --motion-duration-reduced: 120ms;
 }
 
-/* The theme choice (redesign slice 2, item 5): "system" follows `prefers-color-scheme` below
-   with no attribute set; "light" or "dark" is forced by `data-theme` on the document root,
-   regardless of the system scheme. The web vault keeps this choice in memory only for the
-   session (CRYPTO.md §11.4; apps/web/src/theme.ts) — nothing here reads or writes storage. */
+/* Reduced motion (WCAG 2.3.3; module docs on `generate-tokens`, "Motion"): every duration
+   is capped to a short crossfade, every distance and scale becomes a no-op, the shimmer
+   and the stagger stop. Anything animated through these tokens keeps only its fade. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-duration-instant: 90ms;
+    --motion-duration-fast: 120ms;
+    --motion-duration-base: 120ms;
+    --motion-duration-slow: 120ms;
+    --motion-duration-shimmer: 0ms;
+    --motion-distance-1: 0px;
+    --motion-distance-2: 0px;
+    --motion-distance-3: 0px;
+    --motion-scale-enter: 1;
+    --motion-scale-press: 1;
+    --motion-stagger-step: 0ms;
+    --motion-loop-max-iterations: 0;
+  }
+}
+
+/* The theme choice: "system" follows `prefers-color-scheme` below with no attribute
+   set; "light"/"dark" is forced by `data-theme` on the document root regardless of the
+   system scheme (apps/web/src/theme.ts). */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --color-bg: #121317;
-    --color-surface: #1c1d23;
-    --color-border: #3b3d47;
-    --color-text: #ececf1;
-    --color-text-muted: #b4b6c2;
-    --color-accent: #8fa6ff;
-    --color-on-accent: #0b1030;
-    --color-danger: #ffb4ab;
-    --color-on-danger: #410002;
+    --color-bg: #0e1014;
+    --color-surface: #161920;
+    --color-surface-raised: #1e222b;
+    --color-surface-hover: #232833;
+    --color-border: #2b303b;
+    --color-border-strong: #6f7686;
+    --color-text: #eceef3;
+    --color-text-muted: #a8aebb;
+    --color-accent: #8e9aff;
+    --color-accent-hover: #a9b2ff;
+    --color-accent-subtle: #252b4f;
+    --color-on-accent: #0a0f33;
+    --color-danger: #ff9e94;
+    --color-on-danger: #3b0400;
+    --color-success: #6ad49c;
+    --color-on-success: #00341b;
     --color-warning-bg: #3a2c00;
     --color-warning-text: #ffe08a;
-    --color-focus: #8fa6ff;
+    --color-focus: #8e9aff;
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.45), 0 8px 24px rgba(0, 0, 0, 0.4);
+    --shadow-3: 0 6px 12px rgba(0, 0, 0, 0.45), 0 24px 56px rgba(0, 0, 0, 0.55);
   }
 }
 
 :root[data-theme="dark"] {
-  --color-bg: #121317;
-  --color-surface: #1c1d23;
-  --color-border: #3b3d47;
-  --color-text: #ececf1;
-  --color-text-muted: #b4b6c2;
-  --color-accent: #8fa6ff;
-  --color-on-accent: #0b1030;
-  --color-danger: #ffb4ab;
-  --color-on-danger: #410002;
+  --color-bg: #0e1014;
+  --color-surface: #161920;
+  --color-surface-raised: #1e222b;
+  --color-surface-hover: #232833;
+  --color-border: #2b303b;
+  --color-border-strong: #6f7686;
+  --color-text: #eceef3;
+  --color-text-muted: #a8aebb;
+  --color-accent: #8e9aff;
+  --color-accent-hover: #a9b2ff;
+  --color-accent-subtle: #252b4f;
+  --color-on-accent: #0a0f33;
+  --color-danger: #ff9e94;
+  --color-on-danger: #3b0400;
+  --color-success: #6ad49c;
+  --color-on-success: #00341b;
   --color-warning-bg: #3a2c00;
   --color-warning-text: #ffe08a;
-  --color-focus: #8fa6ff;
+  --color-focus: #8e9aff;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 2px 6px rgba(0, 0, 0, 0.45), 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-3: 0 6px 12px rgba(0, 0, 0, 0.45), 0 24px 56px rgba(0, 0, 0, 0.55);
 }

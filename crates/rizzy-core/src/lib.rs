@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-core` — the single implementation of rizzy-vault's cryptography and data model.
 //!
 //! Every client (the web vault and extension through wasm, the CLI and desktop app natively,
@@ -123,6 +125,7 @@
 //! | [`ids`] | §2, §4.3, §4.4 | 16-byte random object ids, symmetric and public key ids, public key types | Object ids come from the injected CSPRNG with no UUID bits; key ids are derived from the key, never chosen |
 //! | [`kdf`] | §2, §6, §12.2 | The `kdf_id` table and client allow-list, Argon2id, NFC password normalisation, the crate-private HKDF-SHA-256 helper | A [`KdfId`](kdf::KdfId) exists only for an enabled id on the allow-list; the Argon2 block matrix is a zeroizing buffer; argon2's non-wiping entry point is not compiled in |
 //! | [`envelope`] | §8, §9 | Symmetric envelope `0x01` (`UtC` + `HtE` over XChaCha20-Poly1305), algorithm and purpose registries, typed contexts, the strict parser | `aad = header ‖ u16(purpose) ‖ ctx`, with purpose and context rebuilt by the reader, never transmitted; the commitment is compared with `ct_eq` before the AEAD runs; no public function takes a nonce |
+//! | [`attachment`] | §4.2, §8.4; ADR 0054 | Attachment chunk layout (512 KiB chunks, 25 MiB cap), `ATTACHMENT_CHUNK` envelopes, the attachment key and `ATTACHMENT_KEY_WRAP` | Ordinary `0x01` envelopes, no new construction; `chunk_count` is derived from the plaintext size, never from the server, and bound into every chunk's AAD; no streaming loop here |
 //! | [`padding`] | §8.5 | Padmé plaintext framing | At least 256 bytes; the reader accepts only the canonical frame; the envelope applies it for padded purposes |
 //! | [`hpke`] | §4.3, §9.2, §10.1 | HPKE envelopes `0x10` (Base) and `0x12` (PSK), X25519 key types, the device-grant PSK | The purpose fixes the mode, so a PSK purpose is never sealed in Base mode; the header key id must be the caller's own key; randomness only from the injected RNG |
 //! | [`sign`] | §9.3, §9.6, §10.2, §10.3 | Ed25519 keys by role, the signature container, every signed statement, the bundle chain | `verify_strict` only; signing only through a key that holds its own public key; the label is prepended by the verifier, never transmitted; roles are types; the bundle chain rejects rollback and reports forks |
@@ -148,6 +151,8 @@
 #![warn(clippy::indexing_slicing, clippy::unreachable)]
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
+pub mod attachment;
+pub mod breach;
 pub mod encoding;
 pub mod envelope;
 pub mod error;
@@ -170,6 +175,8 @@ pub mod server_seal;
 pub mod sign;
 pub mod totp;
 
+#[cfg(test)]
+mod kdf_runs_tests;
 #[cfg(test)]
 #[expect(
     clippy::indexing_slicing,

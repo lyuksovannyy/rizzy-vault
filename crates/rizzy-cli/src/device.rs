@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! An enrolled device, opened: the host side of `rizzy-client`'s flows for one account
 //! (ADR 0013 §2: "The host feeds in events … The state machine returns effects").
 //!
@@ -11,8 +13,9 @@
 //! The account's lock, the cache rows, `store::load::open` (format, meta rows, the
 //! device-state record), then, in stage 2, the stored `register/finish` again (ADR 0026 §2
 //! "Signup pending"); the master password; the offline unlock (one Argon2id run); the load,
-//! which verifies every row like a server's answer. Nothing so far needs the network: the
-//! vault reads offline.
+//! which verifies every row like a server's answer; then the `item_index` rows the merge implies
+//! are committed (ADR 0056 §4: a corrupt table is rebuilt alone, never failing the load).
+//! Nothing so far needs the network: the vault reads offline.
 //!
 //! # Going online ([`Device::online`]; CRYPTO.md §11.3 step 2)
 //!
@@ -109,13 +112,15 @@ mod heal;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use rizzy_client::ClientError;
-use rizzy_client::account::{CertifiedDevice, RevokedDevice, VerifiedAccount};
+use rizzy_client::account::{CertifiedDevice, RevokedDevice, StorageUsage, VerifiedAccount};
 use rizzy_client::credentials::PendingCredentialChange;
 use rizzy_client::device::{DeviceState, UnlockedDevice};
 use rizzy_client::export::gate::ExportGate;
 use rizzy_client::healing::{self, HeldAccount};
+use rizzy_client::items::{ItemId, TRASH_RETENTION_MS};
 use rizzy_client::login::{LoggedIn, LoginInput, start_login};
 use rizzy_client::reregister::start_device_reregistration;
 use rizzy_client::rizzy_proto::account::{AccountStateQuery, AccountView, DeviceGrantsResponse};
@@ -123,7 +128,9 @@ use rizzy_client::rizzy_proto::auth::{
     DeviceAuthFinishResponse, DeviceAuthStartResponse, LoginFinishResponse, LoginStartResponse,
     Reconciliation,
 };
-use rizzy_client::rizzy_proto::auth::{RegisterFinishRequest, RegisterStartResponse};
+use rizzy_client::rizzy_proto::auth::{
+    RegisterFinishRequest, RegisterStartResponse, RequestSignature,
+};
 use rizzy_client::rizzy_proto::change::{
     CommitChangeRequest, DeviceSuspensionRequest, ReregisterStartRequest, ReregisterStartResponse,
     SuspendDeviceResponse,
@@ -131,7 +138,9 @@ use rizzy_client::rizzy_proto::change::{
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
 use rizzy_client::rizzy_proto::recovery::RecoveryCancelResponse;
+use rizzy_client::rizzy_proto::session::{EndSessionRequest, SessionListResponse};
 use rizzy_client::rizzy_proto::vault::{FetchResponse, UploadResponse};
+use rizzy_client::rizzy_proto::webauthn::WebauthnLoginChallengeResponse;
 use rizzy_client::rizzy_proto::wire::{Id, SessionToken};
 use rizzy_client::rotation::{
     ConflictOutcome, PendingRotation, RevokeDevice, RotationDone, RotationLevel, RotationOptions,
@@ -141,7 +150,9 @@ use rizzy_client::session::{
     DeviceSession, device_auth_finish, device_auth_finish_reconciling, device_auth_start,
     device_auth_start_reconciling,
 };
+use rizzy_client::sessions::SessionList;
 use rizzy_client::store::floors::Floors;
+use rizzy_client::store::index;
 use rizzy_client::store::load::{self, Loaded};
 use rizzy_client::store::record::{DeviceRecord, Stage};
 use rizzy_client::store::rows::{Alarm, Changeset, Write};
@@ -150,7 +161,9 @@ use rizzy_client::sync::{Authors, VaultSync};
 use rizzy_client::unlock::{
     account_state_query, apply_device_grants, identity_change_fingerprint, verify_unlock,
 };
-use rizzy_core::ids::DeviceId;
+use rizzy_client::vaults::{PendingMove, VaultCatalog};
+use rizzy_client::webauthn::{self, SecondFactor};
+use rizzy_core::ids::{DeviceId, VaultId};
 use rizzy_core::keys::AccountFingerprint;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -164,7 +177,10 @@ use crate::sys::{OsRng, now_ms, os_rng};
 use crate::ui::Ui;
 
 mod credentials;
+mod vaults;
 pub use credentials::{CredentialChange, CredentialOutcome};
+pub(crate) use vaults::catalog_of;
+pub use vaults::{Shown, VaultSet, user_items};
 
 /// What a command runs in: where the local data is, which account, and the user.
 pub struct Env<'a> {
@@ -177,6 +193,71 @@ pub struct Env<'a> {
     pub trust: crate::tls::Trust,
     /// The user.
     pub ui: &'a mut dyn Ui,
+    /// The sign-outs of this run's device sessions, sent when the command is over
+    /// ([`SignOuts`]).
+    pub sign_outs: SignOuts,
+}
+
+/// How long the sign-out of one session may take at exit (best effort, ADR 0075 owner answer
+/// 3).
+const SIGN_OUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A sign-out (`sessions/current/end`, ADR 0075 R2) signed when a [`Device`] was dropped,
+/// for [`SignOuts::send_all`].
+struct PendingSignOut {
+    /// The device's server.
+    http: Http,
+    /// The session's bearer token (a secret, wiped on drop).
+    token: SessionToken,
+    /// The `device-request` signature over the sign-out.
+    signature: RequestSignature,
+}
+
+/// The sign-outs of one `rv` run. ADR 0075 owner answer 3: "`rv` ends its own session with
+/// `sessions/current/end` when a command exits: best effort, no retry." Each [`Device`] that
+/// authenticated leaves one here when it is dropped, signed with its device key then;
+/// [`crate::commands::run`] sends them once the command is over, each bounded by
+/// five seconds, and ignores every failure (the session then lapses at its TTL).
+#[derive(Clone, Default)]
+pub struct SignOuts(Arc<Mutex<Vec<PendingSignOut>>>);
+
+impl std::fmt::Debug for SignOuts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignOuts").finish_non_exhaustive()
+    }
+}
+
+impl SignOuts {
+    /// Keeps `sign_out` for [`SignOuts::send_all`].
+    fn push(&self, sign_out: PendingSignOut) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(sign_out);
+    }
+
+    /// How many sign-outs wait.
+    #[must_use]
+    pub fn pending(&self) -> usize {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).len()
+    }
+
+    /// Sends every waiting sign-out once, best effort: a failure, a timeout or a `401` (the
+    /// session had already ended) is ignored and not retried.
+    pub async fn send_all(&self) {
+        let pending = std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner));
+        for sign_out in pending {
+            let _ended = tokio::time::timeout(
+                SIGN_OUT_TIMEOUT,
+                sign_out.http.post_bytes_empty(
+                    paths::SESSIONS_CURRENT_END,
+                    Vec::new(),
+                    Auth::Presigned(&sign_out.token, &sign_out.signature),
+                ),
+            )
+            .await;
+        }
+    }
 }
 
 impl std::fmt::Debug for Env<'_> {
@@ -300,6 +381,20 @@ pub(crate) async fn opaque_login(
         match finished {
             Ok(response) => return Ok(awaiting.complete(response)?),
             Err(CliError::Server(ErrorCode::SecondFactorRequired)) if totp.is_none() => {
+                // ADR 0058 point 3: an account with a security key kept this login as a pending
+                // row named by its `login_id`. rv has no `WebAuthn` (it is not a browser on the
+                // server's origin), so it can finish only with a TOTP code; ask the server which
+                // kinds the account has, so that a key-only account gets an explanation rather
+                // than a prompt for a code that does not exist.
+                if second_factor_is_key_only(http, finish.login_id).await? {
+                    ui.note(
+                        "This account's second factor is a security key. rv cannot complete a \
+                         security-key login: log in with the web vault instead, or add an \
+                         authenticator app (TOTP) in the web vault under Settings, Two-factor \
+                         authentication, and use its code here.",
+                    );
+                    return Err(CliError::Server(ErrorCode::SecondFactorRequired));
+                }
                 totp = Some(ui.secret("Two-factor code")?);
             }
             // The server answers a wrong password and an unknown name alike (§5.9).
@@ -322,12 +417,41 @@ pub(crate) async fn opaque_login(
     Err(CliError::Server(ErrorCode::SecondFactorRequired))
 }
 
+/// Whether the login `login_id`, which the server answered `second_factor_required`, can finish
+/// only with a security key: the account holds one and no confirmed TOTP enrolment
+/// (`webauthn/login/challenge`, ADR 0058 point 3). The challenge it issues is never used.
+///
+/// # Errors
+/// The transport's errors, and a server error other than `not_found`.
+async fn second_factor_is_key_only(http: &Http, login_id: Id) -> Result<bool, CliError> {
+    let answer: Result<WebauthnLoginChallengeResponse, CliError> = http
+        .post(
+            paths::WEBAUTHN_LOGIN_CHALLENGE,
+            &webauthn::login_challenge_request(login_id),
+            Auth::None,
+        )
+        .await;
+    let answer = match answer {
+        Ok(response) => Ok(response),
+        Err(CliError::Server(code)) => Err(code),
+        Err(e) => return Err(e),
+    };
+    match SecondFactor::from_challenge(answer) {
+        Ok(SecondFactor::SecurityKey { totp, .. }) => Ok(!totp),
+        Ok(SecondFactor::Totp) => Ok(false),
+        Err(code) => Err(CliError::Server(code)),
+    }
+}
+
 /// An enrolled device, unlocked and loaded (module docs).
 pub struct Device {
-    /// The account's lock, held for the life of the process.
-    lock: AccountLock,
-    /// The cache file.
-    db: Db,
+    /// The account's lock, held for the life of the process (`None` once [`Device::close`]
+    /// gave it back).
+    lock: Option<AccountLock>,
+    /// The cache file (`None` once closed).
+    db: Option<Db>,
+    /// Where this device's sign-out goes when it is dropped ([`SignOuts`]).
+    sign_outs: SignOuts,
     /// The floors of what the file holds.
     floors: Floors,
     /// The transport to the device's server.
@@ -348,14 +472,22 @@ pub struct Device {
     held: HeldAccount,
     /// The authors, for the vault's Fetch.
     authors: Authors,
-    /// The personal vault (M1 has one vault per account).
-    vault: VaultSync,
+    /// Every vault this device holds (ADR 0081 §A7); the Personal vault is the default target.
+    vaults: VaultSet,
+    /// The account as last verified (from the cache, then from each refresh), with its vault
+    /// keys taken out: what vault changes are built on (ADR 0081 §A3, §A5).
+    account: Option<Box<VerifiedAccount>>,
+    /// The moves a `pending_move` row holds (ADR 0081 §A6, INV-104).
+    pending_moves: Vec<PendingMove>,
     /// The alarms raised.
     alarms: BTreeSet<Alarm>,
     /// The device session of this run, once authenticated.
     session: Option<DeviceSession>,
     /// Whether the account answer was verified in this run.
     refreshed: bool,
+    /// The storage usage the server reported with the last answer adopted in this run (ADR
+    /// 0048 §5); unverified, for display only, and never stored.
+    usage: Option<StorageUsage>,
     /// Whether this run authenticated with the reconciliation objects (a restored server that
     /// did not know this device).
     reconciled: bool,
@@ -385,6 +517,10 @@ impl Device {
     /// [`ClientError::WrongPasswordOrSecretKey`], [`ClientError::CacheCorrupt`],
     /// [`ClientError::CacheUpdateRequired`] and [`ClientError::LocalUnlockUnavailable`] as
     /// [`CliError::Client`]; the transport's errors when a pending signup is resent.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the steps of an open in the order the specs fix, the ADR 0056 reconcile last"
+    )]
     pub async fn open(env: &mut Env<'_>) -> Result<Self, CliError> {
         let account = pick_account(env)?;
         // ADR 0026 §3: "directory 0700", also when `rv` did not create it.
@@ -392,7 +528,9 @@ impl Device {
         let lock = AccountLock::acquire(&env.data_dir, &account)?;
         let mut db = Db::open(&cache_path(&env.data_dir, &account)).await?;
         let mut rows = db.read().await?;
-        let mut record = load::open(&rows)?;
+        // `keystore_capable = false`: `rv` never holds a keystore unlock secret (ADR 0019 §1.4,
+        // INV-62), so a record with `E_ks` is refused as corrupt (ADR 0057 §2, INV-81).
+        let mut record = load::open(&rows, false)?;
         let http = Http::new(record.server_origin().as_str(), &env.trust)?;
         let mut typed_password = None;
         if record.stage() == Stage::SignupPending {
@@ -447,7 +585,7 @@ impl Device {
             db.write(&store::finalize_writes(&record.committed())?)
                 .await?;
             rows = db.read().await?;
-            record = load::open(&rows)?;
+            record = load::open(&rows, false)?;
         }
         let password = match typed_password {
             Some(password) => password,
@@ -458,20 +596,24 @@ impl Device {
             device: state,
             account: loaded_account,
             authors,
-            vaults,
+            mut vaults,
             alarms,
             floors,
         } = load::load(&rows, &record, &unlocked, now_ms())?;
+        // ADR 0056 §4: the index rows the merge implies (a corrupt table rebuilt), committed.
+        let index_writes = index::reconcile(&rows, &mut vaults);
         let pending_commit = rows.pending_commit.take();
+        let pending_moves = vaults::moves_of(&rows.pending_moves);
         drop(rows);
-        let mut vaults = vaults.into_iter();
+        let catalog = vaults::catalog_of(&loaded_account, &unlocked);
         // M1: one personal vault per account (ROADMAP §4.2).
-        let (Some(vault), None) = (vaults.next(), vaults.next()) else {
+        if vaults.is_empty() {
             return Err(CliError::Client(ClientError::CacheCorrupt));
-        };
-        Ok(Self {
-            lock,
-            db,
+        }
+        let mut device = Self {
+            lock: Some(lock),
+            db: Some(db),
+            sign_outs: env.sign_outs.clone(),
             floors,
             http,
             record,
@@ -482,15 +624,20 @@ impl Device {
             revocations: loaded_account.revocations().to_vec(),
             held: HeldAccount::from_account(&loaded_account),
             authors,
-            vault,
+            vaults: VaultSet::new(vaults, catalog),
+            account: Some(Box::new(loaded_account)),
+            pending_moves,
             alarms,
             session: None,
             refreshed: false,
+            usage: None,
             reconciled: false,
             reregistered: false,
             password,
             rng: os_rng(),
-        })
+        };
+        device.commit(index_writes).await?;
+        Ok(device)
     }
 
     /// Builds the device of a fresh signup or enrolment, whose cache `db` was just created
@@ -507,14 +654,21 @@ impl Device {
         state: DeviceState,
         unlocked: UnlockedDevice,
         (certificates, revocations, authors): (Vec<CertifiedDevice>, Vec<RevokedDevice>, Authors),
-        mut vault: VaultSync,
+        (vaults, catalog): (Vec<VaultSync>, VaultCatalog),
         password: Zeroizing<String>,
+        sign_outs: SignOuts,
     ) -> Result<Self, CliError> {
         let record = state.record(Stage::Committed)?;
-        vault.persist();
+        let mut vaults = vaults;
+        for vault in &mut vaults {
+            vault.persist();
+            // ADR 0056 §4: a new cache's index starts empty and is filled by the next step.
+            index::track_new(vault);
+        }
         Ok(Self {
-            lock,
-            db,
+            lock: Some(lock),
+            db: Some(db),
+            sign_outs,
             floors,
             http,
             record,
@@ -525,21 +679,18 @@ impl Device {
             certificates,
             revocations,
             authors,
-            vault,
+            vaults: VaultSet::new(vaults, catalog),
+            account: None,
+            pending_moves: Vec::new(),
             alarms: BTreeSet::new(),
             session: None,
             refreshed: false,
+            usage: None,
             reconciled: false,
             reregistered: false,
             password,
             rng: os_rng(),
         })
-    }
-
-    /// The vault, for reads.
-    #[must_use]
-    pub const fn vault(&self) -> &VaultSync {
-        &self.vault
     }
 
     /// The device state.
@@ -554,10 +705,82 @@ impl Device {
         (&self.certificates, &self.revocations)
     }
 
+    /// The storage usage the server reported with the account answer adopted in this run (ADR
+    /// 0048 §5), if one was: the server's word, for display only.
+    #[must_use]
+    pub const fn usage(&self) -> Option<StorageUsage> {
+        self.usage
+    }
+
     /// The alarms raised.
     #[must_use]
     pub const fn alarms(&self) -> &BTreeSet<Alarm> {
         &self.alarms
+    }
+
+    /// Records that the user used `item` on this device (ADR 0056 §2: viewed it or copied a
+    /// field from it): its `item_index` row's `last_used_ms` and `use_count`. Local only; no
+    /// op is written and nothing is sent. Nothing for an item without a row.
+    ///
+    /// # Errors
+    /// The commit's.
+    pub async fn record_use(&mut self, vault_id: VaultId, item: ItemId) -> Result<(), CliError> {
+        self.flush().await?;
+        let Some(vault) = self.vaults.get(vault_id) else {
+            return Ok(());
+        };
+        match index::record_use(vault, item, now_ms()) {
+            Some(write) => self.commit(core::iter::once(write).collect()).await,
+            None => Ok(()),
+        }
+    }
+
+    /// The items whose `item_index` row matches `query`, most recently used first; the empty
+    /// query lists every row in that order (ADR 0056 §5).
+    ///
+    /// # Errors
+    /// [`CliError::Database`].
+    pub async fn search(&mut self, query: &str) -> Result<Vec<(VaultId, ItemId)>, CliError> {
+        let found = self
+            .db
+            .as_mut()
+            .ok_or(CliError::Client(ClientError::Internal))?
+            .search(query, usize::MAX)
+            .await?;
+        Ok(found
+            .into_iter()
+            .filter(|(v, _)| self.vaults.get(*v).is_some())
+            .collect())
+    }
+
+    /// The items used on this device, most recent first, at most `limit` (ADR 0056 §2).
+    ///
+    /// # Errors
+    /// [`CliError::Database`].
+    pub async fn recent(&mut self, limit: usize) -> Result<Vec<(VaultId, ItemId)>, CliError> {
+        let used = self
+            .db
+            .as_mut()
+            .ok_or(CliError::Client(ClientError::Internal))?
+            .recent(limit)
+            .await?;
+        Ok(used
+            .into_iter()
+            .filter(|(v, _)| self.vaults.get(*v).is_some())
+            .collect())
+    }
+
+    /// Drops and rebuilds the `item_index` table from the vault (ADR 0056 §4, `rv cache
+    /// reindex`); every use counter is lost. Returns the number of rows.
+    ///
+    /// # Errors
+    /// The commit's.
+    pub async fn reindex(&mut self) -> Result<usize, CliError> {
+        self.flush().await?;
+        let writes = index::reindex(self.vaults.as_mut_slice());
+        let rows = writes.writes().len().saturating_sub(1);
+        self.commit(writes).await?;
+        Ok(rows)
     }
 
     /// Fails with the first alarm, if any is raised: the device is read-only.
@@ -571,17 +794,21 @@ impl Device {
         }
     }
 
-    /// Runs an edit on the vault with the device's keys and RNG, and commits the rows it
-    /// wrote (ADR 0026 §4 step 1) before returning.
+    /// Runs an edit on the vault `vault_id` with the device's keys and RNG, and commits the
+    /// rows it wrote (ADR 0026 §4 step 1) before returning.
     ///
     /// # Errors
-    /// [`CliError::Alarm`] when the device is read-only; the edit's error; the commit's.
+    /// [`CliError::Alarm`] when the device is read-only; [`ClientError::UnknownVault`] or
+    /// [`ClientError::ReadOnly`] for a vault this device does not hold or open; the edit's
+    /// error; the commit's.
     pub async fn edit<T>(
         &mut self,
+        vault_id: VaultId,
         edit: impl FnOnce(&mut VaultSync, &mut OsRng, &UnlockedDevice, u64) -> Result<T, ClientError>,
     ) -> Result<T, CliError> {
-        self.check_writable()?;
-        let done = edit(&mut self.vault, &mut self.rng, &self.unlocked, now_ms());
+        self.check_vault_writable(vault_id)?;
+        let vault = self.vaults.require_mut(vault_id)?;
+        let done = edit(vault, &mut self.rng, &self.unlocked, now_ms());
         // Whatever the edit wrote before it failed is written too: the rows are own ops the
         // merge already holds.
         self.flush().await?;
@@ -594,12 +821,16 @@ impl Device {
             return Ok(());
         }
         self.floors.admit(&changeset)?;
-        self.db.write(&changeset).await
+        self.db
+            .as_mut()
+            .ok_or(CliError::Client(ClientError::Internal))?
+            .write(&changeset)
+            .await
     }
 
     /// Commits what the vault driver journaled.
     async fn flush(&mut self) -> Result<(), CliError> {
-        let writes = self.vault.take_writes();
+        let writes = self.vaults.take_writes();
         self.commit(writes).await
     }
 
@@ -612,7 +843,7 @@ impl Device {
     ) -> Result<(), CliError> {
         changeset.push(store::alarm_write(alarm, evidence)?);
         self.alarms.insert(alarm);
-        self.vault.set_read_only(true);
+        self.vaults.update_read_only(true);
         Ok(())
     }
 
@@ -699,6 +930,62 @@ impl Device {
         Ok(answer.cancelled)
     }
 
+    /// The account's live sessions (`sessions/list`, ADR 0075 R1) over this run's device
+    /// session.
+    ///
+    /// # Errors
+    /// The transport's errors; [`ClientError::InvalidServerResponse`] for a list that does not
+    /// hold; [`ClientError::Internal`] before [`Device::online`].
+    pub async fn sessions(&mut self) -> Result<SessionList, CliError> {
+        let session = self
+            .session
+            .as_mut()
+            .ok_or(CliError::Client(ClientError::Internal))?;
+        let answer: SessionListResponse = self
+            .http
+            .post_no_body(paths::SESSIONS_LIST, Auth::Device(session, &self.unlocked))
+            .await?;
+        Ok(SessionList::from_response(answer)?)
+    }
+
+    /// Ends one session of the account (`sessions/end`, R3). A device session needs no
+    /// password for it: every request it sends is signed (ADR 0075 §9).
+    ///
+    /// # Errors
+    /// The transport's errors; [`ClientError::Internal`] before [`Device::online`].
+    pub async fn end_session(&mut self, request: &EndSessionRequest) -> Result<(), CliError> {
+        let session = self
+            .session
+            .as_mut()
+            .ok_or(CliError::Client(ClientError::Internal))?;
+        self.http
+            .post_empty(
+                paths::SESSIONS_END,
+                request,
+                Auth::Device(session, &self.unlocked),
+            )
+            .await
+    }
+
+    /// Ends every other OPAQUE and recovery-only session of the account
+    /// (`sessions/others/end`, R4); device sessions stay (ADR 0075 §5).
+    ///
+    /// # Errors
+    /// The transport's errors; [`ClientError::Internal`] before [`Device::online`].
+    pub async fn end_other_sessions(&mut self) -> Result<(), CliError> {
+        let session = self
+            .session
+            .as_mut()
+            .ok_or(CliError::Client(ClientError::Internal))?;
+        self.http
+            .post_bytes_empty(
+                paths::SESSIONS_OTHERS_END,
+                Vec::new(),
+                Auth::Device(session, &self.unlocked),
+            )
+            .await
+    }
+
     /// `POST path` over the device session, with a JSON answer. A session the server ended (a
     /// rotation ends sessions) is renewed once.
     async fn call<T: Serialize, R: DeserializeOwned>(
@@ -735,6 +1022,12 @@ impl Device {
     /// [`CliError::Alarm`] when an alarm is raised or detected; the flows' and the transport's
     /// errors.
     pub async fn online(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
+        // Boxed: the refresh holds the whole account answer, and every caller awaits it.
+        Box::pin(self.online_unboxed(ui)).await
+    }
+
+    /// [`Device::online`]'s body.
+    async fn online_unboxed(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
         if self.refreshed {
             return Ok(());
         }
@@ -762,7 +1055,7 @@ impl Device {
             );
         }
         if self.record.has_pending() {
-            self.settle_pending(ui).await?;
+            Box::pin(self.settle_pending(ui)).await?;
         } else {
             self.refresh(ui).await?;
         }
@@ -972,7 +1265,8 @@ impl Device {
                 self.record = self.state.record(Stage::Committed)?;
                 let mut changeset = before;
                 changeset.push(store::record_write(&self.record)?);
-                self.adopt(account, changeset, confirmed.is_some()).await?;
+                self.adopt(ui, account, changeset, confirmed.is_some())
+                    .await?;
                 // §11.3 step 4.5: acknowledged only after the re-wrapped objects are written. A
                 // catch-up used no grant and acknowledges none.
                 if let Some(ack) = ack {
@@ -1000,7 +1294,8 @@ impl Device {
             }
             Err(e) => return Err(e.into()),
         };
-        self.adopt(account, changeset, confirmed.is_some()).await
+        self.adopt(ui, account, changeset, confirmed.is_some())
+            .await
     }
 
     /// Shows a changed identity fingerprint and asks for the user's confirmation.
@@ -1023,44 +1318,34 @@ impl Device {
         Ok(typed == CONFIRM_WORD)
     }
 
-    /// Adopts a verified account answer: its objects, the authors, and the vault key. When
-    /// the vault key moved to a new epoch, the Fetch at that epoch joins the same transaction,
-    /// so the wraps on disk always open under the vault key on disk.
+    /// Adopts a verified account answer: its objects, the authors, and the vault keys, with
+    /// the vault set checked against it (ADR 0081 §A2, §A7). When a vault key moved to a new
+    /// epoch, or a vault is new here, the Fetch of that vault joins the same transaction, so the
+    /// wraps on disk always open under the vault key on disk.
     async fn adopt(
         &mut self,
+        ui: &mut dyn Ui,
         mut account: VerifiedAccount,
         mut changeset: Changeset,
         identity_confirmed: bool,
     ) -> Result<(), CliError> {
         if identity_confirmed && self.alarms.remove(&Alarm::UnconfirmedIdentityChange) {
             changeset.push(Write::ClearAlarm(Alarm::UnconfirmedIdentityChange));
-            self.vault.set_read_only(!self.alarms.is_empty());
+            self.vaults.update_read_only(!self.alarms.is_empty());
         }
         changeset.append(store::account_writes(&account));
+        self.usage = account.usage();
         self.authors = Authors::from_account(&account)?;
         self.certificates = account.certificates().to_vec();
         self.revocations = account.revocations().to_vec();
-        let key = account
-            .take_vault_key(self.vault.vault_id())
-            .ok_or(ClientError::InvalidServerResponse)?;
-        let epoch = self.vault.vault_key_epoch();
-        match self.vault.adopt_vault_key(key) {
-            Ok(()) => {}
-            // ADR 0025 §4: a second vault key at a seen epoch is a fork, and a verified
-            // self-grant below the held vault-key epoch is a rollback. Either way the alarm is
-            // written in the transaction that detects it (ADR 0026 §4 step 4), and alone: the
-            // answer is not adopted, and the floors would refuse its self-grant (a lower
-            // epoch, or another key id at the held one) and with it the whole changeset.
-            Err(e @ (ClientError::Fork | ClientError::Rollback)) => {
-                let alarm = if matches!(e, ClientError::Fork) {
-                    Alarm::Fork
-                } else {
-                    Alarm::Rollback
-                };
-                return Err(self.alarm(alarm, &[]).await);
-            }
-            Err(e) => return Err(e.into()),
-        }
+        // ADR 0025 §4, per vault: a second vault key at a seen epoch is a fork, and a verified
+        // self-grant below the held vault-key epoch is a rollback. Either way the alarm is
+        // written in the transaction that detects it (ADR 0026 §4 step 4), and alone: the
+        // answer is not adopted, and the floors would refuse its self-grant (a lower epoch, or
+        // another key id at the held one) and with it the whole changeset.
+        let refetch = self
+            .reconcile_vaults(ui, &mut account, &mut changeset)
+            .await?;
         // ADR 0021 §9 "Server behind": the verified state is not below the pin (the floors keep
         // it so) and the self-grant not below the held vault key, so a rollback alarm is
         // resolved: "the device leaves read-only once none holds". It is cleared in the
@@ -1069,26 +1354,37 @@ impl Device {
         if resolves_rollback {
             changeset.push(Write::ClearAlarm(Alarm::Rollback));
         }
-        if self.vault.vault_key_epoch() != epoch && self.fetch_into(&mut changeset).await? {
+        let mut ahead = false;
+        for vault_id in refetch {
+            ahead |= self.fetch_into(vault_id, &mut changeset).await?;
+        }
+        if ahead {
             self.raise(&mut changeset, Alarm::DeviceStateOutdated, &[])?;
         }
         self.commit(changeset).await?;
         self.held.absorb(&account);
+        self.account = Some(Box::new(account));
         if resolves_rollback {
             self.alarms.remove(&Alarm::Rollback);
-            self.vault.set_read_only(!self.alarms.is_empty());
+            self.vaults.update_read_only(!self.alarms.is_empty());
         }
         self.check_writable()
     }
 
-    /// Runs a complete Fetch, collecting its rows into `changeset`. Returns whether the
-    /// server holds more of this device's own history than the file (ADR 0026 §4 step 7).
-    async fn fetch_into(&mut self, changeset: &mut Changeset) -> Result<bool, CliError> {
+    /// Runs a complete Fetch of `vault_id`, collecting its rows into `changeset`. Returns
+    /// whether the server holds more of this device's own history than the file (ADR 0026 §4
+    /// step 7).
+    async fn fetch_into(
+        &mut self,
+        vault_id: VaultId,
+        changeset: &mut Changeset,
+    ) -> Result<bool, CliError> {
         loop {
-            let request = self.vault.fetch_request()?;
+            let request = self.vaults.require_mut(vault_id)?.fetch_request()?;
             let response: FetchResponse = self.call(paths::VAULT_FETCH, &request).await?;
-            let outcome = self.vault.apply_fetch(&self.authors, &response, now_ms())?;
-            changeset.append(self.vault.take_writes());
+            let vault = self.vaults.require_mut(vault_id)?;
+            let outcome = vault.apply_fetch(&self.authors, &response, now_ms())?;
+            changeset.append(vault.take_writes());
             if outcome.own_history_ahead {
                 return Ok(true);
             }
@@ -1098,17 +1394,33 @@ impl Device {
         }
     }
 
-    /// A complete Fetch (ADR 0012 §7), each page's rows committed before the next request
-    /// (ADR 0026 §4 step 2).
+    /// A complete Fetch (ADR 0012 §7) of every open vault (ADR 0081 §A7), each page's rows
+    /// committed before the next request (ADR 0026 §4 step 2). A vault the server answers
+    /// `client_too_old` for is marked "needs a newer rizzy-vault" and the others go on (ADR
+    /// 0081 §A12).
     ///
     /// # Errors
     /// [`CliError::Alarm`] for an older copy of the device state; the flows' and transport's.
     pub async fn fetch(&mut self) -> Result<(), CliError> {
+        for vault_id in self.vaults.open_ids() {
+            match self.fetch_vault(vault_id).await {
+                Err(CliError::Server(ErrorCode::ClientTooOld)) => {
+                    self.vaults.mark_too_new(vault_id);
+                }
+                other => other?,
+            }
+        }
+        Ok(())
+    }
+
+    /// A complete Fetch of `vault_id` ([`Device::fetch`]).
+    async fn fetch_vault(&mut self, vault_id: VaultId) -> Result<(), CliError> {
         loop {
-            let request = self.vault.fetch_request()?;
+            let request = self.vaults.require_mut(vault_id)?.fetch_request()?;
             let response: FetchResponse = self.call(paths::VAULT_FETCH, &request).await?;
-            let outcome = self.vault.apply_fetch(&self.authors, &response, now_ms())?;
-            let mut changeset = self.vault.take_writes();
+            let vault = self.vaults.require_mut(vault_id)?;
+            let outcome = vault.apply_fetch(&self.authors, &response, now_ms())?;
+            let mut changeset = vault.take_writes();
             if outcome.own_history_ahead {
                 self.raise(&mut changeset, Alarm::DeviceStateOutdated, &[])?;
             }
@@ -1127,10 +1439,32 @@ impl Device {
     /// # Errors
     /// [`CliError::Server`] for a refusal that is not resolved; [`CliError::Alarm`].
     pub async fn upload(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
+        for vault_id in self.vaults.open_ids() {
+            match self.upload_vault(ui, vault_id).await {
+                // ADR 0081 §A12: this vault needs a newer client; the others go on.
+                Err(CliError::Server(ErrorCode::ClientTooOld)) => {
+                    self.vaults.mark_too_new(vault_id);
+                }
+                other => other?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Uploads everything queued in the vault `vault_id` ([`Device::upload`]). Nothing for a
+    /// vault that is not open (any more) here.
+    async fn upload_vault(&mut self, ui: &mut dyn Ui, vault_id: VaultId) -> Result<(), CliError> {
         let mut followed = false;
         let mut healed = false;
         loop {
-            let request = match self.vault.upload_request(&mut self.rng, &self.unlocked) {
+            if !self.vaults.is_open(vault_id) {
+                return self.flush().await;
+            }
+            let request = match self
+                .vaults
+                .require_mut(vault_id)?
+                .upload_request(&mut self.rng, &self.unlocked)
+            {
                 Ok(Some(request)) => request,
                 Ok(None) => {
                     // Snapshots the step wrote but does not send yet are rows too.
@@ -1155,8 +1489,9 @@ impl Device {
             // ADR 0026 §4 step 1: `own = 3` is committed before the request leaves.
             self.flush().await?;
             let response: UploadResponse = self.call(paths::VAULT_UPLOAD, &request).await?;
-            let outcome = self.vault.apply_upload_response(&response)?;
-            let mut changeset = self.vault.take_writes();
+            let vault = self.vaults.require_mut(vault_id)?;
+            let outcome = vault.apply_upload_response(&response)?;
+            let mut changeset = vault.take_writes();
             if outcome.own_conflict {
                 self.raise(&mut changeset, Alarm::DeviceStateOutdated, &[])?;
             }
@@ -1173,18 +1508,95 @@ impl Device {
         }
     }
 
-    /// Online, then Fetch, restore healing when the server is behind (`heal`), upload, Fetch:
-    /// the device holds what the server holds and the server holds what the device wrote
-    /// (ADR 0025 §2 step 1; ADR 0021 §9).
+    /// Online, then Fetch, restore healing when the server is behind (`heal`), the client-side
+    /// trash auto-purge pass (`auto_purge`), upload, Fetch: the device holds what the server
+    /// holds and the server holds what the device wrote (ADR 0025 §2 step 1; ADR 0021 §9).
+    ///
+    /// This is the one place the `sync` command and `sync_after_write` (every write command)
+    /// reach, so it is where the auto-purge pass (gap 00; ADR 0012 §5, ADR 0018 §9, §11)
+    /// belongs. (`unlock` calls only [`Device::online`], not this method — it is a status
+    /// command and deliberately does not fetch or upload the vault, so it does not auto-purge
+    /// either; auto-purge needs the fresh vault fetch this method does first, both for an
+    /// accurate trashed-at read and for `holds_unapplied`'s ADR 0018 §11 check.) `auto_purge`
+    /// runs after `heal` (so it sees the latest known trash state) and before `upload` (so any
+    /// purge it queues ships in the same round as every other own op, with no separate upload
+    /// call).
     ///
     /// # Errors
-    /// As [`Device::online`], [`Device::fetch`] and [`Device::upload`].
+    /// As [`Device::online`], [`Device::fetch`] and [`Device::upload`]; the errors of the
+    /// auto-purge pass (private: the errors of
+    /// [`VaultSync::auto_purge_due`], of the commit, and of the
+    /// writability check).
     pub async fn sync(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
         self.online(ui).await?;
         self.fetch().await?;
         self.heal(ui).await?;
+        self.auto_purge().await?;
         self.upload(ui).await?;
-        self.fetch().await
+        self.resume_moves(ui).await?;
+        self.fetch().await?;
+        self.report_cutoff_gaps(ui);
+        for vault_id in self.vaults.too_new_ids() {
+            ui.note(&format!(
+                "Vault {} needs a newer rizzy-vault: it stays read-only on this device.",
+                hex(vault_id.as_bytes())
+            ));
+        }
+        Ok(())
+    }
+
+    /// The client-side trash auto-purge pass (gap 00; ADR 0012 §5 "manually, or automatically
+    /// once an item has been in the trash for the retention period"; ADR 0018 §9 "Trashed at",
+    /// §11 "No purge over an unapplied record"): purges every trashed item whose retention
+    /// period has elapsed, then persists the resulting cache writes the same way every other
+    /// mutating step does (`take_writes` then `commit`) **before** any error of the pass itself
+    /// is reported, so the purge survives a restart even if the device never reaches the
+    /// following `upload` — including a pass that purges some items and then fails on a later
+    /// one ([`VaultSync::auto_purge_due`]'s own doc: "purges already written are not undone").
+    ///
+    /// No `tests/e2e.rs` test drives this past the real 30-day
+    /// [`rizzy_client::items::TRASH_RETENTION_MS`]: `rv` reads the wall clock
+    /// ([`crate::sys::now_ms`]) with no injection seam, and backdating a trash op's `now_ms`
+    /// does not backdate its HLC (ADR 0012 §2) once this account's clock has already ticked
+    /// near real time from earlier real ops in the same test, because `Hlc::tick` clamps to
+    /// `max(last_hlc + 1, now_ms << 16)`.
+    ///
+    /// The tests in `rizzy-client/src/tests/retention.rs` cover `auto_purge_due` itself,
+    /// including its partial-failure path, with full control of `now_ms` — this method's own
+    /// precondition, "purges already written are not undone", above. **They do not cover this
+    /// method.** This flush-before-propagate ordering (`flush` before `purged?`, mirroring
+    /// [`Device::edit`]) has no automated regression test: forcing it needs a live
+    /// [`UnlockedDevice`], which only unlocking real enrollment material hands out
+    /// ([`DeviceRecord::unlock`] and its siblings; ADR 0013 §3 rule 1 — no public constructor
+    /// outside `rizzy-client`), so neither a real device (the clock
+    /// problem above) nor a synthetic one built the way `rizzy-cli/src/db.rs`'s own tests build
+    /// a cache (fabricated rows, no keys) can reach it. The ordering is reasoned by inspection
+    /// against `Device::edit`'s already-tested shape instead.
+    ///
+    /// # Errors
+    /// [`Device::commit`]'s error takes precedence, as [`Device::edit`]: it reports a failure
+    /// to persist what the pass already wrote over the pass's own error. Otherwise, the
+    /// errors of [`VaultSync::auto_purge_due`]; [`Device::check_writable`].
+    async fn auto_purge(&mut self) -> Result<(), CliError> {
+        // Per vault (ADR 0081 §A7). Whatever the pass purged before it failed is committed too:
+        // the rows are own ops the merge already holds (as `Device::edit`).
+        let mut first_error = None;
+        for vault_id in self.vaults.open_ids() {
+            let purged = self.vaults.require_mut(vault_id)?.auto_purge_due(
+                &mut self.rng,
+                &self.unlocked,
+                now_ms(),
+                TRASH_RETENTION_MS,
+            );
+            if let Err(e) = purged {
+                first_error.get_or_insert(e);
+            }
+        }
+        self.flush().await?;
+        if let Some(e) = first_error {
+            return Err(e.into());
+        }
+        self.check_writable()
     }
 
     /// A re-authentication over this device's session (CRYPTO.md §11.6 step 1, §11.8 step 0).
@@ -1337,7 +1749,7 @@ impl Device {
                 .as_ref()
                 .map_or(self.password.as_str(), |(_, p)| p.as_str()),
         )?;
-        let promoted = DeviceRecord::parse(&self.record.encode()?)?.promote_pending();
+        let promoted = DeviceRecord::parse(&self.record.encode()?, false)?.promote_pending();
         let mut view = self.account_view().await?;
         let mut applied = self
             .settled(
@@ -1684,12 +2096,14 @@ impl Device {
             recovery_code: recovery_code.as_deref().map(String::as_str),
             now_ms: now_ms(),
         };
+        // ADR 0081 §A9: every open vault is rotated with the account; `regrants` stays empty.
+        let all = self.vaults.open_refs();
         let mut pending = start_rotation(
             &mut self.rng,
             reauth,
             &self.state,
             &self.unlocked,
-            &[&self.vault],
+            &all,
             &options,
         )?;
         let pending_record = pending.pending_record(&mut self.rng, &self.state, &self.unlocked)?;
@@ -1755,11 +2169,12 @@ impl Device {
                             Auth::Bearer(&flight.token),
                         )
                         .await?;
+                    let all = self.vaults.open_refs();
                     match flight.pending.on_state_conflict(
                         &mut self.rng,
                         &view,
                         &self.unlocked,
-                        &[&self.vault],
+                        &all,
                     ) {
                         Ok(ConflictOutcome::Resend) => {}
                         Ok(ConflictOutcome::Committed) => return Ok(()),
@@ -1848,18 +2263,19 @@ impl Device {
         flight: RotationInFlight,
     ) -> Result<usize, CliError> {
         let state_writes = flight.pending.store_writes()?;
+        let mut all = self.vaults.open_mut_refs();
         let done = flight.pending.finalize(
             &mut self.rng,
             &mut self.state,
             &mut self.unlocked,
-            &mut [&mut self.vault],
+            &mut all,
         )?;
         self.authors = done.authors;
         self.record = self.state.record(Stage::Committed)?;
         self.pending_commit = None;
         let mut changeset = store::finalize_writes(&self.record)?;
         changeset.append(state_writes);
-        changeset.append(self.vault.take_writes());
+        changeset.append(self.vaults.take_writes());
         self.commit(changeset).await?;
         // The new device set for `device list`, and everything at the new epoch.
         self.refreshed = false;
@@ -1877,37 +2293,84 @@ impl Device {
         if self.session.is_none() {
             self.authenticate().await?;
         }
+        let (mut ops, mut snapshots) = (0, 0);
+        for vault_id in self.vaults.open_ids() {
+            let (o, s) = self.upload_unsent_of(vault_id).await?;
+            ops += o;
+            snapshots += s;
+        }
+        Ok((ops, snapshots))
+    }
+
+    /// [`Device::upload_unsent`] for one vault.
+    async fn upload_unsent_of(&mut self, vault_id: VaultId) -> Result<(usize, usize), CliError> {
         // A restore generation is needed to mark the rows sent; a Fetch gives one.
-        let request = self.vault.fetch_request()?;
+        let request = self.vaults.require_mut(vault_id)?.fetch_request()?;
         let response: FetchResponse = self.call(paths::VAULT_FETCH, &request).await?;
-        self.vault.apply_fetch(&self.authors, &response, now_ms())?;
+        self.vaults
+            .require_mut(vault_id)?
+            .apply_fetch(&self.authors, &response, now_ms())?;
         self.flush().await?;
-        while let Some(request) = self.vault.unsent_upload_request()? {
+        while let Some(request) = self.vaults.require_mut(vault_id)?.unsent_upload_request()? {
             self.flush().await?;
-            let before = self.vault.unacknowledged();
+            let before = self.vaults.require(vault_id)?.unacknowledged();
             let response: UploadResponse = self.call(paths::VAULT_UPLOAD, &request).await?;
-            self.vault.apply_upload_response(&response)?;
+            self.vaults
+                .require_mut(vault_id)?
+                .apply_upload_response(&response)?;
             self.flush().await?;
-            if self.vault.unacknowledged() == before {
+            if self.vaults.require(vault_id)?.unacknowledged() == before {
                 // The server takes no more of them (a conflict, a stale epoch): stop.
                 break;
             }
         }
-        Ok(self.vault.unacknowledged())
+        Ok(self.vaults.require(vault_id)?.unacknowledged())
+    }
+
+    /// The unacknowledged own ops and snapshots over every vault (ADR 0026 §5).
+    #[must_use]
+    pub fn unacknowledged(&self) -> (usize, usize) {
+        self.vaults
+            .all()
+            .iter()
+            .map(VaultSync::unacknowledged)
+            .fold((0, 0), |(a, b), (c, d)| (a + c, b + d))
     }
 
     /// Closes the cache and gives back the account id and the lock, for the removal of the
     /// device's files.
-    pub(crate) async fn close(self) -> ([u8; 16], AccountLock) {
+    pub(crate) async fn close(mut self) -> ([u8; 16], Option<AccountLock>) {
         let account = self.state.account_id().to_bytes();
-        self.db.close().await;
-        (account, self.lock)
+        if let Some(db) = self.db.take() {
+            db.close().await;
+        }
+        (account, self.lock.take())
     }
 
     /// The account id as the files are named.
     #[must_use]
     pub fn account_hex(&self) -> String {
         hex(self.state.account_id().as_bytes())
+    }
+}
+
+impl Drop for Device {
+    /// Leaves the sign-out of this run's device session in [`SignOuts`], signed now with the
+    /// device key (ADR 0075 owner answer 3). Nothing when the run never authenticated.
+    fn drop(&mut self) {
+        let Some(mut session) = self.session.take() else {
+            return;
+        };
+        let Ok(signature) =
+            session.sign_request(&self.unlocked, "POST", paths::SESSIONS_CURRENT_END, b"")
+        else {
+            return;
+        };
+        self.sign_outs.push(PendingSignOut {
+            http: self.http.clone(),
+            token: copy_token(session.bearer_token()),
+            signature,
+        });
     }
 }
 

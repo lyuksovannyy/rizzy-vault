@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Error types for URL normalisation and the equivalence list (ADR 0037, ADR 0038).
 //!
 //! None of these carry secrets: a URL and an equivalence list are both public data (ADR 0037
@@ -101,8 +103,9 @@ pub enum EquivalenceListError {
     /// The signature did not verify against the given public key ([`rizzy_core::error::VerifyError`]
     /// via [`rizzy_core::sign::verify_detached`]).
     BadSignature,
-    /// `list_version` is not strictly greater than the caller's highest accepted version
-    /// (INV-39: "reject a list with an equal or lower version").
+    /// `list_version` is lower than the caller's highest accepted version, or is the reserved
+    /// value `0` (INV-39; ADR 0038 §2 as amended by ADR 0080 §6: "reject a list with a lower
+    /// version"; an equal version is the same list re-verified and is accepted).
     NotNewer,
 }
 
@@ -122,3 +125,56 @@ impl fmt::Display for EquivalenceListError {
 }
 
 impl core::error::Error for EquivalenceListError {}
+
+/// The most user-defined groups an account's matching settings may hold (ADR 0042 §3–§4,
+/// `MAX_USER_GROUPS`; owner answer 2 at acceptance).
+pub const MAX_USER_GROUPS: u16 = 64;
+/// The most global group ids an account may disable (ADR 0042 §3–§4, `MAX_DISABLED_GROUPS`;
+/// owner answer 2 at acceptance). Independent of the list's own [`MAX_GROUPS`] on purpose:
+/// "disable every global group" must not consume the whole settings entry (ADR 0042 §3).
+pub const MAX_DISABLED_GROUPS: u16 = 1024;
+
+/// Why the account's matching settings (ADR 0042 §3) did not decode, or an edit of them was
+/// refused (ADR 0042 §4). None of these carry a domain or a group id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MatchingSettingsError {
+    /// The encoded section is not exactly one canonical encoding (truncated or trailing bytes,
+    /// a value out of range, a count above its bound, ids out of order or repeated, a user group
+    /// that breaks a rule). The whole record is rejected (ADR 0042 §2).
+    Malformed,
+    /// A typed domain does not normalise (ADR 0037 §2).
+    InvalidDomain,
+    /// A typed domain is not its own registrable domain: a bare public suffix (`co.uk`,
+    /// `github.io`) or a subdomain (`www.example.com`) (ADR 0042 §4). Or a group built
+    /// elsewhere carries `flag_third_party_hostable = 1`.
+    NotRegistrableDomain,
+    /// Fewer than two domains, more than [`MAX_GROUP_DOMAINS`], or two that normalise to the
+    /// same value.
+    InvalidGroup,
+    /// A user group with the same `group_id` already exists.
+    DuplicateGroup,
+    /// More than [`MAX_USER_GROUPS`] user groups.
+    TooManyUserGroups,
+    /// More than [`MAX_DISABLED_GROUPS`] disabled global groups.
+    TooManyDisabledGroups,
+    /// `0x0000` (account default) given as the account default itself.
+    InvalidMatchDefault,
+}
+
+impl fmt::Display for MatchingSettingsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Malformed => "matching settings are malformed",
+            Self::InvalidDomain => "domain does not normalise",
+            Self::NotRegistrableDomain => "domain is not a registrable domain",
+            Self::InvalidGroup => "a group needs 2 to 64 distinct domains",
+            Self::DuplicateGroup => "a user group with this id exists",
+            Self::TooManyUserGroups => "too many user groups",
+            Self::TooManyDisabledGroups => "too many disabled groups",
+            Self::InvalidMatchDefault => "the account default cannot be account default",
+        })
+    }
+}
+
+impl core::error::Error for MatchingSettingsError {}

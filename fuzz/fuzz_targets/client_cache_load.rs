@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-client`'s cache loader (ADR 0026 §3 "Columns are indexes, never facts", §4
 //! steps 5 and 7, §5, §6): the rows of the local cache are read back from a file anyone with
 //! the user's rights can change, so every row is untrusted input.
@@ -120,6 +122,9 @@ fn copy(rows: &CacheRows) -> CacheRows {
         wraps: rows.wraps.clone(),
         ops: rows.ops.clone(),
         snapshots: rows.snapshots.clone(),
+        item_index: rows.item_index.clone(),
+        item_index_unreadable: rows.item_index_unreadable,
+        pending_moves: rows.pending_moves.clone(),
     }
 }
 
@@ -273,6 +278,9 @@ fn build() -> Fixture {
         identity_secret_keys: commit_request.identity_secret_keys.clone(),
         vault_self_grants: List::new(vec![commit_request.vault_self_grant.clone()])
             .expect("one grant"),
+        bytes_used: 0,
+        quota_bytes: 0,
+        vaults: List::empty(),
     };
     let e_srv = commit_request.account_key_server_wrap.clone();
     let signed_up = pending.finalize().expect("finalised");
@@ -501,7 +509,7 @@ fn fixture() -> &'static Fixture {
 /// Opens and loads `rows`; checks what a loaded cache must satisfy (module docs). `valid`
 /// says the rows are the unmutated fixture, whose further own op must be admitted.
 fn run(rows: &CacheRows, unlocked: &UnlockedDevice, valid: bool) -> Result<(), ClientError> {
-    let record = open(rows)?;
+    let record = open(rows, false)?;
     let mut loaded = load(rows, &record, unlocked, NOW + 100)?;
     assert_eq!(loaded.vaults.len(), rows.vaults.len());
     let counter = rows
@@ -559,7 +567,7 @@ fn run(rows: &CacheRows, unlocked: &UnlockedDevice, valid: bool) -> Result<(), C
         if created.is_ok() && admitted.is_ok() {
             let mut next = copy(rows);
             next.apply(&changeset);
-            open(&next).expect("the record is untouched by an op");
+            open(&next, false).expect("the record is untouched by an op");
         }
     }
     Ok(())

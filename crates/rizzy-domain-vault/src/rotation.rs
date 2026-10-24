@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The vault half of a key rotation ([ADR 0025] §3, §4; CRYPTO.md §11.6 steps 3 and 9, §11.8
 //! step 3, §11.9 step 5; ADR 0012 §6 and ADR 0021 §9 "Rotation cut-off").
 //!
@@ -103,10 +105,14 @@ pub async fn apply_rotation(
     now_ms: u64,
 ) -> Result<(), VaultError> {
     let now = to_sql_time(now_ms)?;
-    // Check 1: one entry per vault, none other. Both lists are ascending by id.
+    // Check 1: one entry per vault, none other. Both lists are ascending by id. No vault is
+    // shared before ADR 0081 Part B, so every vault is in V and `regrants` must be empty (ADR
+    // 0081 §0 item 3, §A9: "the server refuses a `regrants` list that does not name exactly
+    // those vaults").
     let vaults = repo::list_vaults(tx.conn(), account_id).await?;
     let entries = upload.vaults();
-    if vaults.len() != entries.len()
+    if !upload.regrants().is_empty()
+        || vaults.len() != entries.len()
         || vaults
             .iter()
             .zip(entries)
@@ -129,7 +135,7 @@ pub async fn apply_rotation(
         );
     }
     for plan in &plans {
-        write_vault(tx, plan, now).await?;
+        write_vault(tx, account_id, plan, now).await?;
     }
     Ok(())
 }
@@ -274,8 +280,15 @@ async fn check_cutoff(
     Ok(())
 }
 
-/// The writes of one checked vault (module docs, "Writes").
-async fn write_vault(tx: &mut WriteTx, plan: &VaultPlan, now: i64) -> Result<(), VaultError> {
+/// The writes of one checked vault (module docs, "Writes"). The carried wraps it clears are
+/// credited to the account's storage counter (ADR 0048 §2; the `auth` commit transaction holds
+/// the account lock).
+async fn write_vault(
+    tx: &mut WriteTx,
+    account_id: AccountId,
+    plan: &VaultPlan,
+    now: i64,
+) -> Result<(), VaultError> {
     let vault_id = plan.vault_id;
     repo::set_vault_epoch(tx.conn(), vault_id, plan.grant.vault_key_epoch).await?;
     repo::write_self_grant(tx.conn(), vault_id, &plan.grant, plan.has_grant, now).await?;
@@ -293,7 +306,8 @@ async fn write_vault(tx: &mut WriteTx, plan: &VaultPlan, now: i64) -> Result<(),
             });
         }
     }
-    repo::clear_record_wraps(tx.conn(), vault_id).await
+    let freed = repo::clear_record_wraps(tx.conn(), vault_id).await?;
+    crate::usage::charge(tx, account_id, crate::usage::credit(freed), now).await
 }
 
 #[cfg(test)]

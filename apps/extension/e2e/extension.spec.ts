@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Structural/offline coverage that needs no server and no enrolled account: the extension
 // loads, its offscreen document starts, the popup opens and shows the right view for its
 // status, the `storage.session` fallback survives the long-lived context being torn down and
@@ -13,11 +15,9 @@
 // can (`launchPersistentContext` is required either way — extensions only load into a
 // persistent context).
 import { type BrowserContext, chromium, test as base, expect } from "@playwright/test";
-import { mkdtempSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { withProfileDir } from "./profile.ts";
 
 const EXTENSION_PATH = fileURLToPath(new URL("../dist/chromium", import.meta.url));
 
@@ -32,14 +32,18 @@ const TEST_LOGIN_PAGE =
 
 const test = base.extend<{ context: BrowserContext; extensionId: string; loginPageUrl: string }>({
   context: async ({}, use) => {
-    const userDataDir = mkdtempSync(join(tmpdir(), "rizzy-ext-e2e-"));
-    const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: true,
-      channel: "chromium",
-      args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+    await withProfileDir("rizzy-ext-e2e-", async (userDataDir) => {
+      const context = await chromium.launchPersistentContext(userDataDir, {
+        headless: true,
+        channel: "chromium",
+        args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+      });
+      try {
+        await use(context);
+      } finally {
+        await context.close();
+      }
     });
-    await use(context);
-    await context.close();
   },
   extensionId: async ({ context }, use) => {
     let [worker] = context.serviceWorkers();
@@ -189,7 +193,21 @@ async function openInlineMenuWithOneCandidate(context: BrowserContext, extension
         }
       });
       window.postMessage(
-        { type: showType, pageOrigin: location.origin, candidates: [{ itemId, title: "Example", username: "alice", needsWarning: false }] },
+        {
+          type: showType,
+          pageOrigin: location.origin,
+          // Gap 31 in the M2 gap audit: `isInlineMenuShowMessage` now requires `pageHost` and
+          // every candidate's own `savedHost` too (ADR 0037 §5 "Exact host shown") — omitting
+          // either makes this fixture fail validation silently, so `main.ts` never calls
+          // `render()` and `#list` never gets a button, which is exactly the hang this fixture
+          // used to produce before these two fields were added here.
+          pageHost: location.hostname,
+          // ADR 0043: a show message without a canonical instance token is refused like any
+          // other malformed one. Nothing registers this one with the background, so the fill
+          // request it leads to is refused there; this test only checks the pick teardown.
+          instanceToken: crypto.randomUUID(),
+          candidates: [{ itemId, title: "Example", username: "alice", needsWarning: false, savedHost: location.hostname }],
+        },
         location.origin,
       );
     },

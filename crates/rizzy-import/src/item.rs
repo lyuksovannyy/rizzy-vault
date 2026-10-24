@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Imported items: the field writes of one new item per entry, in the M1 item schema of
 //! `rizzy-core` (ADR 0018 §6–§8), and the builder the format mappers fill.
 //!
@@ -42,9 +44,10 @@
 use rizzy_core::item::key::{ElementId, FieldKey, FieldKeyRef};
 use rizzy_core::item::order::evenly_spaced;
 use rizzy_core::item::schema::{
-    ATTR_KIND, ATTR_LABEL, ATTR_MS, ATTR_ORDER, ATTR_VALUE, CustomFieldKind, IMPORT_CREATED_MS,
-    ITEM_FAVORITE, ITEM_TYPE, KeyClass, LIST_FIELD, LIST_PWHIST, LIST_URI, WriteMode, WriteSource,
-    check_create, classify,
+    ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_DISCOVERABLE, ATTR_KIND, ATTR_LABEL,
+    ATTR_MS, ATTR_ORDER, ATTR_PRIVATE_KEY, ATTR_PUBLIC_KEY_COSE, ATTR_RP_ID, ATTR_USER_HANDLE,
+    ATTR_VALUE, CustomFieldKind, IMPORT_CREATED_MS, ITEM_FAVORITE, ITEM_TYPE, KeyClass, LIST_FIELD,
+    LIST_PASSKEY, LIST_PWHIST, LIST_URI, WriteMode, WriteSource, check_create, classify,
 };
 use rizzy_core::item::tag::tag_key;
 use rizzy_core::item::types::{ItemType, SupportedType};
@@ -194,6 +197,25 @@ struct PendingField {
     value: Value,
 }
 
+/// One passkey waiting for its element id: the values of ADR 0039 §1's `passkey/<id>/…` fields
+/// (built by [`crate::cxf`], ADR 0074 §3 "Writes"). `private_key` is concealed by the schema.
+pub(crate) struct PendingPasskey {
+    /// `rp_id`, a Text value.
+    pub(crate) rp_id: Value,
+    /// `user_handle`, a Bytes value.
+    pub(crate) user_handle: Value,
+    /// `credential_id`, a Bytes value.
+    pub(crate) credential_id: Value,
+    /// `private_key`, a Bytes value of the 32-byte scalar or seed.
+    pub(crate) private_key: Value,
+    /// `public_key_cose`, a Bytes value of the derived key's COSE map.
+    pub(crate) public_key_cose: Value,
+    /// `alg`: 1 (ES256) or 2 (`EdDSA`).
+    pub(crate) alg: u16,
+    /// `created_ms`.
+    pub(crate) created_ms: u64,
+}
+
 /// Encoded size of one write in op data: `str(key) ‖ bytes(value)` (ADR 0018 §3, CRYPTO.md
 /// §2: each with a `u32` length).
 const fn write_len(key_len: usize, value_len: usize) -> usize {
@@ -242,6 +264,8 @@ pub(crate) struct ItemBuilder<'w> {
     history: Vec<(Value, Option<u64>)>,
     /// Tag keys, without duplicates.
     tags: Vec<FieldKey>,
+    /// Passkeys (Login only).
+    passkeys: Vec<PendingPasskey>,
     /// Whether [`WarningKind::TooManyElements`] was recorded for this entry (once per entry).
     warned_full: bool,
 }
@@ -260,8 +284,15 @@ impl<'w> ItemBuilder<'w> {
             fields: Vec::new(),
             history: Vec::new(),
             tags: Vec::new(),
+            passkeys: Vec::new(),
             warned_full: false,
         }
+    }
+
+    /// Adds a passkey (ADR 0039 §1; Login only, which is the only type whose schema has the
+    /// `passkey` list: on another type the item's create check refuses it).
+    pub(crate) fn add_passkey(&mut self, passkey: PendingPasskey) {
+        self.passkeys.push(passkey);
     }
 
     /// The item's type.
@@ -525,6 +556,7 @@ impl<'w> ItemBuilder<'w> {
             fields,
             history,
             tags,
+            passkeys,
             ..
         } = self;
         let mut out = Output {
@@ -538,7 +570,8 @@ impl<'w> ItemBuilder<'w> {
             || !uris.is_empty()
             || !fields.is_empty()
             || !history.is_empty()
-            || !tags.is_empty();
+            || !tags.is_empty()
+            || !passkeys.is_empty();
         if !has_content {
             warnings.push(Some(entry), WarningKind::EmptyEntry);
             return None;
@@ -557,6 +590,7 @@ impl<'w> ItemBuilder<'w> {
         out.fields(fields, rng);
         out.history(history, rng);
         out.tags(tags);
+        out.passkeys(passkeys, rng);
         if out.over {
             warnings.push(Some(entry), WarningKind::ItemTooLarge);
         }
@@ -750,6 +784,43 @@ impl Output {
             }
             if let (Some(ms), Some(mk)) = (ms, Self::key(&id, LIST_PWHIST, ATTR_MS)) {
                 self.push(mk, Value::u64(ms));
+            }
+        }
+    }
+
+    /// Adds the passkeys that fit, each whole (its eight fields) or not at all.
+    fn passkeys<R: CryptoRng + ?Sized>(&mut self, passkeys: Vec<PendingPasskey>, rng: &mut R) {
+        for passkey in passkeys {
+            let PendingPasskey {
+                rp_id,
+                user_handle,
+                credential_id,
+                private_key,
+                public_key_cose,
+                alg,
+                created_ms,
+            } = passkey;
+            let fields = [
+                (ATTR_RP_ID, rp_id),
+                (ATTR_USER_HANDLE, user_handle),
+                (ATTR_CREDENTIAL_ID, credential_id),
+                (ATTR_PRIVATE_KEY, private_key),
+                (ATTR_PUBLIC_KEY_COSE, public_key_cose),
+                (ATTR_ALG, Value::enumeration(alg)),
+                (ATTR_DISCOVERABLE, Value::bool(true)),
+                (ATTR_CREATED_MS, Value::u64(created_ms)),
+            ];
+            let size = fields.iter().fold(0, |size, (attribute, value)| {
+                size + write_len(element_key_len(LIST_PASSKEY, attribute), value.len())
+            });
+            if !self.fits(fields.len(), size) {
+                continue;
+            }
+            let id = ElementId::generate(rng);
+            for (attribute, value) in fields {
+                if let Some(key) = Self::key(&id, LIST_PASSKEY, attribute) {
+                    self.push(key, value);
+                }
             }
         }
     }

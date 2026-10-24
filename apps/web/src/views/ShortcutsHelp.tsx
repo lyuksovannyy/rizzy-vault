@@ -1,14 +1,17 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The keyboard-shortcuts help dialog, opened by `?` (redesign slice 2, item 3; `shortcuts.ts`).
 // Not built on `ConfirmDialog` (there is nothing to confirm here, and a single "Close" action
 // has no "safe" vs. "dangerous" distinction), but it shares the same overlay/dialog shell,
-// Escape-to-close, and a backdrop button, so it still reads and behaves like every other
-// dialog in the vault.
+// Escape-to-close, the Tab focus trap (`trapTab`) and a backdrop button, so it still reads and
+// behaves like every other dialog in the vault.
+import { trapTab } from "@rizzy-vault/ui";
 import { Fragment, useEffect, useId, useRef } from "react";
 
 const SHORTCUTS: readonly { readonly keys: string; readonly does: string }[] = [
   { keys: "/", does: "Focus the search box" },
-  { keys: "Ctrl/Cmd+K", does: "Focus the search box" },
-  { keys: "↑ / ↓", does: "Move the item-list selection" },
+  { keys: "Ctrl/Cmd+K", does: "Open the command palette" },
+  { keys: "↑ / ↓", does: "Move the item-list selection, or the palette's selection" },
   { keys: "Enter", does: "Open the selected item" },
   { keys: "Esc", does: "Close a dialog or popover" },
   { keys: "N", does: "New item" },
@@ -19,6 +22,7 @@ const SHORTCUTS: readonly { readonly keys: string; readonly does: string }[] = [
 export function ShortcutsHelp(props: { readonly open: boolean; readonly onClose: () => void }) {
   const titleId = useId();
   const closeRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const previouslyFocused = useRef<Element | null>(null);
 
   useEffect(() => {
@@ -46,11 +50,14 @@ export function ShortcutsHelp(props: { readonly open: boolean; readonly onClose:
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        ref={dialogRef}
         onKeyDown={(e) => {
           if (e.key === "Escape") {
             e.preventDefault();
             props.onClose();
+            return;
           }
+          trapTab(e, dialogRef.current);
         }}
       >
         <h2 id={titleId}>Keyboard shortcuts</h2>

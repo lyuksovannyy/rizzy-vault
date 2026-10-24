@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-domain-vault` — the server's `vault` domain (roadmap M1 step 3; [ADR 0016] §3 row
 //! `rizzy-domain-vault`): Server-mode op records and retained headers, snapshots, compaction,
 //! restore healing, item-key wraps and vault self-grants. It verifies each uploaded op and
@@ -20,6 +22,7 @@
 //! | [`VaultDomain::fetch`] | ADR 0012 §7 "Fetch" as ADR 0021 §4 supersedes it in part | [`fetch`] |
 //! | [`VaultDomain::compact_item`], [`VaultDomain::run_compaction`] | ADR 0021 §3, §7 (the `worker` job) | [`compact`] |
 //! | [`create_vault`], [`VaultDomain::self_grant`], [`VaultDomain::vaults`] | CRYPTO.md §4.2, §4.4 | [`keys`] |
+//! | [`VaultDomain::create_attachment`], [`VaultDomain::attachment_key_wrap`], [`VaultDomain::upload_attachment_chunk`], [`VaultDomain::download_attachment_chunk`], [`VaultDomain::delete_attachment`], [`VaultDomain::sweep_attachments`] | ADR 0054 §5–§7 | [`attachments`] |
 //! | [`port::create_personal_vault`], [`port::self_grants`], [`port::device_head`], [`port::recovery_vaults`] | ADR 0016 R4; CRYPTO.md §11.1 step 8, §11.2 step 5, §11.8 step 0, §11.9 step 3; ADR 0025 §1; ADR 0032 §3 (healing step 3a compares re-sent self-grants) | [`port`]: the vault side of the `auth` flows, on the caller's transaction |
 //! | [`rotation::apply_rotation`] | CRYPTO.md §11.6 steps 3 and 9; ADR 0012 §6; ADR 0021 §9 "Rotation cut-off"; ADR 0025 §3 | [`rotation`]: the vault half of a key rotation, in the `auth` domain's commit transaction |
 //! | [`DeviceDirectory`] | ADR 0012 §7 "Certificates come from the `auth` domain through a trait"; ADR 0016 R4 | [`authors`] |
@@ -129,6 +132,7 @@ use rizzy_core::ids::{AccountId, ItemId, VaultId};
 use rizzy_proto::vault::RestoreGeneration;
 use rizzy_storage::{Conn, Database};
 
+pub mod attachments;
 pub mod authors;
 pub mod compact;
 pub mod error;
@@ -140,7 +144,9 @@ mod repo;
 pub mod rotation;
 mod store;
 pub mod upload;
+pub mod usage;
 
+pub use attachments::NewAttachment;
 pub use authors::{
     AccountKeyState, AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError,
     DuplicateDevice,
@@ -148,8 +154,10 @@ pub use authors::{
 pub use compact::{CompactionFailure, CompactionReport, CompactionRun};
 pub use error::{HealingError, VaultError};
 pub use fetch::{FetchOutcome, IntegrityError, PAGE_BYTES, PAGE_MAX_OPS};
-pub use keys::create_vault;
+pub use keys::{create_owned_vault, create_vault, delete_vault};
 pub use port::PersonalVaultOutcome;
+pub use repo::VaultKind;
+pub use usage::Quota;
 
 /// The vault domain: a database handle, the `auth` domain's certificates through
 /// [`DeviceDirectory`], and the event bus. Cheap to share behind an `Arc`; every call opens its
@@ -163,6 +171,8 @@ pub struct VaultDomain<D> {
     bus: Bus,
     /// The byte budget of one Fetch page, ops and covers together ([`fetch`]).
     page_bytes: usize,
+    /// The per-account storage quota and its headroom ([`usage`], ADR 0048).
+    quota: Quota,
 }
 
 impl<D> fmt::Debug for VaultDomain<D> {
@@ -187,7 +197,18 @@ impl<D: DeviceDirectory> VaultDomain<D> {
             directory,
             bus,
             page_bytes: PAGE_BYTES,
+            quota: Quota {
+                quota_bytes: rizzy_storage::quota::DEFAULT_QUOTA_BYTES,
+                headroom_bytes: rizzy_proto::limits::DEFAULT_UPLOAD_BODY_LEN as u64,
+            },
         }
+    }
+
+    /// The same domain with `quota` instead of [`Quota::default`] (ADR 0048 §1, §3).
+    #[must_use]
+    pub const fn with_quota(mut self, quota: Quota) -> Self {
+        self.quota = quota;
+        self
     }
 
     /// The same domain with a Fetch page budget of `bytes` (ops and covers together, see
@@ -209,6 +230,11 @@ impl<D> VaultDomain<D> {
     /// The byte budget of one Fetch page.
     pub(crate) const fn page_bytes(&self) -> usize {
         self.page_bytes
+    }
+
+    /// The per-account storage quota and its headroom.
+    pub(crate) const fn quota(&self) -> Quota {
+        self.quota
     }
 
     /// The certificate source.

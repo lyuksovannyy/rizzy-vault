@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Property tests of CRYPTO.md §15 item 4 over every implemented purpose: the 12 client
 //! symmetric purposes of M1, the 3 server-only purposes, and the HPKE PSK device grant.
 //!
@@ -25,10 +27,11 @@ use rand_core::Rng as _;
 
 use super::parse;
 use super::purpose::{
-    AccountKeyDeviceGrantCtx, AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx,
-    AccountKeyServerWrapCtx, AccountSettingsCtx, DeviceSecretKeysCtx, ExportFileCtx,
-    IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx, ItemSnapshotCtx, RetiredSecretKeyCtx,
-    ServerLoginStateCtx, ServerSecretsBackupCtx, ServerTotpSecretCtx, VaultKeySelfGrantCtx,
+    AccountKeyDeviceGrantCtx, AccountKeyForwardCtx, AccountKeyKeystoreWrapCtx,
+    AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx, AccountKeyServerWrapCtx, AccountSettingsCtx,
+    DeviceSecretKeysCtx, ExportFileCtx, IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx,
+    ItemSnapshotCtx, RetiredSecretKeyCtx, ServerDbBackupCtx, ServerLoginStateCtx,
+    ServerSecretsBackupCtx, ServerTotpSecretCtx, VaultKeySelfGrantCtx,
 };
 use super::symmetric::{self, server_open, server_seal, test_hooks};
 use super::{AlgId, Context, PlaintextRule, Purpose, open, seal};
@@ -273,6 +276,10 @@ case!(Client AccountKeyLocalWrapCtx {
     account_id, device_id, account_key_epoch, password_epoch, kdf_id
 });
 case!(Client AccountKeyRecoveryWrapCtx { account_id, account_key_epoch, recovery_epoch });
+case!(Client AccountKeyKeystoreWrapCtx { account_id, device_id, account_key_epoch });
+case!(Client AccountKeyForwardCtx {
+    account_id, device_id, from_account_key_epoch, to_account_key_epoch
+});
 case!(Client IdentitySecretKeysCtx { account_id, identity_epoch });
 case!(Client DeviceSecretKeysCtx { account_id, device_id });
 case!(Client RetiredSecretKeyCtx { account_id, retired_key_id });
@@ -289,6 +296,9 @@ case!(Client ExportFileCtx { export_id, created_at_ms, kdf_id, export_salt });
 case!(Server ServerTotpSecretCtx { account_id, totp_credential_seq });
 case!(Server ServerLoginStateCtx { login_id, credential_identifier, expires_at_ms });
 case!(Server ServerSecretsBackupCtx { backup_id, created_at_ms, kdf_id, backup_salt });
+case!(Server ServerDbBackupCtx {
+    backup_id, created_at_ms, backup_key_id, chunk_index, chunk_count
+});
 
 /// Opens `env` as purpose `C`, with `ctx_bytes` read as `C`'s context where the layouts have
 /// the same length, and a random `C` context otherwise. Returns the result and how many `okm`
@@ -308,7 +318,7 @@ type OpenAs =
     fn(&mut ChaCha20Rng, &Key32, &[u8], &[u8]) -> (Purpose, Result<(), DecryptError>, usize, usize);
 
 /// Every implemented symmetric purpose, as an opener.
-const ALL_SYMMETRIC: [OpenAs; 15] = [
+const ALL_SYMMETRIC: [OpenAs; 16] = [
     open_as::<AccountKeyServerWrapCtx>,
     open_as::<AccountKeyLocalWrapCtx>,
     open_as::<AccountKeyRecoveryWrapCtx>,
@@ -324,6 +334,7 @@ const ALL_SYMMETRIC: [OpenAs; 15] = [
     open_as::<ServerTotpSecretCtx>,
     open_as::<ServerLoginStateCtx>,
     open_as::<ServerSecretsBackupCtx>,
+    open_as::<ServerDbBackupCtx>,
 ];
 
 /// Runs `f`, counting `okm` derivations and AEAD openings on this thread.
@@ -538,7 +549,15 @@ macro_rules! symmetric_tests {
         fn the_harness_covers_every_implemented_symmetric_purpose() {
             let covered = [$(<$ty as Context>::PURPOSE),+];
             for p in Purpose::ALL {
-                let implemented = p.spec().first_used == super::purpose::Milestone::M1
+                // M1's symmetric purposes, M8's SERVER_DB_BACKUP (ADR 0071) and the M3/M7
+                // E_ks and forward envelopes (ADR 0057).
+                let implemented = (p.spec().first_used == super::purpose::Milestone::M1
+                    || matches!(
+                        p,
+                        Purpose::ServerDbBackup
+                            | Purpose::AccountKeyKeystoreWrap
+                            | Purpose::AccountKeyForward
+                    ))
                     && p.encrypt_alg() == AlgId::XChaCha20Poly1305Committed;
                 assert_eq!(covered.contains(&p), implemented, "{}", p.name());
             }
@@ -550,6 +569,8 @@ symmetric_tests!(
     account_key_server_wrap: AccountKeyServerWrapCtx,
     account_key_local_wrap: AccountKeyLocalWrapCtx,
     account_key_recovery_wrap: AccountKeyRecoveryWrapCtx,
+    account_key_keystore_wrap: AccountKeyKeystoreWrapCtx,
+    account_key_forward: AccountKeyForwardCtx,
     identity_secret_keys: IdentitySecretKeysCtx,
     device_secret_keys: DeviceSecretKeysCtx,
     retired_secret_key: RetiredSecretKeyCtx,
@@ -562,6 +583,7 @@ symmetric_tests!(
     server_totp_secret: ServerTotpSecretCtx,
     server_login_state: ServerLoginStateCtx,
     server_secrets_backup: ServerSecretsBackupCtx,
+    server_db_backup: ServerDbBackupCtx,
 );
 
 // ---------------------------------------------------------------------------------------------

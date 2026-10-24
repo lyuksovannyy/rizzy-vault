@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `rizzy-proto` entry points (`*_request`) that the server's account endpoints call:
 //! password change, settings, self-revocation, suspension, recovery and TOTP, each built from
 //! the wire request type and checked end to end with `rizzy-core`'s client side. The HTTP
@@ -41,6 +43,8 @@ fn bare(state: Vec<u8>) -> CommitChangeRequest {
         device_grants: List::empty(),
         recovery_rewrap: None,
         vault_rotation: None,
+        vault_create: None,
+        vault_delete: None,
     }
 }
 
@@ -81,7 +85,7 @@ async fn enrol(env: &mut Env, client: &mut Client) -> Device {
 
 /// Registers `password` with a new Secret Key over `session` and builds the commit of
 /// `password_epoch + 1` (CRYPTO.md §11.5 steps 3–5). Returns the commit and the new state.
-async fn password_change(
+pub(crate) async fn password_change(
     env: &mut Env,
     client: &Client,
     session: &rizzy_domain_auth::Session,

@@ -1,0 +1,16 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>One-time code</title>
+  </head>
+  <body>
+    <!-- A later sign-in step that is not the username: a one-time code. A TOTP-only step
+         (ADR 0076 §1.2): its menu opens only when a candidate can produce a code. -->
+    <form id="verify" action="/login/verify">
+      <input id="code" name="code" autocomplete="one-time-code" type="text" />
+      <button type="submit">Continue</button>
+    </form>
+  </body>
+</html>

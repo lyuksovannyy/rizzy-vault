@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The one error type that crosses the boundary (ADR 0013 §3 rule 4: "Errors are typed and
 //! carry no secrets. They cross as enums with stable codes").
 //!
@@ -23,6 +25,12 @@ use wasm_bindgen::prelude::wasm_bindgen;
 /// A call came in an order the flow does not allow: a response with no request outstanding, a
 /// second factor when none was asked for, a result before the flow finished.
 pub const WRONG_STATE: &str = "wrong_state";
+/// `webauthn/login/finish` refused the security key's assertion, or its 60 s pending login had
+/// expired or was used (ADR 0058 point 3): the login starts again from the password.
+pub const SECURITY_KEY_REFUSED: &str = "security_key_refused";
+/// The account's second factor is a security key only, which this flow cannot use (the browser
+/// extension's enrolment login: an extension page is not on the server's origin).
+pub const SECURITY_KEY_REQUIRED: &str = "security_key_required";
 /// The session was locked ([`crate::Session::lock`]); log in again.
 pub const LOCKED: &str = "locked";
 /// A response body larger than anything `/api/v1` sizes (ADR 0028 item 7).
@@ -93,6 +101,7 @@ impl CoreError {
             ErrorCode::PrevSeqMismatch => "server_prev_seq_mismatch",
             ErrorCode::SetupRetired => "server_setup_retired",
             ErrorCode::CredentialsStale => "server_credentials_stale",
+            ErrorCode::QuotaExceeded => "server_quota_exceeded",
             ErrorCode::Internal => "server_internal",
             _ => "server_unknown",
         })
@@ -141,6 +150,10 @@ mod tests {
         assert_eq!(
             CoreError::server(ErrorCode::CredentialsStale).as_str(),
             "server_credentials_stale"
+        );
+        assert_eq!(
+            CoreError::server(ErrorCode::QuotaExceeded).as_str(),
+            "server_quota_exceeded"
         );
         assert_eq!(
             CoreError::from(ClientError::SetupRetired).as_str(),

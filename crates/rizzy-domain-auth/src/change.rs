@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Atomic changes of the signed account state that carry credentials, keys or devices
 //! (CRYPTO.md §11 "Replacing credentials" and "Secrets before commit"; §11.3 step 5, §11.5,
 //! §11.6, §11.8 steps 1–3, §11.9 steps 5–6; ADR 0012 §6).
@@ -17,6 +19,8 @@
 //! | same `recovery_epoch`, nothing else moving, while the stored recovery row lags the state (the recovery repair of ADR 0032 §4 step 6, "re-type the current code") | `E_rec` and `H_rec`, the sent `H_rec` equal to the stored one | fresh OPAQUE |
 //! | recovery switched off | nothing; `E_rec` and `H_rec` are deleted | fresh OPAQUE or recovery-only |
 //! | `settings_seq + 1` | the new `ACCOUNT_SETTINGS` | fresh OPAQUE or a device session |
+//! | `settings_seq + 1` with a new owned vault ([ADR 0081] §A3) | the new `ACCOUNT_SETTINGS` and the vault's self-grant ([`VaultPort::create_owned_vault`]); counted against the per-account vault-creation bucket | fresh OPAQUE or a device session |
+//! | `settings_seq + 1` deleting an owned vault ([ADR 0081] §A5) | the new `ACCOUNT_SETTINGS` and the vault id ([`VaultPort::delete_vault`]) | fresh OPAQUE |
 //! | a new durable device | its certificate (enrolment in a recovery, §11.9 step 5; re-enrolment, §11.3 step 5) | fresh OPAQUE or recovery-only |
 //! | a revoked device | its `device-revocation` with `last_accepted_device_seq` = H, the head the server still holds; with a rotation, after the suspension of §11.8 step 0, over a fresh re-authentication of another device; without one only in the self-revocation shape of §11.3 step 5 | fresh OPAQUE |
 //!
@@ -37,11 +41,16 @@
 //! recovery ends every session (§11.9 step 6), a full rotation ends the other OPAQUE sessions
 //! (the web sessions its revocations cut, §11.6 step 7), and a revocation ends the revoked
 //! device's sessions. A new code or switching recovery off closes any pending recovery.
+//!
+//! A vault change ([ADR 0081] §A11) comes alone with its settings: at most one of `vault_create`
+//! and `vault_delete`, never inside a rotation, a full identity change or a recovery commit.
+//!
+//! [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
 
 use core::fmt;
 
 use rizzy_core::envelope::purpose::Purpose;
-use rizzy_core::ids::{AccountId, DeviceId, KeyType};
+use rizzy_core::ids::{AccountId, DeviceId, KeyType, VaultId};
 use rizzy_core::opaque::{
     CredentialIdentifier, server_registration_finish, server_registration_start,
 };
@@ -53,7 +62,7 @@ use rizzy_proto::auth::RecoveryRegistration;
 use rizzy_proto::limits::{MAX_DEVICE_GRANTS, MAX_DEVICE_STATEMENTS};
 use rizzy_proto::objects::{
     AccountKeyRecoveryWrap, AccountKeyServerWrap, AccountSettings, AccountStatement, DeviceGrant,
-    IdentitySecretKeys, OpaqueMessage,
+    IdentitySecretKeys, OpaqueMessage, VaultSelfGrant,
 };
 use rizzy_proto::wire::{Bytes, List};
 use rizzy_storage::{WriteTx, lock_account};
@@ -61,6 +70,7 @@ use rizzy_storage::{WriteTx, lock_account};
 use crate::AuthService;
 use crate::error::AuthError;
 use crate::ports::VaultPort;
+use crate::ratelimit::{self, BucketKind};
 use crate::rules::{self, RecoveryTransition, Transition};
 use crate::session::{self, Session, SessionKind};
 use crate::sql::{self, exec};
@@ -115,6 +125,15 @@ pub struct AccountChange<R> {
     pub device_grants: List<DeviceGrant, MAX_DEVICE_GRANTS>,
     /// The vault half of a rotation.
     pub vault_rotation: Option<R>,
+    /// A new owned vault's first self-grant, with `settings_seq + 1` ([ADR 0081] §A3).
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    pub vault_create: Option<VaultSelfGrant>,
+    /// An owned vault to delete, with `settings_seq + 1` over a fresh OPAQUE session ([ADR
+    /// 0081] §A5).
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    pub vault_delete: Option<VaultId>,
 }
 
 impl<R> fmt::Debug for AccountChange<R> {
@@ -127,6 +146,8 @@ impl<R> fmt::Debug for AccountChange<R> {
             .field("device_revocations", &self.device_revocations.len())
             .field("device_grants", &self.device_grants.len())
             .field("vault_rotation", &self.vault_rotation.is_some())
+            .field("vault_create", &self.vault_create.is_some())
+            .field("vault_delete", &self.vault_delete.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -532,6 +553,31 @@ impl<V: VaultPort> AuthService<V> {
                 sql::u64_sql(now_ms, "updated_at_ms")?,
             )?;
         }
+        if let Some(grant) = &change.vault_create {
+            // ADR 0081 §A3, §D: the creation bucket counts every creation that reaches here.
+            ratelimit::hit_window(
+                tx.conn(),
+                &ratelimit::bucket(BucketKind::VaultCreate, &[&account.as_bytes()[..]]),
+                &self.config.rate_limits.vault_create_per_account,
+                now_ms,
+            )
+            .await?;
+            self.vault
+                .create_owned_vault(
+                    tx,
+                    account,
+                    grant,
+                    new.account_key_epoch,
+                    *new.account_key_id.as_bytes(),
+                    now_ms,
+                )
+                .await?;
+        }
+        if let Some(vault_id) = change.vault_delete {
+            self.vault
+                .delete_vault(tx, account, vault_id, now_ms)
+                .await?;
+        }
         for retired in &change.retired_secret_keys {
             exec!(
                 tx.conn(),
@@ -728,8 +774,17 @@ fn check_objects<R>(
         || (change.retired_secret_keys.is_empty()
             && change.device_grants.is_empty()
             && change.vault_rotation.is_none());
+    // ADR 0081 §A3, §A5, §A11: at most one vault change, each only with `settings_seq + 1`
+    // (the server cannot read the directory, so it checks that the settings moved), and, as no
+    // client builds one, never inside a rotation or a full identity change.
+    let vault_ok = match (&change.vault_create, &change.vault_delete) {
+        (None, None) => true,
+        (Some(_), Some(_)) => false,
+        _ => step.settings_changed && !rotated && !step.identity_changed,
+    };
     if !recovery_ok
         || !settings_ok
+        || !vault_ok
         || !rotation_only_ok
         || (rotated && change.vault_rotation.is_none())
         || change.retired_secret_keys.len() > MAX_RETIRED_KEYS
@@ -752,10 +807,12 @@ fn authorize<R>(
         || step.account_key_rotated
         || step.recovery != RecoveryTransition::Unchanged
         || !matches!(change.recovery, RecoveryUpload::None);
+    // ADR 0081 §A5: deleting a vault needs a fresh OPAQUE session, like a credential change.
     let heavy = credentials
         || step.password_bumped
         || !plan.new_certs.is_empty()
-        || !plan.new_revocations.is_empty();
+        || !plan.new_revocations.is_empty()
+        || change.vault_delete.is_some();
     let same_password_reregistration = change.registration_upload.is_some()
         && !step.password_bumped
         && !step.account_key_rotated
@@ -768,7 +825,9 @@ fn authorize<R>(
             // §11.9 step 5: a new password and a new code, never a revocation.
             let recovery_commit = step.password_bumped
                 && step.recovery == RecoveryTransition::NewCode
-                && plan.new_revocations.is_empty();
+                && plan.new_revocations.is_empty()
+                && change.vault_create.is_none()
+                && change.vault_delete.is_none();
             if recovery_commit {
                 Ok(())
             } else {

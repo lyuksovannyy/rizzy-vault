@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Dishonest snapshots for the tests: the fault kinds of the merge spike
 //! (`spikes/merge-model/src/replica.rs` `Fault`, `apply_fault`), applied to an honest snapshot.
 //! Each is built to pass the ADR 0018 §5 parse rules, as a "verified but dishonest" snapshot

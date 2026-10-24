@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Master password and Secret Key change on an enrolled device (CRYPTO.md §11.5), and
 //! following such a change made on another device (§11.3 step 5), as a sans-I/O state machine.
 //!
@@ -570,6 +572,8 @@ impl PlainChange {
                 device_grants: List::empty(),
                 recovery_rewrap: None,
                 vault_rotation: None,
+                vault_create: None,
+                vault_delete: None,
             },
             e_srv,
             session_token,
@@ -965,7 +969,7 @@ impl PendingCredentialChange {
                 let local_wrap = p.prepare(rng, device)?;
                 let pin = p.new_pin();
                 let authors = Authors::from_statements(&p.certificates, &p.revocations)?;
-                device.local_wrap = local_wrap;
+                device.set_local_wrap(local_wrap);
                 p.credential.apply(device, unlocked);
                 device.pin = pin;
                 Ok(RotationDone {
@@ -1023,7 +1027,7 @@ pub fn follow_credential_change<R: CryptoRng + ?Sized>(
         password_epoch,
     )?;
     device.adopt(&account);
-    device.local_wrap = local_wrap;
+    device.set_local_wrap(local_wrap);
     device.device_salt = device_salt;
     device.kdf_id = kdf_id;
     device.secret_key = secret_key;

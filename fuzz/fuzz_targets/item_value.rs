@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the item value decoder (ADR 0018 §6, §10): never panics, and a value it accepts is
 //! the one encoding of that value. Part of CRYPTO.md §15 item 7 ("item-record parsers …: the
 //! value decoder") and ADR 0018 §12.
@@ -12,6 +14,9 @@
 //!   supported or not, because an invalid value never rejects its record (ADR 0018 §6, §11).
 //! - [`read_value`] and [`CustomFieldKind`]: reading the value against every expected type, and
 //!   as a custom field of every kind, never panics.
+//! - [`check_autocomplete_id`] (ADR 0076 §2.2, §3): on the raw bytes and on a decoded Text,
+//!   never panics, and an id it accepts is lowercase ASCII of 1–64 bytes and not reserved. A
+//!   synced `field/<id>/autocomplete` value is untrusted input from any writer of the item.
 //!
 //! In production the decoder runs on values inside decrypted records, so fuzzing it on raw
 //! bytes covers a malicious writer who holds the item key (from M9, a vault member). The fuzzed
@@ -19,10 +24,26 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use rizzy_core::item::autocomplete::{
+    MAX_AUTOCOMPLETE_ID_LEN, check_autocomplete_id, is_reserved_autocomplete_id,
+};
 use rizzy_core::item::schema::{CustomFieldKind, Expected, read_value};
 use rizzy_core::item::value::{MAX_VALUE_LEN, Value, ValueRef};
 
+/// The ADR 0076 §2.2 / §3 properties of an accepted autocomplete id.
+fn check_id(id: &[u8]) {
+    if check_autocomplete_id(id).is_ok() {
+        assert!((1..=MAX_AUTOCOMPLETE_ID_LEN).contains(&id.len()));
+        assert!(id.iter().all(|b| b.is_ascii() && !b.is_ascii_uppercase()));
+        assert!(!is_reserved_autocomplete_id(id));
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
+    check_id(data);
+    if let Ok(ValueRef::Text(text)) = ValueRef::decode(data) {
+        check_id(text.as_bytes());
+    }
     match ValueRef::decode(data) {
         Ok(value) => {
             assert!(data.len() <= MAX_VALUE_LEN);

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The signed statements of CRYPTO.md §10.2, except the key bundle ([`super::bundle`]).
 //!
 //! Each statement is a plain struct with its canonical body layout, a `sign` function that

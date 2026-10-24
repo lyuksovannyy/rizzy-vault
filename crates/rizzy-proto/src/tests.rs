@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Message-level tests: known-answer JSON for representative messages, serde round trips of
 //! every message type, rejection of unknown and oversize fields in requests, tolerance of
 //! unknown fields in responses, and redacted `Debug` output of messages that carry secrets.
@@ -13,7 +15,11 @@ use zeroize::Zeroizing;
 use crate::account::{
     AccountStateQuery, AccountView, AckDeviceGrantsRequest, DeviceGrantsResponse,
     EnrolDeviceRequest, PublishAccountStateRequest, PublishBundlesRequest, PublishGrantsRequest,
-    UploadWebDeviceCertificateRequest,
+    UploadWebDeviceCertificateRequest, VaultSummary,
+};
+use crate::attachments::{
+    AttachmentRequest, CreateAttachmentRequest, DownloadChunkRequest, DownloadChunkResponse,
+    GetAttachmentResponse, UploadChunkRequest,
 };
 use crate::auth::{
     DeviceAuthFinishRequest, DeviceAuthFinishResponse, DeviceAuthStartRequest,
@@ -86,6 +92,13 @@ fn account_view() -> AccountView {
             envelope: b(b"e_id"),
         },
         vault_self_grants: l(vec![vault_self_grant()]),
+        bytes_used: 1_234,
+        quota_bytes: 5_368_709_120,
+        vaults: l(vec![VaultSummary {
+            vault_id: id(0x11),
+            kind: 1,
+            bytes_used: 1_000,
+        }]),
     }
 }
 
@@ -530,6 +543,26 @@ fn responses_ignore_unknown_fields() {
 }
 
 #[test]
+fn account_usage_of_adr_0048() {
+    // §5: two plain integer fields on `AccountView`, and `quota_exceeded` on the wire.
+    let view = serde_json::to_value(account_view()).unwrap();
+    assert_eq!(view["bytes_used"], 1_234);
+    assert_eq!(view["quota_bytes"], 5_368_709_120_u64);
+    assert_eq!(
+        serde_json::to_string(&crate::error::ErrorResponse::new(ErrorCode::QuotaExceeded)).unwrap(),
+        r#"{"error":"quota_exceeded"}"#
+    );
+    let result: crate::vault::UploadResult =
+        serde_json::from_str(r#"{"result":"rejected","error":"quota_exceeded"}"#).unwrap();
+    assert_eq!(
+        result,
+        crate::vault::UploadResult::Rejected {
+            error: ErrorCode::QuotaExceeded
+        }
+    );
+}
+
+#[test]
 fn oversize_fields_are_rejected() {
     use base64ct::{Base64UrlUnpadded, Encoding as _};
     let json = |ke1: &[u8]| {
@@ -867,6 +900,8 @@ fn bare_commit(state: &[u8]) -> CommitChangeRequest {
         device_grants: List::empty(),
         recovery_rewrap: None,
         vault_rotation: None,
+        vault_create: None,
+        vault_delete: None,
     }
 }
 
@@ -978,6 +1013,70 @@ fn rotation_fields_round_trip_and_are_left_out_when_absent() {
     let explicit = r#"{"account_state":"Zm9v","device_certificates":[],"device_revocations":[],"device_grants":[],"retired_secret_keys":[]}"#;
     let parsed: CommitChangeRequest = serde_json::from_str(explicit).unwrap();
     assert_eq!(serde_json::to_string(&parsed).unwrap(), plain);
+}
+
+#[test]
+fn vault_create_and_delete_round_trip_and_are_left_out_when_absent() {
+    // ADR 0081 §A11: two optional fields, absent from every other commit.
+    let mut create = bare_commit(b"foo");
+    create.vault_create = Some(self_grant(9));
+    let text = round_trip(&create);
+    assert!(text.contains("\"vault_create\""), "{text}");
+    assert!(!text.contains("\"vault_delete\""), "{text}");
+    let mut delete = bare_commit(b"foo");
+    delete.vault_delete = Some(id(9));
+    let text = round_trip(&delete);
+    assert!(
+        text.contains("\"vault_delete\":\"CQkJCQkJCQkJCQkJCQkJCQ\""),
+        "{text}"
+    );
+    // Unknown fields inside the new grant are refused.
+    let mut extra = serde_json::to_value(&create).unwrap();
+    extra["vault_create"]["kind"] = 2.into();
+    assert!(serde_json::from_value::<CommitChangeRequest>(extra).is_err());
+}
+
+#[test]
+fn regrants_are_empty_by_default_ordered_and_sent() {
+    // ADR 0081 §0 item 3, §A12: a Part A client sends and accepts an empty `regrants`.
+    let upload = VaultRotationUpload::new(vec![vault_rotation(3)]).unwrap();
+    assert!(upload.regrants().is_empty());
+    let text = serde_json::to_string(&upload).unwrap();
+    assert!(text.contains("\"regrants\":[]"), "{text}");
+    // An older sender's form without the field parses as the empty list.
+    let mut old = serde_json::to_value(&upload).unwrap();
+    old.as_object_mut().unwrap().remove("regrants");
+    let parsed: VaultRotationUpload = serde_json::from_value(old).unwrap();
+    assert_eq!(parsed, upload);
+    // Strictly ascending by vault id, both ways.
+    assert_eq!(
+        VaultRotationUpload::with_regrants(vec![], vec![self_grant(4), self_grant(3)]),
+        Err(WireError::NotCanonical)
+    );
+    assert_eq!(
+        VaultRotationUpload::with_regrants(vec![], vec![self_grant(3), self_grant(3)]),
+        Err(WireError::NotCanonical)
+    );
+    let two =
+        VaultRotationUpload::with_regrants(vec![], vec![self_grant(3), self_grant(4)]).unwrap();
+    let mut swapped = serde_json::to_value(&two).unwrap();
+    swapped["regrants"].as_array_mut().unwrap().reverse();
+    assert!(serde_json::from_value::<VaultRotationUpload>(swapped).is_err());
+    let text = round_trip(&two);
+    assert_eq!(
+        serde_json::from_str::<VaultRotationUpload>(&text).unwrap(),
+        two
+    );
+}
+
+#[test]
+fn account_view_vaults_default_to_empty() {
+    // ADR 0081 §A11: a response field, absent from an older server.
+    let mut view = serde_json::to_value(account_view()).unwrap();
+    assert_eq!(view["vaults"][0]["kind"], 1);
+    view.as_object_mut().unwrap().remove("vaults");
+    let parsed: AccountView = serde_json::from_value(view).unwrap();
+    assert!(parsed.vaults.is_empty());
 }
 
 #[test]
@@ -1129,4 +1228,193 @@ fn healing_fields_of_adr_0032() {
         .unwrap(),
         r#"{"error":"credentials_stale"}"#
     );
+}
+
+/// ADR 0075 §3: the `sessions` messages. Known answers from all-zero and all-0xff ids.
+#[test]
+fn known_answer_sessions() {
+    use crate::session::{EndSessionRequest, SessionKindView, SessionListResponse, SessionView};
+
+    let end = EndSessionRequest { session_id: id(0) };
+    assert_eq!(
+        round_trip(&end),
+        r#"{"session_id":"AAAAAAAAAAAAAAAAAAAAAA"}"#
+    );
+    let list = SessionListResponse {
+        sessions: l(vec![
+            SessionView {
+                session_id: id(0xff),
+                kind: SessionKindView::Device,
+                device_id: Some(id(0)),
+                created_at_ms: 2,
+                expires_at_ms: 3,
+                current: true,
+            },
+            SessionView {
+                session_id: id(0),
+                kind: SessionKindView::Opaque,
+                device_id: None,
+                created_at_ms: 1,
+                expires_at_ms: 4,
+                current: false,
+            },
+            SessionView {
+                session_id: id(0),
+                kind: SessionKindView::Recovery,
+                device_id: None,
+                created_at_ms: 0,
+                expires_at_ms: 5,
+                current: false,
+            },
+        ]),
+        truncated: false,
+    };
+    assert_eq!(
+        round_trip(&list),
+        concat!(
+            r#"{"sessions":["#,
+            r#"{"session_id":"_____________________w","kind":"device","device_id":"AAAAAAAAAAAAAAAAAAAAAA","created_at_ms":2,"expires_at_ms":3,"current":true},"#,
+            r#"{"session_id":"AAAAAAAAAAAAAAAAAAAAAA","kind":"opaque","created_at_ms":1,"expires_at_ms":4,"current":false},"#,
+            r#"{"session_id":"AAAAAAAAAAAAAAAAAAAAAA","kind":"recovery","created_at_ms":0,"expires_at_ms":5,"current":false}"#,
+            r#"],"truncated":false}"#
+        )
+    );
+}
+
+/// ADR 0075 §3 and §11 item 7: a `SessionView` carries exactly these fields, so a field
+/// derived from the token (or any new metadata) cannot slip in unreviewed.
+#[test]
+fn session_view_fields_are_pinned() {
+    use crate::session::{SessionKindView, SessionView};
+
+    let view = SessionView {
+        session_id: id(1),
+        kind: SessionKindView::Opaque,
+        device_id: Some(id(2)),
+        created_at_ms: 1,
+        expires_at_ms: 2,
+        current: false,
+    };
+    let value = serde_json::to_value(&view).unwrap();
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "created_at_ms",
+            "current",
+            "device_id",
+            "expires_at_ms",
+            "kind",
+            "session_id"
+        ]
+    );
+}
+
+/// ADR 0075 §3: the request is strict, the response tolerant, the list bounded, and an
+/// unknown kind parses as `Unknown`.
+#[test]
+fn sessions_messages_are_bounded_and_tolerant() {
+    use crate::limits::MAX_SESSIONS_LISTED;
+    use crate::session::{EndSessionRequest, SessionKindView, SessionListResponse};
+
+    // Request: unknown field and bad id refused.
+    assert!(
+        serde_json::from_str::<EndSessionRequest>(
+            r#"{"session_id":"AAAAAAAAAAAAAAAAAAAAAA","extra":1}"#
+        )
+        .is_err()
+    );
+    assert!(serde_json::from_str::<EndSessionRequest>(r#"{"session_id":"AAAA"}"#).is_err());
+    assert!(serde_json::from_str::<EndSessionRequest>("{}").is_err());
+
+    // Response: unknown fields ignored, `truncated` defaults to false, unknown kind.
+    let parsed: SessionListResponse = serde_json::from_str(concat!(
+        r#"{"sessions":[{"session_id":"AAAAAAAAAAAAAAAAAAAAAA","kind":"passkey","#,
+        r#""created_at_ms":1,"expires_at_ms":2,"current":true,"user_agent":"x"}],"later":1}"#
+    ))
+    .unwrap();
+    assert!(!parsed.truncated);
+    let first = &parsed.sessions.as_slice()[0];
+    assert_eq!(first.kind, SessionKindView::Unknown);
+    assert_eq!(first.device_id, None);
+
+    // 256 entries parse, 257 do not.
+    let entry = r#"{"session_id":"AAAAAAAAAAAAAAAAAAAAAA","kind":"opaque","created_at_ms":1,"expires_at_ms":2,"current":false}"#;
+    let body = |n: usize| {
+        format!(
+            r#"{{"sessions":[{}],"truncated":true}}"#,
+            vec![entry; n].join(",")
+        )
+    };
+    let full: SessionListResponse = serde_json::from_str(&body(MAX_SESSIONS_LISTED)).unwrap();
+    assert_eq!(full.sessions.len(), MAX_SESSIONS_LISTED);
+    assert!(full.truncated);
+    assert!(serde_json::from_str::<SessionListResponse>(&body(MAX_SESSIONS_LISTED + 1)).is_err());
+}
+
+/// ADR 0054 §6: the five attachment messages round-trip, refuse unknown request fields, keep
+/// the chunk envelope under the 1 MiB body as base64url JSON, and bound every binary field.
+#[test]
+fn attachment_messages_round_trip_and_are_bounded() {
+    use crate::limits::{
+        ATTACHMENT_CHUNK_SIZE, ATTACHMENT_KEY_WRAP_LEN, MAX_ATTACHMENT_CHUNK_ENVELOPE_LEN,
+        MAX_ATTACHMENT_LEN, MAX_BODY_LEN,
+    };
+    assert_eq!(ATTACHMENT_CHUNK_SIZE, 512 * 1024);
+    assert_eq!(MAX_ATTACHMENT_LEN, 25 * 1024 * 1024);
+    assert_eq!(MAX_ATTACHMENT_CHUNK_ENVELOPE_LEN, 524_378);
+    assert_eq!(ATTACHMENT_KEY_WRAP_LEN, 122);
+
+    let create = CreateAttachmentRequest {
+        attachment_id: id(1),
+        vault_id: id(2),
+        item_id: id(3),
+        attachment_key_wrap: Fixed::from_bytes([7; ATTACHMENT_KEY_WRAP_LEN]),
+        total_plaintext_len: u64::MAX,
+    };
+    round_trip(&create);
+    round_trip(&AttachmentRequest {
+        attachment_id: id(1),
+    });
+    round_trip(&GetAttachmentResponse {
+        attachment_key_wrap: Fixed::from_bytes([7; ATTACHMENT_KEY_WRAP_LEN]),
+    });
+    round_trip(&DownloadChunkRequest {
+        attachment_id: id(1),
+        chunk_index: u32::MAX,
+    });
+    let full = UploadChunkRequest {
+        attachment_id: id(1),
+        chunk_index: 49,
+        envelope: b(&vec![0xab; MAX_ATTACHMENT_CHUNK_ENVELOPE_LEN]),
+    };
+    let text = round_trip(&full);
+    assert!(text.len() < MAX_BODY_LEN, "{} bytes", text.len());
+    round_trip(&DownloadChunkResponse {
+        envelope: b(&[1, 2, 3]),
+    });
+
+    // One byte over the chunk envelope limit is refused before decoding.
+    let over = text.replacen("\"envelope\":\"", "\"envelope\":\"AAAA", 1);
+    assert!(serde_json::from_str::<UploadChunkRequest>(&over).is_err());
+    // A wrap of any other length is refused.
+    let short = serde_json::to_string(&create).unwrap().replacen(
+        "\"attachment_key_wrap\":\"",
+        "\"attachment_key_wrap\":\"AAAA",
+        1,
+    );
+    assert!(serde_json::from_str::<CreateAttachmentRequest>(&short).is_err());
+    // Requests deny unknown fields; responses ignore them.
+    let extra = format!(r#"{{"attachment_id":"{ZERO_ID}","chunk_count":3}}"#);
+    assert!(serde_json::from_str::<AttachmentRequest>(&extra).is_err());
+    let extra = format!(r#"{{"attachment_id":"{ZERO_ID}","chunk_index":0,"size":1}}"#);
+    assert!(serde_json::from_str::<DownloadChunkRequest>(&extra).is_err());
+    let response = r#"{"envelope":"AQID","chunk_count":3}"#;
+    assert!(serde_json::from_str::<DownloadChunkResponse>(response).is_ok());
 }

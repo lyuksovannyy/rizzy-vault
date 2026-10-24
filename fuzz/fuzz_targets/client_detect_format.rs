@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-client`'s import-format recognition (`export::detect`; owner decision
 //! 2026-10-05: the app recognises an import file's format itself): on arbitrary bytes it never
 //! panics, and it agrees with the strict reader of our encrypted export.

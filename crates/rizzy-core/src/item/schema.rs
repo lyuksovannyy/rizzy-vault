@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The key registry of the M1 item schema, and the checks a writer runs (ADR 0018 §6–§8, §10,
 //! §11).
 //!
@@ -11,19 +13,44 @@
 //! | `item.name`, `item.notes` | Text | all | any | no |
 //! | `item.favorite` | Bool (absent means false) | all | any | no |
 //! | `import.created_ms` | U64 | all | importers only | no |
-//! | `field/<id>/label` · `/kind` · `/value` · `/order` | Text · Enum · Text or Bool · `SortKey` | all | any | `value` of a hidden custom field |
+//! | `field/<id>/label` · `/kind` · `/value` · `/order` · `/autocomplete` | Text · Enum · Text or Bool · `SortKey` · Text | all | any | `value` of a hidden custom field |
 //! | `tag/<hex>` | Bool `0x01` | all | any | no |
 //! | `share/<share_id>/secret` | Bytes, 32 | all | not in M1 (M5) | yes |
 //! | `login.username`, `login.password`, `login.totp` | Text | Login | any | password, TOTP |
 //! | `uri/<id>/value` · `/match` · `/order` | Text · Enum · `SortKey` | Login | any; `match`'s values are [ADR 0037] §4 (Accepted, M2) | no |
 //! | `pwhist/<id>/value` · `/ms` | Text · U64 | Login | any | no (see below) |
+//! | `attachment/<id>/name` · `/mime` · `/size` · `/order` | Text · Text · U64 · `SortKey` | all | any | no |
 //! | `card.holder`, `.number`, `.brand`, `.exp_month`, `.exp_year`, `.code`, `.pin` | Text | Card | any | number, code, PIN |
 //! | `identity.` + 18 names | Text | Identity | any | `ssn`, `passport_number` |
+//! | `identity.sex`, `identity.birthday` | Text | Identity | any | no |
+//! | `ssh.host`, `.port`, `.username`, `.private_key`, `.public_key`, `.passphrase` | Text | SSH key | any | `private_key`, `passphrase` |
+//! | `api.name`, `.key`, `.secret`, `.endpoint` | Text | API credential | any | `key`, `secret` |
+//! | `license.name`, `.key`, `.seats`, `.expires` | Text | Software license | any | `key` |
+//! | `wifi.ssid`, `.password`, `.security_type` | Text | Wi-Fi | any | `password` |
 //! | `vault.name`, `vault.icon` | Text | Vault settings | any | no |
 //!
-//! Keys under the reserved prefixes (`ssh.`, `api.`, `license.`, `wifi.`, `bank.`, `passkey.`,
-//! `passkey/`, `attachment/`, and `share/` attributes other than `secret`) are
-//! [`KeyClass::Reserved`]; every other grammar key is [`KeyClass::Unknown`], and so is a
+//! The `ssh.`, `api.`, `license.` and `wifi.` rows are [ADR 0055] §1's (Accepted
+//! 2026-10-22), added the way §7 adds a key: "a line in the ADR that ships it, never a version
+//! bump". ADR 0055 §1 also had a `bank.` row for the Bank account type; [ADR 0078] §2 (Accepted
+//! 2026-10-23) retired it with the type: every key under `bank.` is now
+//! [`ReservedFor::Retired`], carried byte for byte and never assigned again. Every one is Text, "stored as entered": `ssh.port`, `license.seats` and
+//! `license.expires` follow `card.exp_month`'s precedent, not U64. `ssh.port` absent means
+//! [`SSH_DEFAULT_PORT`] (`22`), a display default and not a stored value.
+//!
+//! The `identity.sex` and `identity.birthday` row is [ADR 0079] §1's (Accepted 2026-10-23),
+//! added under the same §7 rule. Both are Text, "stored as entered": writers that pick from the
+//! UI write `male` or `female` ([`IDENTITY_SEX_MALE`], [`IDENTITY_SEX_FEMALE`]) and an RFC 3339
+//! `full-date` (`YYYY-MM-DD`); readers show any other text as entered. A client that predates
+//! the row classifies both as [`KeyClass::Unknown`] and carries them byte for byte (ADR 0018 §11).
+//!
+//! The `attachment/<id>/…` rows are [ADR 0054] §4's (Accepted 2026-10-22): `<id>` is the
+//! attachment's own 16-byte id, which also names its storage row. No `/wrap` attribute exists:
+//! the attachment key's wrap travels only through `attachments/get` (ADR 0054 §6).
+//!
+//! Keys under the reserved prefixes (`passkey.`, `attachment/` attributes ADR 0054 does not
+//! assign, `share/` attributes other than
+//! `secret`, every key under `ssh.`, `api.`, `license.` or `wifi.` that ADR 0055 does not
+//! assign, and every key under the retired `bank.` prefix, ADR 0078 §2) are [`KeyClass::Reserved`]; every other grammar key is [`KeyClass::Unknown`], and so is a
 //! `tag/<hex>` key whose hex is not a name [`super::tag::tag_key`] could have produced
 //! (ADR 0018 §7: UTF-8, NFC, no Cc; see [`super::tag`]). Both are carried byte for byte by the
 //! record layer and exported unchanged (ADR 0018 §11). An M1 writer never invents a value for
@@ -33,7 +60,10 @@
 //!
 //! **Concealment** is the ADR 0018 §7 list: `login.password`, `login.totp`, `card.number`,
 //! `card.code`, `card.pin`, `identity.ssn`, `identity.passport_number`, hidden custom fields and
-//! `share/…`. The same fields are left out of an M5 share unless chosen. The list does not name
+//! `share/…`; extended, as ADR 0039 did for `passkey/<id>/private_key`, by ADR 0055 §4 (owner
+//! answer 1) with `ssh.private_key`, `ssh.passphrase`, `api.key`, `api.secret`, `license.key`,
+//! `wifi.password`, and by ADR 0078 §2 with every key under the retired `bank.` prefix (the
+//! clients conceal every key that is not [`KeyClass::Known`]). The same fields are left out of an M5 share unless chosen. The list does not name
 //! `pwhist/<id>/value`, the imported password history, so this registry does not conceal it;
 //! that omission is reported to the owner rather than decided here.
 //!
@@ -88,6 +118,10 @@
 //!
 //! [ADR 0027]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0027-export-payload.md
 //! [ADR 0037]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0037-url-matching-and-autofill-rules.md
+//! [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
+//! [ADR 0055]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0055-m3-item-type-field-keys.md
+//! [ADR 0078]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0078-retire-bank-account-item-type.md
+//! [ADR 0079]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0079-identity-generator.md
 //!
 //! **`uri/<id>/match` is writable from M2** (ADR 0037, Accepted, assigns its enum values
 //! `0x0000`–`0x0006`; unassigned values above that are still accepted here, as any other Enum
@@ -173,6 +207,76 @@ pub const IDENTITY_SSN: &str = "identity.ssn";
 pub const IDENTITY_PASSPORT_NUMBER: &str = "identity.passport_number";
 /// `identity.drivers_license`: Text.
 pub const IDENTITY_DRIVERS_LICENSE: &str = "identity.drivers_license";
+/// `identity.sex`: Text (ADR 0079 §1). UI writers write [`IDENTITY_SEX_MALE`] or
+/// [`IDENTITY_SEX_FEMALE`]; any other text is shown as entered. Absent means not set.
+pub const IDENTITY_SEX: &str = "identity.sex";
+/// `identity.birthday`: Text (ADR 0079 §1), a civil date. Date-control writers write the
+/// RFC 3339 `full-date` form `YYYY-MM-DD`; any other text is shown and edited as entered.
+pub const IDENTITY_BIRTHDAY: &str = "identity.birthday";
+/// The value a UI writer stores in [`IDENTITY_SEX`] for "Male" (ADR 0079 §1).
+pub const IDENTITY_SEX_MALE: &str = "male";
+/// The value a UI writer stores in [`IDENTITY_SEX`] for "Female" (ADR 0079 §1).
+pub const IDENTITY_SEX_FEMALE: &str = "female";
+/// `ssh.host`: Text, the host the key logs in to (SSH key; ADR 0055 §1).
+pub const SSH_HOST: &str = "ssh.host";
+/// `ssh.port`: Text, as entered. Absent means [`SSH_DEFAULT_PORT`], a display default and
+/// never a stored value (ADR 0055 §1, like `item.favorite` absent meaning false).
+pub const SSH_PORT: &str = "ssh.port";
+/// `ssh.username`: Text.
+pub const SSH_USERNAME: &str = "ssh.username";
+/// `ssh.private_key`: Text, the private key as entered (PEM or OpenSSH armour). Concealed.
+pub const SSH_PRIVATE_KEY: &str = "ssh.private_key";
+/// `ssh.public_key`: Text.
+pub const SSH_PUBLIC_KEY: &str = "ssh.public_key";
+/// `ssh.passphrase`: Text, the private key's passphrase. Concealed.
+pub const SSH_PASSPHRASE: &str = "ssh.passphrase";
+/// `api.name`: Text, the service the credential is for (distinct from `item.name`, the
+/// user's title of the item; ADR 0055 §1).
+pub const API_NAME: &str = "api.name";
+/// `api.key`: Text, the key or key id. Concealed.
+pub const API_KEY: &str = "api.key";
+/// `api.secret`: Text. Concealed.
+pub const API_SECRET: &str = "api.secret";
+/// `api.endpoint`: Text, as entered. Never opened or filled by the client: it is a value,
+/// not a website (the `uri` list is Login's).
+pub const API_ENDPOINT: &str = "api.endpoint";
+/// `license.name`: Text, the product (distinct from `item.name`; ADR 0055 §1).
+pub const LICENSE_NAME: &str = "license.name";
+/// `license.key`: Text, the license key. Concealed.
+pub const LICENSE_KEY: &str = "license.key";
+/// `license.seats`: Text, as entered (Text, like `card.exp_month`; ADR 0055 §1).
+pub const LICENSE_SEATS: &str = "license.seats";
+/// `license.expires`: Text, as entered (ADR 0055 owner answer 3: Text for M3).
+pub const LICENSE_EXPIRES: &str = "license.expires";
+/// `wifi.ssid`: Text, the network name.
+pub const WIFI_SSID: &str = "wifi.ssid";
+/// `wifi.password`: Text. Concealed.
+pub const WIFI_PASSWORD: &str = "wifi.password";
+/// `wifi.security_type`: Text, as entered (for example "WPA2"); no enum is defined.
+pub const WIFI_SECURITY_TYPE: &str = "wifi.security_type";
+
+/// What an absent `ssh.port` displays as: `22` (ADR 0055 §1). A display default only: no
+/// writer stores it on the user's behalf, and a create op leaves the field out when the user
+/// typed nothing.
+pub const SSH_DEFAULT_PORT: &str = "22";
+
+/// What an SSH key's `ssh.port` shows (ADR 0055 §1). `displayed` is the encoded value the
+/// register displays (ADR 0018 §6), `None` when the item has no such register.
+///
+/// - No register, or one that displays Cleared: [`SSH_DEFAULT_PORT`]. Cleared is "the field
+///   has no value" (ADR 0018 §6), the same as absent.
+/// - A Text: that text, as entered (`ssh.port` is Text, never parsed as a number).
+/// - Anything else: `None`, shown as "unsupported value" (ADR 0018 §6), never as the default,
+///   so a newer client's value is not silently replaced by `22` on screen.
+#[must_use]
+pub fn ssh_port(displayed: Option<&[u8]>) -> Option<&str> {
+    match displayed.map(|value| read_value(Expected::Text, value)) {
+        None | Some(Some(ValueRef::Cleared)) => Some(SSH_DEFAULT_PORT),
+        Some(Some(ValueRef::Text(text))) => Some(text),
+        Some(_) => None,
+    }
+}
+
 /// `vault.name`: Text, the vault's name (vault settings).
 pub const VAULT_NAME: &str = "vault.name";
 /// `vault.icon`: Text, an identifier from the client's icon set (vault settings).
@@ -192,11 +296,19 @@ pub const LIST_PWHIST: &str = "pwhist";
 /// which uses this list on the existing Login type rather than the standalone item type
 /// `0x000A`, released to unassigned).
 pub const LIST_PASSKEY: &str = "passkey";
+/// List `attachment` (all types): one element per encrypted attachment, keyed by the
+/// attachment's 16-byte id (ADR 0054 §4).
+pub const LIST_ATTACHMENT: &str = "attachment";
 
 /// Attribute `label` of a custom field: Text.
 pub const ATTR_LABEL: &str = "label";
 /// Attribute `kind` of a custom field: Enum, see [`CustomFieldKind`]. A layout attribute.
 pub const ATTR_KIND: &str = "kind";
+/// The `autocomplete` attribute of a custom field: its autocomplete id, Text, a content
+/// attribute, shown ([ADR 0076] §2.1). Its value meaning is [`super::autocomplete`].
+///
+/// [ADR 0076]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0076-autocomplete-driven-autofill.md
+pub const ATTR_AUTOCOMPLETE: &str = "autocomplete";
 /// Attribute `value` of a custom field, a URI or a password-history entry.
 pub const ATTR_VALUE: &str = "value";
 /// Attribute `order` of a custom field or a URI: `SortKey`. A layout attribute.
@@ -208,6 +320,14 @@ pub const ATTR_MATCH: &str = "match";
 pub const ATTR_SECRET: &str = "secret";
 /// Attribute `ms` of a password-history entry: U64, Unix milliseconds.
 pub const ATTR_MS: &str = "ms";
+/// Attribute `name` of an attachment: Text, the filename as entered (ADR 0054 §4).
+pub const ATTR_NAME: &str = "name";
+/// Attribute `mime` of an attachment: Text, the declared media type, never content-sniffed
+/// (ADR 0054 §4).
+pub const ATTR_MIME: &str = "mime";
+/// Attribute `size` of an attachment: U64, the plaintext byte length. The reader derives the
+/// chunk count from it (ADR 0054 §1, §4); the server never sees or trusts it.
+pub const ATTR_SIZE: &str = "size";
 /// Attribute `rp_id` of a passkey: Text, the registrable-domain-or-suffix the credential was
 /// created for. Never written from page-supplied data at use time; only at creation, after the
 /// `rizzy-client`/extension INV-64 check (ADR 0039 §1, §2).
@@ -430,11 +550,20 @@ const LOGIN: Applies = Applies::Only(SupportedType::Login);
 const CARD: Applies = Applies::Only(SupportedType::Card);
 /// Identity-only.
 const IDENTITY: Applies = Applies::Only(SupportedType::Identity);
+/// SSH-key-only (ADR 0055 §1).
+const SSH: Applies = Applies::Only(SupportedType::SshKey);
+/// API-credential-only (ADR 0055 §1).
+const API: Applies = Applies::Only(SupportedType::ApiCredential);
+/// Software-license-only (ADR 0055 §1).
+const LICENSE: Applies = Applies::Only(SupportedType::SoftwareLicense);
+/// Wi-Fi-only (ADR 0055 §1).
+const WIFI: Applies = Applies::Only(SupportedType::Wifi);
 /// Vault-settings-only.
 const VAULT: Applies = Applies::Only(SupportedType::VaultSettings);
 
-/// Every fixed key of the M1 schema, with its entry (ADR 0018 §7).
-pub const FIXED_KEYS: [(&str, KeySpec); 35] = [
+/// Every fixed key of the schema, with its entry: ADR 0018 §7's 35, and ADR 0055 §1's 17 for
+/// the M3 types (6 of them concealed, ADR 0055 §3–§4, as ADR 0078 §7 amends them).
+pub const FIXED_KEYS: [(&str, KeySpec); 54] = [
     (
         ITEM_TYPE,
         spec(
@@ -492,20 +621,51 @@ pub const FIXED_KEYS: [(&str, KeySpec); 35] = [
     (IDENTITY_SSN, secret_text(IDENTITY)),
     (IDENTITY_PASSPORT_NUMBER, secret_text(IDENTITY)),
     (IDENTITY_DRIVERS_LICENSE, text(IDENTITY)),
+    (IDENTITY_SEX, text(IDENTITY)),
+    (IDENTITY_BIRTHDAY, text(IDENTITY)),
+    (SSH_HOST, text(SSH)),
+    (SSH_PORT, text(SSH)),
+    (SSH_USERNAME, text(SSH)),
+    (SSH_PRIVATE_KEY, secret_text(SSH)),
+    (SSH_PUBLIC_KEY, text(SSH)),
+    (SSH_PASSPHRASE, secret_text(SSH)),
+    (API_NAME, text(API)),
+    (API_KEY, secret_text(API)),
+    (API_SECRET, secret_text(API)),
+    (API_ENDPOINT, text(API)),
+    (LICENSE_NAME, text(LICENSE)),
+    (LICENSE_KEY, secret_text(LICENSE)),
+    (LICENSE_SEATS, text(LICENSE)),
+    (LICENSE_EXPIRES, text(LICENSE)),
+    (WIFI_SSID, text(WIFI)),
+    (WIFI_PASSWORD, secret_text(WIFI)),
+    (WIFI_SECURITY_TYPE, text(WIFI)),
     (VAULT_NAME, text(VAULT)),
     (VAULT_ICON, text(VAULT)),
 ];
 
 /// The namespaces reserved for the M3 item types (ADR 0018 §7, "Reserved prefixes"): fixed
-/// keys `ssh.…`, `api.…`, `license.…`, `wifi.…` and `bank.…`.
-const M3_TYPE_NAMESPACES: [&str; 5] = ["ssh", "api", "license", "wifi", "bank"];
+/// keys `ssh.…`, `api.…`, `license.…` and `wifi.…`. ADR 0055 §1 assigns 17 keys under them
+/// ([`FIXED_KEYS`]); every other key under these prefixes (a later `ssh.key_type`, say) stays
+/// reserved (ADR 0055 §2).
+const M3_TYPE_NAMESPACES: [&str; 4] = ["ssh", "api", "license", "wifi"];
+
+/// The namespaces of retired item types (ADR 0078 §2): `bank.…`, the keys of the Bank account
+/// type (`0x0009`) ADR 0055 assigned and ADR 0078 retired. Every key under them is
+/// [`ReservedFor::Retired`]: carried byte for byte and never assigned again, so the bytes an
+/// older build stored there never change meaning.
+const RETIRED_NAMESPACES: [&str; 1] = ["bank"];
 
 /// What a reserved key is reserved for (ADR 0018 §7, "Reserved prefixes").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ReservedFor {
-    /// `ssh.`, `api.`, `license.`, `wifi.`, `bank.`: the M3 item types.
+    /// `ssh.`, `api.`, `license.`, `wifi.`: the M3 item types, for every key under them that
+    /// ADR 0055 §1 does not assign.
     M3Types,
-    /// `attachment/`: the M3 attachments ADR.
+    /// `bank.`: keys of a retired item type (ADR 0078 §2): carried, never assigned again.
+    Retired,
+    /// `attachment/` attributes other than the four ADR 0054 §4 assigns (`name`, `mime`,
+    /// `size`, `order`), and `attachment/<id>` itself.
     M3Attachments,
     /// `share/` attributes other than `secret`, and `share/<id>` itself: the M5 ADR.
     M5Share,
@@ -547,6 +707,8 @@ pub fn classify(key: FieldKeyRef<'_>) -> KeyClass {
             let namespace = key.namespace();
             if M3_TYPE_NAMESPACES.contains(&namespace) {
                 KeyClass::Reserved(ReservedFor::M3Types)
+            } else if RETIRED_NAMESPACES.contains(&namespace) {
+                KeyClass::Reserved(ReservedFor::Retired)
             } else if namespace == "passkey" {
                 KeyClass::Reserved(ReservedFor::PasskeyDotKeys)
             } else {
@@ -564,7 +726,12 @@ fn classify_element(key: FieldKeyRef<'_>) -> KeyClass {
     };
     let list = key.namespace();
     match (list, key.attribute()) {
-        (LIST_FIELD, Some(ATTR_LABEL)) => known(
+        // ADR 0054 §4: an attachment's `name` and `mime` are plain Text on every type. ADR 0076
+        // §2.1: a custom field's autocomplete id is Text, any writer, shown, like the label. Its
+        // grammar and reserved set are `super::autocomplete`; the item-state checks are
+        // `rizzy-client`'s.
+        (LIST_FIELD, Some(ATTR_LABEL | ATTR_AUTOCOMPLETE))
+        | (LIST_ATTACHMENT, Some(ATTR_NAME | ATTR_MIME)) => known(
             Expected::Text,
             Applies::All,
             Writers::Any,
@@ -582,7 +749,7 @@ fn classify_element(key: FieldKeyRef<'_>) -> KeyClass {
             Writers::Any,
             Concealment::IfHiddenField,
         ),
-        (LIST_FIELD | LIST_URI, Some(ATTR_ORDER)) => known(
+        (LIST_FIELD | LIST_URI | LIST_ATTACHMENT, Some(ATTR_ORDER)) => known(
             Expected::SortKey,
             if list == LIST_URI {
                 LOGIN
@@ -618,7 +785,14 @@ fn classify_element(key: FieldKeyRef<'_>) -> KeyClass {
             known(Expected::U64, LOGIN, Writers::Any, Concealment::Shown)
         }
         (LIST_PASSKEY, attribute) => classify_passkey(attribute),
-        ("attachment", _) => KeyClass::Reserved(ReservedFor::M3Attachments),
+        (LIST_ATTACHMENT, Some(ATTR_SIZE)) => known(
+            Expected::U64,
+            Applies::All,
+            Writers::Any,
+            Concealment::Shown,
+        ),
+        // ADR 0054 §4 assigns four attributes; any other stays reserved until an ADR ships it.
+        (LIST_ATTACHMENT, _) => KeyClass::Reserved(ReservedFor::M3Attachments),
         _ => KeyClass::Unknown,
     }
 }

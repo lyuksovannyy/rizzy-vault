@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Recovery with the Emergency Kit (CRYPTO.md §11.9; ADR 0008; ADR 0025 §1), as a sans-I/O
 //! state machine.
 //!
@@ -630,6 +632,8 @@ impl Reregistering {
             } else {
                 Some(VaultRotationUpload::new(rotations).map_err(internal)?)
             },
+            vault_create: None,
+            vault_delete: None,
         };
         let pin = AccountPin {
             bundle: account.pin.bundle.clone(),
@@ -677,6 +681,7 @@ impl Reregistering {
                 },
                 device_keys,
                 local_unlock_key: None,
+                keystore_secret: None,
             },
             vault_keys,
             wraps,

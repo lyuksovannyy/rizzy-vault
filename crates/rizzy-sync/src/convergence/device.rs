@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! A simulated client device: one [`VaultLog`] and one [`ItemMerge`] per item, driven through
 //! the client cycle the `causal` module documents (verify, plan, absorb, commit, deliver), the
 //! own-chain upload bookkeeping, "Server behind" and the healing request (ADR 0012 §4, §7;
@@ -13,6 +15,14 @@
 //!   the merge spike's `integrated` preset drops them (`keepown` = "since newest snapshot"), so
 //!   that a healing request has to send headers without their bodies behind snapshots.
 //!
+//! # Held covers
+//!
+//! A cover the merge refuses only as `PurgeAboveCut` is held for the rest of the response, as
+//! `rizzy-client` holds it (ADR 0050 §2): the log counts it for the chain check, the merge keeps
+//! its plaintext, and the absorption is retried after every page whose commit advanced a chain
+//! and once more after the last page; what is still held then is given up, and counts as a
+//! refusal of an untainted cover (a violation) unless it could lie.
+//!
 //! # Crypto
 //!
 //! The device signs and seals what it writes, and verifies and opens what it is served
@@ -24,6 +34,23 @@
 //! record parser accepted what it holds. The device keeps each accepted envelope as it
 //! travelled, so a re-upload and a healing request send the same signed bytes, together with
 //! the `data` it opened to.
+//!
+//! # Keys and epochs
+//!
+//! The device holds the vault keys of the epochs it was granted and the item keys it may use:
+//! every initial key from enrolment, the fresh keys it created, and those it opened from the
+//! wrap-set rows a Fetch serves. It writes under the CRYPTO.md §11.6 writer rule
+//! ([`Device::choose_key`]): the item's current key, or a fresh one created at its current
+//! epoch when that one is stale, which the merge's `FreshItemKey` trigger follows with a full
+//! snapshot; the wrap of a key it created travels beside the records sealed under it. It reads
+//! under the reader rule: the key the envelope's `key_id` names, among those it holds. An op
+//! under a key it does not hold is rejected rather than parked (`BodyStatus::Waiting` is not
+//! used): the chain then stops at it, and the next Fetch serves it again from the same
+//! cursor; against an honest server every key's row is served with the records, so only a
+//! restore can reach that path. The device processes a newer account state at a Fetch, or
+//! after a stale-epoch answer ([`Device::on_stale`]), never on its own: between a rotation and
+//! its next Fetch it writes at the old epoch, as a device that has not processed the pushed
+//! change does.
 //!
 //! # Ground truth for the checks
 //!
@@ -57,23 +84,39 @@
 //!   it are rolled back with the merges, as the spike restores the device.
 //! - **An own op sent without an answer before a restore** ("the server may have stored and
 //!   served it", ADR 0021 §9 "Stale epoch") is never re-issued: the device sends the same
-//!   signed record again. With one key epoch and no stale-epoch answer, re-publishing it in a
-//!   healing request and sending it through the normal upload path store the same record, so
-//!   the device uses the normal path; the server compares it byte for byte ("Already stored").
+//!   signed record again, through the normal upload path while no stale-epoch answer came
+//!   (the server compares it byte for byte, "Already stored"), and in a healing request of its
+//!   own once one did ([`VaultLog::stale_plan`] puts it among the ops to re-publish). That
+//!   request carries every wrap the server lacks too.
+//! - **Stale snapshots.** A snapshot answered "stale epoch" is dropped from what the device
+//!   holds (so no healing request re-publishes it) and rewritten under the offered epoch.
+//! - **Wraps the server lacks** ("Server behind": "the server lacks an item-key wrap the device
+//!   got from it or had acknowledged") are read as the rows of keys it learned from the
+//!   server, and of keys it created for an own op the server acknowledged. Every healing
+//!   request sequence starts with one request of every wrap the server lacks, wrapped at the
+//!   device's epoch.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rizzy_core::ids::{DeviceId, ItemId, OpId, SnapshotId};
+use rizzy_core::ids::{DeviceId, ItemId, OpId, SnapshotId, SymmetricKeyId};
 use rizzy_core::secret::SecretBytes;
 
 use super::faults::{self, Fault};
-use super::server::{HealingRequest, OpAnswer, OpRecord, Page, Server, SnapAnswer, SnapRecord};
-use super::{VAULT, crypto, item_key};
-use crate::causal::{BodyStatus, Report, ServedOp, ServerView, VaultLog};
+use super::server::{
+    HealingRequest, OpAnswer, OpRecord, Page, Response, Server, SnapAnswer, SnapRecord, Wrap,
+    WrapRow,
+};
+use super::{VAULT, crypto};
+use crate::causal::{
+    AuthorStatus, BodyStatus, CoverPlan, Report, ServedOp, ServerView, VaultLog, check_op_author,
+    check_snapshot_author,
+};
 use crate::dot::Dot;
 use crate::header::{ItemSchemaVersion, OpHeader, SnapshotHeader};
 use crate::hlc::Hlc;
-use crate::merge::{AbsorbOutcome, ItemMerge, MergeError, OpInput, OwnWrite, SnapshotInput};
+use crate::merge::{
+    AbsorbOutcome, ItemMerge, MergeError, OpInput, OwnWrite, Reissue, SnapshotInput,
+};
 use crate::record::{
     FieldKey, Lifecycle, OpData, Value, Write, encode_op, parse_op, parse_snapshot,
 };
@@ -98,9 +141,15 @@ pub(super) struct DeviceStats {
     pub(super) absorbed: u64,
     /// Untainted covers the merge refused, other than the paging finding: a violation.
     pub(super) refused: u64,
-    /// Tombstone covers refused as `PurgeAboveCut` on a page that is a strict prefix of its
-    /// response: the paging finding of [`super::world::World::drain`], excused.
-    pub(super) paged_refused: u64,
+    /// Covers refused only as `PurgeAboveCut` and held across the pages of their response
+    /// sequence (ADR 0050 §2).
+    pub(super) held: u64,
+    /// Held covers that ended resolved: the merge took them on a retry, or a cover it took
+    /// since made them moot.
+    pub(super) holds_resolved: u64,
+    /// Held covers the merge took on a retry (the rest of [`DeviceStats::holds_resolved`] were
+    /// moot).
+    pub(super) holds_taken: u64,
     /// Covers refused that could lie (a tainted record, or a tainted device): the reports of
     /// "Snapshots are claims" at work.
     pub(super) lie_refused: u64,
@@ -122,6 +171,20 @@ pub(super) struct DeviceStats {
     pub(super) purges_refused: u64,
     /// Own snapshots the server refused (and the device discarded).
     pub(super) snapshots_refused: u64,
+    /// Fresh item keys the CRYPTO.md §11.6 writer rule created.
+    pub(super) fresh_keys: u64,
+    /// Item keys learned by opening a wrap-set row.
+    pub(super) keys_unwrapped: u64,
+    /// Stale-epoch answers to own ops.
+    pub(super) stale_ops: u64,
+    /// Stale-epoch answers to own snapshots (each discarded and rewritten).
+    pub(super) stale_snapshots: u64,
+    /// Own ops re-issued with the same `device_seq` after a stale answer.
+    pub(super) reissued: u64,
+    /// Own ops a stale answer sent to a healing request instead (they may have been served).
+    pub(super) republished: u64,
+    /// Snapshots written because a re-issue called for one.
+    pub(super) reissue_snapshots: u64,
 }
 
 /// A simulated device of the one vault.
@@ -144,6 +207,9 @@ pub(super) struct Device {
     rng: crypto::Nonces,
     /// Every snapshot record it wrote or absorbed.
     held_snaps: Vec<SnapRecord>,
+    /// Per item, the record of the cover the merge holds in the current response sequence
+    /// (ADR 0050 §2).
+    pending_covers: BTreeMap<ItemId, SnapRecord>,
     /// Snapshots written and not uploaded yet.
     outbox_snaps: Vec<SnapRecord>,
     /// Its HLC.
@@ -177,6 +243,37 @@ pub(super) struct Device {
     pub(super) held_past_cutoff: Vec<ItemId>,
     /// Whether the server was behind at its last sync: read-only, no new writes.
     pub(super) read_only: bool,
+    /// The vault's current `vault_key_epoch` as this device knows it: the newest account state
+    /// it processed (CRYPTO.md §11.6 "Current vault epoch").
+    pub(super) epoch: u32,
+    /// The epochs of the vault keys it holds.
+    pub(super) vault_keys: BTreeSet<u32>,
+    /// The item keys it holds, by key id, with their item: every initial key, the fresh keys
+    /// it created, and the keys it opened from wrap-set rows.
+    item_keys: BTreeMap<[u8; 16], ItemId>,
+    /// The vault epoch of the account state the world offers this device at its next exchange
+    /// with the server (`None`: no grant, a revoked device). It processes it at a Fetch, and
+    /// after a stale-epoch answer.
+    pub(super) offered: Option<u32>,
+    /// The `key_id` of every op envelope it wrote or verified, by dot.
+    op_keys: BTreeMap<Dot, SymmetricKeyId>,
+    /// The wraps of the fresh item keys it created, sent beside the records sealed under them.
+    own_wraps: BTreeMap<[u8; 16], Wrap>,
+    /// The item keys it learned from the server's wrap-set rows.
+    learned: BTreeSet<[u8; 16]>,
+    /// Own ops a stale-epoch answer marked for a healing request, by `device_seq`.
+    republish: BTreeSet<u64>,
+    /// The `expires_at_ms` of every expiring certificate, as the last Fetch served them (a
+    /// stand-in for the kind-4 certificates; absent: no expiry).
+    expiries: BTreeMap<DeviceId, u64>,
+    /// Re-issued own ops, with their new item key, for the harness's ledger. Drained by the
+    /// world.
+    pub(super) reissued: Vec<(OpHeader, SymmetricKeyId)>,
+    /// The items this device told a lie about (ground truth, a faulty device).
+    pub(super) lied_items: BTreeSet<ItemId>,
+    /// Its own certificate's `expires_at_ms` (a kind-4 device; 0: none). An honest web vault
+    /// writes no op whose HLC is past it (CRYPTO.md §10.2 rule (c)).
+    pub(super) expires_at_ms: u64,
     /// Calls the harness did not expect to fail, by what failed; the property check reports
     /// them. Metadata only.
     pub(super) errors: Vec<String>,
@@ -199,6 +296,7 @@ impl Device {
             signed: BTreeMap::new(),
             rng: crypto::Nonces::new(seed, id),
             held_snaps: Vec::new(),
+            pending_covers: BTreeMap::new(),
             outbox_snaps: Vec::new(),
             clock: Hlc::ZERO,
             now_ms,
@@ -214,19 +312,208 @@ impl Device {
             tainted: false,
             held_past_cutoff: Vec::new(),
             read_only: false,
+            epoch: 0,
+            vault_keys: BTreeSet::from([0]),
+            item_keys: crypto::initial_keys()
+                .map(|(item, key)| (*key.as_bytes(), item))
+                .collect(),
+            offered: Some(0),
+            op_keys: BTreeMap::new(),
+            own_wraps: BTreeMap::new(),
+            learned: BTreeSet::new(),
+            republish: BTreeSet::new(),
+            expiries: BTreeMap::new(),
+            reissued: Vec::new(),
+            lied_items: BTreeSet::new(),
+            expires_at_ms: 0,
             errors: Vec::new(),
             events: Vec::new(),
             stats: DeviceStats::default(),
         }
     }
 
-    /// The merge of `item`, created with the item's key in its wrap set.
-    fn merge_mut(items: &mut BTreeMap<ItemId, ItemMerge>, item: ItemId) -> &mut ItemMerge {
+    /// The merge of `item`, created with every key of the item in `keys` in its wrap set.
+    fn merge_mut<'a>(
+        items: &'a mut BTreeMap<ItemId, ItemMerge>,
+        keys: &BTreeMap<[u8; 16], ItemId>,
+        item: ItemId,
+    ) -> &'a mut ItemMerge {
         items.entry(item).or_insert_with(|| {
             let mut merge = ItemMerge::new(item);
-            merge.add_item_key(item_key(item));
+            for (key, _) in keys.iter().filter(|(_, i)| **i == item) {
+                merge.add_item_key(SymmetricKeyId::from_bytes(*key));
+            }
             merge
         })
+    }
+
+    /// Whether it holds the item key with id `key`.
+    fn holds(&self, key: &SymmetricKeyId) -> bool {
+        self.item_keys.contains_key(key.as_bytes())
+    }
+
+    /// The ids of every item key it holds.
+    pub(super) fn held_keys(&self) -> Vec<SymmetricKeyId> {
+        self.item_keys
+            .keys()
+            .map(|k| SymmetricKeyId::from_bytes(*k))
+            .collect()
+    }
+
+    /// Enrols the device with the account state of `epoch`: the current vault key only (a new
+    /// device gets what a login gets; it holds the initial item keys from the start).
+    pub(super) fn enrol(&mut self, epoch: u32) {
+        self.epoch = epoch;
+        self.vault_keys = BTreeSet::from([epoch]);
+    }
+
+    /// Processes the account state of `epoch` (CRYPTO.md §11.3 steps 3–4, standing in for the
+    /// device grant and the self-grant): a newer epoch becomes current, with its vault key.
+    pub(super) fn adopt(&mut self, epoch: u32) {
+        if epoch > self.epoch {
+            self.epoch = epoch;
+            self.vault_keys.insert(epoch);
+        }
+    }
+
+    /// The item key a write to `item` is sealed under, by the CRYPTO.md §11.6 writer rule: the
+    /// item's current key (the held key of the highest creation epoch), unless it is stale at
+    /// the current epoch ([`rizzy_core::keys::ItemKey::is_stale`]); then a fresh key created at
+    /// the current epoch, and `true`. Nothing is kept until [`Device::take_key`].
+    fn choose_key(&self, item: ItemId) -> (SymmetricKeyId, bool) {
+        let current = self
+            .item_keys
+            .iter()
+            .filter(|(_, i)| **i == item)
+            .map(|(k, _)| SymmetricKeyId::from_bytes(*k))
+            .max_by_key(|k| {
+                (
+                    crypto::key_info(k).map_or(0, |(_, e)| e),
+                    core::cmp::Reverse(*k.as_bytes()),
+                )
+            })
+            .unwrap_or_else(|| crypto::initial_key(item));
+        if !crypto::is_stale(&current, self.epoch) {
+            return (current, false);
+        }
+        crypto::fresh_key(item, self.epoch, self.id).map_or((current, false), |fresh| (fresh, true))
+    }
+
+    /// Keeps the fresh item key `key` of `item` the writer rule created: held, in the item's
+    /// wrap set, and wrapped under the current vault key for the records sealed under it.
+    fn take_key(&mut self, item: ItemId, key: SymmetricKeyId) {
+        self.item_keys.insert(*key.as_bytes(), item);
+        if let Some(merge) = self.items.get_mut(&item) {
+            merge.add_item_key(key);
+        }
+        match crypto::wrap(&mut self.rng, &key, self.epoch) {
+            Some(envelope) => {
+                self.own_wraps.insert(
+                    *key.as_bytes(),
+                    Wrap {
+                        epoch: self.epoch,
+                        envelope,
+                    },
+                );
+            }
+            None => self.errors.push("a fresh item key did not wrap".to_owned()),
+        }
+        self.stats.fresh_keys += 1;
+    }
+
+    /// Opens every wrap-set row of an item key it does not hold with the vault key of the row's
+    /// epoch, if it holds that one, and keeps the key when its derived id is the row's.
+    fn learn_wraps(&mut self, rows: &[WrapRow]) {
+        for row in rows {
+            if self.holds(&row.key) || !self.vault_keys.contains(&row.wrap.epoch) {
+                continue;
+            }
+            let Some(key) = crypto::unwrap(row.wrap.epoch, row.item, &row.wrap.envelope) else {
+                continue;
+            };
+            if key == row.key && crypto::key_info(&key).is_some_and(|(i, _)| i == row.item) {
+                self.item_keys.insert(*key.as_bytes(), row.item);
+                self.learned.insert(*key.as_bytes());
+                if let Some(merge) = self.items.get_mut(&row.item) {
+                    merge.add_item_key(key);
+                }
+                self.stats.keys_unwrapped += 1;
+            }
+        }
+    }
+
+    /// The rotator's re-wrap (ADR 0025 §2 step 3): each row it can open with a vault key it
+    /// holds, re-wrapped under the vault key of `epoch` with its creation epoch unchanged, and
+    /// the rows it cannot open, to drop.
+    pub(super) fn rewrap(
+        &mut self,
+        rows: &[WrapRow],
+        epoch: u32,
+    ) -> (Vec<WrapRow>, Vec<(ItemId, SymmetricKeyId)>) {
+        let mut rewrapped = Vec::new();
+        let mut dropped = Vec::new();
+        for row in rows {
+            let opened = self
+                .vault_keys
+                .contains(&row.wrap.epoch)
+                .then(|| crypto::unwrap(row.wrap.epoch, row.item, &row.wrap.envelope))
+                .flatten()
+                .filter(|key| *key == row.key);
+            match opened.and_then(|key| crypto::wrap(&mut self.rng, &key, epoch)) {
+                Some(envelope) => rewrapped.push(WrapRow {
+                    item: row.item,
+                    key: row.key,
+                    wrap: Wrap { epoch, envelope },
+                }),
+                None => dropped.push((row.item, row.key)),
+            }
+        }
+        (rewrapped, dropped)
+    }
+
+    /// The ADR 0032 §2 step 3b rows of a device whose epoch is above the server's after a
+    /// restore: every wrap-set row it holds, that is every item key it holds but the initial
+    /// ones (which have no row here), wrapped under the vault key of its epoch. `None` unless
+    /// it holds that vault key.
+    pub(super) fn epoch_rows(&mut self) -> Option<Vec<WrapRow>> {
+        if !self.vault_keys.contains(&self.epoch) {
+            return None;
+        }
+        let keys: Vec<([u8; 16], ItemId)> = self
+            .item_keys
+            .iter()
+            .map(|(k, i)| (*k, *i))
+            .filter(|(k, _)| {
+                crypto::key_info(&SymmetricKeyId::from_bytes(*k)).is_some_and(|(_, e)| e > 0)
+            })
+            .collect();
+        let mut rows = Vec::new();
+        for (key, item) in keys {
+            let id = SymmetricKeyId::from_bytes(key);
+            if let Some(envelope) = crypto::wrap(&mut self.rng, &id, self.epoch) {
+                rows.push(WrapRow {
+                    item,
+                    key: id,
+                    wrap: Wrap {
+                        epoch: self.epoch,
+                        envelope,
+                    },
+                });
+            }
+        }
+        Some(rows)
+    }
+
+    /// Every envelope it holds, for property 6: its op bodies with their headers, and every
+    /// snapshot record it wrote, absorbed or has not sent.
+    pub(super) fn envelopes(&self) -> (Vec<(&OpHeader, &[u8])>, Vec<&SnapRecord>) {
+        let ops = self
+            .bodies
+            .iter()
+            .filter_map(|(dot, held)| self.log.header(*dot).map(|h| (h, held.envelope.as_slice())))
+            .collect();
+        let snaps = self.held_snaps.iter().chain(&self.outbox_snaps).collect();
+        (ops, snaps)
     }
 
     /// Advances the HLC by a receipt of `remote` (ADR 0012 §2, with the skew guard).
@@ -240,9 +527,13 @@ impl Device {
     /// Writes `edit` on `item` (ADR 0012 §2–§4, ADR 0018 §3): its header on the own chain,
     /// applied through [`ItemMerge::apply_own_op`] with the writer rules, then sealed as its
     /// `ITEM_OP` envelope, signed and kept for upload. A read-only device writes nothing, and
-    /// a Purge the writer rules forbid is not written. Returns the op's header and encoded
-    /// data (the plaintext, which only the harness's ledger sees).
-    pub(super) fn write(&mut self, item: ItemId, edit: &Edit) -> Option<(OpHeader, Vec<u8>)> {
+    /// a Purge the writer rules forbid is not written. Returns the op's header, encoded data
+    /// (the plaintext, which only the harness's ledger sees) and item key id.
+    pub(super) fn write(
+        &mut self,
+        item: ItemId,
+        edit: &Edit,
+    ) -> Option<(OpHeader, Vec<u8>, SymmetricKeyId)> {
         if self.read_only {
             return None;
         }
@@ -274,11 +565,17 @@ impl Device {
         let Ok(hlc) = self.clock.tick(now) else {
             return None;
         };
+        if self.expires_at_ms != 0 && hlc.millis() > self.expires_at_ms {
+            return None;
+        }
         let seq = self.next_seq;
         let mut op_id = self.id.to_bytes();
         op_id[8..].copy_from_slice(&seq.to_be_bytes());
         let holds_unapplied_record = self.log.waiting().iter().any(|w| w.item_id == item);
-        let merge = Self::merge_mut(&mut self.items, item);
+        // CRYPTO.md §11.6 writer rule: a stale item key gives way to a fresh one, and the
+        // merge's `FreshItemKey` trigger then calls for a full snapshot under it.
+        let (key, fresh) = self.choose_key(item);
+        let merge = Self::merge_mut(&mut self.items, &self.item_keys, item);
         let dot = Dot::new(self.id, seq)?;
         let header = OpHeader {
             vault_id: VAULT,
@@ -288,7 +585,7 @@ impl Device {
             vault_prev_seq: self.log.own_vault_prev_seq(),
             hlc,
             item_schema_version: ItemSchemaVersion::V1,
-            vault_key_epoch: 0,
+            vault_key_epoch: self.epoch,
             causal_context: merge.covered().clone(),
         };
         let Ok(parsed) = parse_op(&body) else {
@@ -299,11 +596,11 @@ impl Device {
         let applied = merge.apply_own_op(
             OpInput {
                 header: &header,
-                key_id: item_key(item),
+                key_id: key,
                 data: &parsed,
             },
             OwnWrite {
-                fresh_item_key: false,
+                fresh_item_key: fresh,
                 holds_unapplied_record,
             },
         );
@@ -326,23 +623,27 @@ impl Device {
             self.errors
                 .push(format!("record_own_op failed at {:?}: {e:?}", header.dot));
         }
-        if !self.seal_own_op(&header, &body) {
+        if fresh {
+            self.take_key(item, key);
+        }
+        if !self.seal_own_op(&header, key, &body) {
             return None;
         }
         if applied.snapshot_due.is_some() {
             self.snapshot(item);
         }
-        Some((header, body))
+        Some((header, body, key))
     }
 
     /// Makes the record of an own op that travels and keeps it for upload: `data` sealed as
-    /// the `ITEM_OP` envelope under the item key, its AAD bound to `header`, and the `op`
+    /// the `ITEM_OP` envelope under the item key `key`, its AAD bound to `header`, and the `op`
     /// statement signed over the header and the envelope's hash. Returns whether it sealed.
-    fn seal_own_op(&mut self, header: &OpHeader, data: &[u8]) -> bool {
-        let Some(envelope) = crypto::seal_op(&mut self.rng, header, data) else {
+    fn seal_own_op(&mut self, header: &OpHeader, key: SymmetricKeyId, data: &[u8]) -> bool {
+        let Some(envelope) = crypto::seal_op(&mut self.rng, header, &key, data) else {
             self.errors.push("an op did not seal".to_owned());
             return false;
         };
+        self.op_keys.insert(header.dot, key);
         match crypto::sign_op(header, &envelope) {
             Some(signed) => {
                 self.signed.insert(header.dot, signed);
@@ -381,17 +682,12 @@ impl Device {
             return false;
         };
         let told = lie.filter(|_| self.faulty).and_then(|(fault, heads)| {
-            self.lie(
-                item,
-                fault,
-                heads,
-                &written.covered,
-                written.data.expose_secret(),
-            )
+            self.lie(fault, heads, &written.covered, written.data.expose_secret())
         });
         let record = match told {
             Some((covered, data)) => {
                 self.stats.lies_written += 1;
+                self.lied_items.insert(item);
                 self.snapshot_record(item, covered, &data, true)
             }
             None => self.snapshot_record(
@@ -415,17 +711,17 @@ impl Device {
     /// `heads`; `None` if the kind does not apply.
     fn lie(
         &self,
-        item: ItemId,
         fault: Fault,
         heads: &crate::vv::VersionVector,
         covered: &crate::vv::VersionVector,
         data: &[u8],
     ) -> Option<(crate::vv::VersionVector, Vec<u8>)> {
         let causal_context = |dot: Dot| self.log.header(dot).map(|h| h.causal_context.clone());
+        let key_of = |dot: Dot| self.op_keys.get(&dot).copied();
         let cx = faults::Known {
             author: self.id,
             heads,
-            item_key: item_key(item),
+            key_of: &key_of,
             causal_context: &causal_context,
         };
         faults::apply(fault, covered, data, &cx)
@@ -433,7 +729,8 @@ impl Device {
 
     /// The snapshot record of `item` with `covered` and `data`, under a fresh snapshot id:
     /// `data` sealed as the `ITEM_SNAPSHOT` envelope of that header (so its AAD binds the
-    /// covered VV) and the `snapshot` statement signed by this device. `tainted` is the
+    /// covered VV) under the item key the writer rule picks, with that key's wrap if this
+    /// device created it, and the `snapshot` statement signed by this device. `tainted` is the
     /// simulation's ground truth ([`SnapRecord::tainted`]).
     fn snapshot_record(
         &mut self,
@@ -451,15 +748,20 @@ impl Device {
             snapshot_id: SnapshotId::from_bytes(id),
             author: self.id,
             item_schema_version: ItemSchemaVersion::V1,
-            vault_key_epoch: 0,
+            vault_key_epoch: self.epoch,
             covered,
         };
-        let envelope = crypto::seal_snapshot(&mut self.rng, &header, data)?;
+        let (key, fresh) = self.choose_key(item);
+        if fresh {
+            self.take_key(item, key);
+        }
+        let envelope = crypto::seal_snapshot(&mut self.rng, &header, &key, data)?;
         let signed = crypto::sign_snapshot(&header, &envelope)?;
         Some(SnapRecord {
             signed,
             header,
             data: envelope,
+            wrap: self.own_wraps.get(key.as_bytes()).cloned(),
             tainted,
         })
     }
@@ -473,18 +775,25 @@ impl Device {
             .map_or_else(|| self.log.head(self.id), |h| h.vault_prev_seq)
     }
 
-    /// The own op record at `dot`, with its body if held.
+    /// The own op record at `dot`, with its body if held and the wrap of its item key if this
+    /// device created that key.
     fn record(&self, dot: Dot) -> Option<OpRecord> {
         Some(OpRecord {
             signed: self.signed.get(&dot)?.clone(),
             header: self.log.header(dot)?.clone(),
             body: self.bodies.get(&dot).map(|held| held.envelope.clone()),
+            wrap: self
+                .op_keys
+                .get(&dot)
+                .and_then(|k| self.own_wraps.get(k.as_bytes()))
+                .cloned(),
         })
     }
 
     /// Uploads the unacknowledged own ops in chain order (ADR 0012 §7 "Upload"; ADR 0021 §9
     /// "Already stored"). With `lose_answer`, the first answer never arrives: the op stays sent
-    /// without an answer and goes again next time.
+    /// without an answer and goes again next time. An op a stale-epoch answer marked for
+    /// re-publication goes in a healing request of its own instead ([`Device::on_stale`]).
     pub(super) fn upload_ops(&mut self, server: &mut Server, lose_answer: bool) {
         // The session starts with an answer, which carries the restore generation (ADR 0021 §2).
         self.log.observe_generation(server.generation());
@@ -498,6 +807,26 @@ impl Device {
                 self.errors
                     .push(format!("own unacknowledged body dropped at {dot:?}"));
                 return;
+            }
+            if self.republish.contains(&dot.seq()) {
+                // "It re-publishes such an op in a healing request" (ADR 0021 §9).
+                let request = HealingRequest {
+                    wraps: self.missing_wraps(server),
+                    ops: vec![record],
+                    snapshots: Vec::new(),
+                };
+                match server.heal(&request) {
+                    Ok(()) => {
+                        self.events.push(format!("republished {dot:?}"));
+                        self.republish.remove(&dot.seq());
+                        self.observe_own_head(server);
+                        continue;
+                    }
+                    Err(e) => {
+                        self.events.push(format!("republish {dot:?}: {e:?}"));
+                        return;
+                    }
+                }
             }
             if let Err(e) = self.log.record_sent(dot.seq()) {
                 self.errors.push(format!("record_sent failed: {e:?}"));
@@ -520,15 +849,118 @@ impl Device {
                     if let Err(e) = self.log.record_answered(dot.seq(), generation) {
                         self.errors.push(format!("record_answered failed: {e:?}"));
                     }
+                    if answer == OpAnswer::StaleEpoch {
+                        self.on_stale(dot);
+                    }
                     return;
                 }
             }
         }
     }
 
+    /// A stale-epoch answer to the own op at `rejected` (ADR 0021 §9 "Stale epoch"): the
+    /// device processes the offered account state, then [`VaultLog::stale_plan`] splits the
+    /// rejected op and the later old-epoch own ops into those it re-issues with the same
+    /// `device_seq` under the current epoch ([`Device::reissue`]) and those the server may have
+    /// stored and served, which it re-publishes verbatim in a healing request at its next
+    /// upload. One snapshot per item follows the last re-issue that called for one.
+    fn on_stale(&mut self, rejected: Dot) {
+        self.stats.stale_ops += 1;
+        let Some(epoch) = self.offered else {
+            self.events
+                .push(format!("stale answer to {rejected:?} without a grant"));
+            return;
+        };
+        self.adopt(epoch);
+        let plan = match self.log.stale_plan(rejected.seq(), self.epoch) {
+            Ok(plan) => plan,
+            Err(e) => {
+                self.errors.push(format!("stale_plan failed: {e:?}"));
+                return;
+            }
+        };
+        let mut due = BTreeSet::new();
+        for dot in plan.reissue {
+            if let Some(item) = self.reissue(dot) {
+                due.insert(item);
+            }
+        }
+        for item in due {
+            if self.snapshot(item) {
+                self.stats.reissue_snapshots += 1;
+            }
+        }
+        self.stats.republished += plan.republish.len() as u64;
+        self.republish
+            .extend(plan.republish.iter().map(|d| d.seq()));
+    }
+
+    /// Re-issues the own op at `dot` (ADR 0018 §3 "Re-issued ops", owner decision 15): the same
+    /// header but for the current `vault_key_epoch`, the same op data sealed under the item key
+    /// the writer rule picks, signed again, held in place of the original by the causal layer
+    /// ([`VaultLog::reissue_own_op`]) and the merge ([`ItemMerge::reissue_own_op`]). Every
+    /// unsent snapshot of the item that covers the op is discarded. Returns the item when the
+    /// merge calls for a snapshot.
+    fn reissue(&mut self, dot: Dot) -> Option<ItemId> {
+        let Some(original) = self.log.header(dot).cloned() else {
+            self.errors
+                .push(format!("no header to re-issue at {dot:?}"));
+            return None;
+        };
+        let Some(data) = self.bodies.get(&dot).map(|held| held.data.clone()) else {
+            self.errors.push(format!("no body to re-issue at {dot:?}"));
+            return None;
+        };
+        let item = original.item_id;
+        let (key, fresh) = self.choose_key(item);
+        let mut header = original;
+        header.vault_key_epoch = self.epoch;
+        if let Err(e) = self.log.reissue_own_op(header.clone()) {
+            self.errors
+                .push(format!("reissue_own_op (log) failed at {dot:?}: {e:?}"));
+            return None;
+        }
+        let covers = |s: &SnapRecord| s.header.item_id == item && s.header.covered.covers(dot);
+        let discarded: Vec<SnapRecord> = self
+            .outbox_snaps
+            .iter()
+            .filter(|s| covers(s))
+            .cloned()
+            .collect();
+        self.outbox_snaps.retain(|s| !covers(s));
+        self.held_snaps.retain(|s| !discarded.contains(s));
+        if fresh {
+            self.take_key(item, key);
+        }
+        let merge = Self::merge_mut(&mut self.items, &self.item_keys, item);
+        let trigger = match merge.reissue_own_op(
+            &header,
+            key,
+            Reissue {
+                fresh_item_key: fresh,
+                discarded_unsent_snapshot: !discarded.is_empty(),
+            },
+        ) {
+            Ok(trigger) => trigger,
+            Err(e) => {
+                self.errors
+                    .push(format!("reissue_own_op (merge) failed at {dot:?}: {e:?}"));
+                None
+            }
+        };
+        if !self.seal_own_op(&header, key, &data) {
+            return None;
+        }
+        self.reissued.push((header, key));
+        self.stats.reissued += 1;
+        trigger.map(|_| item)
+    }
+
     /// Uploads the unsent snapshots whose own entry is acknowledged: the server refuses a
     /// snapshot claiming its author's unstored dots (ADR 0021 §9), so one waits for the own ops
-    /// it covers. Any answer to a sent snapshot ends it: a refusal "only discards" it.
+    /// it covers. Any answer to a sent snapshot ends it: a refusal "only discards" it, and a
+    /// stale-epoch answer "only discards and rewrites it" (the rewrite, under the offered
+    /// epoch, waits in the outbox for the next upload).
     ///
     /// With `early`, every unsent snapshot goes at once, before the own ops it covers are
     /// acknowledged (ADR 0021 §8: "a snapshot uploaded before ops it covers"); the server
@@ -543,7 +975,25 @@ impl Device {
         for record in ready {
             match server.upload_snapshot(&record) {
                 SnapAnswer::Stored | SnapAnswer::AlreadyStored => {}
-                SnapAnswer::Refused(_) => self.stats.snapshots_refused += 1,
+                SnapAnswer::StaleEpoch => {
+                    self.stats.stale_snapshots += 1;
+                    self.held_snaps.retain(|s| *s != record);
+                    if let Some(epoch) = self.offered {
+                        self.adopt(epoch);
+                        self.snapshot(record.header.item_id);
+                    }
+                }
+                SnapAnswer::Refused(_) => {
+                    self.stats.snapshots_refused += 1;
+                    // "Any answer to a sent snapshot ends it: a refusal 'only discards' it"
+                    // (this function's own docs, ADR 0021 §9): the server never stored this
+                    // record, so it must not survive as something this device still "holds"
+                    // and could serve as a cover. The `StaleEpoch` branch already does this;
+                    // a plain refusal was missing it, which let a never-accepted snapshot
+                    // outlive the dots it claims and reach the property 3 replay as if it
+                    // were an honest, delivered record.
+                    self.held_snaps.retain(|s| *s != record);
+                }
                 SnapAnswer::BadData => self
                     .errors
                     .push("the server refused an honest snapshot's data".to_owned()),
@@ -565,10 +1015,59 @@ impl Device {
                 ServerView {
                     state_seq: 0,
                     heads: &heads,
-                    lacks_wrap: false,
+                    lacks_wrap: self.server_lacks_wrap(server),
                 },
             )
             .is_empty()
+    }
+
+    /// Every item key it holds but the initial ones (which have no row here) that the server
+    /// has no wrap-set row for, wrapped under the vault key of its epoch (ADR 0021 §9 "Healing
+    /// request": "every item-key wrap the server lacks").
+    fn missing_wraps(&mut self, server: &Server) -> Vec<WrapRow> {
+        let stored: BTreeSet<[u8; 16]> = server.rows().iter().map(|r| *r.key.as_bytes()).collect();
+        let missing: Vec<([u8; 16], ItemId)> = self
+            .item_keys
+            .iter()
+            .filter(|(k, _)| !stored.contains(*k))
+            .filter(|(k, _)| {
+                crypto::key_info(&SymmetricKeyId::from_bytes(**k)).is_some_and(|(_, e)| e > 0)
+            })
+            .map(|(k, i)| (*k, *i))
+            .collect();
+        let mut rows = Vec::new();
+        for (key, item) in missing {
+            let id = SymmetricKeyId::from_bytes(key);
+            if let Some(envelope) = crypto::wrap(&mut self.rng, &id, self.epoch) {
+                rows.push(WrapRow {
+                    item,
+                    key: id,
+                    wrap: Wrap {
+                        epoch: self.epoch,
+                        envelope,
+                    },
+                });
+            }
+        }
+        rows
+    }
+
+    /// Whether the server lacks a wrap-set row of an item key this device got from it, or
+    /// created for an own op the server acknowledged (ADR 0021 §9 "Server behind").
+    fn server_lacks_wrap(&self, server: &Server) -> bool {
+        let stored: BTreeSet<[u8; 16]> = server.rows().iter().map(|r| *r.key.as_bytes()).collect();
+        let acked = self.log.acknowledged();
+        let own_acked = self
+            .op_keys
+            .iter()
+            .filter(|(dot, _)| dot.device_id() == self.id && dot.seq() <= acked)
+            .map(|(_, k)| *k.as_bytes())
+            .filter(|k| self.own_wraps.contains_key(k));
+        self.learned
+            .iter()
+            .copied()
+            .chain(own_acked)
+            .any(|k| !stored.contains(&k))
     }
 
     /// The devices with a chain in this device's log.
@@ -606,11 +1105,21 @@ impl Device {
     }
 
     /// Heals a server that is behind (ADR 0012 §7 "Healing a server rollback" step 4 as
-    /// ADR 0021 §9 "Healing request" replaces it), in the order the module docs give: held
-    /// bodies chain by chain, the normal upload path for unacknowledged own ops, then one
-    /// request with the remaining headers without their bodies behind fresh snapshots, or
-    /// held ones sent verbatim.
+    /// ADR 0021 §9 "Healing request" replaces it), in the order the module docs give: every
+    /// item-key wrap the server lacks, held bodies chain by chain, the normal upload path for
+    /// unacknowledged own ops, then one request with the remaining headers without their
+    /// bodies behind fresh snapshots, or held ones sent verbatim.
     pub(super) fn heal(&mut self, server: &mut Server) {
+        let wraps = self.missing_wraps(server);
+        if !wraps.is_empty() {
+            let request = HealingRequest {
+                wraps,
+                ..HealingRequest::default()
+            };
+            if let Err(e) = server.heal(&request) {
+                self.events.push(format!("wraps: {e:?}"));
+            }
+        }
         self.heal_bodies(server);
         self.observe_own_head(server);
         // The normal upload path for own ops never acknowledged.
@@ -628,6 +1137,7 @@ impl Device {
                     break;
                 };
                 let request = HealingRequest {
+                    wraps: Vec::new(),
                     ops: vec![record],
                     snapshots: Vec::new(),
                 };
@@ -706,10 +1216,11 @@ impl Device {
                     let told = self
                         .heal_lie
                         .filter(|_| self.faulty)
-                        .and_then(|fault| self.lie(item, fault, &heads, &w.covered, data));
+                        .and_then(|fault| self.lie(fault, &heads, &w.covered, data));
                     match told {
                         Some((covered, lie)) => {
                             self.stats.lies_written += 1;
+                            self.lied_items.insert(item);
                             self.snapshot_record(item, covered, &lie, true)
                         }
                         None => self.snapshot_record(item, w.covered, data, self.tainted),
@@ -823,17 +1334,18 @@ impl Device {
         }
     }
 
-    /// A Fetch (ADR 0012 §7 "Fetch"): learns the served revocations, then runs the client cycle
-    /// on each page (`pages` is the response after the harness's delivery faults), then the
+    /// A Fetch (ADR 0012 §7 "Fetch"): processes the offered account state, learns the served
+    /// revocations, expiring certificates and wrap-set rows, then runs the client cycle on each
+    /// page (`pages` is the response after the harness's delivery faults), then the
     /// merged-snapshot triggers and the complete-Fetch reports.
-    pub(super) fn fetch(
-        &mut self,
-        cutoffs: &BTreeMap<DeviceId, u64>,
-        generation: crate::causal::RestoreGeneration,
-        pages: &[Page],
-    ) {
-        self.log.observe_generation(generation);
-        for (&device, &cutoff) in cutoffs {
+    pub(super) fn fetch(&mut self, response: &Response, pages: &[Page]) {
+        if let Some(epoch) = self.offered {
+            self.adopt(epoch);
+        }
+        self.log.observe_generation(response.generation);
+        self.expiries.clone_from(&response.expiries);
+        self.learn_wraps(&response.wraps);
+        for (&device, &cutoff) in &response.cutoffs {
             if self.log.cutoff(device).is_none() {
                 let revocation = self.log.learn_revocation(device, cutoff);
                 self.held_past_cutoff.extend(revocation.held_past_cutoff);
@@ -843,6 +1355,11 @@ impl Device {
         for page in pages {
             self.process_page(page, &mut touched);
         }
+        // The end of the response sequence (ADR 0050 §2): a last retry, then what is still held
+        // is given up and its links lapse.
+        self.retry_holds(&[], &BTreeMap::new(), &mut touched);
+        self.end_holds();
+        self.deliver(&mut touched);
         for item in touched {
             let due = self.items.get_mut(&item).and_then(ItemMerge::end_fetch);
             if due.is_some() {
@@ -851,6 +1368,193 @@ impl Device {
         }
         self.last_complete = self.log.complete_fetch_reports();
         self.prune_bodies();
+    }
+
+    /// Absorbs one verified cover under `plan`, with the verified bodies of the page on its
+    /// item, and does what the client does with the outcome: records an absorption, holds a
+    /// cover refused only as `PurgeAboveCut` (ADR 0050 §2), counts any other refusal.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one cover with its record and plaintext, the plan, and the page it came in"
+    )]
+    fn absorb_cover(
+        &mut self,
+        plan: &CoverPlan,
+        header: &SnapshotHeader,
+        record: &SnapRecord,
+        opened: &SecretBytes,
+        served: &[ServedOp],
+        verified: &BTreeMap<Dot, Opened<'_>>,
+        touched: &mut BTreeSet<ItemId>,
+    ) {
+        let item = header.item_id;
+        let Ok(data) = parse_snapshot(&header.covered, opened.expose_secret()) else {
+            return;
+        };
+        let bodies: Vec<(&OpHeader, SymmetricKeyId, OpData<'_>)> = served
+            .iter()
+            .filter(|s| s.header.item_id == item)
+            .filter_map(|s| {
+                let body = verified.get(&s.header.dot)?;
+                Some((&s.header, body.key, parse_op(&body.data).ok()?))
+            })
+            .collect();
+        let with: Vec<OpInput<'_>> = bodies
+            .iter()
+            .map(|(h, key, d)| OpInput {
+                header: h,
+                key_id: *key,
+                data: d,
+            })
+            .collect();
+        let merge = Self::merge_mut(&mut self.items, &self.item_keys, item);
+        // Whether this absorption could involve a lie (ground truth, for the checks only).
+        let could_lie = record.tainted || self.tainted;
+        match merge.absorb_snapshot(
+            SnapshotInput {
+                header,
+                data: &data,
+            },
+            &with,
+            Some(&plan.cut),
+        ) {
+            Ok(absorption) => match absorption.outcome {
+                AbsorbOutcome::Absorbed(absorbed) => {
+                    let taken = merge.covered().clone();
+                    self.log.record_absorbed(plan, item, &taken);
+                    self.stats.claim_cuts += absorption.claim_cuts.len() as u64;
+                    if !absorbed.disagreements.is_empty() {
+                        self.disagreement_items.insert(item);
+                        if !could_lie {
+                            self.honest_disagreements
+                                .extend(absorbed.disagreements.iter().copied());
+                        }
+                    }
+                    self.disagreements.extend(absorbed.disagreements);
+                    if let Some(hlc) = absorbed.receive_hlc {
+                        self.receive(hlc);
+                    }
+                    if !self.held_snaps.contains(record) {
+                        self.held_snaps.push(record.clone());
+                    }
+                    if record.tainted {
+                        self.tainted = true;
+                        self.stats.lies_absorbed += 1;
+                    }
+                    touched.insert(item);
+                    self.stats.absorbed += 1;
+                    if self.end_retried_hold(item) {
+                        self.stats.holds_resolved += 1;
+                        self.stats.holds_taken += 1;
+                    }
+                }
+                AbsorbOutcome::Refused(r) => {
+                    self.stats.claim_cuts += absorption.claim_cuts.len() as u64;
+                    let kind = refusal_kind(&r);
+                    let copy = SecretBytes::copy_from_slice(opened.expose_secret());
+                    let held = r.holds_cover()
+                        && self.log.hold_cover(header)
+                        && merge.hold_claim(header.clone(), copy).is_ok();
+                    if held {
+                        if self.pending_covers.insert(item, record.clone()).is_none() {
+                            self.stats.held += 1;
+                        }
+                    } else {
+                        self.give_up(item, could_lie);
+                    }
+                    // Server-visible metadata only: the cover's VV and author, the refusal's
+                    // kind and the plan's cut (the purge dot of a tombstone is content, and is
+                    // left out).
+                    self.events.push(format!(
+                        "cover {:?} by {:?} refused: {kind} held {held} plan cut {:?}",
+                        header.covered, header.author, plan.cut
+                    ));
+                }
+            },
+            Err(e) => self.errors.push(format!("absorb_snapshot failed: {e:?}")),
+        }
+    }
+
+    /// A cover refused for good: an untainted one is a violation, a tainted one "Snapshots are
+    /// claims" at work. If it was the item's held cover, retried, the hold ends (its links
+    /// lapse, ADR 0050 §2).
+    fn give_up(&mut self, item: ItemId, could_lie: bool) {
+        if could_lie {
+            self.stats.lie_refused += 1;
+        } else {
+            self.stats.refused += 1;
+        }
+        self.end_retried_hold(item);
+    }
+
+    /// Ends the hold of `item` if its held cover is the one being retried: the log holds the
+    /// item and the merge no longer does, since [`Device::retry_holds`] took the claim out. A
+    /// cover of an item whose held cover is still in the merge changes no hold.
+    fn end_retried_hold(&mut self, item: ItemId) -> bool {
+        let taken = self
+            .items
+            .get(&item)
+            .is_none_or(|merge| merge.held_claim().is_none());
+        if taken && self.log.release_hold(item) {
+            self.pending_covers.remove(&item);
+            return true;
+        }
+        false
+    }
+
+    /// Retries every held cover, unchanged, under the log's held plan, as the client does when
+    /// a chain advanced and at the end of the response sequence (ADR 0050 §2). A moot one (a
+    /// cover absorbed since dominates it) is dropped.
+    fn retry_holds(
+        &mut self,
+        served: &[ServedOp],
+        verified: &BTreeMap<Dot, Opened<'_>>,
+        touched: &mut BTreeSet<ItemId>,
+    ) {
+        let items: Vec<ItemId> = self.log.held_items().collect();
+        if items.is_empty() {
+            return;
+        }
+        let plan = self.log.held_plan();
+        for item in items {
+            let mut moot = false;
+            let claim = self.items.get_mut(&item).and_then(|merge| {
+                moot = merge.held_claim_moot();
+                merge.take_held_claim().filter(|_| !moot)
+            });
+            let (Some((header, opened)), Some(record)) =
+                (claim, self.pending_covers.get(&item).cloned())
+            else {
+                self.log.release_hold(item);
+                self.pending_covers.remove(&item);
+                if moot {
+                    self.stats.holds_resolved += 1;
+                }
+                continue;
+            };
+            self.absorb_cover(&plan, &header, &record, &opened, served, verified, touched);
+        }
+    }
+
+    /// The end of a response sequence (ADR 0050 §2): every cover still held is given up, and
+    /// its links lapse into the gap `complete_fetch_reports` reports.
+    fn end_holds(&mut self) {
+        for (item, record) in core::mem::take(&mut self.pending_covers) {
+            if let Some(merge) = self.items.get_mut(&item) {
+                merge.take_held_claim();
+            }
+            let could_lie = record.tainted || self.tainted;
+            if could_lie {
+                self.stats.lie_refused += 1;
+            } else {
+                self.stats.refused += 1;
+                self.events.push(format!(
+                    "held cover {:?} by {:?} unresolved at the end of the response",
+                    record.header.covered, record.header.author
+                ));
+            }
+        }
+        self.log.end_holds();
     }
 
     /// One page through the cycle of the `causal` module docs: verify, plan, absorb, commit,
@@ -867,12 +1571,32 @@ impl Device {
         let mut served = Vec::new();
         let mut verified: BTreeMap<Dot, Opened<'_>> = BTreeMap::new();
         let mut signed: BTreeMap<Dot, &[u8]> = BTreeMap::new();
+        let item_keys = &self.item_keys;
+        let holds = |k: &SymmetricKeyId| item_keys.contains_key(k.as_bytes());
         for record in &page.ops {
             let Some((statement, header)) =
                 crypto::verify_op(&record.signed, record.header.dot.device_id())
             else {
                 continue;
             };
+            // The author checks that read the header: the revocation cut-off and rule (c)
+            // against the author's certificate expiry (ADR 0012 §4 step 1).
+            let author = AuthorStatus {
+                device: header.dot.device_id(),
+                last_accepted: self.log.cutoff(header.dot.device_id()),
+                expires_at_ms: self
+                    .expiries
+                    .get(&header.dot.device_id())
+                    .copied()
+                    .unwrap_or(0),
+            };
+            if let Err(refusal) = check_op_author(&header, author) {
+                self.errors.push(format!(
+                    "an honest server served {:?}, refused for its author: {refusal}",
+                    header.dot
+                ));
+                continue;
+            }
             let body = match record.body.as_deref() {
                 Some(envelope) => {
                     // A body served again (a duplicated record, a re-fetch) is the one the
@@ -884,15 +1608,26 @@ impl Device {
                     let data = if !statement.matches_envelope(envelope) {
                         None
                     } else if let Some(held) = held {
-                        Some(held.data.clone())
+                        self.op_keys
+                            .get(&header.dot)
+                            .map(|&key| (held.data.clone(), key))
                     } else {
-                        crypto::open_op(&header, envelope)
-                            .filter(|data| parse_op(data.expose_secret()).is_ok())
-                            .map(|data| data.expose_secret().to_vec())
+                        // CRYPTO.md §11.6 reader rule: the key its `key_id` names, among the
+                        // keys of the item this device holds.
+                        crypto::open_op(&header, envelope, holds)
+                            .filter(|(data, _)| parse_op(data.expose_secret()).is_ok())
+                            .map(|(data, key)| (data.expose_secret().to_vec(), key))
                     };
                     match data {
-                        Some(data) => {
-                            verified.insert(header.dot, Opened { envelope, data });
+                        Some((data, key)) => {
+                            verified.insert(
+                                header.dot,
+                                Opened {
+                                    envelope,
+                                    data,
+                                    key,
+                                },
+                            );
                             BodyStatus::Verified
                         }
                         None => BodyStatus::Rejected,
@@ -913,7 +1648,24 @@ impl Device {
             if !statement.matches_envelope(&record.data) {
                 continue;
             }
-            let Some(data) = crypto::open_snapshot(&header, &record.data) else {
+            // A kind-4 author's snapshot: its covered-VV entry for its author at most the
+            // highest `device_seq` of that author verified here, this page's headers included
+            // (the `causal::author` module's suggested bound; CRYPTO.md §10.2 rule (c)).
+            if self.expiries.contains_key(&header.author) {
+                let bound = served
+                    .iter()
+                    .filter(|s| s.header.dot.device_id() == header.author)
+                    .map(|s| s.header.dot.seq())
+                    .fold(self.log.head(header.author), u64::max);
+                if let Err(refusal) = check_snapshot_author(&header, Some(bound)) {
+                    self.errors.push(format!(
+                        "an honest server served a cover by {:?} refused for its author: {refusal}",
+                        header.author
+                    ));
+                    continue;
+                }
+            }
+            let Some((data, _)) = crypto::open_snapshot(&header, &record.data, holds) else {
                 continue;
             };
             if parse_snapshot(&header.covered, data.expose_secret()).is_ok() {
@@ -925,104 +1677,31 @@ impl Device {
         let plan = self.log.plan_covers(&served, &cover_headers);
         for dot in &plan.links {
             if let Some(op) = served.iter().find(|s| s.header.dot == *dot)
-                && let Err(e) =
-                    Self::merge_mut(&mut self.items, op.header.item_id).record_header(&op.header)
+                && let Err(e) = Self::merge_mut(&mut self.items, &self.item_keys, op.header.item_id)
+                    .record_header(&op.header)
             {
                 self.errors
                     .push(format!("record_header failed at {dot:?}: {e:?}"));
             }
         }
-        // 3. Absorb each named cover, with the verified bodies of this page on its item.
+        // 3. Absorb each named cover, with the verified bodies of this page on its item. A cover
+        //    refused only as `PurgeAboveCut` is held for the response sequence (ADR 0050 §2).
         for &i in &plan.absorb {
             let Some((header, record, opened)) = covers.get(i) else {
                 continue;
             };
-            let item = header.item_id;
-            let Ok(data) = parse_snapshot(&header.covered, opened.expose_secret()) else {
-                continue;
-            };
-            let bodies: Vec<(&OpHeader, OpData<'_>)> = served
-                .iter()
-                .filter(|s| s.header.item_id == item)
-                .filter_map(|s| {
-                    let body = verified.get(&s.header.dot)?;
-                    Some((&s.header, parse_op(&body.data).ok()?))
-                })
-                .collect();
-            let with: Vec<OpInput<'_>> = bodies
-                .iter()
-                .map(|(h, d)| OpInput {
-                    header: h,
-                    key_id: item_key(item),
-                    data: d,
-                })
-                .collect();
-            let merge = Self::merge_mut(&mut self.items, item);
-            // Whether this absorption could involve a lie (ground truth, for the checks only).
-            let could_lie = record.tainted || self.tainted;
-            match merge.absorb_snapshot(
-                SnapshotInput {
-                    header,
-                    data: &data,
-                },
-                &with,
-            ) {
-                Ok(absorption) => match absorption.outcome {
-                    AbsorbOutcome::Absorbed(absorbed) => {
-                        let taken = merge.covered().clone();
-                        self.log.record_absorbed(&plan, item, &taken);
-                        self.stats.claim_cuts += absorption.claim_cuts.len() as u64;
-                        if !absorbed.disagreements.is_empty() {
-                            self.disagreement_items.insert(item);
-                            if !could_lie {
-                                self.honest_disagreements
-                                    .extend(absorbed.disagreements.iter().copied());
-                            }
-                        }
-                        self.disagreements.extend(absorbed.disagreements);
-                        if let Some(hlc) = absorbed.receive_hlc {
-                            self.receive(hlc);
-                        }
-                        if !self.held_snaps.contains(record) {
-                            self.held_snaps.push((*record).clone());
-                        }
-                        if record.tainted {
-                            self.tainted = true;
-                            self.stats.lies_absorbed += 1;
-                        }
-                        touched.insert(item);
-                        self.stats.absorbed += 1;
-                    }
-                    AbsorbOutcome::Refused(r) => {
-                        self.stats.claim_cuts += absorption.claim_cuts.len() as u64;
-                        let kind = refusal_kind(&r);
-                        if could_lie {
-                            self.stats.lie_refused += 1;
-                        } else if kind == "PurgeAboveCut" && page.partial {
-                            self.stats.paged_refused += 1;
-                        } else {
-                            self.stats.refused += 1;
-                        }
-                        // Server-visible metadata only: the cover's VV and author, the
-                        // refusal's kind and the plan's cut (the purge dot of a tombstone is
-                        // content, and is left out).
-                        self.events.push(format!(
-                            "cover {:?} by {:?} refused: {kind} partial page {} plan cut {:?}",
-                            header.covered, header.author, page.partial, plan.cut
-                        ));
-                    }
-                },
-                Err(e) => self.errors.push(format!("absorb_snapshot failed: {e:?}")),
-            }
+            self.absorb_cover(&plan, header, record, opened, &served, &verified, touched);
         }
-        // 4. Commit.
+        // 4. Commit; a chain that advanced may let a held cover be taken (ADR 0050 §2).
         let commit = self.log.commit(&served);
         self.reports.extend(commit.reports);
+        let advanced = !commit.accepted.is_empty();
         for dot in commit.accepted {
             let Some(header) = self.log.header(dot).cloned() else {
                 continue;
             };
-            if let Err(e) = Self::merge_mut(&mut self.items, header.item_id).record_header(&header)
+            if let Err(e) = Self::merge_mut(&mut self.items, &self.item_keys, header.item_id)
+                .record_header(&header)
             {
                 self.errors
                     .push(format!("record_header failed at {dot:?}: {e:?}"));
@@ -1031,6 +1710,7 @@ impl Device {
                 self.signed.insert(dot, statement.to_vec());
             }
             if let Some(body) = verified.get(&dot) {
+                self.op_keys.insert(dot, body.key);
                 self.bodies.insert(
                     dot,
                     HeldBody {
@@ -1039,6 +1719,9 @@ impl Device {
                     },
                 );
             }
+        }
+        if advanced {
+            self.retry_holds(&served, &verified, touched);
         }
         // 5. Deliver.
         self.deliver(touched);
@@ -1061,10 +1744,15 @@ impl Device {
                     .push("a delivered body did not parse".to_owned());
                 continue;
             };
-            let merge = Self::merge_mut(&mut self.items, delivery.item_id);
+            let key_id = self
+                .op_keys
+                .get(&delivery.dot)
+                .copied()
+                .unwrap_or_else(|| crypto::initial_key(delivery.item_id));
+            let merge = Self::merge_mut(&mut self.items, &self.item_keys, delivery.item_id);
             match merge.apply_op(OpInput {
                 header,
-                key_id: item_key(delivery.item_id),
+                key_id,
                 data: &data,
             }) {
                 Ok(applied) => {
@@ -1115,6 +1803,8 @@ struct Opened<'a> {
     envelope: &'a [u8],
     /// The op `data` it opened to.
     data: Vec<u8>,
+    /// The `key_id` of the item key it opened under.
+    key: SymmetricKeyId,
 }
 
 /// An op body a device holds: an envelope it sealed itself, or one that passed the verify

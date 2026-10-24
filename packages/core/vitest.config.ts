@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Vitest for packages/core (ADR 0014 §3 "Vitest for unit tests"). Node environment: the tests
 // load the generated wasm module from disk; the end-to-end test talks to a real `rizzy-vault`.
 import { defineConfig } from "vitest/config";

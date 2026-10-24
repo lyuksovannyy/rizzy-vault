@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Signup in Server mode (CRYPTO.md §11.1), as a sans-I/O state machine.
 //!
 //! ```text
@@ -458,6 +460,7 @@ impl SignupStarted {
                 account_key: g.account_key,
                 device_keys: g.device_keys,
                 local_unlock_key: None,
+                keystore_secret: None,
             },
             vault_key: g.vault_key,
         })

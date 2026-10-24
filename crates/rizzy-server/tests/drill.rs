@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The operator's backup → wipe → restore drill, in its fast form ([docs/self-hosting.md] §8–§10;
 //! ADR 0011 "Backups"; the threat model §5.8, INV-50, INV-59; ADR 0021 §2).
 //!
@@ -20,7 +22,8 @@
 //!    `rizzy-vault restore --in <file>` into an empty database.
 //! 6. **Start again.** The startup checks pass; the database reads back exactly as backed up;
 //!    the restore generation is new (ADR 0021 §2) and every account is in a reconciliation
-//!    epoch of that generation (INV-59).
+//!    epoch of that generation (INV-59). The storage counter, seeded at the first start, comes
+//!    back with the rows and matches them (ADR 0048 §4).
 //! 7. **Refusals.** A second `restore` into the restored (non-empty) database; a fresh secrets
 //!    file next to the restored database (CRYPTO.md §5.8), both at startup and by `restore`
 //!    into an empty database, which it leaves empty (ADR 0023 §5 step 4); a damaged backup
@@ -51,7 +54,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rizzy_domain_auth::StartupCheckError;
 use rizzy_server::config::{self, Config, Settings, Sources};
 use rizzy_server::server::{ServeError, Services, open_services};
-use rizzy_server::{admin, fsutil, secrets_backup, secrets_file};
+use rizzy_server::{admin, db_backup, fsutil, secrets_backup, secrets_file};
 use rizzy_storage::backup::file;
 use rizzy_storage::meta::{end_reconciliation_epoch, reconciliation_epochs, restore_generation};
 use rizzy_storage::tables::TABLES;
@@ -269,6 +272,20 @@ fn populated(secrets_path: &Path) -> Dump {
             "auth_key_grants",
             vec![vec![a1(), d1(), int(1), d3(), blob(17, 160), int(24)]],
         ),
+        // ADR 0077 §4: one security key; its SecurityKey JSON is opaque to the backup.
+        (
+            "auth_webauthn_credentials",
+            vec![vec![
+                a1(),
+                blob(40, 64),
+                int(1),
+                Value::Text("{\"cred\":{}}".to_owned()),
+                int(1),
+                int(9),
+                Value::Text("Desk key".to_owned()),
+                int(41),
+            ]],
+        ),
         (
             "auth_totp_credentials",
             vec![vec![
@@ -290,7 +307,7 @@ fn populated(secrets_path: &Path) -> Dump {
         ),
         (
             "vault_vaults",
-            vec![vec![v1(), a1(), int(0), int(2), int(28)]],
+            vec![vec![v1(), a1(), int(0), int(2), int(28), int(1)]],
         ),
         (
             "vault_self_grants",
@@ -361,10 +378,29 @@ fn populated(secrets_path: &Path) -> Dump {
             ]],
         ),
         ("vault_compaction_queue", vec![vec![v1(), item(), int(34)]]),
+        // ADR 0054 §5: one attachment of 100 bytes, its one chunk stored.
+        (
+            "vault_attachments",
+            vec![vec![
+                idv(36),
+                v1(),
+                item(),
+                blob(37, 122),
+                int(100),
+                int(1),
+                int(38),
+            ]],
+        ),
+        (
+            "vault_attachment_chunks",
+            vec![vec![idv(36), int(0), blob(39, 190)]],
+        ),
         (
             "vault_device_cursors",
             vec![vec![v1(), d1(), blob(35, 26), int(35)]],
         ),
+        // No counter row: the first start's backfill seeds it from the vault rows (ADR 0048 §4).
+        ("storage_account_usage", Vec::new()),
     ];
     let tables: Vec<TableDump> = TABLES
         .iter()
@@ -408,6 +444,28 @@ async fn restore_state(db: &Database) -> (RestoreGeneration, Vec<([u8; 16], Rest
         .collect();
     tx.finish().await.unwrap();
     (generation, epochs)
+}
+
+/// The first account's storage counter, asserted equal to the true sum of its vault rows (ADR
+/// 0048 §4).
+async fn usage(db: &Database) -> u64 {
+    let account = [ACCOUNTS[0]; 16];
+    let mut tx = db.begin_read().await.unwrap();
+    let counter = rizzy_storage::quota::bytes_used(tx.conn(), &account)
+        .await
+        .unwrap();
+    let truth = rizzy_domain_vault::usage::counted_bytes(
+        tx.conn(),
+        rizzy_domain_auth::types::AccountId::from_bytes(account),
+    )
+    .await
+    .unwrap();
+    tx.finish().await.unwrap();
+    assert_eq!(
+        counter, truth,
+        "the storage counter does not match the rows"
+    );
+    counter
 }
 
 /// Stops a started server: closes the pools, which releases the writer lock.
@@ -501,11 +559,14 @@ fn backup_wipe_restore_drill() {
         }
         let services = open_services(&config).await.unwrap();
         assert_eq!(restore_state(&services.db).await, (before, Vec::new()));
+        // ADR 0048 §4: the start seeded the account's storage counter from its vault rows.
+        let seeded = usage(&services.db).await;
+        assert!(seeded > 0);
 
         // 2. Back up next to the running server: `backup` on a read-only reader, and the
         //    encrypted secrets backup. `restore` cannot run next to it.
         let backup_path = root.join("db.rvbackup");
-        let summary = admin::backup(&config, &backup_path).await.unwrap();
+        let summary = admin::backup(&config, &backup_path, false).await.unwrap();
         let backup_file = std::fs::read(&backup_path).unwrap();
         assert_eq!(summary.len, backup_file.len());
         assert_eq!(
@@ -604,6 +665,8 @@ fn backup_wipe_restore_drill() {
         assert_eq!(accounts, ACCOUNTS.map(|a| [a; 16]).to_vec());
         assert!(epochs.iter().all(|(_, g)| *g == after));
         assert_eq!(services.db.dump().await.unwrap(), backup);
+        // ADR 0048 §4: the restored counter matches the restored rows.
+        assert_eq!(usage(&services.db).await, seeded);
         stop(services).await;
 
         // 7. Refusals.
@@ -660,6 +723,287 @@ fn backup_wipe_restore_drill() {
         copy_dir(&native, &data);
         let services = open_services(&config).await.unwrap();
         assert_eq!(restore_state(&services.db).await, (before, Vec::new()));
+        assert_eq!(services.db.dump().await.unwrap(), backup);
+        stop(services).await;
+    });
+}
+
+/// The configuration of [`server_config`] on the `PostgreSQL` database at `url`.
+fn postgres_config(data: &Path, secrets: &Path, url: &str) -> Config {
+    let mut env: BTreeMap<&'static str, String> = BTreeMap::new();
+    env.insert(config::ORIGIN, ORIGIN.to_owned());
+    env.insert(config::DATA_DIR, data.to_str().unwrap().to_owned());
+    env.insert(config::SECRETS_FILE, secrets.to_str().unwrap().to_owned());
+    env.insert(config::DATABASE_URL, url.to_owned());
+    let lookup = move |key: &str| env.get(key).map(OsString::from);
+    Config::from_sources(&Sources {
+        file: Settings::new(),
+        env: &lookup,
+        roles_flag: None,
+    })
+    .unwrap()
+}
+
+/// The format version 1 file inside a format version 2 backup, opened with `secrets_path`.
+fn opened_backup(secrets_path: &Path, encrypted: &[u8]) -> file::BackupFile {
+    let secrets = secrets_file::load(secrets_path).unwrap();
+    let plain = db_backup::open(|id| secrets.backup_key(id), encrypted).unwrap();
+    file::parse(&plain).unwrap()
+}
+
+/// The encrypted variant of the drill (ADR 0071; docs/self-hosting.md, "Encrypted backups"):
+/// `secrets rotate --backup-key`, `backup --encrypt` next to the running server, a second
+/// rotation (the backup stays restorable under its older key), wipe, `restore` from the
+/// encrypted file, and the refusals: no backup key, a tampered file, another instance's
+/// secrets file.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the drill reads top to bottom as the operator runs it"
+)]
+fn encrypted_backup_wipe_restore_drill() {
+    block_on(async {
+        let root = TempDir::new();
+        let data = root.join("data");
+        let secrets_dir = root.join("secrets");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&secrets_dir).unwrap();
+        let secrets_path = secrets_dir.join("secrets.json");
+        let config = server_config(&data, &secrets_path);
+        admin::secrets_init(&config).unwrap();
+        let instance = populated(&secrets_path);
+        let before = RestoreGeneration([0x22; 16]);
+        {
+            let db = open_writer(&config).await;
+            db.restore(&instance, before, 1_000).await.unwrap();
+            db.close().await;
+        }
+
+        // No backup key yet: --encrypt is a usage error, and nothing is written.
+        let backup_path = root.join("db.rvbackup");
+        let refused = admin::backup(&config, &backup_path, true)
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, admin::AdminError::NoBackupKey));
+        assert!(refused.is_usage());
+        assert!(!backup_path.exists());
+
+        // 1. The operator adds a backup key (server stopped), and keeps a secrets backup.
+        let rotated = admin::secrets_rotate(&config, admin::Rotate::BackupKey)
+            .await
+            .unwrap();
+        assert_eq!(rotated.id, 1);
+        let secrets_with_key = std::fs::read(&secrets_path).unwrap();
+
+        // 2. Back up, encrypted, next to the running server.
+        let services = open_services(&config).await.unwrap();
+        let summary = admin::backup(&config, &backup_path, true).await.unwrap();
+        let encrypted = std::fs::read(&backup_path).unwrap();
+        assert_eq!(summary.len, encrypted.len());
+        assert_eq!(
+            summary.encrypted,
+            Some(admin::EncryptedSummary {
+                backup_key_id: 1,
+                chunk_count: 1
+            })
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&backup_path)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the encrypted backup is private");
+        }
+        assert_eq!(db_backup::format_version(&encrypted), Some(2));
+        let header = db_backup::parse_header(&encrypted).unwrap();
+        assert_eq!(header.backup_key_id, 1);
+        let inner = opened_backup(&secrets_path, &encrypted);
+        assert_eq!(inner.created_at_ms, header.created_at_ms);
+        let backup = inner.dump;
+        assert_eq!(backup.schema_version, schema_version());
+        // The payload's digest is the plain file's; it is not in the encrypted file.
+        let plain = file::write(&backup, header.created_at_ms).unwrap();
+        assert_eq!(
+            summary.digest,
+            file::digest(&plain[..plain.len() - file::DIGEST_LEN])
+        );
+        // Confidentiality (ADR 0071, superseding ADR 0023 §2 for version 2): no table name, no
+        // row value, no secret of the secrets file appears in the encrypted file.
+        for spec in TABLES {
+            assert!(!contains(&encrypted, spec.name.as_bytes()), "{}", spec.name);
+        }
+        for table in &backup.tables {
+            for value in table.rows.iter().flatten() {
+                let bytes: &[u8] = match value {
+                    Value::Blob(b) => b,
+                    Value::Text(t) => t.as_bytes(),
+                    Value::Null | Value::Integer(_) => continue,
+                };
+                if bytes.len() >= 16 {
+                    assert!(!contains(&encrypted, bytes), "{}", table.table);
+                }
+            }
+        }
+        for needle in secret_needles(&secrets_with_key) {
+            assert!(!contains(&encrypted, &needle), "a secret in the backup");
+        }
+        stop(services).await;
+
+        // 3. A later rotation: new backups use key 2, and this one still restores with key 1.
+        let rotated = admin::secrets_rotate(&config, admin::Rotate::BackupKey)
+            .await
+            .unwrap();
+        assert_eq!(rotated.id, 2);
+        let secrets = secrets_file::load(&secrets_path).unwrap();
+        assert_eq!(secrets.current_backup_key_id(), Some(2));
+        drop(secrets);
+
+        // 4. Refusals into an empty database, each leaving it empty.
+        let empty_dir = root.join("empty-data");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        let empty = server_config(&empty_dir, &secrets_path);
+        let mut damaged = encrypted.clone();
+        let last = damaged.len() - 20;
+        damaged[last] ^= 0x01;
+        let damaged_path = root.join("damaged.rvbackup");
+        std::fs::write(&damaged_path, &damaged).unwrap();
+        assert!(matches!(
+            admin::restore(&empty, &damaged_path).await,
+            Err(admin::AdminError::DbBackup(
+                db_backup::DbBackupError::Authentication { chunk_index: 0 }
+            ))
+        ));
+        let mut truncated = encrypted.clone();
+        truncated.truncate(truncated.len() - 1);
+        let truncated_path = root.join("truncated.rvbackup");
+        std::fs::write(&truncated_path, &truncated).unwrap();
+        assert!(matches!(
+            admin::restore(&empty, &truncated_path).await,
+            Err(admin::AdminError::DbBackup(
+                db_backup::DbBackupError::Malformed(_)
+            ))
+        ));
+        // Another instance's secrets file: without a backup key 1, then with its own key 1 (the
+        // key-id check fails).
+        let other_dir = root.join("other-secrets");
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let other = server_config(&empty_dir, &other_dir.join("secrets.json"));
+        admin::secrets_init(&other).unwrap();
+        assert!(matches!(
+            admin::restore(&other, &backup_path).await,
+            Err(admin::AdminError::DbBackup(
+                db_backup::DbBackupError::UnknownBackupKey { backup_key_id: 1 }
+            ))
+        ));
+        admin::secrets_rotate(&other, admin::Rotate::BackupKey)
+            .await
+            .unwrap();
+        assert!(matches!(
+            admin::restore(&other, &backup_path).await,
+            Err(admin::AdminError::DbBackup(
+                db_backup::DbBackupError::Authentication { chunk_index: 0 }
+            ))
+        ));
+        {
+            let db = open_writer(&empty).await;
+            db.check_restore_target().await.unwrap();
+            db.close().await;
+        }
+
+        // 5. Wipe the data directory (the secrets file stays: it holds the backup keys) and
+        //    restore from the encrypted file.
+        std::fs::remove_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let report = admin::restore(&config, &backup_path).await.unwrap();
+        let backed_up_rows: usize = backup.tables.iter().map(|t| t.rows.len()).sum();
+        assert_eq!(report.rows, u64::try_from(backed_up_rows).unwrap());
+
+        // 6. Start again: the checks pass, the data is back, a new restore generation.
+        let services = open_services(&config).await.unwrap();
+        let (after, epochs) = restore_state(&services.db).await;
+        assert_ne!(after, before);
+        assert_eq!(epochs.len(), ACCOUNTS.len());
+        assert_eq!(services.db.dump().await.unwrap(), backup);
+        stop(services).await;
+    });
+}
+
+/// The encrypted backup on `PostgreSQL` (ADR 0071; ADR 0023 §5 step 1, §6): a format version 2
+/// file from the `SQLite` drill instance is refused into the empty `PostgreSQL` database when
+/// tampered, then restored into it; `backup --encrypt` from `PostgreSQL` (its `REPEATABLE READ`
+/// reader) gives the same dump back, which restores into a fresh `SQLite` database.
+///
+/// `#[ignore]`d by default: run with `RIZZY_TEST_POSTGRES_URL` naming an **empty** database
+/// (it is migrated and filled), e.g. `RIZZY_TEST_POSTGRES_URL=postgres://rizzy:rizzy@127.0.0.1:
+/// 55432/rizzy_m8_db_backup cargo test -p rizzy-server --test drill -- --ignored`.
+#[test]
+#[ignore = "needs RIZZY_TEST_POSTGRES_URL: an empty PostgreSQL database"]
+fn postgres_encrypted_backup_restore_drill() {
+    let url = std::env::var("RIZZY_TEST_POSTGRES_URL").unwrap();
+    block_on(async {
+        let root = TempDir::new();
+        let sqlite_data = root.join("sqlite-data");
+        let pg_data = root.join("pg-data");
+        let back_data = root.join("back-data");
+        let secrets_dir = root.join("secrets");
+        for dir in [&sqlite_data, &pg_data, &back_data, &secrets_dir] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let secrets_path = secrets_dir.join("secrets.json");
+        let sqlite = server_config(&sqlite_data, &secrets_path);
+        let pg = postgres_config(&pg_data, &secrets_path, &url);
+        admin::secrets_init(&sqlite).unwrap();
+        admin::secrets_rotate(&sqlite, admin::Rotate::BackupKey)
+            .await
+            .unwrap();
+        let instance = populated(&secrets_path);
+        {
+            let db = open_writer(&sqlite).await;
+            db.restore(&instance, RestoreGeneration([0x33; 16]), 1_000)
+                .await
+                .unwrap();
+            db.close().await;
+        }
+        // One start, as on a running instance: it seeds the storage counter (ADR 0048 §4),
+        // which a restore rebuilds.
+        stop(open_services(&sqlite).await.unwrap()).await;
+        let from_sqlite = root.join("from-sqlite.rvbackup");
+        admin::backup(&sqlite, &from_sqlite, true).await.unwrap();
+        let encrypted = std::fs::read(&from_sqlite).unwrap();
+        let backup = opened_backup(&secrets_path, &encrypted).dump;
+
+        // The PostgreSQL target: migrated explicitly (ADR 0011 point 9), then a tampered file is
+        // refused and leaves it empty, so the real restore below still runs.
+        admin::migrate(&pg).await.unwrap();
+        let mut damaged = encrypted.clone();
+        damaged[db_backup::HEADER_LEN + 50] ^= 0x80;
+        let damaged_path = root.join("damaged.rvbackup");
+        std::fs::write(&damaged_path, &damaged).unwrap();
+        assert!(matches!(
+            admin::restore(&pg, &damaged_path).await,
+            Err(admin::AdminError::DbBackup(
+                db_backup::DbBackupError::Authentication { chunk_index: 0 }
+            ))
+        ));
+        admin::restore(&pg, &from_sqlite).await.unwrap();
+
+        // An encrypted backup from PostgreSQL holds the same dump, and the server starts on it
+        // (its startup checks pass; the first start then seeds the storage counter, ADR 0048).
+        let from_pg = root.join("from-pg.rvbackup");
+        let summary = admin::backup(&pg, &from_pg, true).await.unwrap();
+        assert_eq!(summary.encrypted.unwrap().backup_key_id, 1);
+        let encrypted_pg = std::fs::read(&from_pg).unwrap();
+        assert_eq!(opened_backup(&secrets_path, &encrypted_pg).dump, backup);
+        let services = open_services(&pg).await.unwrap();
+        services.db.close().await;
+        drop(services);
+
+        // And back into a fresh SQLite database.
+        let back = server_config(&back_data, &secrets_path);
+        admin::restore(&back, &from_pg).await.unwrap();
+        let services = open_services(&back).await.unwrap();
         assert_eq!(services.db.dump().await.unwrap(), backup);
         stop(services).await;
     });

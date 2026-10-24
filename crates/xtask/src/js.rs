@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `cargo xtask check-js`: the JavaScript dependency policy of ADR 0014 §3, which "mirrors
 //! `deny.toml`" and "lands with the first package in M1" (`packages/core`).
 //!

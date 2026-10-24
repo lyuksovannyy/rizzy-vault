@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! A DEFLATE decoder (RFC 1951) and the CRC-32 of zip (ISO 3309, as in APPNOTE.TXT §4.4.7),
 //! for the `export.data` member of a 1PUX archive. Neither is cryptography: DEFLATE is a
 //! compression format and CRC-32 an error-detecting code, and nothing here protects a secret

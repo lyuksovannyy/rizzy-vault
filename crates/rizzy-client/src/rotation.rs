@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Key rotation by an enrolled device (CRYPTO.md §11.6; the revocation of §11.8 steps 1–3;
 //! [ADR 0025] §2), as a sans-I/O state machine.
 //!
@@ -712,6 +714,8 @@ pub(crate) fn start_rotation_with<R: CryptoRng + ?Sized>(
             device_grants: List::empty(),
             recovery_rewrap: None,
             vault_rotation: None,
+            vault_create: None,
+            vault_delete: None,
         },
         rebuilds: 0,
         prepared: None,
@@ -1100,6 +1104,8 @@ impl PendingRotation {
             device_grants: List::new(self.account.grants.clone()).map_err(internal)?,
             recovery_rewrap: self.built.recovery_rewrap.clone(),
             vault_rotation: Some(VaultRotationUpload::new(self.vaults.clone()).map_err(internal)?),
+            vault_create: None,
+            vault_delete: None,
         };
         Ok(())
     }
@@ -1215,8 +1221,13 @@ impl PendingRotation {
         if let Some((local_wrap, device_keys_wrap)) = self.prepared.take() {
             // The envelopes the pending record holds on disk: the finalised state is those
             // bytes, not a second wrap of the same key.
-            device.local_wrap = local_wrap;
+            device.set_local_wrap(local_wrap);
             device.device_keys_wrap = device_keys_wrap;
+            device.rewrap_keystore(
+                rng,
+                unlocked.keystore_secret.as_ref(),
+                &self.new_account_key,
+            )?;
         } else {
             let derived;
             let local = if let Some(local) = unlocked.local_unlock_key.as_ref() {
@@ -1233,7 +1244,13 @@ impl PendingRotation {
                     .map_err(internal)?;
                 &derived
             };
-            device.rewrap(rng, local, &self.new_account_key, &unlocked.device_keys)?;
+            device.rewrap(
+                rng,
+                local,
+                unlocked.keystore_secret.as_ref(),
+                &self.new_account_key,
+                &unlocked.device_keys,
+            )?;
         }
         if let Some(credential) = self.credential.take() {
             credential.apply(device, unlocked);

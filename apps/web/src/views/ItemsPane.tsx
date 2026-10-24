@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The item list with search, and the selected item's view or editor. In the trash, the list
 // shows trashed items, and the view offers restore and purge instead of edit.
 //
@@ -11,18 +13,20 @@ import {
   IconPlus,
   IconStarFilled,
   IconStarOutline,
+  ItemIcon,
   TypeIcon,
 } from "@rizzy-vault/ui";
 import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
 import { useDismissableMenu } from "../dismissable-menu.ts";
-import { CREATABLE_TYPES, matches } from "../fields.ts";
+import { CREATABLE_TYPES, compareFavoriteFirst, matches, typeLabel } from "../fields.ts";
 import { moveListSelection } from "../shortcuts.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText } from "./common.tsx";
 import { ItemEditor } from "./ItemEditor.tsx";
 import { ItemView } from "./ItemView.tsx";
+import { inVault, vaultLabelOf } from "../vaults.ts";
 
 /** What the right-hand side shows. */
 type Detail =
@@ -98,14 +102,21 @@ export function emptyState(
 /** The list and the detail (module docs). `newItemSignal` increments each time the global `N`
  * shortcut (`VaultView.tsx`) asks this pane to start a new item of the default (first
  * creatable) type — a one-shot signal, not a boolean, so firing it twice in a row (fast double
- * `N`) is still two requests rather than one the second press' state update coalesces away. */
+ * `N`) is still two requests rather than one the second press' state update coalesces away.
+ * `openItemId`/`openItemNonce` are the same one-shot-signal shape, for the command palette's
+ * "open item" command (`CommandPalette.tsx`): `openItemNonce` increments each time the palette
+ * asks this pane to show `openItemId`'s detail view, even if it is the same id as last time. */
 export function ItemsPane(props: {
   readonly ctx: VaultContext;
   readonly trash: boolean;
   readonly scope: Scope;
+  /** The vault switcher's choice (ADR 0081 §A8): `undefined` is "All vaults". */
+  readonly vaultFilter?: string | undefined;
   readonly newItemSignal: number;
+  readonly openItemId?: string | undefined;
+  readonly openItemNonce?: number | undefined;
 }) {
-  const { ctx, trash, scope, newItemSignal } = props;
+  const { ctx, trash, scope, newItemSignal, openItemId, openItemNonce = 0 } = props;
   const [items, setItems] = useState<ItemSummary[]>([]);
   const [query, setQuery] = useState("");
   const [detail, setDetail] = useState<Detail>({ kind: "none" });
@@ -154,10 +165,20 @@ export function ItemsPane(props: {
     // depended on, the same way effects elsewhere in this pane read `ctx` without listing it.
   }, [newItemSignal]);
 
-  const inFilter = items.filter((i) => inScope(i, scope));
-  const shown = inFilter
-    .filter((i) => matches(i, query))
-    .sort((a, b) => Number(b.favorite) - Number(a.favorite) || a.title.localeCompare(b.title));
+  /** The command palette's "open item" command (module docs above). Declared after the
+   * scope/trash-clear effect above, so that when `VaultView` changes `scope` to show this pane
+   * and bumps `openItemNonce` in the same event, this effect's `setDetail` is the one that wins
+   * the render (both effects run in this declaration order within one commit). */
+  useEffect(() => {
+    if (openItemNonce > 0 && openItemId !== undefined) {
+      setDetail({ kind: "view", id: openItemId });
+    }
+    // Only `openItemNonce` should re-trigger this, the same reasoning as the `N`-shortcut effect
+    // above.
+  }, [openItemNonce]);
+
+  const inFilter = items.filter((i) => inScope(i, scope) && inVault(i, props.vaultFilter));
+  const shown = inFilter.filter((i) => matches(i, query)).sort(compareFavoriteFirst);
   const empty = emptyState(scope, trash, items.length > 0, inFilter.length > 0, query !== "");
 
   useEffect(() => {
@@ -261,11 +282,12 @@ export function ItemsPane(props: {
                   onClick={() => openDetail(i.id)}
                 >
                   <span className="row-icon">
-                    <TypeIcon type={i.itemType} />
+                    <ItemIcon icons={ctx.icons} websiteHost={i.websiteHost} itemType={i.itemType} size={20} />
                   </span>
                   <span className="row-text">
                     <span className="row-title">{i.title === "" ? "(untitled)" : i.title}</span>
-                    <span className="row-sub">{i.username ?? i.itemType}</span>
+                    <span className="row-sub">{i.username ?? typeLabel(i.itemType)}</span>
+                    <span className="row-sub row-vault">{vaultLabelOf(ctx.vaults, i.vaultId)}</span>
                   </span>
                   {i.favorite ? (
                     <span className="row-favorite" aria-label="favorite">
@@ -288,32 +310,44 @@ export function ItemsPane(props: {
             <IconBack /> Back
           </button>
         )}
-        {detail.kind === "view" && (
-          <ItemView
-            key={`${detail.id}-${ctx.revision}-${localRevision}`}
-            ctx={ctx}
-            id={detail.id}
-            onEdit={() => setDetail({ kind: "edit", id: detail.id })}
-            onWritten={(gone) => written(gone ? { kind: "none" } : detail)}
-          />
-        )}
-        {detail.kind === "edit" && (
-          <ItemEditor
-            key={`edit-${detail.id}`}
-            ctx={ctx}
-            id={detail.id}
-            onCancel={() => setDetail({ kind: "view", id: detail.id })}
-            onSaved={(id) => written({ kind: "view", id })}
-          />
-        )}
-        {detail.kind === "new" && (
-          <ItemEditor
-            key={`new-${detail.itemType}`}
-            ctx={ctx}
-            newType={detail.itemType}
-            onCancel={() => setDetail({ kind: "none" })}
-            onSaved={(id) => written({ kind: "view", id })}
-          />
+        {/* The entrance wrapper (docs/design/README.md "Opening an item"): keyed by what is open,
+            not by the item's revision, so opening an item or switching to its editor slides the
+            pane in, while a sync or save that re-mounts the same item's view does not replay
+            the motion. */}
+        {detail.kind !== "none" && (
+          <div
+            className="item-detail-enter"
+            key={detail.kind === "new" ? `new-${detail.itemType}` : `${detail.kind}-${detail.id}`}
+          >
+            {detail.kind === "view" && (
+              <ItemView
+                key={`${detail.id}-${ctx.revision}-${localRevision}`}
+                ctx={ctx}
+                id={detail.id}
+                onEdit={() => setDetail({ kind: "edit", id: detail.id })}
+                onWritten={(gone) => written(gone ? { kind: "none" } : detail)}
+                onMoved={(newId) => written({ kind: "view", id: newId })}
+              />
+            )}
+            {detail.kind === "edit" && (
+              <ItemEditor
+                key={`edit-${detail.id}`}
+                ctx={ctx}
+                id={detail.id}
+                onCancel={() => setDetail({ kind: "view", id: detail.id })}
+                onSaved={(id) => written({ kind: "view", id })}
+              />
+            )}
+            {detail.kind === "new" && (
+              <ItemEditor
+                key={`new-${detail.itemType}`}
+                ctx={ctx}
+                newType={detail.itemType}
+                onCancel={() => setDetail({ kind: "none" })}
+                onSaved={(id) => written({ kind: "view", id })}
+              />
+            )}
+          </div>
         )}
       </div>
     </div>

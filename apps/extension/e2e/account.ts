@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Signup and item creation through the real web vault's own UI (`apps/web/e2e/vault.spec.ts`'s
 // `signUp`/`newItem` pattern, duplicated here for the same reason as `server.ts`: separate
 // `tsconfig.json` trees, one small self-contained helper). The extension has no signup flow of
@@ -8,9 +10,9 @@ import { type Page, expect } from "@playwright/test";
 
 export const TEST_ACCOUNT_PASSWORD = "correct horse battery staple";
 
-/** Signs up `loginName` on the server at `origin` and confirms the Emergency Kit. Returns the
- * Secret Key, the one value besides the login name and password that enrolling a device needs
- * (CRYPTO.md §11.2). */
+/** Signs up `loginName` on the server at `origin`, confirms the Emergency Kit and closes the
+ * getting-started guide the web vault opens after signup. Returns the Secret Key, the one value
+ * besides the login name and password that enrolling a device needs (CRYPTO.md §11.2). */
 export async function signUp(page: Page, origin: string, loginName: string): Promise<string> {
   await page.goto(origin);
   await page.getByRole("button", { name: "Create an account" }).click();
@@ -23,6 +25,9 @@ export async function signUp(page: Page, origin: string, loginName: string): Pro
   await page.getByLabel(/last group of your Secret Key/).fill(secretKey.split("-").at(-1) ?? "");
   await page.getByRole("button", { name: "Create the account" }).click();
   await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
+  const guide = page.getByRole("region", { name: "Get started" });
+  await guide.getByRole("button", { name: "Close the guide" }).click();
+  await expect(guide).toHaveCount(0);
   return secretKey;
 }
 
@@ -36,7 +41,27 @@ export async function logIn(page: Page, origin: string, loginName: string, secre
   await page.getByLabel("Login name").fill(loginName);
   await page.getByLabel("Secret Key", { exact: true }).fill(secretKey);
   await page.getByLabel("Master password", { exact: true }).fill(TEST_ACCOUNT_PASSWORD);
-  await page.getByRole("button", { name: /^(Log in|Unlock)$/ }).click();
+  // The extension's own inline menu anchors to this page's "Master password" field (it is a
+  // password-shaped input like any other) and can geometrically overlap the Log in/Unlock
+  // button below it. A real click there lands a `mousedown` on the page first, which blurs the
+  // field and tears the menu down (`content-script.ts`'s `InlineMenu`, `#onBlur`); a Playwright
+  // locator click runs its actionability check — including "not obscured" — before dispatching
+  // any mouse event, so that blur never happens and the click retries against the menu forever.
+  // Worse, `wireInlineMenu` rebuilds the menu on *any* qualifying DOM mutation regardless of
+  // current focus (`content-script.ts`'s `report`/`schedule`), so even a one-shot blur can lose
+  // a race against a menu that reappears a moment later from an unrelated page re-render. Retry
+  // the whole focus → blur → wait-absent → click sequence (`toPass`) rather than doing it once:
+  // each attempt forces a fresh blur event (destroying whatever menu is currently live) and then
+  // races the click against the next possible recreation, so it only fails for good if the menu
+  // keeps winning that race for the full ten seconds — a real anomaly, not routine flake.
+  const masterPassword = page.getByLabel("Master password", { exact: true });
+  const loginButton = page.getByRole("button", { name: /^(Log in|Unlock)$/ });
+  await expect(async () => {
+    await masterPassword.focus();
+    await masterPassword.blur();
+    await expect(page.locator("iframe[data-rizzy-inline-menu]")).toHaveCount(0, { timeout: 500 });
+    await loginButton.click({ timeout: 500 });
+  }).toPass({ timeout: 10_000 });
   await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
 }
 

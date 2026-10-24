@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Changes of the signed account state that carry credentials, keys or devices, and the
 //! suspension of revocation phase 1 (CRYPTO.md §11 "Replacing credentials", §11.3 step 5,
 //! §11.5, §11.6, §11.8 steps 0–3, §11.9 steps 5–6; ADR 0012 §6; ADR 0025).
@@ -30,6 +32,7 @@
 //! every request here rejects unknown fields.
 //!
 //! [ADR 0025]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0025-rotation-vault-half.md
+//! [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
 
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
@@ -79,6 +82,8 @@ pub struct ReregisterStartResponse {
 /// | `recovery_epoch + 1` (a new recovery code) | `recovery` |
 /// | recovery switched off | nothing more; the server deletes `E_rec` and `H_rec` |
 /// | `settings_seq + 1` | `account_settings` |
+/// | `settings_seq + 1` with a new owned vault ([ADR 0081] §A3) | `account_settings` and `vault_create` |
+/// | `settings_seq + 1` deleting an owned vault ([ADR 0081] §A5) | `account_settings` and `vault_delete` |
 /// | a new durable device (§11.9 step 5, §11.3 step 5) | its certificate in `device_certificates` |
 /// | a revoked device without a rotation (the self-revocation of §11.3 step 5 only) | its `device-revocation` in `device_revocations` |
 /// | `account_key_epoch + 1` (standard rotation, §11.6; the revocation of §11.8 step 3; the default recovery of §11.9 step 5) | `account_key_server_wrap`, `identity_secret_keys`, `device_grants` (one per remaining durable device), `vault_rotation`, and `recovery_rewrap` (keep the code) or `recovery` (new code) while recovery is on |
@@ -137,6 +142,17 @@ pub struct CommitChangeRequest {
     /// The vault half of a rotation (§11.6 steps 3 and 9; ADR 0025 §1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault_rotation: Option<VaultRotationUpload>,
+    /// A new owned vault's `VAULT_KEY_SELF_GRANT` at vault epoch 0 under the new state's
+    /// `account_key_epoch` ([ADR 0081] §A3): the server creates the vault (kind 2) with it in
+    /// the commit's transaction. Only with `settings_seq + 1`, and never together with
+    /// `vault_delete`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_create: Option<VaultSelfGrant>,
+    /// An owned vault to delete with everything stored for it ([ADR 0081] §A5). Only with
+    /// `settings_seq + 1`, over a fresh OPAQUE session, and never together with
+    /// `vault_create`; the Personal vault is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_delete: Option<Id>,
 }
 
 /// Revocation phase 1, `suspend(device_id)` (CRYPTO.md §11.8 step 0; ADR 0012 §6), and the
@@ -209,14 +225,22 @@ pub struct VaultRotation {
     pub dropped: List<WrapLocator, MAX_ITEM_KEY_WRAPS>,
 }
 
-/// The vault half of a rotation (ADR 0025 §1): one [`VaultRotation`] per vault of the account,
-/// strictly ascending by `self_grant.vault_id` bytewise (so one per vault, and one JSON form).
+/// The vault half of a rotation (ADR 0025 §1 as [ADR 0081] §0 item 3 replaces it): one
+/// [`VaultRotation`] per unshared vault of the account, strictly ascending by
+/// `self_grant.vault_id` bytewise (so one per vault, and one JSON form), and `regrants`: for
+/// each shared vault the account holds a self-grant for, that self-grant re-wrapped under the
+/// new account key, strictly ascending by `vault_id`.
+///
+/// No vault is shared before ADR 0081 Part B, so `regrants` is always sent empty and the server
+/// refuses any other list. A sender that omits it means the empty list.
 ///
 /// Deserialising rejects any other order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VaultRotationUpload {
     /// The vaults, ascending by id.
     vaults: List<VaultRotation, MAX_VAULT_GRANTS>,
+    /// The re-wrapped self-grants of shared vaults, ascending by id (empty in Part A).
+    regrants: List<VaultSelfGrant, MAX_VAULT_GRANTS>,
 }
 
 impl VaultRotationUpload {
@@ -226,17 +250,35 @@ impl VaultRotationUpload {
     /// [`WireError::TooMany`] above [`MAX_VAULT_GRANTS`] entries; [`WireError::NotCanonical`]
     /// when the vaults are not strictly ascending by `self_grant.vault_id`.
     pub fn new(vaults: Vec<VaultRotation>) -> Result<Self, WireError> {
-        Self::checked(List::new(vaults)?)
+        Self::checked(List::new(vaults)?, List::default())
     }
 
-    /// The order check.
-    fn checked(vaults: List<VaultRotation, MAX_VAULT_GRANTS>) -> Result<Self, WireError> {
+    /// Checks and wraps `vaults` and `regrants` ([ADR 0081] §0 item 3).
+    ///
+    /// # Errors
+    /// As [`VaultRotationUpload::new`], for either list.
+    pub fn with_regrants(
+        vaults: Vec<VaultRotation>,
+        regrants: Vec<VaultSelfGrant>,
+    ) -> Result<Self, WireError> {
+        Self::checked(List::new(vaults)?, List::new(regrants)?)
+    }
+
+    /// The order checks.
+    fn checked(
+        vaults: List<VaultRotation, MAX_VAULT_GRANTS>,
+        regrants: List<VaultSelfGrant, MAX_VAULT_GRANTS>,
+    ) -> Result<Self, WireError> {
         let ascending = vaults
             .as_slice()
             .windows(2)
             .all(|w| matches!(w, [a, b] if a.self_grant.vault_id < b.self_grant.vault_id));
-        if ascending {
-            Ok(Self { vaults })
+        let regrants_ascending = regrants
+            .as_slice()
+            .windows(2)
+            .all(|w| matches!(w, [a, b] if a.vault_id < b.vault_id));
+        if ascending && regrants_ascending {
+            Ok(Self { vaults, regrants })
         } else {
             Err(WireError::NotCanonical)
         }
@@ -247,19 +289,29 @@ impl VaultRotationUpload {
     pub fn vaults(&self) -> &[VaultRotation] {
         self.vaults.as_slice()
     }
+
+    /// The re-wrapped self-grants of shared vaults, ascending by id ([ADR 0081] §0 item 3).
+    #[must_use]
+    pub fn regrants(&self) -> &[VaultSelfGrant] {
+        self.regrants.as_slice()
+    }
 }
 
-/// The wire form: `{"vaults": [...]}`, unknown fields rejected.
+/// The wire form: `{"vaults": [...], "regrants": [...]}`, unknown fields rejected; an absent
+/// `regrants` is the empty list.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VaultRotationUploadWire {
     /// The vaults, as sent.
     vaults: List<VaultRotation, MAX_VAULT_GRANTS>,
+    /// The regrants, as sent.
+    #[serde(default)]
+    regrants: List<VaultSelfGrant, MAX_VAULT_GRANTS>,
 }
 
 impl<'de> Deserialize<'de> for VaultRotationUpload {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = VaultRotationUploadWire::deserialize(deserializer)?;
-        Self::checked(wire.vaults).map_err(de::Error::custom)
+        Self::checked(wire.vaults, wire.regrants).map_err(de::Error::custom)
     }
 }

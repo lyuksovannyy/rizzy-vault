@@ -40,14 +40,27 @@ crypto and store decision still happens inside `DurableSession`/`rizzy-wasm`).
   but it is not nothing: a slow enough network, or a form that resolves synchronously, can hit
   it. A full fix is an on-load "is there a pending offer for my origin?" check the content
   script runs on every page, which this change does not add.
+- **Accessibility audit (M3, ADR 0014 §5):** `e2e/a11y.spec.ts` runs axe-core's WCAG 2.x A/AA
+  and best-practice rules, and a Chromium accessibility-tree check (`e2e/a11y.ts`, the same
+  checks as `apps/web/e2e/a11y.ts`), over the options page, the popup's set-up, items, item,
+  generator and locked views, and a login page with the inline-menu iframe in it. It is the one
+  extension spec CI runs (self-contained, a few seconds). Found and fixed by it: the inline-menu
+  iframe had no accessible name (now a constant `title`, the same whatever the menu holds) and
+  its content sat outside any landmark, and buttons in the unstyled popup and the menu were
+  under WCAG 2.2's 24px target size. Not covered: real screen readers, Firefox, and keyboard
+  use of the extension: whether a keyboard user can reach the inline menu from the page's field
+  and fill from it is not checked (its buttons accept any trusted click, keyboard activation
+  included, but nothing tests the way there).
 - **Not attempted:** Firefox Playwright coverage (no automatable unpacked-extension flow, same
   as before — this also means `pushApplyFill`'s direct-`ext.tabs` branch, the one Firefox's
   `background-page.ts` actually takes, has no e2e coverage of its own; only the Chromium relay
   branch is exercised, by the autofill-and-save spec); a longer-running soak test of whether the
   offscreen document/Firefox background page survive a real session (see "The ADR 0036 §2
-  survival spike" below); regex, per-URI match
-  mode and user-defined equivalence-group settings UI (the matcher and core support them; no
-  options-page surface edits them yet; every item matches via the account default, Base domain).
+  survival spike" below); regex, and a per-URI match mode or account match settings surface in
+  the extension itself (the web vault's item editor and Settings → Website matching edit them;
+  the extension applies them: a URI with no override of its own takes the account's match
+  default, and the account's user-defined and disabled global equivalence groups shape matching,
+  through `DurableSession.decideMatchCandidates`, ADR 0042 §6).
 
 ### Bugs found only by the end-to-end Playwright spec (`e2e/autofill-and-save.spec.ts`)
 
@@ -119,7 +132,11 @@ does:
    matcher for that sender's own tab URL and requires the claimed item to be among the result
    (`core-host/content-handler.ts`'s `selectFillCandidate`), re-checking the equivalence-only
    second confirmation there too rather than trusting the iframe's UI alone. The revealed values
-   are pushed to the content script as `apply_fill`, never back to the iframe. See
+   are pushed to the content script as `apply_fill`, never back to the iframe. Since ADR 0043
+   the sender check alone is not enough either: the request must also carry the per-instance
+   token the content script registered for that exact iframe and delivered to it only in its
+   show `postMessage` (`core-host/iframe-instance.ts`), so a clone of the menu resource elsewhere
+   in the tab is refused. See
    [ADR 0036](../../docs/adr/0036-browser-extension-architecture-and-key-custody.md) §4's
    "chosen-fill request" bullet (added the same day) for the full rationale, and
    `test/sender.test.ts`/`test/content-handler.test.ts`/`test/listener-routing.test.ts` for the
@@ -278,7 +295,8 @@ the confirm dialog.**
   trusted click (`event.isTrusted`) is the only thing that can approve or pick a candidate; the
   ceremony is bound to the tab/origin at offer time and re-checked at approval time
   (`passkey-ceremony.ts`'s `take()`), so a navigation invalidates it (unlike the save prompt,
-  which survives one).
+  which survives one). The approval or decline also carries the consent iframe's own ADR 0043
+  instance token, an independent check beside `ceremonyToken`.
 - **Long-lived context** (`core-context.ts`'s `offerPasskeyCreate`/`offerPasskeyGet`/
   `approvePasskeyCeremony`): calls `createPasskey` + `addPasskey`/`editItem` + `sync()` for a
   create, or `DurableSession.passkeyAssertion` for a sign-in. Any failure (a Rust
@@ -316,6 +334,97 @@ invisible to the unit tests or a casual manual check:
 Firefox: not automated, same reason as the rest of this file (no Playwright-automatable
 unpacked-extension flow) — the create/get interception and the consent UI are plain
 `postMessage`/DOM code with nothing Chromium-specific in it, but that is untested, not proven.
+
+### M3: multi-step login forms (ROADMAP §4.4)
+
+The inline menu is offered on each step of a login split across steps, and each step's fill
+writes only that step's own field(s):
+
+| Step | Looks like | The menu fills |
+|---|---|---|
+| One-page form | a visible password field, with its form's username field before it | both |
+| Identifier-first | a username or email field alone; the password is on the next page, or hidden until the page reveals it | the username only ("Fills the username only."; no generator) |
+| Password-only | a visible password field with no username field of its own (the username was on an earlier page) | the password only ("Fills the password only.") |
+
+- **Detection** is [`src/content/login-step.ts`](src/content/login-step.ts): a pure,
+  deterministic heuristic over facts the content script reads from the top frame's own
+  document — `autocomplete` tokens (`username` and `webauthn` are strong signals; `email` is a
+  weak one), input types, `name`/`id`/`placeholder`/`aria-label`/label hints, and form
+  structure (a username is paired only with a password of the same form; a weakly signalled
+  identifier alone needs a sign-in form: a concealed password field in it, or "Next"/"Sign in"-
+  style hints and no search/newsletter/sign-up ones). Unit tested in Node against the HTML
+  fixtures in [`test/fixtures/login-steps/`](test/fixtures/login-steps) (`test/login-step.test.ts`),
+  which `e2e/multistep.spec.ts` also loads into real Chromium.
+- **Every step is its own gesture.** A pick on the identifier step never fills the password
+  step; the password step's menu appears on its own and nothing is written until the user clicks
+  a candidate in it (INV-36; ADR 0037 §5; ADR 0040). Nothing is remembered between steps or
+  across a navigation: there is no state for it to live in, and the e2e suite checks that the
+  next step stays empty without a new click.
+- **Only the step's own value crosses.** The inline menu's existing `inline_menu_fill_chosen`
+  request carries an optional `only: "username" | "password"`, and the long-lived context
+  narrows what it pushes to the content script to that one value (`content-handler.ts`'s
+  `narrowFillValues`; ADR 0036 §4, nothing "beyond what the user is filling"). `apply_fill` can
+  therefore carry a username alone. No new message type.
+- **The A7 gates apply to every field of every step**: hidden, `opacity: 0`, zero-size,
+  off-screen (entirely left of or above the document) and covered fields are never chosen, and
+  each target is re-checked when the fill lands, as are read-only and disabled fields. A password
+  field inside an iframe is never seen at all: the content script runs in the top frame only.
+- **Same-page reveal.** The content script's `MutationObserver` now also watches `style`,
+  `class`, `hidden`, `disabled` and `readonly`, since a revealed password field is usually an
+  attribute change rather than a new node. An attribute-only change re-asks the background only
+  if it reveals a field the current step did not have, so a passing restyle (a View
+  Transition, an animation) never tears the menu down; the menu's own per-frame restyling of
+  its iframe never counts at all.
+  A field whose `type` attribute flips (`hidden` → `password`) is not watched, so such a reveal
+  is picked up only at the next structural change: a known gap.
+- **Not done:** save/update-on-submit still needs a password field and the username on the same
+  page, so a two-page sign-in is not offered for saving (the password page has no username to
+  save with it); Firefox is not automated (as everywhere in this file).
+
+### M3: autocomplete-driven autofill (ADR 0076)
+
+The page's `autocomplete` attribute now decides each field's role, the inline menu fills a
+saved login's TOTP code on a 2FA step, and a custom field the user gave an *autocomplete id* in
+the web vault fills the page field whose `autocomplete` is exactly that id.
+
+| Field | Role |
+|---|---|
+| `username`, or the `webauthn` flag | the identifier (strong signal) |
+| `email`, `tel`, `tel-national` | the identifier (weak signal, as before) |
+| `current-password` | the password target |
+| `new-password` | never filled with a saved password; its menu offers the generator only |
+| `one-time-code` (text, tel, number, password) | the TOTP target, unless its own hints say SMS, phone or e-mail |
+| any other WHATWG name (`cc-csc`, `postal-code`, …) | none |
+| none or `off` | the old heuristics, then the strict TOTP heuristic |
+| a custom token (`member-no`) | the old heuristics, and a custom target |
+
+- **Detection** is [`src/messaging/autocomplete.ts`](src/messaging/autocomplete.ts) (the parser and
+  the reserved set, which `test/autocomplete.test.ts` checks against `rizzy-core`'s) and
+  [`src/content/login-step.ts`](src/content/login-step.ts) (roles, the TOTP heuristic and the
+  step's fill scope). The TOTP heuristic needs every rule of ADR 0076 §1.3; each §1.4 negative case
+  (card security codes, SMS and e-mail codes, PINs, postal codes, phones, captcha/coupon/backup
+  codes, split-digit boxes, a lone "code", sign-up and checkout forms, hidden fields) is an HTML
+  fixture in [`test/fixtures/totp/`](test/fixtures/totp). A TOTP-only step opens a menu only when a
+  candidate for the page holds a time-based secret.
+- **Offer, then fill.** The inline-menu iframe asks the long-lived context for an offer
+  (`inline_menu_offer_request`, with its ADR 0043 instance token). The answer, sent to the iframe
+  only, says per candidate whether a click fills a code and which custom fields it fills, by
+  Display Name; the row shows "Also fills: one-time code · Member no. · PIN (hidden)" before the
+  click. A fill that names the offer (`offerId`: 16 random bytes, single use, 120 s, bound to the
+  tab and page URL, at most 4 per tab, dropped on lock) takes its scope from the offer record,
+  never from the message, and its values from one `rizzy-wasm` call: the TOTP code is computed
+  there and the secret never leaves it.
+- **The content script writes** the code into the step's TOTP target and each custom value into
+  the first field of the step's form whose *current* token matches, re-checking every target as
+  before. A page that renames a token after the menu showed gets nothing for it.
+- **Saving custom fields.** At submit, up to 8 visible custom-token fields of the form are
+  captured. When they give a row, the extension-origin save dialog
+  ([`src/save-dialog/`](src/save-dialog)) replaces the page-DOM banner: it fetches its rows from the
+  long-lived context by the save-prompt token, new text fields start ticked and hidden fields and
+  updates unticked, an empty Display Name cannot be saved, and only a real click answers it. A
+  save never changes an existing field's id. The banner still saves username and password only.
+- **Not done:** TOTP and custom fill from the popup (ADR 0076 owner answer 9); filling
+  split-digit code boxes.
 
 ## Architecture
 

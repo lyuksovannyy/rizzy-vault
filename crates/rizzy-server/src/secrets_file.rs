@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The server secrets file (CRYPTO.md §5.8, §5.11; ADR 0010 §4; threat model INV-50, INV-69).
 //!
 //! CRYPTO.md §5.11 fixes the file's **contents** ("the single normative list") and its version,
 //! `format = 1`: `server_setup` per `setup_id`, `enum_key`, `server_data_key` per `data_key_id`
-//! with one marked current, and the first-run bootstrap token. ADR 0028 item 13 owns the JSON
+//! with one marked current, the first-run bootstrap token, and, once a backup key exists,
+//! `backup_keys` per `backup_key_id` with one marked current (M8, ADR 0071). ADR 0028 item 13 owns the JSON
 //! **layout**, and this module mirrors it: the smallest layout that carries exactly that list,
 //! in the JSON shape CRYPTO.md §11.14 already uses for files, at most 256 KiB, unknown members
 //! refused:
@@ -14,12 +17,17 @@
 //!   "enum_key": "<b64url, 32 bytes>",
 //!   "data_keys": [{"data_key_id": 1, "key": "<b64url, 32 bytes>"}],
 //!   "current_data_key_id": 1,
-//!   "bootstrap_token": "<b64url, 32 bytes>"
+//!   "bootstrap_token": "<b64url, 32 bytes>",
+//!   "backup_keys": [{"backup_key_id": 1, "key": "<b64url, 32 bytes>"}],
+//!   "current_backup_key_id": 1
 //! }
 //! ```
 //!
 //! Binary fields are base64url without padding (CRYPTO.md §9.6), decoded strictly. Unknown
-//! fields are refused; `bootstrap_token` may be absent. The file is untrusted input only in the
+//! fields are refused; `bootstrap_token` may be absent, and `backup_keys` and
+//! `current_backup_key_id` are present together or absent together (ADR 0028 item 13 as ADR
+//! 0071 replaces it). **Compatibility is one-way:** a file with `backup_keys` is refused by an
+//! older binary, which does not know the members. The file is untrusted input only in the
 //! sense that an operator can damage it: it is read with a size limit
 //! ([`MAX_SECRETS_FILE_LEN`]) and parsed without panics (fuzz target `server_secrets_file`).
 //!
@@ -36,8 +44,8 @@ use std::path::Path;
 use base64ct::{Base64UrlUnpadded, Encoding as _};
 use rizzy_domain_auth::ServerSecrets;
 use rizzy_domain_auth::secrets::SECRETS_FORMAT;
-use rizzy_domain_auth::types::ServerDataKey;
 use rizzy_domain_auth::types::{EnumKey, ServerSetup};
+use rizzy_domain_auth::types::{ServerDataKey, ServerDbBackupKey};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize as _, Zeroizing};
 
@@ -116,6 +124,22 @@ struct RawFile {
     /// The bootstrap token, base64url, if the file still carries one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bootstrap_token: Option<String>,
+    /// The backup keys (ADR 0071), present together with `current_backup_key_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    backup_keys: Option<Vec<BackupKeyEntry>>,
+    /// The `backup_key_id` marked current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current_backup_key_id: Option<u32>,
+}
+
+/// One backup-key entry as stored (ADR 0071).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupKeyEntry {
+    /// The `backup_key_id`.
+    backup_key_id: u32,
+    /// The key, base64url.
+    key: String,
 }
 
 impl Drop for RawFile {
@@ -129,6 +153,9 @@ impl Drop for RawFile {
         self.enum_key.zeroize();
         if let Some(t) = &mut self.bootstrap_token {
             t.zeroize();
+        }
+        for k in self.backup_keys.iter_mut().flatten() {
+            k.key.zeroize();
         }
     }
 }
@@ -197,7 +224,7 @@ pub fn parse(bytes: &[u8]) -> Result<ServerSecrets, SecretsFileError> {
             )
         })
         .transpose()?;
-    ServerSecrets::from_parts(
+    let secrets = ServerSecrets::from_parts(
         raw.format,
         setups,
         enum_key,
@@ -205,7 +232,26 @@ pub fn parse(bytes: &[u8]) -> Result<ServerSecrets, SecretsFileError> {
         raw.current_data_key_id,
         bootstrap_token,
     )
-    .map_err(SecretsFileError::Invalid)
+    .map_err(SecretsFileError::Invalid)?;
+    match (&raw.backup_keys, raw.current_backup_key_id) {
+        (None, None) => Ok(secrets),
+        (Some(entries), Some(current)) => {
+            let mut keys = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let key = ServerDbBackupKey::from_slice(
+                    &decode(&entry.key, 32, "backup_keys.key")?,
+                    entry.backup_key_id,
+                )
+                .map_err(|_| SecretsFileError::BadField("backup_keys.key"))?;
+                keys.push(key);
+            }
+            secrets
+                .with_backup_keys(keys, current)
+                .map_err(SecretsFileError::Invalid)
+        }
+        // Present together or absent together (ADR 0028 item 13).
+        _ => Err(SecretsFileError::Malformed),
+    }
 }
 
 /// Serialises `secrets` in the layout of the module docs. The returned bytes hold every secret
@@ -235,6 +281,16 @@ pub fn serialize(secrets: &ServerSecrets) -> Result<Zeroizing<Vec<u8>>, SecretsF
         bootstrap_token: secrets
             .bootstrap_token()
             .map(Base64UrlUnpadded::encode_string),
+        backup_keys: secrets.current_backup_key_id().map(|_| {
+            secrets
+                .backup_keys()
+                .map(|k| BackupKeyEntry {
+                    backup_key_id: k.backup_key_id(),
+                    key: Base64UrlUnpadded::encode_string(k.expose_secret()),
+                })
+                .collect()
+        }),
+        current_backup_key_id: secrets.current_backup_key_id(),
     };
     // Room for a file with several rotations up front, so the buffer is rarely reallocated
     // (a reallocation would leave an unwiped copy of the secrets behind).
@@ -262,6 +318,7 @@ mod tests {
 
     use chacha20::ChaCha20Rng;
     use chacha20::rand_core::SeedableRng as _;
+    use rizzy_domain_auth::secrets::SecretsError;
 
     use super::*;
 
@@ -308,5 +365,77 @@ mod tests {
         let debug = format!("{secrets:?}");
         let enum_key = Base64UrlUnpadded::encode_string(secrets.enum_key().expose_secret());
         assert!(!debug.contains(&enum_key));
+    }
+
+    #[test]
+    fn backup_keys_round_trip_and_are_present_together() {
+        let mut rng = ChaCha20Rng::seed_from_u64(3);
+        let mut secrets = ServerSecrets::generate(&mut rng);
+        // No backup key: neither member is written (an older binary still reads the file).
+        let none = String::from_utf8(serialize(&secrets).unwrap().to_vec()).unwrap();
+        assert!(!none.contains("backup_key"));
+        assert_eq!(
+            parse(none.as_bytes()).unwrap().current_backup_key_id(),
+            None
+        );
+
+        secrets.rotate_backup_key(&mut rng).unwrap();
+        secrets.rotate_backup_key(&mut rng).unwrap();
+        let bytes = serialize(&secrets).unwrap();
+        let back = parse(&bytes).unwrap();
+        assert_eq!(serialize(&back).unwrap().as_slice(), bytes.as_slice());
+        assert_eq!(back.current_backup_key_id(), Some(2));
+        assert_eq!(
+            back.backup_key(1).unwrap().expose_secret(),
+            secrets.backup_key(1).unwrap().expose_secret()
+        );
+
+        let good = String::from_utf8(bytes.to_vec()).unwrap();
+        let edit = |f: &dyn Fn(&mut serde_json::Value)| {
+            let mut value: serde_json::Value = serde_json::from_str(&good).unwrap();
+            f(&mut value);
+            parse(value.to_string().as_bytes())
+        };
+        // One member without the other.
+        let only_keys = edit(&|v| {
+            v.as_object_mut().unwrap().remove("current_backup_key_id");
+        });
+        assert!(matches!(only_keys, Err(SecretsFileError::Malformed)));
+        let only_current = edit(&|v| {
+            v.as_object_mut().unwrap().remove("backup_keys");
+        });
+        assert!(matches!(only_current, Err(SecretsFileError::Malformed)));
+        // A current id no key has, an empty list, a duplicate id, an unknown entry member.
+        assert!(matches!(
+            edit(&|v| v["current_backup_key_id"] = 9.into()),
+            Err(SecretsFileError::Invalid(SecretsError::NoCurrentBackupKey))
+        ));
+        assert!(matches!(
+            edit(&|v| v["backup_keys"] = serde_json::json!([])),
+            Err(SecretsFileError::Invalid(SecretsError::NoCurrentBackupKey))
+        ));
+        assert!(matches!(
+            edit(&|v| v["backup_keys"][1]["backup_key_id"] = 1.into()),
+            Err(SecretsFileError::Invalid(SecretsError::DuplicateId))
+        ));
+        assert!(matches!(
+            edit(&|v| v["backup_keys"][0]["extra"] = 1.into()),
+            Err(SecretsFileError::Malformed)
+        ));
+        let short = edit(&|v| v["backup_keys"][0]["key"] = "AAAA".into());
+        assert_eq!(
+            short.err().unwrap().to_string(),
+            "secrets file field backup_keys.key is malformed"
+        );
+        // A backup key equal to the data key (INV-98).
+        let data_key =
+            Base64UrlUnpadded::encode_string(secrets.data_keys().next().unwrap().expose_secret());
+        assert!(matches!(
+            edit(&|v| v["backup_keys"][0]["key"] = data_key.clone().into()),
+            Err(SecretsFileError::Invalid(SecretsError::BackupKeyReused))
+        ));
+        let debug = format!("{back:?}");
+        let key = Base64UrlUnpadded::encode_string(back.backup_key(2).unwrap().expose_secret());
+        assert!(!debug.contains(&key));
     }
 }

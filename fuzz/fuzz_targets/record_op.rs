@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the op-data parser of the item record (ADR 0018 §5 `parse_op`), which reads the
 //! decrypted `data` of every `ITEM_OP` envelope. From M9 a vault member can author that
 //! plaintext, and before then any holder of the item key can, so the parser must never panic,

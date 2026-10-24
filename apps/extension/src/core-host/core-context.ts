@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The long-lived context's message handling, shared between the Chromium offscreen document
 // (`offscreen.ts`) and the Firefox background page (`background-page.ts`) — ADR 0036 §2: "one
 // long-lived context holds the instance... for the whole extension lifetime." This is the ONE
@@ -12,6 +14,7 @@ import { createSavePromptLocationIndex } from "./save-prompt-location.ts";
 import {
   type AddPasskeyInput,
   type DurableSession,
+  type ItemChange,
   type MatchCandidate,
   type MatchFrameInfo,
   addPasskeyChange,
@@ -22,16 +25,22 @@ import {
   findItemForUpdate,
   initCore,
   itemCredentials,
+  itemIcon,
   newElementId,
   newLoginChangeset,
   newLoginWithPasskeyChangeset,
+  saveTargets,
+  saveVault,
   sessionPasskeyCandidatesForRpId,
   toContractItemSummary,
+  vaultLabel,
   unlockDevice,
   updateLoginChangeset,
 } from "./bindings.ts";
 import { ExtensionCache } from "../cache/idb.ts";
 import { AutoLockTimer, readAutoLockMs } from "./lifecycle.ts";
+import { createIframeInstanceStore } from "./iframe-instance.ts";
+import { type OfferRecord, type OfferRefusal, type OfferedItem, createOfferStore } from "./offer-store.ts";
 import {
   type PasskeyCeremonyRequest,
   createPasskeyCeremonyStore,
@@ -40,7 +49,12 @@ import {
 import { base64ToBytes, bytesToBase64 } from "../messaging/bytes.ts";
 import { clearUnlockedSnapshot, hasSessionStorage, restoreUnlockedSnapshot } from "./session-store.ts";
 import type {
+  CapturedCustomField,
+  FillOnly,
+  FillScope,
+  FillValues,
   ItemFieldSummary,
+  OfferCandidate,
   PasskeyCandidateSummary,
   PasskeyResultPayload,
   PopupRequest,
@@ -99,6 +113,8 @@ async function lock(ext: WebExtNamespace): Promise<void> {
   pendingSavePrompts.clear();
   savePromptLocations.clear();
   passkeyCeremonies.clear();
+  iframeInstances.clear();
+  offers.clear();
   if (hasSessionStorage(ext)) {
     await clearUnlockedSnapshot(ext);
   }
@@ -128,6 +144,9 @@ interface PendingSavePrompt {
    * whatever the vault's state happens to be by then. Set only when `action` is `"update"`,
    * same as the immediate response `offerSavePrompt` already returns. */
   readonly itemTitle?: string;
+  /** ADR 0076 §5.1: the submitted form's custom-token fields, for the extension-origin save
+   * dialog only (never the page-DOM banner, §5.2). Held in memory, dropped with the prompt. */
+  readonly customFields?: readonly CapturedCustomField[];
 }
 
 /** Submitted-credential reports awaiting a save/update decision (ADR 0036 §4: zeroized once the
@@ -155,6 +174,9 @@ function addPendingSavePrompt(pending: PendingSavePrompt): string {
  * note on the save-prompt race this fixes). Deliberately short: a stale offer reachable for too
  * long after the user has moved on is the wrong default for a security prompt. */
 const SAVE_PROMPT_LOCATION_TTL_MS = 2 * 60 * 1000;
+
+/** The longest website host an `item_icon` request may carry (the core bounds it again). */
+const MAX_WEBSITE_HOST_CHARS = 1024;
 
 /** The save-prompt offer's *location* index (`save-prompt-location.ts`'s own module docs) —
  * never its credentials, which stay solely in {@link pendingSavePrompts} above. Cleared on lock
@@ -193,7 +215,7 @@ function rememberPendingOfferByLocation(tabId: number | undefined, pageUrl: stri
 export function checkPendingSavePromptByLocation(
   tabId: number | undefined,
   pageUrl: string,
-): { readonly token: string; readonly suggestion: "save" | "update"; readonly itemTitle?: string } | undefined {
+): { readonly token: string; readonly suggestion: "save" | "update"; readonly itemTitle?: string; readonly dialog?: true } | undefined {
   const token = savePromptLocations.take(tabId, registrableDomainOrUndefined(pageUrl), Date.now());
   if (token === undefined) {
     return undefined;
@@ -212,7 +234,34 @@ export function checkPendingSavePromptByLocation(
     token,
     suggestion: pending.action,
     ...(pending.itemTitle !== undefined ? { itemTitle: pending.itemTitle } : {}),
+    // ADR 0076 §5.2: the same dialog/banner choice as the immediate answer made.
+    ...(hasDialogRows(pending) || severalSaveTargets(pending.action) ? { dialog: true as const } : {}),
   };
+}
+
+/** ADR 0081 §A8: a new login with two or more vaults to save to is asked in the extension-origin
+ * dialog, whose picker preselects the Personal vault; vault names never enter the page DOM. */
+function severalSaveTargets(action: "save" | "update"): boolean {
+  if (action !== "save" || session === undefined) {
+    return false;
+  }
+  try {
+    return saveTargets(session).length > 1;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a pending prompt's captured custom fields give save-dialog rows (ADR 0076 §5.3). */
+function hasDialogRows(pending: PendingSavePrompt): boolean {
+  if (session === undefined || pending.customFields === undefined || pending.customFields.length === 0) {
+    return false;
+  }
+  try {
+    return session.customSavePlan(pending.action === "update" ? pending.updateItemId : undefined, pending.customFields).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 /** Runs the save or update a resolved save-prompt token named (`content-handler.ts`'s
@@ -224,7 +273,13 @@ async function applySavePromptAction(pending: PendingSavePrompt, action: "save" 
     return;
   }
   if (action === "save") {
-    await session.createItem("login", newLoginChangeset(pending.pageUrl, pending.usernameValue, pending.passwordValue));
+    // ADR 0081 §A8: the page-DOM banner offers no picker (vault names never enter the page), so
+    // it saves to the Personal vault; with several vaults the dialog asks (`wantsDialog`).
+    await session.createItem(
+      saveVault(session, undefined),
+      "login",
+      newLoginChangeset(pending.pageUrl, pending.usernameValue, pending.passwordValue),
+    );
   } else if (pending.updateItemId !== undefined) {
     await session.editItem(pending.updateItemId, updateLoginChangeset(pending.usernameValue, pending.passwordValue));
   }
@@ -248,7 +303,7 @@ export async function resolveSavePrompt(token: string, action: "save" | "update"
 export function matchCandidatesFor(
   pageUrl: string,
   frame: MatchFrameInfo,
-): { candidates: readonly MatchCandidate[]; warnings: readonly string[] } | undefined {
+): { pageHost: string; pagePort: number | undefined; candidates: readonly MatchCandidate[]; warnings: readonly string[] } | undefined {
   if (session === undefined) {
     return undefined;
   }
@@ -258,13 +313,20 @@ export function matchCandidatesFor(
 /** `content-handler.ts`'s own title/username lookup for one match candidate (ADR 0013 §3 rule
  * 3: list views never carry more than title/username). `undefined` while locked, or if the item
  * no longer exists (deleted between the match decision and this lookup). */
-export function itemSummaryFor(itemId: string): { title: string; username: string } | undefined {
+export function itemSummaryFor(itemId: string): { title: string; username: string; vault?: string } | undefined {
   if (session === undefined) {
     return undefined;
   }
   try {
     const item = session.item(itemId);
-    return { title: item.title, username: item.username ?? "" };
+    // ADR 0081 §A7: every list row shows its vault, the inline menu's candidate rows too; the
+    // label ("Personal", a name, "Untitled vault") is the popup's (`vaultLabel`).
+    const vault = session.vaults().find((v) => v.id === item.vaultId);
+    return {
+      title: item.title,
+      username: item.username ?? "",
+      ...(vault === undefined ? {} : { vault: vaultLabel(vault) }),
+    };
   } catch {
     return undefined;
   }
@@ -282,10 +344,51 @@ export function revealCredentialsForFill(itemId: string): { username?: string; p
   return { ...(username !== "" ? { username } : {}), password };
 }
 
+/** `content-handler.ts`'s `handleInlineMenuGeneratePasswordRequest` (gap 32 in the M2 gap
+ * audit, ADR 0040's trusted-click pattern applied to the generator): the same
+ * `generatePasswordWithOptions` the popup's own `generate_password` handler (below) calls, with
+ * its own default length — this one-button inline affordance offers no length/kind picker of its
+ * own (ROADMAP §4.4's generator is the popup's; duplicating a picker into the small iframe menu
+ * is unneeded surface, YAGNI). Independent of enrolment/unlock, same as the popup's handler:
+ * `initCore()` is memoised, so this is a no-op once anything else has already loaded the wasm
+ * module. Never throws — `handleInlineMenuGeneratePasswordRequest` catches and reports a plain
+ * refusal, matching every other inline-menu-iframe request's `ContentErrorMessage` fallback. */
+export async function generatePasswordForFill(): Promise<string> {
+  await initCore();
+  return generatePasswordWithOptions({}).value;
+}
+
 /** The passkey consent ceremony's pending-request store (`core-host/passkey-ceremony.ts`'s own
  * module docs) — cleared on lock, alongside every other in-memory secret-adjacent state this
  * long-lived context holds (`lock`, above). */
 const passkeyCeremonies = createPasskeyCeremonyStore();
+
+/** The inline-menu/passkey-consent iframe instance tokens (ADR 0043; `core-host/iframe-instance.ts`'s
+ * own module docs) — cleared on lock like {@link passkeyCeremonies}. A registration needs no
+ * unlocked session (the iframe shows nothing privileged while locked anyway, and every request it
+ * could send is refused while locked regardless), so these four never check `session`. */
+const iframeInstances = createIframeInstanceStore();
+
+/** `register_iframe_instance` (ADR 0043 point 2): `tabId`/`trustedOrigin` are the browser-vouched
+ * sender info of the content script that minted `instanceToken`. */
+export function registerIframeInstance(instanceToken: string, tabId: number, trustedOrigin: string): boolean {
+  return iframeInstances.register(instanceToken, tabId, trustedOrigin, Date.now());
+}
+
+/** `revoke_iframe_instance` (ADR 0043 point 5). */
+export function revokeIframeInstance(instanceToken: string, tabId: number): void {
+  iframeInstances.revoke(instanceToken, tabId);
+}
+
+/** The use-time check (ADR 0043 point 4), for `listener.ts`'s `isInlineMenuSender` branch:
+ * every `true` must be paired with one {@link releaseIframeInstance} once that request settles. */
+export function acquireIframeInstance(instanceToken: string, liveTabId: number): boolean {
+  return iframeInstances.acquire(instanceToken, liveTabId, Date.now());
+}
+
+export function releaseIframeInstance(instanceToken: string): void {
+  iframeInstances.release(instanceToken);
+}
 
 /** `content-handler.ts`'s `passkey_create_request` handling (ADR 0039 §2): registers a pending
  * "save a passkey" ceremony and returns what the consent UI needs to display, or `undefined`
@@ -304,7 +407,14 @@ export function offerPasskeyCreate(
   userName: string,
   userDisplayName: string,
   challengeB64: string,
-): { readonly ceremonyToken: string; readonly rpId: string; readonly rpName: string; readonly userName: string } | undefined {
+): {
+  readonly ceremonyToken: string;
+  readonly rpId: string;
+  readonly rpName: string;
+  readonly userName: string;
+  readonly vaults?: readonly { readonly id: string; readonly label: string }[];
+  readonly defaultVaultId?: string;
+} | undefined {
   if (session === undefined) {
     return undefined;
   }
@@ -323,19 +433,44 @@ export function offerPasskeyCreate(
     challengeB64,
   };
   const ceremonyToken = passkeyCeremonies.create(request, tabId, origin, Date.now());
-  return { ceremonyToken, rpId, rpName, userName };
+  // ADR 0081 §A8: a passkey that saves a new login offers the vault picker (Personal
+  // preselected); one added to an existing login stays in that login's vault.
+  const attaches = sessionPasskeyCandidatesForRpId(session, rpId).length > 0;
+  const targets = attaches ? [] : saveTargets(session);
+  const personal = targets.find((v) => v.id === session?.personalVaultId) ?? targets[0];
+  return {
+    ceremonyToken,
+    rpId,
+    rpName,
+    userName,
+    ...(targets.length > 1 && personal !== undefined
+      ? { vaults: targets.map((v) => ({ id: v.id, label: vaultLabel(v) })), defaultVaultId: personal.id }
+      : {}),
+  };
 }
 
 /** `content-handler.ts`'s `passkey_get_request` handling: registers a pending "sign in with a
- * passkey" ceremony with every candidate whose stored `rp_id` matches, or `undefined` while
- * locked or when nothing matches (ADR 0039 §2's consent prompt needs at least one real choice —
- * an empty list falls straight back to the native authenticator, `content-handler.ts`'s own
- * decision, not this function's). */
+ * passkey" ceremony with every candidate whose stored `rp_id` matches — and, when the page's own
+ * `navigator.credentials.get()` call named `allowCredentials` (`allowCredentialIdsB64`, gap
+ * 35(b) in the M2 gap audit), only the ones among those matches whose `credentialId` the page
+ * actually listed. `undefined` while locked or when nothing matches (ADR 0039 §2's consent
+ * prompt needs at least one real choice — an empty list falls straight back to the native
+ * authenticator, `content-handler.ts`'s own decision, not this function's).
+ *
+ * An empty `allowCredentialIdsB64` means "any discoverable credential for this `rpId`"
+ * (`PasskeyGetRequestMessage`'s own doc, mirroring the WebAuthn spec's own "omitted or empty
+ * `allowCredentials` means a discoverable-credential request") — every `rp_id` match is offered,
+ * same as before this gap was filled. A non-empty list narrows to the intersection: this is the
+ * one place that intersection is computed, so `passkey_assertion` itself never has to (`crate::
+ * device::DeviceSession::passkey_assertion`'s own doc: "This call does **not** check
+ * `passkey_id` against the page's `allowCredentials`").
+ */
 export function offerPasskeyGet(
   origin: string,
   tabId: number,
   rpIdHint: string | undefined,
   challengeB64: string,
+  allowCredentialIdsB64: readonly string[],
 ): { readonly ceremonyToken: string; readonly rpId: string; readonly candidates: readonly PasskeyCandidateSummary[] } | undefined {
   if (session === undefined) {
     return undefined;
@@ -344,7 +479,11 @@ export function offerPasskeyGet(
   if (rpId === undefined) {
     return undefined;
   }
-  const matches = sessionPasskeyCandidatesForRpId(session, rpId);
+  let matches = sessionPasskeyCandidatesForRpId(session, rpId);
+  if (allowCredentialIdsB64.length > 0) {
+    const allowed = new Set(allowCredentialIdsB64);
+    matches = matches.filter((m) => allowed.has(bytesToBase64(m.credentialId)));
+  }
   if (matches.length === 0) {
     return undefined;
   }
@@ -375,7 +514,9 @@ function hostOf(origin: string): string | undefined {
 }
 
 function splitPasskeyRef(passkeyRef: string): { readonly itemId: string; readonly elementId: string } | undefined {
-  const i = passkeyRef.indexOf(":");
+  // The item part is an item reference, `<vault hex>:<item hex>` (ADR 0081 §A7); the element
+  // id after the last colon has none.
+  const i = passkeyRef.lastIndexOf(":");
   if (i < 0) {
     return undefined;
   }
@@ -398,6 +539,7 @@ export async function approvePasskeyCeremony(
   liveTabId: number,
   liveOrigin: string,
   chosenPasskeyRef: string | undefined,
+  vaultId?: string,
 ): Promise<PasskeyResultPayload | undefined> {
   const request = passkeyCeremonies.take(ceremonyToken, liveTabId, liveOrigin, Date.now());
   if (request === undefined || session === undefined) {
@@ -405,7 +547,7 @@ export async function approvePasskeyCeremony(
   }
   try {
     if (request.kind === "create") {
-      return await runCreatePasskey(session, request);
+      return await runCreatePasskey(session, request, vaultId);
     }
     return runGetPasskey(session, request, chosenPasskeyRef);
   } catch {
@@ -426,6 +568,7 @@ export function declinePasskeyCeremony(ceremonyToken: string, liveTabId: number,
 async function runCreatePasskey(
   s: DurableSession,
   request: Extract<PasskeyCeremonyRequest, { kind: "create" }>,
+  vaultId: string | undefined,
 ): Promise<PasskeyResultPayload> {
   const created = createPasskey(request.origin, request.rpId, base64ToBytes(request.challengeB64));
   const passkeyInput: AddPasskeyInput = {
@@ -446,7 +589,11 @@ async function runCreatePasskey(
   if (existing !== undefined) {
     await s.editItem(existing.itemId, [addPasskeyChange(passkeyInput)]);
   } else {
-    await s.createItem("login", newLoginWithPasskeyChangeset(request.rpName, request.userName, passkeyInput));
+    await s.createItem(
+      saveVault(s, vaultId),
+      "login",
+      newLoginWithPasskeyChangeset(request.rpName, request.userName, passkeyInput),
+    );
   }
   try {
     // Pushes the new/updated Login to the server right away, rather than waiting for the popup
@@ -487,11 +634,13 @@ function runGetPasskey(
     clientDataJsonB64: bytesToBase64(assertion.clientDataJson),
     authenticatorDataB64: bytesToBase64(assertion.authenticatorData),
     signatureB64: bytesToBase64(assertion.signatureDer),
-    // `userHandle` is deliberately absent (`StoredPasskey`'s own doc, `bindings.ts`): no
-    // `@rizzy-vault/core` call returns it back once stored, only at creation time. Legal per the
-    // WebAuthn spec (`AuthenticatorAssertionResponse.userHandle` is nullable), but an RP that
-    // requires it for a fully "typeless" discoverable sign-in will not accept this response —
-    // `not_done`, reported honestly rather than worked around.
+    // Gap 35(a) in the M2 gap audit: `DurableSession.passkeyAssertion` now reads the stored
+    // `user_handle` back alongside the credential id (`crates/rizzy-wasm/src/device.rs`'s
+    // `passkey_assertion`, never the private key) and returns it on every assertion, so this is
+    // always set, not conditionally — an RP that requires `userHandle` for a fully "typeless"
+    // discoverable sign-in (WebAuthn's own nullable field, but some RPs do require it in
+    // practice) now gets it.
+    userHandleB64: bytesToBase64(assertion.userHandle),
   };
 }
 
@@ -503,16 +652,30 @@ export function offerSavePrompt(
   usernameValue: string | undefined,
   passwordValue: string | undefined,
   tabId: number | undefined,
-): { readonly token: string; readonly suggestion: "save" | "update"; readonly itemTitle?: string } | undefined {
+  customFields?: readonly CapturedCustomField[],
+): { readonly token: string; readonly suggestion: "save" | "update"; readonly itemTitle?: string; readonly dialog?: true } | undefined {
   if (session === undefined || passwordValue === undefined || passwordValue === "") {
     return undefined;
   }
   const username = usernameValue ?? "";
-  const existing = findItemForUpdate(session, pageUrl);
+  const existing = findItemForUpdate(session, pageUrl, username);
+  const custom = customFields !== undefined && customFields.length > 0 ? { customFields } : {};
+  // ADR 0076 §5.2–§5.3: when a captured custom field gives a dialog row, consent is asked in
+  // the extension-origin save dialog, never in the page-DOM banner.
+  const dialog = (itemId: string | undefined) => {
+    if (customFields === undefined || customFields.length === 0 || session === undefined) {
+      return {};
+    }
+    try {
+      return session.customSavePlan(itemId, customFields).length > 0 ? { dialog: true as const } : {};
+    } catch {
+      return {};
+    }
+  };
   if (existing === undefined) {
-    const token = addPendingSavePrompt({ action: "save", pageUrl, usernameValue: username, passwordValue });
+    const token = addPendingSavePrompt({ action: "save", pageUrl, usernameValue: username, passwordValue, ...custom });
     rememberPendingOfferByLocation(tabId, pageUrl, token);
-    return { token, suggestion: "save" };
+    return { token, suggestion: "save", ...(severalSaveTargets("save") ? { dialog: true as const } : dialog(undefined)) };
   }
   const token = addPendingSavePrompt({
     action: "update",
@@ -521,9 +684,213 @@ export function offerSavePrompt(
     passwordValue,
     updateItemId: existing.id,
     itemTitle: existing.title,
+    ...custom,
   });
   rememberPendingOfferByLocation(tabId, pageUrl, token);
-  return { token, suggestion: "update", itemTitle: existing.title };
+  return { token, suggestion: "update", itemTitle: existing.title, ...dialog(existing.id) };
+}
+
+/** One row of the extension-origin save dialog (ADR 0076 §5.3). Never a value. */
+export interface SaveDialogRow {
+  readonly index: number;
+  readonly kind: "add" | "update";
+  readonly label: string;
+  readonly concealed: boolean;
+  readonly checked: boolean;
+}
+
+/** What the save dialog shows for the pending prompt `token` (ADR 0076 §5.2: it fetches its
+ * choices from here directly, by the save-prompt token). `undefined` when there is no such
+ * prompt or the device is locked. The prompt stays pending. */
+export function saveDialogChoices(
+  token: string,
+): { readonly suggestion: "save" | "update"; readonly itemTitle?: string; readonly pageHost: string; readonly rows: readonly SaveDialogRow[] } | undefined {
+  const pending = pendingSavePrompts.get(token);
+  if (pending === undefined || session === undefined) {
+    return undefined;
+  }
+  let pageHost = "";
+  try {
+    pageHost = new URL(pending.pageUrl).hostname;
+  } catch {
+    // An unparsable URL was refused before it was stored; an empty host is shown otherwise.
+  }
+  const rows = session
+    .customSavePlan(pending.action === "update" ? pending.updateItemId : undefined, pending.customFields ?? [])
+    .map((r) => ({ index: r.index, kind: r.kind, label: r.label, concealed: r.concealed, checked: r.checked }));
+  // ADR 0081 §A8: a new login's vault picker, the Personal vault preselected every time.
+  const targets = pending.action === "save" ? saveTargets(session) : [];
+  const personal = targets.find((v) => v.id === session?.personalVaultId) ?? targets[0];
+  return {
+    suggestion: pending.action,
+    ...(pending.itemTitle !== undefined ? { itemTitle: pending.itemTitle } : {}),
+    pageHost,
+    rows,
+    ...(targets.length > 1 && personal !== undefined
+      ? { vaults: targets.map((v) => ({ id: v.id, label: vaultLabel(v) })), defaultVaultId: personal.id }
+      : {}),
+  };
+}
+
+/** The longest Display Name the save dialog may set, in UTF-16 code units. */
+export const MAX_SAVE_DIALOG_LABEL_LEN = 256;
+
+/**
+ * Resolves the pending prompt `token` from the save dialog (ADR 0076 §5.3–§5.4): the login's
+ * save or update as the banner would, plus the custom rows the user ticked (`chosen`, by row
+ * index, with the Display Name the user left in an "add" row). The rows are recomputed here
+ * from the prompt and the vault, never taken from the message: a save never sets or changes an
+ * existing field's id, adds a field only under its own token, and every write runs W1–W5 in
+ * `rizzy-client`. Returns `false` for no such prompt.
+ */
+export async function resolveSaveDialog(
+  token: string,
+  action: "save" | "update" | "dismiss",
+  chosen: readonly { readonly index: number; readonly label: string }[],
+  vaultId?: string,
+): Promise<boolean> {
+  const pending = takePendingSavePrompt(token);
+  if (pending === undefined) {
+    return false;
+  }
+  if (action === "dismiss" || session === undefined || action !== pending.action) {
+    return true;
+  }
+  const captured = pending.customFields ?? [];
+  const rows = session.customSavePlan(pending.action === "update" ? pending.updateItemId : undefined, captured);
+  const extra: ItemChange[] = [];
+  for (const pick of chosen) {
+    const row = rows.find((r) => r.index === pick.index);
+    const field = captured[pick.index];
+    if (row === undefined || field === undefined) {
+      continue;
+    }
+    if (row.kind === "add") {
+      const label = pick.label.trim();
+      if (label === "" || label.length > MAX_SAVE_DIALOG_LABEL_LEN) {
+        continue; // W5: a new field needs a Display Name; the dialog never sends an empty one.
+      }
+      extra.push({
+        op: "addCustomField",
+        element: newElementId(),
+        label,
+        kind: field.masked ? "hidden" : "text",
+        value: field.value,
+        autocomplete: field.token,
+      });
+    } else if (row.element !== undefined) {
+      extra.push({ op: "set", key: `field/${row.element}/value`, value: field.value });
+    }
+  }
+  if (pending.action === "save") {
+    await session.createItem(saveVault(session, vaultId), "login", [
+      ...newLoginChangeset(pending.pageUrl, pending.usernameValue, pending.passwordValue),
+      ...extra,
+    ]);
+  } else if (pending.updateItemId !== undefined) {
+    await session.editItem(pending.updateItemId, [...updateLoginChangeset(pending.usernameValue, pending.passwordValue), ...extra]);
+  }
+  return true;
+}
+
+/** The inline-menu offer records (ADR 0076 §4.1; `offer-store.ts`), cleared on lock. */
+const offers = createOfferStore(
+  (out) => crypto.getRandomValues(out),
+  () => Date.now(),
+);
+
+/** Truncates a Display Name to the offer's 256-character bound, by code point. */
+function offerLabel(label: string): string {
+  let out = "";
+  for (const ch of label) {
+    if (out.length + ch.length > 256) {
+      break;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** Whether an item can produce a TOTP code (ADR 0076 §1.3 rule (g), `hasTotp`). */
+export function hasTotpFor(itemId: string): boolean {
+  if (session === undefined) {
+    return false;
+  }
+  try {
+    return session.autofillOffer(itemId, []).fillsTotp;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Builds and records the offer for one inline menu (ADR 0076 §4.1 step 3): per current candidate,
+ * whether a click fills a TOTP code (the step has a TOTP target and the item a time-based
+ * secret) and which custom fields it fills, by Display Name. `undefined` while locked.
+ */
+export function createOffer(
+  tabId: number,
+  pageUrl: string,
+  scope: FillScope,
+  candidateIds: readonly string[],
+): { readonly offerId: string; readonly candidates: readonly OfferCandidate[] } | undefined {
+  if (session === undefined) {
+    return undefined;
+  }
+  const stepHasTotp = scope.only === "totp" || scope.totp === true;
+  const items = new Map<string, OfferedItem>();
+  const candidates: OfferCandidate[] = [];
+  for (const itemId of candidateIds) {
+    let offer: ReturnType<DurableSession["autofillOffer"]>;
+    try {
+      offer = session.autofillOffer(itemId, scope.custom ?? []);
+    } catch {
+      continue;
+    }
+    const fillsTotp = stepHasTotp && offer.fillsTotp;
+    items.set(itemId, { fillsTotp, custom: offer.custom.map((c) => ({ token: c.token, element: c.element })) });
+    candidates.push({
+      itemId,
+      fillsTotp,
+      customFill: offer.custom.map((c) => ({ label: offerLabel(c.label), concealed: c.concealed })),
+    });
+  }
+  const offerId = offers.create({ tabId, pageUrl, scope, items });
+  return { offerId, candidates };
+}
+
+/** Takes an offer for a fill (ADR 0076 §4.2; `offer-store.ts`'s `take`). */
+export function takeOffer(offerId: string, tabId: number, pageUrl: string, itemId: string, only: FillOnly | undefined): OfferRecord | OfferRefusal {
+  return offers.take(offerId, tabId, pageUrl, itemId, only);
+}
+
+/**
+ * The values of one offered fill (ADR 0076 §4.2): one coarse call into `rizzy-client` with the
+ * offer record's own scope and the elements it recorded. `undefined` while locked or when
+ * nothing would be filled.
+ */
+export function fillValuesFor(itemId: string, record: OfferRecord): FillValues | undefined {
+  if (session === undefined) {
+    return undefined;
+  }
+  const item = record.items.get(itemId);
+  if (item === undefined) {
+    return undefined;
+  }
+  const plan = session.fillPlan(itemId, {
+    only: record.scope.only,
+    totp: item.fillsTotp && record.scope.only !== "totp",
+    custom: item.custom,
+    usernameToken: record.scope.usernameToken,
+    passwordToken: record.scope.passwordToken,
+  });
+  const values: FillValues = {
+    ...(plan.username !== undefined ? { username: plan.username } : {}),
+    ...(plan.password !== undefined ? { password: plan.password } : {}),
+    ...(plan.totp !== undefined && item.fillsTotp ? { totp: plan.totp } : {}),
+    ...(plan.custom.length > 0 ? { custom: plan.custom } : {}),
+  };
+  return Object.keys(values).length === 0 ? undefined : values;
 }
 
 function mapFields(fields: readonly { key: string; kind: ItemFieldSummary["kind"]; concealed: boolean; value: string | undefined }[]): readonly ItemFieldSummary[] {
@@ -607,7 +974,30 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
       if (session === undefined) {
         return { type: "error", code: "locked" };
       }
-      return { type: "items", items: session.items().map(toContractItemSummary) };
+      {
+        const vaults = session.vaults();
+        return { type: "items", items: session.items().map((i) => toContractItemSummary(i, vaults)) };
+      }
+    case "item_icon": {
+      // ADR 0052 point 6: only while unlocked, and only the hostname leaves (the core refuses
+      // anything that is not one, and sends nothing for it).
+      if (session === undefined) {
+        return { type: "error", code: "locked" };
+      }
+      if (typeof request.websiteHost !== "string" || request.websiteHost.length > MAX_WEBSITE_HOST_CHARS) {
+        return { type: "error", code: "invalid_input" };
+      }
+      try {
+        const { serverOrigin } = await readAccountConfig();
+        if (serverOrigin === undefined) {
+          return { type: "error", code: "not_enrolled" };
+        }
+        const png = await itemIcon(serverOrigin, request.websiteHost);
+        return { type: "icon", png: png === undefined ? null : bytesToBase64(png) };
+      } catch (e) {
+        return { type: "error", code: errorCode(e, "item_icon_failed") };
+      }
+    }
     case "item_fields":
       if (session === undefined) {
         return { type: "error", code: "locked" };

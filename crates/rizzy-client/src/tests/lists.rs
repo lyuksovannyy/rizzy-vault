@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! List order tests (ADR 0018 §6 "List order"; `crate::lists`): moves between neighbours,
 //! the rewrite with evenly spaced keys when no key fits, and the split of a large rewrite into
 //! consecutive ops.
@@ -14,7 +16,7 @@ use crate::lists::{
 };
 
 /// A writer with one Login item.
-fn one_item(seed: u64) -> (Server, ChaCha20Rng, VaultSync, UnlockedDevice, ItemId) {
+pub(super) fn one_item(seed: u64) -> (Server, ChaCha20Rng, VaultSync, UnlockedDevice, ItemId) {
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
     let mut server = Server::new(seed + 1);
     let a = signup(&mut server, &mut rng, DeviceKind::DesktopCli);

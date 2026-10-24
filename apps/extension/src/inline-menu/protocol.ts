@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The `window.postMessage` protocol between the content script (running in the untrusted
 // page's own window — isolated-world JS, but a shared DOM/BOM, including `window` itself) and
-// the extension-origin inline-menu iframe it creates (ADR 0036 §4/§5, ADR 0036 §75 "the
+// the extension-origin inline-menu iframe it creates (ADR 0036 §4/§5, ADR 0036 §6 "the
 // inline-menu iframe app"; INV-36, INV-40). Carries no secrets, only title/username summaries
-// (ADR 0013 §3 rule 3) in, and the user's chosen `itemId` out — never crosses
+// (ADR 0013 §3 rule 3) and each item's vault label (ADR 0081 §A7) in, and the user's chosen
+// `itemId` out — never crosses
 // `messaging/contract.ts`'s background-messaging boundary, and is validated on both ends all
 // the same, because `postMessage` delivers to any listener regardless of claimed source.
 //
@@ -43,7 +46,7 @@
 //     `inline_menu_fill_chosen` message that would have to follow only ever carries the real
 //     `itemId` the real iframe's own click handler holds — a forged show message cannot make
 //     the iframe send that for an id it never really rendered a trusted click for.
-import { MAX_CANDIDATES, MAX_FIELD_VALUE_LEN, MAX_TITLE_LEN } from "../messaging/contract.ts";
+import { MAX_CANDIDATES, MAX_FIELD_VALUE_LEN, MAX_HOST_LEN, MAX_TITLE_LEN, MAX_VAULT_LABEL_LEN, isFillOnly, isFillScope, isInstanceToken, type FillOnly, type FillScope } from "../messaging/contract.ts";
 
 export const INLINE_MENU_SHOW = "rizzy-inline-menu-show";
 export const INLINE_MENU_PICK = "rizzy-inline-menu-pick";
@@ -57,6 +60,16 @@ export interface InlineMenuCandidate {
    * module's) — the menu must show a warning and ask for a second, explicit confirmation before
    * filling it. */
   readonly needsWarning: boolean;
+  /** The saved URI's exact normalised host, A-label form (ADR 0037 §5 "Exact host shown";
+   * gap 31 in the M2 gap audit) — "the saved site" in the equivalence-only warning. Computed by
+   * `rizzy-match`, never by this module: render it verbatim, never decoded to Unicode, so a
+   * mixed-script host keeps showing its punycode `xn--` form. */
+  readonly savedHost: string;
+  /** ADR 0076 §4.1: the item can produce a TOTP code. */
+  readonly hasTotp?: boolean;
+  /** ADR 0081 §A7: the item's vault label, shown in the row as the popup shows it (never a
+   * secret; `MatchCandidateSummary.vault`). */
+  readonly vault?: string;
 }
 
 export interface InlineMenuShowMessage {
@@ -64,7 +77,31 @@ export interface InlineMenuShowMessage {
   /** The embedding page's origin, used only as this message's own `postMessage` target when
    * the iframe later replies — never trusted as an identity claim beyond that. */
   readonly pageOrigin: string;
+  /** ADR 0043 point 3: the token the content script minted for, and registered with the
+   * background for, this one iframe instance. This targeted message is the only place it ever
+   * travels — never `src`, an attribute, or anything else a page sharing the tab's frame tree
+   * can read — and the iframe sends it back with every privileged request
+   * (`messaging/contract.ts`'s `InlineMenuFillRequestMessage`). A page that forges this message
+   * (the forgeable direction, module docs) can only invent a token, which the background refuses;
+   * a clone of this resource is never sent one at all. */
+  readonly instanceToken: string;
+  /** The page's own exact normalised host, A-label form (ADR 0037 §5 "Exact host shown"; gap
+   * 31 in the M2 gap audit): the menu always shows this, matching or not, so the user can
+   * notice an unexpected match. Computed by `rizzy-match`, never by this module. */
+  readonly pageHost: string;
   readonly candidates: readonly InlineMenuCandidate[];
+  /** The one field this login step fills (`content/login-step.ts`; ROADMAP §4.4 M3 multi-step
+   * login forms): `"username"` on an identifier-first step, `"password"` on a password-only
+   * step, absent for a one-page form (both). The iframe passes it on unchanged in its own fill
+   * request (`messaging/contract.ts`'s `InlineMenuFillRequestMessage.only`), where it can only
+   * ever narrow what the long-lived context sends; a page script that forges this message can
+   * at most widen it back to the one-page form's both-values push, which the content script
+   * still writes only into the visible fields of the step it detected. */
+  readonly only?: FillOnly;
+  /** The step's whole fill scope (ADR 0076 §4.1): `only`, a TOTP target, the custom tokens.
+   * The iframe sends it in its offer request; the long-lived context only ever narrows with it,
+   * and discloses in the menu, before the click, everything a click on a row would fill. */
+  readonly scope?: FillScope;
 }
 
 export interface InlineMenuPickMessage {
@@ -85,7 +122,10 @@ function isCandidate(value: unknown): value is InlineMenuCandidate {
     isBoundedString(v["itemId"], 256) &&
     isBoundedString(v["title"], MAX_TITLE_LEN) &&
     isBoundedString(v["username"], MAX_FIELD_VALUE_LEN) &&
-    typeof v["needsWarning"] === "boolean"
+    typeof v["needsWarning"] === "boolean" &&
+    isBoundedString(v["savedHost"], MAX_HOST_LEN) &&
+    (v["hasTotp"] === undefined || typeof v["hasTotp"] === "boolean") &&
+    (v["vault"] === undefined || isBoundedString(v["vault"], MAX_VAULT_LABEL_LEN))
   );
 }
 
@@ -94,7 +134,14 @@ export function isInlineMenuShowMessage(value: unknown): value is InlineMenuShow
     return false;
   }
   const v = value as Record<string, unknown>;
-  if (v["type"] !== INLINE_MENU_SHOW || !isBoundedString(v["pageOrigin"], MAX_FIELD_VALUE_LEN)) {
+  if (
+    v["type"] !== INLINE_MENU_SHOW ||
+    !isBoundedString(v["pageOrigin"], MAX_FIELD_VALUE_LEN) ||
+    !isInstanceToken(v["instanceToken"]) ||
+    !isBoundedString(v["pageHost"], MAX_HOST_LEN) ||
+    !(v["only"] === undefined || isFillOnly(v["only"])) ||
+    !(v["scope"] === undefined || isFillScope(v["scope"]))
+  ) {
     return false;
   }
   return Array.isArray(v["candidates"]) && v["candidates"].length <= MAX_CANDIDATES && v["candidates"].every(isCandidate);

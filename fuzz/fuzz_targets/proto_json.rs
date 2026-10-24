@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the `/api/v1` types of `rizzy-proto` on arbitrary JSON bytes: every request type the
 //! server parses from a client, and every response type a client parses from a server the
 //! threat model does not trust (ADR 0002 point 3; threat model §7.6 "D", A2). None may panic,
@@ -41,6 +43,7 @@ use rizzy_proto::recovery::{
     RecoveryCancelResponse, RecoveryCompleteResponse, RecoveryRequest, RecoveryStartResponse,
     RecoveryVault,
 };
+use rizzy_proto::session::{EndSessionRequest, SessionListResponse};
 use rizzy_proto::totp::{TotpDisableRequest, TotpEnrolConfirmRequest, TotpEnrolStartResponse};
 use rizzy_proto::vault::{
     FetchRequest, FetchResponse, HealingRequest, HealingResponse, UploadRequest, UploadResponse,
@@ -69,7 +72,7 @@ fuzz_target!(|data: &[u8]| {
     let Some((&selector, json)) = data.split_first() else {
         return;
     };
-    match selector % 42 {
+    match selector % 44 {
         // Requests.
         0 => check::<RegisterStartRequest>(json),
         1 => check::<RegisterFinishRequest>(json),
@@ -117,6 +120,9 @@ fuzz_target!(|data: &[u8]| {
         // The vault half of a rotation and the recovery answer's vaults (ADR 0025 §1), also
         // reached through `CommitChangeRequest` and `RecoveryCompleteResponse` above.
         40 => check::<VaultRotationUpload>(json),
+        // The `sessions` resource (ADR 0075 §3): the one request and the bounded list.
+        41 => check::<EndSessionRequest>(json),
+        42 => check::<SessionListResponse>(json),
         _ => check::<RecoveryVault>(json),
     }
 });

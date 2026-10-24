@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The extension end to end, against the real server (`server.ts`) and a real account created
 // through the web vault's own signup (`account.ts`): enrol this device, unlock, offer autofill
 // only for the page whose host the saved item's URI actually matches (never for a different
@@ -22,19 +24,21 @@
 // there too — correctly. ADR 0037 point 5/point 33 ("any other port ... is never part of the
 // registrable-domain computation") excludes port from `BaseDomain` matching everywhere,
 // including the exact-host fallback this very host shape uses. `newLogin` is only ever used to
-// get an item the vault has never saved an exact-URL match for (`findItemForUpdate` IS an exact
-// URL compare, port included, so it still offers "save," not "update," there) — it does not,
-// and was never meant to, exercise "no candidates for an unrelated host."
-import { mkdtempSync } from "node:fs";
+// get "save," not "update," offered on submit there — and that is `NEW_LOGIN_USERNAME` (below)
+// differing from `EXISTING_USERNAME`, not any URL/host comparison: `findItemForUpdate`'s own
+// matcher narrows to the SAME full host as the page's own (`bindings.ts`'s `selectUpdateCandidate`,
+// finding 1 of the 2026-10-09 review — port excluded, same as every other host comparison here),
+// which `127.0.0.1` on either port already satisfies; the username mismatch is what keeps this
+// an offered "save," not an "update" of the existing item. `newLogin` does not, and was never
+// meant to, exercise "no candidates for an unrelated host."
 import { createServer, type Server } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { type BrowserContext, type Page, chromium, test as base, expect } from "@playwright/test";
 
 import { TEST_ACCOUNT_PASSWORD, createLoginItem, logIn, signUp } from "./account.ts";
 import { type RunningServer, startServer } from "./server.ts";
+import { withProfileDir } from "./profile.ts";
 
 const EXTENSION_PATH = fileURLToPath(new URL("../dist/chromium", import.meta.url));
 
@@ -91,14 +95,18 @@ const test = base.extend<{ server: RunningServer; context: BrowserContext; exten
     server.stop();
   },
   context: async ({}, use) => {
-    const userDataDir = mkdtempSync(join(tmpdir(), "rizzy-ext-e2e-autofill-"));
-    const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: true,
-      channel: "chromium",
-      args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+    await withProfileDir("rizzy-ext-e2e-autofill-", async (userDataDir) => {
+      const context = await chromium.launchPersistentContext(userDataDir, {
+        headless: true,
+        channel: "chromium",
+        args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+      });
+      try {
+        await use(context);
+      } finally {
+        await context.close();
+      }
     });
-    await use(context);
-    await context.close();
   },
   extensionId: async ({ context }, use) => {
     let [worker] = context.serviceWorkers();
@@ -157,27 +165,41 @@ test("enrol, unlock, host-exact autofill matching, fill, save on submit, sync, a
     // the one `Synced.` message is more deterministic than a fixed timeout.
     await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
 
-    // --- The matching page offers exactly the one candidate whose saved URI matches this host.
+    // --- The matching page offers exactly the one candidate whose saved URI matches this host,
+    // plus the generator's own "Generate password" button (gap 32 in the M2 gap audit, always
+    // present now) — scoped out of this locator by name so it never matches these buttons too.
     const matchPage = await context.newPage();
     await matchPage.goto(matchingOrigin);
     const matchMenu = matchPage.frameLocator('iframe[data-rizzy-inline-menu]');
-    await expect(matchMenu.getByRole("button")).toContainText("Matching Site", { timeout: 15_000 });
-    await expect(matchMenu.getByRole("button")).toContainText(EXISTING_USERNAME);
+    const candidateButton = matchMenu.getByRole("button", { name: "Matching Site", exact: false });
+    await expect(candidateButton).toContainText("Matching Site", { timeout: 15_000 });
+    await expect(candidateButton).toContainText(EXISTING_USERNAME);
 
     // A trusted click fills the page's own fields with the item's real credentials — never a
     // placeholder, never the candidate list's own title/username.
-    await matchMenu.getByRole("button").click();
+    await candidateButton.click();
     await expect(matchPage.locator('input[type="text"]')).toHaveValue(EXISTING_USERNAME);
     await expect(matchPage.locator('input[type="password"]')).toHaveValue(EXISTING_PASSWORD);
     await matchPage.close();
 
     // --- The look-alike host (`localhost`, same port and server, different host string) gets
     // no candidates at all: `127.0.0.1` and `localhost` are not the same saved match under
-    // `BaseDomain` mode for a host with no registrable domain of its own.
+    // `BaseDomain` mode for a host with no registrable domain of its own. The menu itself still
+    // appears (gap 32 in the M2 gap audit: it always offers "Generate password", independent of
+    // any saved match), but with no candidate row at all — asserted by role, not by iframe
+    // presence, which is no longer "zero candidates" evidence now that the generator lives here
+    // too.
     const lookalikePage = await context.newPage();
     await lookalikePage.goto(`http://localhost:${matching.port}/`);
-    await lookalikePage.waitForTimeout(1500);
-    await expect(lookalikePage.locator("iframe[data-rizzy-inline-menu]")).toHaveCount(0);
+    const lookalikeMenu = lookalikePage.frameLocator('iframe[data-rizzy-inline-menu]');
+    await expect(lookalikeMenu.getByRole("button", { name: "Generate password" })).toBeVisible({ timeout: 15_000 });
+    await expect(lookalikeMenu.getByRole("button", { name: "Matching Site", exact: false })).toHaveCount(0);
+
+    // --- A trusted click on "Generate password" (gap 32) writes straight into the page's own
+    // password field, exactly like a real fill, on a page that has no saved candidate at all.
+    await lookalikeMenu.getByRole("button", { name: "Generate password" }).click();
+    await expect(lookalikePage.locator('input[type="password"]')).not.toHaveValue("", { timeout: 15_000 });
+    await expect(lookalikePage.locator('input[type="text"]')).toHaveValue("");
     await lookalikePage.close();
 
     // --- Submitting a new login the vault has never seen offers "Save", never an auto-save.
@@ -238,5 +260,106 @@ test("enrol, unlock, host-exact autofill matching, fill, save on submit, sync, a
   } finally {
     await matching.stop();
     await newLogin.stop();
+  }
+});
+
+// Security review finding: the inline-menu `<iframe>`'s own outer size used to be derived from
+// `candidates.length`, which the embedding page's script can always read (`getBoundingClientRect()`
+// on an element it can see even though it cannot see into it) regardless of the cross-origin
+// document inside — turning "0 vs 1 vs 3 saved candidates" into an oracle for "does this user
+// have an account on this site" (THREAT_MODEL INV-37). `content-script.ts`'s `InlineMenu` now
+// uses fixed `INLINE_MENU_WIDTH_PX`/`INLINE_MENU_HEIGHT_PX` constants for every case, with
+// overflow scrolling inside the iframe's own document instead. This test proves it end to end,
+// against the real iframe element in three real pages whose own layout is otherwise identical
+// (the same `loginPageHtml()` fixture), with 0, 1 and 3 matching saved items respectively.
+test("the inline-menu iframe's outer geometry and attributes never reveal the saved-candidate count", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const zeroCandidates = await startLoginPageServer();
+  const oneCandidate = await startLoginPageServer();
+  const threeCandidates = await startLoginPageServer();
+
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "geomuser");
+    await createLoginItem(setupPage, {
+      title: "One Candidate",
+      username: "alice@example.com",
+      password: "pw-one",
+      websiteUrl: `http://127.0.0.1:${oneCandidate.port}/`,
+    });
+    await createLoginItem(setupPage, {
+      title: "Three Candidate A",
+      username: "alice@example.com",
+      password: "pw-three-a",
+      websiteUrl: `http://127.0.0.1:${threeCandidates.port}/`,
+    });
+    await createLoginItem(setupPage, {
+      title: "Three Candidate B",
+      username: "bob@example.com",
+      password: "pw-three-b",
+      websiteUrl: `http://127.0.0.1:${threeCandidates.port}/`,
+    });
+    await createLoginItem(setupPage, {
+      title: "Three Candidate C",
+      username: "carol@example.com",
+      password: "pw-three-c",
+      websiteUrl: `http://127.0.0.1:${threeCandidates.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await openPopup(context, extensionId);
+    await popup.getByLabel("Server URL").fill(server.origin);
+    await popup.getByLabel("Account (login name)").fill("geomuser");
+    await popup.getByLabel("Secret Key").fill(secretKey);
+    await popup.getByLabel("Master password").fill(TEST_ACCOUNT_PASSWORD);
+    await popup.getByRole("button", { name: "Set up" }).click();
+    await expect(popup.getByRole("button", { name: "Lock" })).toBeVisible({ timeout: 30_000 });
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    interface FrameGeometry {
+      readonly width: number;
+      readonly height: number;
+      readonly left: number;
+      readonly top: number;
+      readonly className: string;
+      readonly dataRizzyInlineMenu: string | null;
+    }
+
+    async function frameGeometry(port: number): Promise<FrameGeometry> {
+      const page = await context.newPage();
+      await page.goto(`http://127.0.0.1:${port}/`);
+      const frame = page.locator("iframe[data-rizzy-inline-menu]");
+      await expect(frame).toBeVisible({ timeout: 15_000 });
+      const geometry = await frame.evaluate((el) => {
+        const rect = el.getBoundingClientRect();
+        return {
+          width: rect.width,
+          height: rect.height,
+          left: rect.left,
+          top: rect.top,
+          className: el.className,
+          dataRizzyInlineMenu: el.getAttribute("data-rizzy-inline-menu"),
+        };
+      });
+      await page.close();
+      return geometry;
+    }
+
+    const zeroGeometry = await frameGeometry(zeroCandidates.port);
+    const oneGeometry = await frameGeometry(oneCandidate.port);
+    const threeGeometry = await frameGeometry(threeCandidates.port);
+
+    // The one property this test exists to pin: every outer-frame property a page's own script
+    // can observe is byte-for-byte identical whether 0, 1 or 3 saved items actually matched.
+    expect(oneGeometry).toEqual(zeroGeometry);
+    expect(threeGeometry).toEqual(zeroGeometry);
+  } finally {
+    await zeroCandidates.stop();
+    await oneCandidate.stop();
+    await threeCandidates.stop();
   }
 });

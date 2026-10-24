@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The encrypted export's payload: its encoding, its reader, and the import of our own export
 //! ([ADR 0027] §1–§2; CRYPTO.md §11.14 for the file around it).
 //!
@@ -35,10 +37,12 @@
 //!   takes the typed acknowledgement of ADR 0027 §5 ("no flag, setting or environment
 //!   variable skips this"). [`encode_payload`] is public for the fuzz target: it encodes
 //!   bytes its caller already holds.
-//! - **Versions.** The file's `version` stays 1; the reader requires `payload_version` 1 and
-//!   refuses any other as "update required" ([`ClientError::ExportUpdateRequired`]). The
-//!   payload version is inside the envelope because the file's `version` is not in the
-//!   `EXPORT_FILE` context.
+//! - **Versions.** The file's `version` stays 1; the reader requires `payload_version` 1. A
+//!   payload of version 2 is a CXF document (ADR 0074 §2, §5 point 1, which replaces ADR 0027
+//!   §1's bullet), read only under the `rizzy-vault-cxf-export` tag ([`super::cxf`]): here it
+//!   is a swapped tag and refused as [`ClientError::InvalidExportFile`]. Any other version is
+//!   "update required" ([`ClientError::ExportUpdateRequired`]). The payload version is inside
+//!   the envelope because the file's `version` is not in the `EXPORT_FILE` context.
 //!
 //! # Reading (ADR 0027 §2 step 2)
 //!
@@ -70,13 +74,21 @@
 //!
 //! # Readings (conservative, where ADR 0027 §2 leaves a detail open)
 //!
-//! - **A write the new item may not make.** `check_carried` refuses a known key of another
-//!   item type and the keys an M1 client never writes (`uri/<id>/match`,
-//!   `share/<id>/secret`). Such a register is left out and counted
+//! - **A key of another item type** (`check_carried` refuses it with `WrongItemType`: a
+//!   `ssh.host` on a Login, a `card.number` on an Identity) **skips the whole item**, like any
+//!   other per-item write failure ([ADR 0055] owner answer 4, option (a): ADR 0027 §2 step 4,
+//!   "Per-item refusals do not refuse the file"). Since ADR 0055 assigned the `ssh.`, `api.`,
+//!   `license.` and `wifi.` keys, they are known keys of their own types, so this now covers
+//!   them too; before, they were reserved and carried on any type. The `bank.` keys ADR 0055
+//!   also assigned are reserved again since [ADR 0078] §2 retired them, so they are carried
+//!   on any type, byte for byte; an item of the retired type itself (`0x0009`, ADR 0078 §1) is
+//!   unsupported, so the whole item is skipped and counted (ADR 0078 §3).
+//! - **A key this client never writes** (`share/<id>/secret`, M5's; `check_carried` refuses
+//!   it with `NotWritable`). Such a register is left out and counted
 //!   ([`PayloadImport::fields_not_carried`]); the item is still imported. `rizzy-core` treats
-//!   those keys the same way in a restore or duplicate as a new item.
+//!   it the same way in a restore or duplicate as a new item.
 //! - **Which items are skipped.** An item without a valid `item.type`, of a type this client
-//!   does not support, or of the vault-settings type (which a writer never exports, and which
+//!   does not support, holding a key of another item type (above), or of the vault-settings type (which a writer never exports, and which
 //!   is never imported as an item), and an item the import path refuses because it would be
 //!   oversize as a new item.
 //! - **Which history is carried.** Only history entries that are a non-empty Text, since
@@ -86,6 +98,8 @@
 //!   live snapshot data.
 //!
 //! [ADR 0027]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0027-export-payload.md
+//! [ADR 0055]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0055-m3-item-type-field-keys.md
+//! [ADR 0078]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0078-retire-bank-account-item-type.md
 
 use core::fmt;
 
@@ -109,9 +123,12 @@ use rizzy_sync::record::{
 use rizzy_sync::vv::VersionVector;
 use zeroize::Zeroizing;
 
+use rizzy_core::export::FORMAT;
+
+use super::cxf::CXF_PAYLOAD_VERSION;
 use super::gate::EncryptedExportAuth;
 use super::state;
-use super::{read_export, write_export};
+use super::{parse_export_json, read_export, write_export};
 use crate::device::UnlockedDevice;
 use crate::error::ClientError;
 use crate::items::{ImportWrite, check_import};
@@ -247,16 +264,20 @@ pub fn encode_payload(items: &[PayloadItem<'_>]) -> Result<SecretBytes, ClientEr
 /// bounds; any failure refuses the whole payload. Never panics.
 ///
 /// # Errors
-/// [`ClientError::ExportUpdateRequired`] for a payload of another version;
-/// [`ClientError::InvalidExportFile`] for every other failure.
+/// [`ClientError::ExportUpdateRequired`] for a payload of an unknown version;
+/// [`ClientError::InvalidExportFile`] for a CXF payload (version 2, ADR 0074 §2: it belongs
+/// under the `rizzy-vault-cxf-export` tag, so this is a swapped tag, refused at dispatch) and
+/// for every other failure.
 pub fn parse_payload(payload: &[u8]) -> Result<Vec<PayloadEntry<'_>>, ClientError> {
     const BAD: ClientError = ClientError::InvalidExportFile;
     if payload.len() > MAX_PAYLOAD_LEN {
         return Err(BAD);
     }
     let mut reader = Reader::new(payload);
-    if reader.u16().map_err(|_| BAD)? != PAYLOAD_VERSION {
-        return Err(ClientError::ExportUpdateRequired);
+    match reader.u16().map_err(|_| BAD)? {
+        PAYLOAD_VERSION => {}
+        CXF_PAYLOAD_VERSION => return Err(BAD),
+        _ => return Err(ClientError::ExportUpdateRequired),
     }
     let count = usize::try_from(reader.u32().map_err(|_| BAD)?).map_err(|_| BAD)?;
     if count > MAX_PAYLOAD_ENTRIES
@@ -360,13 +381,13 @@ fn encoded_state(merge: &ItemMerge) -> Option<SecretBytes> {
 
 /// One new item built from a payload entry: what [`VaultSync::import_item_writes`] takes, and
 /// what was lost on the way.
-struct NewItem {
+pub(crate) struct NewItem {
     /// The item's type.
-    item_type: ItemType,
+    pub(crate) item_type: ItemType,
     /// The writes: where each comes from, its key and its value.
-    writes: Vec<(WriteSource, FieldKey, Value)>,
+    pub(crate) writes: Vec<(WriteSource, FieldKey, Value)>,
     /// Whether the exported item displayed Trashed.
-    trashed: bool,
+    pub(crate) trashed: bool,
     /// Fields whose concurrent values collapsed to the displayed one.
     collapsed: usize,
     /// History entries not carried.
@@ -415,9 +436,10 @@ fn new_item<R: CryptoRng + ?Sized>(entry: &PayloadEntry<'_>, rng: &mut R) -> Opt
                 FieldKey::parse(key.as_bytes()).ok()?,
                 Value::copy_from_encoded(shown.value).ok()?,
             )),
-            Err(WriteError::NotWritable | WriteError::WrongItemType) => {
+            Err(WriteError::NotWritable) => {
                 item.fields_lost = item.fields_lost.saturating_add(1);
             }
+            // `WrongItemType` among them: ADR 0055 owner answer 4 skips the whole item.
             Err(_) => return None,
         }
     }
@@ -506,6 +528,37 @@ pub fn preview_payload<R: CryptoRng + ?Sized>(
 }
 
 impl VaultSync {
+    /// The new item a copy of `item` into another vault writes ([ADR 0081] §A6 step 1): the
+    /// item's merged state as one export payload entry, through the importer path, exactly as
+    /// an import of an export of this vault would carry it.
+    ///
+    /// # Errors
+    /// [`ClientError::UnknownItem`] when the item is not live (Active or Trashed) or is the
+    /// vault-settings item, or when the import path would skip it;
+    /// [`ClientError::ExportOversizeItems`] when its state cannot be encoded.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    pub(crate) fn copy_of<R: CryptoRng + ?Sized>(
+        &self,
+        item: ItemId,
+        rng: &mut R,
+    ) -> Result<NewItem, ClientError> {
+        let (id, merge) = self
+            .exported_merges()
+            .find(|(id, _)| *id == item)
+            .ok_or(ClientError::UnknownItem)?;
+        let data = encoded_state(merge).ok_or(ClientError::ExportOversizeItems)?;
+        let payload = encode_payload(&[PayloadItem {
+            item_id: id,
+            covered: merge.covered(),
+            data: data.expose_secret(),
+        }])
+        .map_err(|_| ClientError::ExportOversizeItems)?;
+        let entries = parse_payload(payload.expose_secret()).map_err(|_| ClientError::Internal)?;
+        let entry = entries.first().ok_or(ClientError::Internal)?;
+        importable_item(entry, rng).ok_or(ClientError::UnknownItem)
+    }
+
     /// The merges an export holds (ADR 0027 §1 "What is exported"): every item whose state is
     /// live, Active or Trashed, ascending by id, without the vault-settings item.
     pub(crate) fn exported_merges(&self) -> impl Iterator<Item = (ItemId, &ItemMerge)> + '_ {
@@ -659,10 +712,13 @@ impl VaultSync {
     /// strict JSON, the header checks, one Argon2id run, the envelope), then
     /// [`VaultSync::import_payload`] on the plaintext, which stays in its zeroizing buffer.
     ///
+    /// The file's tag must be `rizzy-vault-export`: a CXF export (`rizzy-vault-cxf-export`,
+    /// ADR 0074 §2) is opened with [`VaultSync::import_cxf_encrypted`] instead.
+    ///
     /// # Errors
-    /// As [`read_export`] and [`VaultSync::import_payload`]. The vault's own refusals
-    /// ([`ClientError::ReadOnly`], [`ClientError::InvalidInput`]) come before the key
-    /// derivation.
+    /// As [`read_export`] and [`VaultSync::import_payload`]; [`ClientError::InvalidExportFile`]
+    /// for another tag. The vault's own refusals ([`ClientError::ReadOnly`],
+    /// [`ClientError::InvalidInput`]) come before the key derivation.
     pub fn import_encrypted<R: CryptoRng + ?Sized>(
         &mut self,
         rng: &mut R,
@@ -672,6 +728,9 @@ impl VaultSync {
         now_ms: u64,
     ) -> Result<PayloadImport, ClientError> {
         self.check_writable(unlocked)?;
+        if parse_export_json(file)?.format != FORMAT {
+            return Err(ClientError::InvalidExportFile);
+        }
         let payload = read_export(file, export_password)?;
         self.import_payload(rng, unlocked, payload.expose_secret(), now_ms)
     }

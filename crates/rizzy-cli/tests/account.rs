@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rv`'s account flows end to end against a real `rizzy-vault` server: a master password
 //! change and a Secret Key change, also with a full rotation, with the other device following
 //! them (CRYPTO.md §11.5, §11.6, §11.3 step 5), an interrupted change settled by the next
@@ -28,7 +30,7 @@ use std::time::{Duration, Instant};
 use rizzy_cli::CliError;
 use rizzy_cli::args::parse;
 use rizzy_cli::commands::run;
-use rizzy_cli::device::Env;
+use rizzy_cli::device::{Env, SignOuts};
 use rizzy_cli::ui::Ui;
 use rizzy_client::ClientError;
 use rizzy_client::rizzy_proto::error::ErrorCode;
@@ -54,6 +56,34 @@ fn temp_dir(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// The variables a `rizzy-vault` process needs from the OS to run at all, kept when its
+/// environment is cleared ([`clear_env`]). None on Unix. On Windows, `SystemRoot`: Winsock
+/// loads its service provider from a registry path written as
+/// `%SystemRoot%\System32\mswsock.dll`, so a process without the variable cannot create a
+/// socket (`WSAEPROVIDERFAILEDINIT`, error 10106) and `rizzy-vault` exits 1 when it binds its
+/// listener. Go's `os/exec` adds `SYSTEMROOT` to every child's environment for this reason;
+/// Rust's `env_clear` does not. Also `PATH` on Windows: `rizzy-vault` links OpenSSL as a DLL
+/// (webauthn-rs, ADR 0077), and a non-system DLL is found through `PATH`; without it the process
+/// cannot load (`STATUS_DLL_NOT_FOUND`) and writes nothing. Nothing else is needed: the
+/// temporary directory falls back from `TMP`, `TEMP` and `USERPROFILE` to the Windows directory.
+const OS_ENV: &[&str] = if cfg!(windows) {
+    &["SystemRoot", "PATH"]
+} else {
+    &[]
+};
+
+/// Clears `command`'s environment, so no `RIZZY_*` variable of the developer leaks in, and
+/// puts back [`OS_ENV`] from this process's.
+fn clear_env(command: &mut Command) -> &mut Command {
+    command.env_clear();
+    for name in OS_ENV {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command
 }
 
 /// The `rizzy-vault` binary next to this test's executable, built through cargo (a no-op when
@@ -83,6 +113,86 @@ fn server_binary() -> PathBuf {
     binary
 }
 
+/// Where the `rizzy-vault` processes of a server write their standard error, in its directory:
+/// their log lines and error messages, for the failure report ([`log_tail`]).
+const STDERR_LOG: &str = "stderr.log";
+
+/// How long a `rizzy-vault` process may take to start listening: long, since a debug build on
+/// a loaded host can take long to start.
+const START_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How many free ports a new server tries before the test gives up.
+const START_ATTEMPTS: usize = 10;
+
+/// A loopback port that was free a moment ago ([`listening`] detects a process that bound it
+/// since).
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// The text of `log` from byte `from` on (empty if there is none yet).
+fn log_text(log: &Path, from: u64) -> String {
+    let bytes = std::fs::read(log).unwrap_or_default();
+    let from = usize::try_from(from).unwrap().min(bytes.len());
+    String::from_utf8_lossy(&bytes[from..]).into_owned()
+}
+
+/// The last lines of the log of the server in `dir`, for a failure report.
+fn log_tail(dir: &Path) -> String {
+    const LINES: usize = 40;
+    let log = dir.join(STDERR_LOG);
+    let text = log_text(&log, 0);
+    let lines: Vec<&str> = text.lines().collect();
+    format!(
+        "last {} lines of {}:\n{}",
+        LINES.min(lines.len()),
+        log.display(),
+        lines[lines.len().saturating_sub(LINES)..].join("\n")
+    )
+}
+
+/// Waits until the serving process `child` of the server in `dir`, started when its log had
+/// `from` bytes, logs that it listens on `port`; `false` if the port is taken.
+///
+/// Ready means the process's own `listening` line, never a connection to the port: another
+/// process (a parallel test's server or proxy) may have bound the port since it was probed.
+/// This one then exits with `listener: address in use` while a connection reaches the other,
+/// and `rv` would go on against a stranger's server (whose answer to a signup for a name taken
+/// there is `invalid_request`).
+fn listening(child: &mut Child, dir: &Path, from: u64, port: u16) -> bool {
+    let log = dir.join(STDERR_LOG);
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        let says = |line: &str| {
+            serde_json::from_str::<serde_json::Value>(line).is_ok_and(|event| {
+                event["event"] == "listening" && event["port"] == u64::from(port)
+            })
+        };
+        if log_text(&log, from).lines().any(says) {
+            return true;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            if log_text(&log, from).contains("listener: address in use") {
+                return false;
+            }
+            panic!("rizzy-vault exited at start: {status}; {}", log_tail(dir));
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "rizzy-vault did not listen within {START_TIMEOUT:?}; {}",
+                log_tail(dir)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// A running `rizzy-vault`. Killed on drop.
 struct Server {
     /// The process.
@@ -102,18 +212,21 @@ impl Server {
         let dir = temp_dir("server");
         std::fs::create_dir_all(dir.join("data")).unwrap();
         std::fs::create_dir_all(dir.join("secrets")).unwrap();
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let origin_port = origin_port.unwrap_or(port);
-        let command = |dir: &Path| {
+        let command = |dir: &Path, port: u16| {
+            let log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join(STDERR_LOG))
+                .unwrap();
             let mut command = Command::new(server_binary());
-            command
-                .env_clear()
-                .env("RIZZY_ORIGIN", format!("http://127.0.0.1:{origin_port}"))
+            clear_env(&mut command)
+                .env(
+                    "RIZZY_ORIGIN",
+                    format!("http://127.0.0.1:{}", origin_port.unwrap_or(port)),
+                )
                 .env("RIZZY_LISTEN", format!("127.0.0.1:{port}"))
+                // An ephemeral admin port, so parallel servers never collide on 8081 (ADR 0060 §2).
+                .env("RIZZY_ADMIN_LISTEN", "127.0.0.1:0")
                 .env("RIZZY_SIGNUP", "open")
                 .env("RIZZY_DATA_DIR", dir.join("data"))
                 .env(
@@ -122,33 +235,35 @@ impl Server {
                 )
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                .stderr(log);
             for (name, value) in extra {
                 command.env(name, value);
             }
             command
         };
-        let init = command(&dir).args(["secrets", "init"]).output().unwrap();
-        assert!(
-            init.status.success(),
-            "{}",
-            String::from_utf8_lossy(&init.stderr)
-        );
-        let mut child = command(&dir).spawn().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-            if let Some(status) = child.try_wait().unwrap() {
-                panic!("rizzy-vault exited at start: {status}");
+        // The secrets file does not depend on the port.
+        let init = command(&dir, free_port())
+            .args(["secrets", "init"])
+            .status()
+            .unwrap();
+        assert!(init.success(), "secrets init failed; {}", log_tail(&dir));
+        for _ in 0..START_ATTEMPTS {
+            let port = free_port();
+            let from = std::fs::metadata(dir.join(STDERR_LOG)).map_or(0, |m| m.len());
+            let mut child = command(&dir, port).spawn().unwrap();
+            if listening(&mut child, &dir, from, port) {
+                return Self {
+                    child,
+                    dir,
+                    origin_port: origin_port.unwrap_or(port),
+                    port,
+                };
             }
-            assert!(Instant::now() < deadline, "rizzy-vault did not start");
-            std::thread::sleep(Duration::from_millis(50));
         }
-        Self {
-            child,
-            dir,
-            origin_port,
-            port,
-        }
+        panic!(
+            "rizzy-vault found every port it tried taken; {}",
+            log_tail(&dir)
+        );
     }
 
     /// The origin `rv` dials.
@@ -158,9 +273,16 @@ impl Server {
 }
 
 impl Drop for Server {
+    #[expect(
+        clippy::print_stderr,
+        reason = "the server's log in a failed test's output, which the test harness captures"
+    )]
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if std::thread::panicking() {
+            eprintln!("rizzy-vault on port {}: {}", self.port, log_tail(&self.dir));
+        }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -468,6 +590,7 @@ impl Rv {
                     account: None,
                     trust: rizzy_cli::tls::Trust::default(),
                     ui: &mut script,
+                    sign_outs: SignOuts::default(),
                 };
                 self.runtime.block_on(run(invocation, &mut env))
             }

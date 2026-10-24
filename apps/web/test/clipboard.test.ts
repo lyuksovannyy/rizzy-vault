@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The clipboard is cleared after the timeout, only if it still holds our value, or when it
 // cannot be read; a failed clear is retried on focus, and nothing asks for clipboard-read
 // (THREAT_MODEL A14; `clipboard.ts`).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Dots: the identity of an op (ADR 0012 §2 "Dot").
 //!
 //! A dot is `(device_id, device_seq)`. `device_id` is the author's

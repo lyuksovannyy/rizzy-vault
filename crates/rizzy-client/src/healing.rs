@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Account-side restore healing: the client's half of ADR 0012 §7 "Healing a server rollback"
 //! as [ADR 0032] §1–§4 replace its steps 2 and 3 and its "What is not re-uploaded", and of "A
 //! device enrolled after the backup" (threat model §5.8, INV-59), as ADR 0021 §9 "Server
@@ -542,6 +544,8 @@ pub fn recovery_repair<R: CryptoRng + ?Sized>(
         device_grants: List::empty(),
         recovery_rewrap: None,
         vault_rotation: None,
+        vault_create: None,
+        vault_delete: None,
     };
     Ok(RecoveryRepair {
         request,

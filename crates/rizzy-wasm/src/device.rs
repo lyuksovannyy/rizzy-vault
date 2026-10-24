@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The browser extension's durable device (ADR 0036 §1: device kind 2; CRYPTO.md §11.2 new
 //! device, §11.3 unlock, §5.10 device authentication).
 //!
@@ -60,40 +62,48 @@ use core::fmt;
 use rizzy_client::ClientError;
 use rizzy_client::account::VerifiedAccount;
 use rizzy_client::device::{DeviceState, UnlockedDevice};
-use rizzy_client::items::{FieldEdit, ItemId};
+use rizzy_client::items::{FieldEdit, ItemId, TRASH_RETENTION_MS};
 use rizzy_client::login::{
     Enrolled, LoggedIn, LoginAwaitingSession, LoginInput, LoginStarted, start_login,
 };
-use rizzy_client::passkey::get_assertion;
+use rizzy_client::matching::{EquivalenceGroup, startup_equivalence_groups};
+use rizzy_client::passkey::{PasskeySigningKey, get_assertion_with};
 use rizzy_client::rizzy_core::item::key::ElementId;
-use rizzy_client::rizzy_core::item::schema::{ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY, LIST_PASSKEY};
+use rizzy_client::rizzy_core::item::schema::{
+    ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY, ATTR_RP_ID, ATTR_USER_HANDLE,
+    LIST_PASSKEY,
+};
 use rizzy_client::rizzy_core::item::value::ValueRef;
-use rizzy_client::rizzy_core::passkey::Es256SigningKey;
 use rizzy_client::rizzy_core::sign::DeviceKind;
 use rizzy_client::rizzy_proto::auth::{
     DeviceAuthFinishResponse, DeviceAuthStartResponse, LoginFinishResponse, LoginStartResponse,
 };
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
-use rizzy_client::rizzy_proto::wire::SessionToken;
+use rizzy_client::rizzy_proto::webauthn::WebauthnLoginChallengeResponse;
+use rizzy_client::rizzy_proto::wire::{Id, SessionToken};
 use rizzy_client::session::{
     DeviceSession as ClientDeviceSession, device_auth_finish, device_auth_start,
 };
+use rizzy_client::settings::SettingsCache;
 use rizzy_client::store::floors::Floors;
-use rizzy_client::store::rows::CacheRows;
+use rizzy_client::store::rows::{CacheRows, Changeset, Write};
 use rizzy_client::store::{self, record::Stage as RecordStage};
 use rizzy_client::sync::{Authors, VaultSync};
+use rizzy_client::webauthn::{self, SecondFactor};
 use wasm_bindgen::prelude::wasm_bindgen;
 use zeroize::Zeroizing;
 
-use crate::error::{CoreError, CoreResult, WRONG_STATE};
+use crate::error::{CoreError, CoreResult, SECURITY_KEY_REQUIRED, WRONG_STATE};
 use crate::http::{self, HttpRequest};
-use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, type_from_name, visible_item};
-use crate::passkey::PasskeyAssertion;
+use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, item_ref, type_from_name};
+use crate::matching::{self, MatchDecision, MatchSettingsView, UriInput};
+use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
 use crate::store::{CacheDelta, KvRow, decode_rows, encode_rows};
 use crate::sync::{Ctx, Signer, SyncDriver};
+use crate::vaults::{VaultSet, catalog_of};
 
 /// A copy of a bearer token (as `rv`'s `copy_token` does): the only way to keep using one after
 /// the value that owns it (here, [`LoggedIn`]) is consumed by the next step.
@@ -124,11 +134,16 @@ enum FlowStage {
     /// `login/start` is outstanding.
     Start(Box<LoginStarted>),
     /// `login/finish` is outstanding.
-    Finish(LoginAwaitingSession),
+    Finish(LoginAwaitingSession, Id),
     /// `devices/enrol` is outstanding.
     Enrol(Box<rizzy_client::login::PendingEnrolment>),
     /// The account has 2FA and the login carried no code.
     NeedsTotp,
+    /// `login/finish` answered `second_factor_required`: `webauthn/login/challenge` asks which
+    /// second factor the account has (ADR 0058 point 3). A security key cannot be used here (an
+    /// extension page is not on the server's origin), so a key-only account ends the flow with
+    /// `security_key_required`; an account with TOTP too is asked for a code.
+    SecondFactor,
     /// Enrolled; the result is ready for [`EnrolFlow::finish`].
     Done(Box<Enrolled>),
     /// Failed, or the result was taken.
@@ -205,7 +220,10 @@ impl EnrolFlow {
     #[must_use]
     pub fn state(&self) -> String {
         match self.stage {
-            FlowStage::Start(_) | FlowStage::Finish(_) | FlowStage::Enrol(_) => "request",
+            FlowStage::Start(_)
+            | FlowStage::Finish(_, _)
+            | FlowStage::SecondFactor
+            | FlowStage::Enrol(_) => "request",
             FlowStage::NeedsTotp => "needs_totp",
             FlowStage::Done(_) => "done",
             FlowStage::Spent => "failed",
@@ -303,13 +321,19 @@ impl EnrolFlow {
                 let totp = self.totp.as_ref().map(|t| t.as_str());
                 let (awaiting, finish) = (*started).finish(&mut self.rng, &answer, totp)?;
                 self.pending = Some(HttpRequest::post(paths::LOGIN_FINISH, &finish, None)?);
-                self.stage = FlowStage::Finish(awaiting);
+                self.stage = FlowStage::Finish(awaiting, finish.login_id);
                 Ok(())
             }
-            FlowStage::Finish(awaiting) => {
+            FlowStage::Finish(awaiting, login_id) => {
                 match http::server_code(status, body) {
                     Some(ErrorCode::SecondFactorRequired) if self.totp.is_none() => {
-                        self.stage = FlowStage::NeedsTotp;
+                        drop(awaiting);
+                        self.pending = Some(HttpRequest::post(
+                            paths::WEBAUTHN_LOGIN_CHALLENGE,
+                            &webauthn::login_challenge_request(login_id),
+                            None,
+                        )?);
+                        self.stage = FlowStage::SecondFactor;
                         return Ok(());
                     }
                     Some(ErrorCode::Unauthorized) => {
@@ -335,6 +359,21 @@ impl EnrolFlow {
                 http::empty(status, body)?;
                 self.stage = FlowStage::Done(Box::new(pending_enrol.finalize()));
                 Ok(())
+            }
+            FlowStage::SecondFactor => {
+                let answer = match http::server_code(status, body) {
+                    Some(code) => Err(code),
+                    None => Ok(http::json::<WebauthnLoginChallengeResponse>(status, body)?),
+                };
+                match SecondFactor::from_challenge(answer).map_err(CoreError::server)? {
+                    SecondFactor::SecurityKey { totp: false, .. } => {
+                        Err(CoreError::new(SECURITY_KEY_REQUIRED))
+                    }
+                    SecondFactor::SecurityKey { totp: true, .. } | SecondFactor::Totp => {
+                        self.stage = FlowStage::NeedsTotp;
+                        Ok(())
+                    }
+                }
             }
             FlowStage::NeedsTotp | FlowStage::Done(_) | FlowStage::Spent => {
                 Err(CoreError::new(WRONG_STATE))
@@ -371,10 +410,11 @@ impl EnrolResult {
     /// this device's certificate on the server while persisting nothing of it locally — not a
     /// state a fallback default may paper over (advisor review).
     ///
-    /// Also builds this device's driver of the account's first vault, exactly as
+    /// Also builds this device's driver of every vault the account's catalog opens, exactly as
     /// [`crate::session::Session::from_web`] does for the ephemeral device (module docs, "Sync
-    /// and items"): [`VaultSync::new`] at `next_device_seq` 1, with
-    /// [`VaultSync::persist`] turned on so the very first write journals its own cache rows.
+    /// and items"; ADR 0081 §A7): [`VaultSync::new`] from `next_device_seq` 1 on one shared
+    /// counter, with [`VaultSync::persist`] turned on so the very first write journals its own
+    /// cache rows.
     ///
     /// # Errors
     /// [`ClientError::Internal`] if the device-state record, the first changeset, or a vault's
@@ -394,16 +434,9 @@ impl EnrolResult {
         let cache_rows = encode_rows(&rows)?;
 
         let mut account = enrolled.account;
-        let vault_id = account
-            .vault_ids()
-            .next()
-            .ok_or(ClientError::InvalidServerResponse)?;
-        let vault_key = account
-            .take_vault_key(vault_id)
-            .ok_or(ClientError::InvalidServerResponse)?;
         let authors = Authors::from_account(&account)?;
-        let mut vault = VaultSync::new(vault_key, &enrolled.unlocked, 1)?;
-        vault.persist();
+        let vaults = VaultSet::open_all(&mut account, &enrolled.unlocked, true)
+            .map_err(|_| ClientError::InvalidServerResponse)?;
 
         Ok(Self {
             cache_rows,
@@ -412,9 +445,10 @@ impl EnrolResult {
                 enrolled.unlocked,
                 account,
                 authors,
-                vec![vault],
+                vaults,
                 rows,
                 floors,
+                Changeset::new(),
             )),
         })
     }
@@ -475,7 +509,7 @@ pub struct DeviceSession {
     authors: Authors,
     /// This device's driver of each vault the account holds a self-grant for; `[0]` is the
     /// personal vault every call below operates on (struct docs).
-    vaults: Vec<VaultSync>,
+    vaults: VaultSet,
     /// A mirror of every row this device's cache holds, kept in step with `vaults`'/`account`'s
     /// own writes so `DeviceSession::drain_cache_writes` can diff the encoded rows before and
     /// after a step (`crate::store::CacheDelta`'s module docs). Never a secret by itself: the
@@ -494,6 +528,18 @@ pub struct DeviceSession {
     sync: SyncDriver,
     /// The RNG for item writes and sync.
     rng: Rng,
+    /// The account settings of `account`, read once per object (ADR 0042 §6).
+    settings: SettingsCache,
+    /// The compiled-in global equivalence list's groups, verified once when the session
+    /// started against the cache's persisted floor (ADR 0051 §4), for every later decision.
+    global_groups: Vec<EquivalenceGroup>,
+    /// Writes of the session's start not yet in `cache`: a format migration of the rows it was
+    /// unlocked from ([`store::load::migration_writes`]) and a raised
+    /// `highest_equivalence_list_version` ([`startup_equivalence_groups`]). The first
+    /// [`DeviceSession::drain_cache_writes`] puts them ahead of every other write, through
+    /// [`Floors::admit`] like any other (ADR 0051 §3, INV-75: until the host commits them, a
+    /// restart re-migrates and re-verifies, never accepts an older list).
+    start_writes: Changeset,
 }
 
 impl fmt::Debug for DeviceSession {
@@ -501,23 +547,39 @@ impl fmt::Debug for DeviceSession {
         f.debug_struct("DeviceSession")
             .field("account_id", &self.unlocked.account_id())
             .field("device_id", &self.unlocked.device_id())
-            .field("vaults", &self.vaults.len())
+            .field("vaults", &self.vaults.all().len())
             .finish_non_exhaustive()
     }
+}
+
+/// ADR 0051 §4: once per session, at its start, against the floor the load rehydrated: the
+/// compiled-in global groups, with a raised floor appended to `start_writes`. An unlock at a
+/// floor equal to the compiled-in list's version (every unlock after the first) keeps the
+/// groups and appends nothing (ADR 0080 §6).
+fn start_global_groups(floors: &Floors, start_writes: &mut Changeset) -> Vec<EquivalenceGroup> {
+    let (global_groups, floor_writes) = startup_equivalence_groups(floors);
+    start_writes.append(floor_writes);
+    global_groups
 }
 
 impl DeviceSession {
     /// Wraps an already-unlocked device (used by [`EnrolResult::new`] and
     /// [`DeviceSession::unlock`]).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one private constructor over the session's parts; a parts struct would only rename them"
+    )]
     fn from_parts(
         device: DeviceState,
         unlocked: UnlockedDevice,
         account: VerifiedAccount,
         authors: Authors,
-        vaults: Vec<VaultSync>,
+        vaults: VaultSet,
         cache: CacheRows,
         floors: Floors,
+        mut start_writes: Changeset,
     ) -> Self {
+        let global_groups = start_global_groups(&floors, &mut start_writes);
         Self {
             device,
             unlocked,
@@ -530,22 +592,10 @@ impl DeviceSession {
             pending: None,
             sync: SyncDriver::default(),
             rng: os_rng(),
+            settings: SettingsCache::default(),
+            global_groups,
+            start_writes,
         }
-    }
-
-    /// The personal vault, read-only (struct docs). A write goes through a direct
-    /// `self.vaults.first_mut()` instead, inline beside the other fields it needs at once
-    /// (`self.rng`, `self.unlocked`): a `&mut self` accessor here would borrow every field for
-    /// as long as the vault reference lives, which is exactly what `create_item`/`sync_start`
-    /// must not do.
-    ///
-    /// # Errors
-    /// [`ClientError::Internal`] if this device holds no vault at all, which [`EnrolResult::new`]
-    /// and [`DeviceSession::unlock`] never produce.
-    fn vault_ref(&self) -> CoreResult<&VaultSync> {
-        self.vaults
-            .first()
-            .ok_or_else(|| ClientError::Internal.into())
     }
 
     /// The cache writes of every step since the last drain, diffed against the current
@@ -559,8 +609,15 @@ impl DeviceSession {
     /// [`ClientError::Internal`] if the changeset breaks a floor (never, for a changeset this
     /// device's own steps produced over its own `floors`) or a row does not encode.
     fn drain_cache_writes(&mut self) -> CoreResult<CacheDelta> {
-        let mut changeset = store::account_writes(&self.account);
-        for vault in &mut self.vaults {
+        let mut changeset = core::mem::take(&mut self.start_writes);
+        // ADR 0081 §A5, §A7: a vault deleted on another device leaves the cache with its rows.
+        for vault_id in self.sync.take_dropped() {
+            changeset.push(Write::DropVault {
+                vault_id: vault_id.to_bytes(),
+            });
+        }
+        changeset.append(store::account_writes(&self.account));
+        for vault in self.vaults.all_mut() {
             changeset.append(vault.take_writes());
         }
         if changeset.is_empty() {
@@ -583,11 +640,7 @@ impl DeviceSession {
         if self.sync.running() {
             return Err(CoreError::new(WRONG_STATE));
         }
-        let item = items::item_id(id)?;
-        let vault = self
-            .vaults
-            .first_mut()
-            .ok_or_else(|| CoreError::from(ClientError::Internal))?;
+        let (vault, item) = self.vaults.item_mut(id)?;
         op(vault, &mut self.rng, &self.unlocked, item, now_ms)?;
         Ok(())
     }
@@ -613,22 +666,33 @@ impl DeviceSession {
         now_ms: u64,
     ) -> Result<Self, CoreError> {
         let password = take_secret(password)?;
-        let rows = decode_rows(&cache_rows).map_err(CoreError::from)?;
-        let record = store::load::open(&rows).map_err(CoreError::from)?;
+        // ADR 0026 §5, ADR 0051 §2: an older format is migrated before it is opened. `rows` is
+        // the migrated set the load verifies; `stored`, a second decode of the same rows, is the
+        // mirror of what the host holds, so the migration reaches the host as part of the first
+        // drained delta (`start_writes`) instead of being lost in a mirror that already has it.
+        let stored = decode_rows(&cache_rows).map_err(CoreError::from)?;
+        let migration = store::load::migration_writes(&stored).map_err(CoreError::from)?;
+        let mut rows = decode_rows(&cache_rows).map_err(CoreError::from)?;
+        rows.apply(&migration);
+        let record = store::load::open(&rows, false).map_err(CoreError::from)?;
         let unlocked = record.unlock(password.as_str()).map_err(CoreError::from)?;
         let loaded =
             store::load::load(&rows, &record, &unlocked, now_ms).map_err(CoreError::from)?;
         // `load::load` already built this device's vault drivers from the cache's own
         // `vaults`/`wraps` rows, with the cache journal on (module docs, "Sync and items");
-        // nothing here calls `take_vault_key`/`VaultSync::new` itself.
+        // nothing here calls `take_vault_key`/`VaultSync::new` itself. ADR 0081 §A2, §A7: only
+        // the vaults the cached account's catalog lists are kept, sharing one device counter.
+        let catalog = catalog_of(&loaded.account, &unlocked);
+        let vaults = VaultSet::new(loaded.vaults, catalog, true);
         Ok(Self::from_parts(
             loaded.device,
             unlocked,
             loaded.account,
             loaded.authors,
-            loaded.vaults,
-            rows,
+            vaults,
+            stored,
             loaded.floors,
+            migration,
         ))
     }
 
@@ -754,7 +818,10 @@ impl DeviceSession {
     /// As `DeviceSession::vault_ref`.
     #[wasm_bindgen(getter, js_name = readOnly)]
     pub fn read_only(&self) -> Result<bool, CoreError> {
-        Ok(self.vault_ref()?.is_read_only())
+        Ok(!self
+            .vaults
+            .personal_vault()
+            .is_ok_and(|v| !v.is_read_only()))
     }
 
     /// How many own ops the server has not acknowledged yet: what a lock now would lose (the
@@ -764,7 +831,7 @@ impl DeviceSession {
     /// As `DeviceSession::vault_ref`.
     #[wasm_bindgen(getter, js_name = unsentChanges)]
     pub fn unsent_changes(&self) -> Result<usize, CoreError> {
-        Ok(self.vault_ref()?.unacknowledged().0)
+        Ok(self.vaults.all().iter().map(|v| v.unacknowledged().0).sum())
     }
 
     /// Whether a sync is running.
@@ -786,10 +853,7 @@ impl DeviceSession {
             return Err(CoreError::new(WRONG_STATE));
         };
         let mut ctx = Ctx {
-            vault: self
-                .vaults
-                .first_mut()
-                .ok_or_else(|| CoreError::from(ClientError::Internal))?,
+            vaults: &mut self.vaults,
             account: &mut self.account,
             authors: &mut self.authors,
             unlocked: &self.unlocked,
@@ -819,10 +883,7 @@ impl DeviceSession {
             return Err(CoreError::new(WRONG_STATE));
         };
         let ctx = Ctx {
-            vault: self
-                .vaults
-                .first_mut()
-                .ok_or_else(|| CoreError::from(ClientError::Internal))?,
+            vaults: &mut self.vaults,
             account: &mut self.account,
             authors: &mut self.authors,
             unlocked: &self.unlocked,
@@ -840,12 +901,46 @@ impl DeviceSession {
     /// As `DeviceSession::vault_ref`.
     #[wasm_bindgen(js_name = syncAbort)]
     pub fn sync_abort(&mut self) -> Result<(), CoreError> {
-        self.sync.abort(
-            self.vaults
-                .first_mut()
-                .ok_or_else(|| CoreError::from(ClientError::Internal))?,
-        );
+        self.sync.abort(&mut self.vaults);
         Ok(())
+    }
+
+    /// Every vault the account's directory lists (ADR 0081 §A2): the Personal vault first, then
+    /// the others by name; the save prompts' picker and the item rows' vault label.
+    #[must_use]
+    pub fn vaults(&self) -> Vec<crate::vaults::VaultView> {
+        self.vaults
+            .views(|vault| self.account.vault_bytes_used(vault))
+    }
+
+    /// The Personal vault, which every save prompt preselects (ADR 0081 §A8); `undefined`
+    /// while the vault set raises an alarm that hides it.
+    #[wasm_bindgen(getter, js_name = personalVaultId)]
+    #[must_use]
+    pub fn personal_vault_id(&self) -> Option<String> {
+        self.vaults.personal().ok().map(|v| hex(v.as_bytes()))
+    }
+
+    /// The vault completeness check's alarms (INV-102).
+    #[wasm_bindgen(js_name = vaultAlarms)]
+    #[must_use]
+    pub fn vault_alarms(&self) -> Vec<crate::vaults::VaultAlarmView> {
+        self.vaults.alarm_views()
+    }
+
+    /// How many unsent changes were discarded with vaults deleted on another device since the
+    /// last call (reported once; ADR 0081 §A5).
+    #[wasm_bindgen(js_name = takeDiscardedChanges)]
+    pub fn take_discarded_changes(&mut self) -> usize {
+        self.vaults.take_discarded()
+    }
+
+    /// The revoked devices whose ops are missing below their cut-off in every vault after the
+    /// last sync (ADR 0081 §0 item 2): 0 for an honest server.
+    #[wasm_bindgen(getter, js_name = revokedDataMissing)]
+    #[must_use]
+    pub fn revoked_data_missing(&self) -> usize {
+        self.vaults.cutoff_gaps()
     }
 
     /// The cache writes of every step since the last call (struct docs,
@@ -866,7 +961,12 @@ impl DeviceSession {
     /// # Errors
     /// As `DeviceSession::vault_ref`.
     pub fn items(&self, trash: bool) -> Result<Vec<ItemSummary>, CoreError> {
-        Ok(items::summaries(self.vault_ref()?, trash))
+        Ok(self
+            .vaults
+            .all()
+            .iter()
+            .flat_map(|v| items::summaries(v, trash))
+            .collect())
     }
 
     /// One item's summary.
@@ -875,8 +975,7 @@ impl DeviceSession {
     /// As `DeviceSession::vault_ref`; `invalid_input` for an id that is not 32 hex digits;
     /// `unknown_item`.
     pub fn item(&self, id: &str) -> Result<ItemSummary, CoreError> {
-        let vault = self.vault_ref()?;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.vaults.item(id)?;
         items::summary(vault, item).ok_or(ClientError::UnknownItem.into())
     }
 
@@ -886,9 +985,109 @@ impl DeviceSession {
     /// As [`DeviceSession::item`].
     #[wasm_bindgen(js_name = itemFields)]
     pub fn item_fields(&self, id: &str) -> Result<Vec<FieldView>, CoreError> {
-        let vault = self.vault_ref()?;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.vaults.item(id)?;
         Ok(items::fields(vault, item))
+    }
+
+    /// What each custom field's autocomplete id does, in list order (ADR 0076 §2.5).
+    ///
+    /// # Errors
+    /// As [`DeviceSession::item`].
+    #[wasm_bindgen(js_name = customFieldAutofill)]
+    pub fn custom_field_autofill(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::autofill::CustomFieldAutofillView>, CoreError> {
+        crate::autofill::custom_field_autofill(self.vaults.item(id)?.0, id)
+    }
+
+    /// The offer of one inline-menu candidate (ADR 0076 §4.1): whether it fills a TOTP code,
+    /// and which custom fields it fills for the page's custom `tokens` (Display Names and
+    /// flags only, never a value).
+    ///
+    /// # Errors
+    /// As `DeviceSession::vault_ref`; `invalid_input` for an id that is not 32 hex digits.
+    #[wasm_bindgen(js_name = autofillOffer)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen hands this exported call ownership of the JS array as Vec<String>"
+    )]
+    pub fn autofill_offer(
+        &self,
+        id: &str,
+        tokens: Vec<String>,
+    ) -> Result<crate::autofill::AutofillOffer, CoreError> {
+        crate::autofill::autofill_offer(self.vaults.item(id)?.0, id, &tokens)
+    }
+
+    /// The values of one fill click (ADR 0076 §4.2): one coarse call. `only` is `username`,
+    /// `password`, `totp` or none; `tokens` and `elements` are the offer record's custom
+    /// tokens and the element ids it recorded for them. The TOTP code is computed here at
+    /// `now_ms`; the secret never crosses.
+    ///
+    /// # Errors
+    /// As `DeviceSession::vault_ref`; `invalid_input` for a bad id, `only` or lists of
+    /// different lengths; `unknown_item` unless the item is an Active Login.
+    #[wasm_bindgen(js_name = fillPlan)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one coarse call: the offer record's scope, flat, as wasm-bindgen passes it"
+    )]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen hands this exported call ownership of the JS arrays and strings"
+    )]
+    pub fn fill_plan(
+        &self,
+        id: &str,
+        only: Option<String>,
+        totp: bool,
+        tokens: Vec<String>,
+        elements: Vec<String>,
+        username_token: Option<String>,
+        password_token: Option<String>,
+        now_ms: u64,
+    ) -> Result<crate::autofill::FillValues, CoreError> {
+        crate::autofill::fill_plan(
+            self.vaults.item(id)?.0,
+            id,
+            &crate::autofill::FillArgs {
+                only: only.as_deref(),
+                totp,
+                tokens: &tokens,
+                elements: &elements,
+                username_token: username_token.as_deref(),
+                password_token: password_token.as_deref(),
+            },
+            now_ms,
+        )
+    }
+
+    /// The save dialog's custom-field rows (ADR 0076 §5.3) for a new item (`id` absent) or an
+    /// update of `id`: `tokens`, `values` and `masked` (1 for a `type=password` input) are
+    /// the captured fields, parallel. No value crosses back.
+    ///
+    /// # Errors
+    /// As `DeviceSession::vault_ref`; `invalid_input` for a bad id or lists of different
+    /// lengths.
+    #[wasm_bindgen(js_name = customSavePlan)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen hands this exported call ownership of the JS arrays"
+    )]
+    pub fn custom_save_plan(
+        &self,
+        id: Option<String>,
+        tokens: Vec<String>,
+        values: Vec<String>,
+        masked: Vec<u8>,
+    ) -> Result<Vec<crate::autofill::SaveRowView>, CoreError> {
+        let values: Vec<Zeroizing<String>> = values.into_iter().map(Zeroizing::new).collect();
+        let vault = match id.as_deref() {
+            Some(id) => self.vaults.item(id)?.0,
+            None => self.vaults.personal_vault()?,
+        };
+        crate::autofill::save_plan(vault, id.as_deref(), &tokens, &values, &masked)
     }
 
     /// One field's value as text, concealed or not: call it only on the user's request.
@@ -898,8 +1097,7 @@ impl DeviceSession {
     /// `invalid_input` for a value with no text form.
     #[wasm_bindgen(js_name = revealField)]
     pub fn reveal_field(&self, id: &str, key: &str) -> Result<String, CoreError> {
-        let vault = self.vault_ref()?;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.vaults.item(id)?;
         Ok(items::reveal(vault, item, key)?.as_str().to_owned())
     }
 
@@ -919,8 +1117,12 @@ impl DeviceSession {
     ///
     /// # Errors
     /// As [`DeviceSession::item`]; `invalid_input` when `passkey_id` is not a valid element
-    /// id, the item has no such passkey, or its stored key is not a valid 32-byte scalar;
+    /// id, the item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed;
     /// otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64).
+    ///
+    /// This call does **not** check `passkey_id` against the page's `allowCredentials` — the
+    /// extension's background filters [`DeviceSession::passkey_candidates`]'s result first
+    /// (gap 35(b) in the M2 gap audit; [`crate::passkey`] module docs).
     ///
     /// [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md
     #[wasm_bindgen(js_name = passkeyAssertion)]
@@ -932,23 +1134,36 @@ impl DeviceSession {
         rp_id: &str,
         challenge: &[u8],
     ) -> Result<PasskeyAssertion, CoreError> {
-        let vault = self.vault_ref()?;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.vaults.item(id)?;
         let bad = || CoreError::from(ClientError::InvalidInput);
         let element = ElementId::from_bytes(items::parse_id(passkey_id)?);
 
-        let credential_id_key = element
-            .key(LIST_PASSKEY, ATTR_CREDENTIAL_ID)
-            .map_err(|_| bad())?;
-        let credential_id = match vault
-            .field_value(item, credential_id_key.as_str())
-            .ok_or_else(bad)?
-            .decode()
-        {
-            Ok(ValueRef::Bytes(bytes)) => bytes.to_vec(),
-            _ => return Err(bad()),
+        let bytes_field = |attr: &str| -> Result<Vec<u8>, CoreError> {
+            let key = element.key(LIST_PASSKEY, attr).map_err(|_| bad())?;
+            match vault
+                .field_value(item, key.as_str())
+                .ok_or_else(bad)?
+                .decode()
+            {
+                Ok(ValueRef::Bytes(bytes)) => Ok(bytes.to_vec()),
+                _ => Err(bad()),
+            }
         };
 
+        let credential_id = bytes_field(ATTR_CREDENTIAL_ID)?;
+        let user_handle = bytes_field(ATTR_USER_HANDLE)?;
+
+        // `alg` picks the algorithm (ADR 0039 §1): 1 is ES256, which this project creates; 2 is
+        // an `EdDSA` passkey a CXF import brought in (ADR 0074 §3), whose seed must never be
+        // read as a P-256 scalar.
+        let alg_key = element.key(LIST_PASSKEY, ATTR_ALG).map_err(|_| bad())?;
+        let Ok(ValueRef::Enum(alg)) = vault
+            .field_value(item, alg_key.as_str())
+            .ok_or_else(bad)?
+            .decode()
+        else {
+            return Err(bad());
+        };
         let private_key_key = element
             .key(LIST_PASSKEY, ATTR_PRIVATE_KEY)
             .map_err(|_| bad())?;
@@ -957,12 +1172,72 @@ impl DeviceSession {
             .ok_or_else(bad)?
             .decode()
         {
-            Ok(ValueRef::Bytes(bytes)) => Es256SigningKey::from_bytes(bytes).map_err(|_| bad())?,
+            Ok(ValueRef::Bytes(bytes)) => {
+                PasskeySigningKey::from_stored(alg, bytes).map_err(|_| bad())?
+            }
             _ => return Err(bad()),
         };
 
-        let assertion = get_assertion(&signing_key, &credential_id, origin, rp_id, challenge)?;
+        let assertion = get_assertion_with(
+            &signing_key,
+            &credential_id,
+            &user_handle,
+            origin,
+            rp_id,
+            challenge,
+        )?;
         Ok(assertion.into())
+    }
+
+    /// Every stored passkey's non-secret metadata on item `id` (`passkey/<id>/…`; ADR 0039
+    /// §1), for the extension's background to list `navigator.credentials.get()`/`.create()`
+    /// candidates (gaps 35(a)/(b) in the M2 gap audit; [`crate::passkey`] module docs) — never
+    /// `private_key`, which stays in Rust and is read only by [`DeviceSession::passkey_assertion`].
+    ///
+    /// # Errors
+    /// As [`DeviceSession::item`].
+    #[wasm_bindgen(js_name = passkeyCandidates)]
+    pub fn passkey_candidates(&self, id: &str) -> Result<Vec<PasskeyCandidate>, CoreError> {
+        let (vault, item) = self.vaults.item(id)?;
+        let mut out = Vec::new();
+        for element in vault.list_elements(item, LIST_PASSKEY) {
+            let element_id = element.element.as_str();
+            let key = |attr: &str| format!("{LIST_PASSKEY}/{element_id}/{attr}");
+            let text = |attr: &str| match vault.field_value(item, &key(attr))?.decode() {
+                Ok(ValueRef::Text(text)) => Some(text.to_owned()),
+                _ => None,
+            };
+            let bytes = |attr: &str| match vault.field_value(item, &key(attr))?.decode() {
+                Ok(ValueRef::Bytes(bytes)) => Some(bytes.to_vec()),
+                _ => None,
+            };
+            let enum_value = |attr: &str| match vault.field_value(item, &key(attr))?.decode() {
+                Ok(ValueRef::Enum(value)) => Some(value),
+                _ => None,
+            };
+            let u64_value = |attr: &str| match vault.field_value(item, &key(attr))?.decode() {
+                Ok(ValueRef::U64(value)) => Some(value),
+                _ => None,
+            };
+
+            let (Some(rp_id), Some(user_handle), Some(credential_id), Some(alg)) = (
+                text(ATTR_RP_ID),
+                bytes(ATTR_USER_HANDLE),
+                bytes(ATTR_CREDENTIAL_ID),
+                enum_value(ATTR_ALG),
+            ) else {
+                continue;
+            };
+            out.push(PasskeyCandidate {
+                element_id: element_id.to_owned(),
+                rp_id,
+                user_handle,
+                credential_id,
+                alg,
+                created_ms: u64_value(ATTR_CREATED_MS).unwrap_or(0),
+            });
+        }
+        Ok(out)
     }
 
     /// Creates an item of `item_type` (a name of [`crate::items::TYPES`]) with the draft's
@@ -975,6 +1250,7 @@ impl DeviceSession {
     #[wasm_bindgen(js_name = createItem)]
     pub fn create_item(
         &mut self,
+        vault_id: &str,
         item_type: &str,
         draft: &ItemDraft,
         now_ms: u64,
@@ -983,17 +1259,15 @@ impl DeviceSession {
             return Err(CoreError::new(WRONG_STATE));
         }
         let item_type = type_from_name(item_type)?;
-        let writes = items::writes(self.vault_ref()?, None, draft)?;
+        let target = items::vault_id(vault_id)?;
+        let vault = self.vaults.get_mut(target)?;
+        let writes = items::writes(vault, None, draft)?;
         let edits: Vec<FieldEdit<'_>> = writes
             .iter()
             .map(|(key, value)| FieldEdit { key, value })
             .collect();
-        let vault = self
-            .vaults
-            .first_mut()
-            .ok_or_else(|| CoreError::from(ClientError::Internal))?;
         let item = vault.create_item(&mut self.rng, &self.unlocked, item_type, &edits, now_ms)?;
-        Ok(hex(item.as_bytes()))
+        Ok(item_ref(target, item))
     }
 
     /// Edits an active item with the draft's writes, as one op.
@@ -1010,16 +1284,12 @@ impl DeviceSession {
         if self.sync.running() {
             return Err(CoreError::new(WRONG_STATE));
         }
-        let item = items::item_id(id)?;
-        let writes = items::writes(self.vault_ref()?, Some(item), draft)?;
+        let (vault, item) = self.vaults.item_mut(id)?;
+        let writes = items::writes(vault, Some(item), draft)?;
         let edits: Vec<FieldEdit<'_>> = writes
             .iter()
             .map(|(key, value)| FieldEdit { key, value })
             .collect();
-        let vault = self
-            .vaults
-            .first_mut()
-            .ok_or_else(|| CoreError::from(ClientError::Internal))?;
         vault.edit_item(&mut self.rng, &self.unlocked, item, &edits, now_ms)?;
         Ok(())
     }
@@ -1052,9 +1322,86 @@ impl DeviceSession {
         self.lifecycle(id, VaultSync::purge_item::<Rng>, now_ms)
     }
 
+    /// Purges every trashed item of the personal vault whose retention period has elapsed
+    /// (gap 00; ADR 0012 §5, ADR 0018 §9, §11; module docs of
+    /// `rizzy_client::items::VaultSync::auto_purge_due`). The host calls this once after a
+    /// successful sync, while the session is unlocked, so it runs only when this device is
+    /// online. `DeviceSession::drain_cache_writes` after this call returns the rows to
+    /// persist. Returns the purged items' ids, ascending; empty when nothing was due.
+    ///
+    /// # Errors
+    /// `wrong_state` while a sync runs.
+    #[wasm_bindgen(js_name = autoPurge)]
+    pub fn auto_purge(&mut self, now_ms: u64) -> Result<Vec<String>, CoreError> {
+        if self.sync.running() {
+            return Err(CoreError::new(WRONG_STATE));
+        }
+        let mut out = Vec::new();
+        for vault in self.vaults.all_mut() {
+            if vault.is_read_only() {
+                continue;
+            }
+            let vault_id = vault.vault_id();
+            let purged =
+                vault.auto_purge_due(&mut self.rng, &self.unlocked, now_ms, TRASH_RETENTION_MS)?;
+            out.extend(purged.into_iter().map(|id| item_ref(vault_id, id)));
+        }
+        Ok(out)
+    }
+
     /// Zeroizes every handle this session holds (ADR 0013 §3 rule 1). Consumes the session;
     /// dropping it does the same.
     pub fn lock(self) {}
+}
+
+/// URL matching under the account's own settings (ADR 0037 §6–§7; ADR 0042 §6).
+#[wasm_bindgen]
+impl DeviceSession {
+    /// Decides which of `uris` are autofill candidates for `page_url`, requested by the frame at
+    /// `frame_origin`, under this account's settings: a URI mode `0x0000` resolves to the
+    /// account's match default, and the merged equivalence view is the compiled-in global list
+    /// minus the account's disabled groups, plus its user-defined groups. The settings are read
+    /// once per `ACCOUNT_SETTINGS` object (`rizzy_client::settings::SettingsCache`).
+    ///
+    /// # Errors
+    /// `settings_update_required` or `invalid_server_response` for settings this build cannot
+    /// read: no candidate is offered under settings it could not apply; `account_key_rotated`;
+    /// `invalid_input` as the free `decideMatchCandidates`.
+    #[wasm_bindgen(js_name = decideMatchCandidates)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen hands this exported call ownership of the JS array as Vec<UriInput>, never a slice"
+    )]
+    pub fn decide_match_candidates(
+        &mut self,
+        page_url: &str,
+        is_top_frame: bool,
+        frame_origin: &str,
+        uris: Vec<UriInput>,
+    ) -> Result<MatchDecision, CoreError> {
+        let settings = self.settings.get(&self.account, &self.unlocked)?;
+        matching::decide_with_account(
+            page_url,
+            is_top_frame,
+            frame_origin,
+            &uris,
+            settings,
+            &self.global_groups,
+        )
+    }
+
+    /// The account's matching settings, against this build's global list.
+    ///
+    /// # Errors
+    /// As [`DeviceSession::decide_match_candidates`].
+    #[wasm_bindgen(js_name = matchSettings)]
+    pub fn match_settings(&mut self) -> Result<MatchSettingsView, CoreError> {
+        let settings = self.settings.get(&self.account, &self.unlocked)?;
+        Ok(matching::settings_view(
+            settings.matching(),
+            &self.global_groups,
+        ))
+    }
 }
 
 impl DeviceSession {
@@ -1197,6 +1544,38 @@ mod tests {
             "wrong_state"
         );
         assert_eq!(flow.state(), "request");
+    }
+
+    /// ADR 0080 §6 on the unlock path (`from_parts`): the first unlock of a fresh cache and
+    /// every later unlock, at the floor the first one persisted, run with the same compiled-in
+    /// global groups, and a later unlock never appends a floor write. While no signed list is
+    /// compiled in (`rizzy_match::compiled::GLOBAL_LIST` is `None` until the owner signs one)
+    /// both unlocks have no groups and no writes; once one ships, this is the check that the
+    /// default site groups survive the second unlock.
+    #[test]
+    fn every_unlock_after_the_first_keeps_the_compiled_in_groups_without_a_write() {
+        let mut floors = Floors::empty();
+        let mut first_writes = Changeset::new();
+        let first = start_global_groups(&floors, &mut first_writes);
+        floors.admit(&first_writes).unwrap();
+        let expected_floor = rizzy_client::rizzy_match::compiled::global_list(0)
+            .unwrap()
+            .map_or(0, |list| list.list_version());
+        assert_eq!(floors.highest_equivalence_list_version(), expected_floor);
+        assert_eq!(
+            first.is_empty(),
+            rizzy_client::rizzy_match::compiled::GLOBAL_LIST.is_none()
+        );
+
+        for _ in 0..3 {
+            let mut later_writes = Changeset::new();
+            let later = start_global_groups(&floors, &mut later_writes);
+            assert_eq!(later, first);
+            assert!(
+                later_writes.is_empty(),
+                "an equal version never writes the floor"
+            );
+        }
     }
 
     #[test]

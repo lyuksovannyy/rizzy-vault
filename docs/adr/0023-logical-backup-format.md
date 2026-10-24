@@ -1,6 +1,6 @@
 # ADR 0023: Logical database backup file format
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0071](0071-encrypted-db-backup-format.md) (§2 in part)
 - Date: 2026-09-29
 - Deciders: project owner
 - Milestone: M1

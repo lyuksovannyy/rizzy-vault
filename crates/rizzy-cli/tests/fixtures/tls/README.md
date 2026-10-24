@@ -12,6 +12,10 @@ They were generated once, on 2026-10-05, with the system OpenSSL CLI (OpenSSL 3.
 | `wrong-host.pem` | The same key, issued by the CA, SAN `wrong.example` only | Refusal of a wrong host name (served with `leaf.key`) |
 | `self-signed.pem`, `self-signed.key` | A self-signed server certificate with `CA:TRUE`, SAN `localhost`, `127.0.0.1`, `::1` | Refusal when it is both the CA file and the server certificate (ADR 0030 Decision 5) |
 | `self-signed-leaf.pem`, `self-signed-leaf.key` | A self-signed server certificate with `CA:FALSE` (critical), `serverAuth`, SAN `localhost`, `127.0.0.1`, `::1`; added on 2026-10-05 with the same OpenSSL | Refusal of a non-CA certificate in the CA file, which would otherwise act as a pin (ADR 0030 Decision 5) |
+| `ca2.pem` | A second test CA, independent of `ca.pem`: self-signed, `CA:TRUE` (critical), key usage `keyCertSign`, `cRLSign`. Its key was deleted after signing. Added 2026-10-11 for `tests/tls_mitm.rs`, because `ca.pem`'s own key no longer exists to issue new leaves under it | A second, independently trusted CA in `tests/tls_mitm.rs`'s CA-file construction matrix; the issuer of the three leaves below |
+| `not-yet-valid.pem`, `not-yet-valid.key` | A server certificate issued by `ca2.pem`: `CA:FALSE`, `serverAuth`, SAN `localhost`, `127.0.0.1`, `::1`, valid only from 2100-01-01 | Refusal of a not-yet-valid certificate (`tests/tls_mitm.rs`) |
+| `wrong-eku.pem`, `wrong-eku.key` | A server certificate issued by `ca2.pem`: `CA:FALSE`, `clientAuth` only (no `serverAuth`), same SAN | Refusal of a certificate without the server-authentication EKU (`tests/tls_mitm.rs`) |
+| `weak-sig.pem`, `weak-sig.key` | A server certificate issued by `ca2.pem` with the same extensions as `leaf.pem`, but the issuer's signature over it uses SHA-1 (`ecdsa-with-SHA1`) instead of SHA-256 | Refusal of a certificate signed with a weak (SHA-1) signature algorithm (`tests/tls_mitm.rs`) |
 
 ## How they were made
 
@@ -64,3 +68,44 @@ rm ca.key
 ```
 
 Regenerating them is a reviewed change like any other test-vector change: run the commands above, and check with `openssl x509 -in <file> -noout -text` that each certificate is what the table says.
+
+## The A4 harness's fixtures (`ca2.pem` and its three leaves)
+
+Added 2026-10-11, same OpenSSL (3.6.2), same reasoning: no crate generates certificates at
+test time (ADR 0030 open question 5). `tests/tls_mitm.rs`'s combinatorial cert x protocol
+matrix needed a not-yet-valid certificate, one without the `serverAuth` EKU, and one signed
+with a weak algorithm, none of which `ca.pem` can issue any more (its key was deleted above).
+A second CA keeps these additions from touching the original fixtures at all; its key was
+deleted the same way.
+
+```sh
+key() { openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$1"; }
+leafext() {
+  printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=%s\nsubjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1\nauthorityKeyIdentifier=keyid\nsubjectKeyIdentifier=hash\n' "$1" > "$W/ext.cnf"
+}
+
+key ca2.key
+openssl req -x509 -new -key ca2.key -sha256 -days 36500 -subj "/CN=rizzy-vault test CA 2" \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectKeyIdentifier=hash" -out ca2.pem
+
+key not-yet-valid.key
+leafext serverAuth
+openssl req -new -key not-yet-valid.key -subj "/CN=localhost" -out "$W/nyv.csr"
+openssl x509 -req -in "$W/nyv.csr" -CA ca2.pem -CAkey ca2.key -set_serial 10 -sha256 \
+  -not_before 21000101000000Z -not_after 21010101000000Z -extfile "$W/ext.cnf" -out not-yet-valid.pem
+
+key wrong-eku.key
+leafext clientAuth
+openssl req -new -key wrong-eku.key -subj "/CN=localhost" -out "$W/eku.csr"
+openssl x509 -req -in "$W/eku.csr" -CA ca2.pem -CAkey ca2.key -set_serial 11 -sha256 -days 36500 \
+  -extfile "$W/ext.cnf" -out wrong-eku.pem
+
+key weak-sig.key
+leafext serverAuth
+openssl req -new -key weak-sig.key -subj "/CN=localhost" -out "$W/weak.csr"
+openssl x509 -req -in "$W/weak.csr" -CA ca2.pem -CAkey ca2.key -set_serial 12 -sha1 -days 36500 \
+  -extfile "$W/ext.cnf" -out weak-sig.pem
+
+rm ca2.key
+```

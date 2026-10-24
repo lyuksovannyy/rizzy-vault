@@ -1,0 +1,13 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!doctype html>
+<!-- ADR 0076 §1.3–§1.4 fixture: e-mail verification code -->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>e-mail verification code</title></head>
+  <body>
+    <form id="mail" action="/verify">
+      <label for="code">Verification code sent to your e-mail</label>
+      <input id="code" name="verification_code" type="text" inputmode="numeric" maxlength="6" />
+      <button type="submit">Verify</button>
+    </form>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Username covered by an overlay</title>
+  </head>
+  <body>
+    <!-- Hostile: a username field another element is painted over (the topmost check). The
+         overlay is real, for the browser; data-fixture-covered tells the Node fixture reader,
+         which has no layout. Step: password. -->
+    <form id="login" action="/session" onsubmit="return false" style="position:relative">
+      <input id="user" type="text" autocomplete="username" data-fixture-covered style="width:200px;height:24px" />
+      <div id="overlay" style="position:absolute;left:0;top:0;width:240px;height:40px;background:#fff"></div>
+      <input id="pass" type="password" />
+      <button type="submit">Log in</button>
+    </form>
+  </body>
+</html>

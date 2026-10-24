@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The sync driver of one vault on one device (ADR 0012 §4, §7; ADR 0018 §3, §10; ADR 0021
 //! §2, §4, §9; CRYPTO.md §8.4, §10.2, §11.6 reader and writer rules).
 //!
@@ -31,6 +33,20 @@
 //! Covers (snapshot records) are verified the same way, with the snapshot author bound of
 //! CRYPTO.md §10.2 rule (c) and §11.8 step 4. Then the `causal` cycle: plan, absorb, commit,
 //! deliver.
+//!
+//! # Paged responses (ADR 0050)
+//!
+//! A page carries the covers of its own bodiless headers only, so a tombstone can arrive in a
+//! page before the header of the Purge it records, on its chain or another device's. A cover
+//! the merge refuses only as `PurgeAboveCut` is held for the rest of the response sequence
+//! (every page up to a `complete` one), not given up: the log links its headers so the cursor
+//! moves on, nothing that waits for them is applied, and the absorption is retried, unchanged,
+//! after each page whose commit advanced a chain and once more on the complete page
+//! ([`FetchOutcome::held_covers`]). A cover taken on a retry is journaled like any absorbed
+//! one. One still held when the sequence completes is given up (a refused cover, and a gap in
+//! the reports), and the next Fetch serves its headers again. A hold is kept in memory only:
+//! a restart in the middle of a sequence starts the next one from the persisted cursor (ADR
+//! 0050 open question 1).
 //!
 //! # Upload
 //!
@@ -113,13 +129,13 @@ use rizzy_proto::vault::{
 };
 use rizzy_proto::wire::List;
 use rizzy_sync::causal::{
-    AuthorStatus, BodyStatus, Report, RestoreGeneration, ServedOp, ServerView, VaultLog,
-    check_op_author, check_snapshot_author,
+    AuthorStatus, BodyStatus, CoverPlan, GapCause, Report, RestoreGeneration, ServedOp, ServerView,
+    VaultLog, check_op_author, check_snapshot_author,
 };
 use rizzy_sync::dot::Dot;
 use rizzy_sync::header::{ItemSchemaVersion, OpHeader, SnapshotHeader};
 use rizzy_sync::hlc::Hlc;
-use rizzy_sync::merge::{AbsorbOutcome, ItemMerge, OpInput, SnapshotInput};
+use rizzy_sync::merge::{AbsorbOutcome, ItemLifecycle, ItemMerge, OpInput, SnapshotInput};
 use rizzy_sync::record::{parse_op, parse_snapshot};
 use rizzy_sync::vv::VersionVector;
 
@@ -127,6 +143,7 @@ use crate::account::{CertifiedDevice, RevokedDevice, VerifiedAccount};
 use crate::device::UnlockedDevice;
 use crate::error::{ClientError, internal};
 use crate::store::floors::{id16, u64_be};
+use crate::store::index::{self, IndexEntry};
 use crate::store::rows::{Changeset, OpRow, SnapshotRow, WrapRow, Write, meta, own};
 use crate::wire::{bytes, id};
 
@@ -243,8 +260,15 @@ pub struct FetchOutcome {
     pub applied: usize,
     /// Covers absorbed.
     pub absorbed: usize,
-    /// Covers the merge refused ("Snapshots are claims").
+    /// Covers the merge refused ("Snapshots are claims"), and held covers given up: refused on a
+    /// retry for another reason, or still unresolved when the response sequence completed (ADR
+    /// 0050 §2).
     pub refused_covers: usize,
+    /// Covers the merge refused only as `Refusal::PurgeAboveCut` and that this driver holds
+    /// across the pages of the response sequence instead (ADR 0050 §2): the header of the Purge
+    /// such a tombstone records may come in a later page. A held cover the merge takes on a
+    /// retry counts in [`FetchOutcome::absorbed`] then.
+    pub held_covers: usize,
     /// Records dropped before the chain check: unknown signer, bad signature, foreign vault,
     /// author checks.
     pub dropped: usize,
@@ -304,6 +328,29 @@ struct Settled {
     accepted: Vec<Dot>,
     /// The indexes, into the verified covers, of the covers the merge absorbed.
     absorbed: Vec<usize>,
+    /// The indexes, into the verified covers, of the covers the merge holds (ADR 0050 §2).
+    held: Vec<usize>,
+    /// The items whose held cover the merge took on a retry (ADR 0050 §2).
+    retried: Vec<ItemId>,
+}
+
+/// What the merge did with one cover ([`VaultSync::absorb_cover`]).
+enum Absorb {
+    /// Absorbed, and recorded in the log.
+    Taken,
+    /// Refused only as `Refusal::PurgeAboveCut`: to hold (ADR 0050 §2).
+    Hold,
+    /// Refused for another reason, or not absorbable: final.
+    Refused,
+}
+
+/// The `item_index` rows of one vault as the cache holds them (ADR 0056 §4), for the diff each
+/// [`VaultSync::take_writes`] appends.
+struct IndexTracking {
+    /// The rows, by item id.
+    rows: BTreeMap<[u8; 16], IndexEntry>,
+    /// Whether the next take must compare even if nothing was journaled.
+    dirty: bool,
 }
 
 /// What the journal last wrote of the values that live in `cache_meta` and `vaults`, so that a
@@ -371,6 +418,10 @@ pub struct VaultSync {
     /// The cache writes of the steps since the last [`VaultSync::take_writes`], for a host that
     /// persists the vault (ADR 0026 §4); `None` for one that does not (the web vault).
     journal: Option<Vec<Write>>,
+    /// The `item_index` rows the cache holds for this vault, when the host keeps the M3 local
+    /// index (ADR 0056 §4 "Kept incrementally"; [`crate::store::index`]); `None` for a host
+    /// that does not (the web vault, the browser extension).
+    index: Option<IndexTracking>,
     /// What the journal last wrote of the counters and the restore generation.
     journaled: Journaled,
     /// Per own op the server answered without storing it: the restore generation of that
@@ -389,6 +440,12 @@ pub struct VaultSync {
     /// they wrote or absorbed"). A healing request sends them verbatim as the covers of the
     /// headers it sends without a body.
     held_covers: Vec<(SnapshotHeader, SnapshotRecord)>,
+    /// Per item, the cover the merge holds for a retry in the current response sequence (ADR
+    /// 0050 §2; the plaintext is the merge's, [`ItemMerge::held_claim`]): its record, and whether
+    /// its carried wrap matched the signed hash, to journal and hold it like any absorbed cover
+    /// once the merge takes it. In memory only (ADR 0050 §2: "ADR 0026's cache gains no new
+    /// row").
+    pending_covers: BTreeMap<ItemId, (SnapshotHeader, SnapshotRecord, bool)>,
     /// The server's heads h(V, d) in the last Fetch page, for the healing request's ranges.
     server_heads: Option<VersionVector>,
     /// The item-key wraps of this vault at the held vault key's epoch that this device got
@@ -408,6 +465,54 @@ pub struct VaultSync {
     wraps_complete_at: Option<u32>,
     /// The own `device_seq`s of the healing request in flight, for its answer.
     healing: Option<heal::HealInFlight>,
+    /// The device's counters, shared with its other vaults' drivers ([`DeviceCounters`]).
+    counters: Option<DeviceCounters>,
+}
+
+/// The per-device counters, `device_seq` and the HLC, shared by every [`VaultSync`] of one
+/// device ([ADR 0081] §A7): "a device running several `VaultSync` drivers allocates
+/// `device_seq` from one per-device counter (today's cache meta `NEXT_DEVICE_SEQ`), and each
+/// driver sets `vault_prev_seq` from its own vault's chain".
+///
+/// Each driver keeps its own copy and merges it with the shared one (the larger value of each
+/// counter wins) before it allocates a `device_seq`, after it wrote an op or received an HLC,
+/// and before it journals the counters. Neither counter ever goes backwards, so no
+/// `device_seq` is allocated twice across vaults, and `device_seq` stays gap-free per device.
+/// Cloning shares the counters.
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+#[derive(Clone, Default)]
+pub struct DeviceCounters(std::sync::Arc<std::sync::Mutex<(u64, Hlc)>>);
+
+impl fmt::Debug for DeviceCounters {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DeviceCounters")
+    }
+}
+
+impl DeviceCounters {
+    /// New counters, before any driver joined them.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Merges `(next_seq, clock)` into the shared counters and returns the merged values.
+    fn merge(&self, next_seq: u64, clock: Hlc) -> (u64, Hlc) {
+        let mut shared = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        shared.0 = shared.0.max(next_seq);
+        shared.1 = shared.1.max(clock);
+        *shared
+    }
+
+    /// The next `device_seq` any driver of this device would allocate.
+    #[must_use]
+    pub fn next_device_seq(&self) -> u64 {
+        self.merge(0, Hlc::ZERO).0
+    }
 }
 
 impl fmt::Debug for VaultSync {
@@ -490,16 +595,70 @@ impl VaultSync {
             seen_keys,
             stale_from: None,
             journal: None,
+            index: None,
             journaled: Journaled::default(),
             answered: BTreeMap::new(),
             held_ops: BTreeMap::new(),
             held_covers: Vec::new(),
+            pending_covers: BTreeMap::new(),
             server_heads: None,
             known_wraps: BTreeMap::new(),
             served_wraps: BTreeSet::new(),
             wraps_complete_at: None,
             healing: None,
+            counters: None,
         })
+    }
+
+    /// The revoked devices of the account this driver knows a cut-off for, other than its own,
+    /// each with its chain's head in this vault and its `last_accepted_device_seq`: the inputs
+    /// of the cross-vault missing-data check ([`crate::vaults::revoked_cutoff_gaps`]).
+    #[must_use]
+    pub fn revoked_heads(&self) -> Vec<(DeviceId, u64, u64)> {
+        self.log
+            .cutoffs()
+            .filter(|(device, _)| *device != self.device_id)
+            .map(|(device, cut)| (device, self.log.head(device), cut))
+            .collect()
+    }
+
+    /// The missing-data reports of a complete Fetch. ADR 0081 §0 item 2: with several vaults,
+    /// `device_seq` counts ops in every vault, so a revoked device's chain may end below its
+    /// cut-off in one vault; a driver that shares its counters leaves that check to the one
+    /// over every vault ([`crate::vaults::revoked_cutoff_gaps`]).
+    fn complete_fetch_reports(&self) -> Vec<Report> {
+        let several = self.counters.is_some();
+        self.log
+            .complete_fetch_reports()
+            .into_iter()
+            .filter(|r| {
+                !(several
+                    && matches!(
+                        r,
+                        Report::Gap {
+                            cause: GapCause::BelowCutoff { .. },
+                            ..
+                        }
+                    ))
+            })
+            .collect()
+    }
+
+    /// Joins the device's shared counters ([`DeviceCounters`], ADR 0081 §A7): from now on this
+    /// driver allocates `device_seq` and ticks the HLC from them, with every other driver that
+    /// joined the same counters.
+    pub fn share_counters(&mut self, counters: &DeviceCounters) {
+        self.counters = Some(counters.clone());
+        self.merge_counters();
+    }
+
+    /// Merges this driver's counters with the shared ones, if it joined any.
+    fn merge_counters(&mut self) {
+        if let Some(counters) = &self.counters {
+            let (next_seq, clock) = counters.merge(self.next_seq, self.clock);
+            self.next_seq = next_seq;
+            self.clock = clock;
+        }
     }
 
     /// Turns the cache journal on (ADR 0026 §4): from now on every step records the rows it
@@ -517,6 +676,7 @@ impl VaultSync {
     /// generation if they moved (ADR 0026 §4 steps 1–2 and 6). Empty when the journal is off
     /// or nothing changed.
     pub fn take_writes(&mut self) -> Changeset {
+        self.merge_counters();
         let Some(journal) = self.journal.as_mut() else {
             return Changeset::new();
         };
@@ -547,7 +707,39 @@ impl VaultSync {
         }
         // The counters come first: an own op row is admitted only with a counter above it.
         writes.sort_by_key(|w| !matches!(w, Write::Meta { .. }));
+        // ADR 0056 §4: the index writes of the items this step changed, in the same transaction
+        // as the rows that changed them. A merge changes only through a journaled row (an op, a
+        // snapshot, a wrap that opens a body), so a step that journaled nothing changed none.
+        if let Some(tracking) = self.index.take() {
+            self.index = Some(if tracking.dirty || !writes.is_empty() {
+                let after = index::project_vault(self);
+                writes.extend(index::diff(&tracking.rows, &after));
+                IndexTracking {
+                    rows: after,
+                    dirty: false,
+                }
+            } else {
+                tracking
+            });
+        }
         writes.into_iter().collect()
+    }
+
+    /// Turns `item_index` tracking on (ADR 0056 §4) from `rows`, the rows the cache holds for
+    /// this vault once the host committed what [`crate::store::index`] returned. Only with the
+    /// journal on: the index is kept in the same transactions.
+    pub(crate) fn track_index(&mut self, rows: BTreeMap<[u8; 16], IndexEntry>) {
+        if self.journal.is_some() {
+            self.index = Some(IndexTracking { rows, dirty: false });
+        }
+    }
+
+    /// Makes the next [`VaultSync::take_writes`] compare the index even if nothing was
+    /// journaled: tracking started on a vault the table does not reflect yet.
+    pub(crate) fn mark_index_dirty(&mut self) {
+        if let Some(tracking) = self.index.as_mut() {
+            tracking.dirty = true;
+        }
     }
 
     /// Records one cache write, if the journal is on.
@@ -618,10 +810,13 @@ impl VaultSync {
         self.vault_id
     }
 
-    /// The next own `device_seq`, for the host to keep with the device.
+    /// The next own `device_seq`, for the host to keep with the device: the device's, across
+    /// every driver that shares its counters ([`DeviceCounters`]).
     #[must_use]
-    pub const fn next_device_seq(&self) -> u64 {
-        self.next_seq
+    pub fn next_device_seq(&self) -> u64 {
+        self.counters
+            .as_ref()
+            .map_or(self.next_seq, |c| c.next_device_seq().max(self.next_seq))
     }
 
     /// Whether writes are refused (see the module docs).
@@ -1037,10 +1232,17 @@ impl VaultSync {
                 None => outcome.dropped += 1,
             }
         }
-        let settled = self.settle(&mut served, &covers, now_ms, &mut outcome)?;
+        let settled = self.settle(
+            &mut served,
+            &covers,
+            response.complete,
+            now_ms,
+            &mut outcome,
+        )?;
         // The rows of what was accepted (ADR 0026 §4 step 2): every accepted op statement with
-        // the body and wrap that matched its signed hashes, every absorbed snapshot record.
-        // The same records are held in memory for a healing request (ADR 0021 §9).
+        // the body and wrap that matched its signed hashes, every absorbed snapshot record
+        // (`keep_covers`). The same records are held in memory for a healing request (ADR 0021
+        // §9).
         for (op, (record, wrap)) in served.iter().zip(&op_records) {
             if settled.accepted.contains(&op.header.dot) {
                 let body = matches!(op.body, BodyStatus::Verified | BodyStatus::Waiting);
@@ -1051,19 +1253,9 @@ impl VaultSync {
                 }
             }
         }
-        for index in &settled.absorbed {
-            if let (Some((header, _)), Some((record, wrap))) =
-                (covers.get(*index), cover_records.get(*index))
-            {
-                self.hold_cover(header, record, *wrap);
-                if self.journal.is_some() {
-                    let row = self.snapshot_row(header, record, *wrap, own::SERVED);
-                    self.record(|| Write::PutSnapshot(row));
-                }
-            }
-        }
+        self.keep_covers(&settled, &covers, &cover_records);
         if response.complete {
-            outcome.reports.extend(self.log.complete_fetch_reports());
+            outcome.reports.extend(self.complete_fetch_reports());
         }
         // Server behind (ADR 0021 §9).
         let heads = heads_vv(&response.heads);
@@ -1093,6 +1285,7 @@ impl VaultSync {
         }
         self.server_heads = Some(heads);
         self.prune_bodies();
+        self.merge_counters();
         Ok(outcome)
     }
 
@@ -1128,7 +1321,9 @@ impl VaultSync {
 
     /// Steps 2–5 of the causal cycle for verified ops and covers: plan, absorb, commit,
     /// deliver. Shared by [`VaultSync::apply_fetch`] and [`VaultSync::restore`], so a cache
-    /// load runs the same code as a Fetch (ADR 0026 §4 step 5).
+    /// load runs the same code as a Fetch (ADR 0026 §4 step 5). `complete` says the page ends
+    /// its response sequence (a cache load is one whole sequence): held covers are retried once
+    /// more and then given up (ADR 0050 §2).
     ///
     /// # Errors
     /// As [`VaultSync::apply_fetch`].
@@ -1136,6 +1331,7 @@ impl VaultSync {
         &mut self,
         served: &mut [ServedOp],
         covers: &[(SnapshotHeader, SecretBytes)],
+        complete: bool,
         now_ms: u64,
         outcome: &mut FetchOutcome,
     ) -> Result<Settled, ClientError> {
@@ -1153,61 +1349,24 @@ impl VaultSync {
                     .map_err(|_| ClientError::InvalidServerResponse)?;
             }
         }
-        // 3. Absorb.
+        // 3. Absorb. A cover refused only as `PurgeAboveCut` is held, not given up: the
+        //    header of the Purge it records may come in a later page (ADR 0050 §2).
         let mut touched = BTreeSet::new();
         for &i in &plan.absorb {
             let Some((header, plaintext)) = covers.get(i) else {
                 continue;
             };
-            let Ok(data) = parse_snapshot(&header.covered, plaintext.expose_secret()) else {
-                continue;
-            };
-            let item = header.item_id;
-            let page_bodies: Vec<(&OpHeader, SymmetricKeyId, &SecretBytes)> = served
-                .iter()
-                .filter(|s| s.header.item_id == item && s.body == BodyStatus::Verified)
-                .filter_map(|s| {
-                    let (key_id, body) = self.bodies.get(&s.header.dot)?;
-                    Some((&s.header, *key_id, body))
-                })
-                .collect();
-            let parsed: Vec<(&OpHeader, SymmetricKeyId, rizzy_sync::record::OpData<'_>)> =
-                page_bodies
-                    .iter()
-                    .filter_map(|(h, k, b)| Some((*h, *k, parse_op(b.expose_secret()).ok()?)))
-                    .collect();
-            let with: Vec<OpInput<'_>> = parsed
-                .iter()
-                .map(|(h, k, d)| OpInput {
-                    header: h,
-                    key_id: *k,
-                    data: d,
-                })
-                .collect();
-            let merge = Self::merge_mut(&mut self.items, &self.item_keys, item);
-            match merge.absorb_snapshot(
-                SnapshotInput {
-                    header,
-                    data: &data,
-                },
-                &with,
-            ) {
-                Ok(absorption) => match absorption.outcome {
-                    AbsorbOutcome::Absorbed(absorbed) => {
-                        let taken = merge.covered().clone();
-                        self.log.record_absorbed(&plan, item, &taken);
-                        if let Some(hlc) = absorbed.receive_hlc
-                            && let Ok(receipt) = self.clock.receive(hlc, now_ms)
-                        {
-                            self.clock = receipt.clock;
-                        }
-                        touched.insert(item);
-                        outcome.absorbed += 1;
-                        settled.absorbed.push(i);
-                    }
-                    AbsorbOutcome::Refused(_) => outcome.refused_covers += 1,
-                },
-                Err(_) => outcome.refused_covers += 1,
+            match self.absorb_cover(&plan, header, plaintext, served, now_ms, &mut touched) {
+                Some(Absorb::Taken) => {
+                    outcome.absorbed += 1;
+                    settled.absorbed.push(i);
+                }
+                Some(Absorb::Hold) if self.hold(header, plaintext) => {
+                    outcome.held_covers += 1;
+                    settled.held.push(i);
+                }
+                Some(Absorb::Hold | Absorb::Refused) => outcome.refused_covers += 1,
+                None => {}
             }
         }
         // 4. Commit.
@@ -1220,6 +1379,14 @@ impl VaultSync {
                     .map_err(|_| ClientError::InvalidServerResponse)?;
             }
         }
+        // ADR 0050 §2: the held covers are retried whenever a chain advanced, and once more at
+        // the end of the response sequence, after which an unresolved one is given up.
+        if !commit.accepted.is_empty() || complete {
+            self.retry_holds(served, now_ms, &mut touched, outcome, &mut settled);
+        }
+        if complete {
+            self.end_holds(outcome);
+        }
         settled.accepted = commit.accepted;
         // 5. Deliver.
         outcome.applied += self.deliver(now_ms, &mut touched);
@@ -1230,6 +1397,194 @@ impl VaultSync {
             }
         }
         Ok(settled)
+    }
+
+    /// Absorbs one verified cover under `plan` (ADR 0018 §3 "Snapshots are claims"), with the
+    /// verified bodies of this page on its item, and records what the merge took. `None` if
+    /// its data does not parse.
+    fn absorb_cover(
+        &mut self,
+        plan: &CoverPlan,
+        header: &SnapshotHeader,
+        plaintext: &SecretBytes,
+        served: &[ServedOp],
+        now_ms: u64,
+        touched: &mut BTreeSet<ItemId>,
+    ) -> Option<Absorb> {
+        let data = parse_snapshot(&header.covered, plaintext.expose_secret()).ok()?;
+        let item = header.item_id;
+        let page_bodies: Vec<(&OpHeader, SymmetricKeyId, &SecretBytes)> = served
+            .iter()
+            .filter(|s| s.header.item_id == item && s.body == BodyStatus::Verified)
+            .filter_map(|s| {
+                let (key_id, body) = self.bodies.get(&s.header.dot)?;
+                Some((&s.header, *key_id, body))
+            })
+            .collect();
+        let parsed: Vec<(&OpHeader, SymmetricKeyId, rizzy_sync::record::OpData<'_>)> = page_bodies
+            .iter()
+            .filter_map(|(h, k, b)| Some((*h, *k, parse_op(b.expose_secret()).ok()?)))
+            .collect();
+        let with: Vec<OpInput<'_>> = parsed
+            .iter()
+            .map(|(h, k, d)| OpInput {
+                header: h,
+                key_id: *k,
+                data: d,
+            })
+            .collect();
+        let merge = Self::merge_mut(&mut self.items, &self.item_keys, item);
+        let Ok(absorption) = merge.absorb_snapshot(
+            SnapshotInput {
+                header,
+                data: &data,
+            },
+            &with,
+            Some(&plan.cut),
+        ) else {
+            return Some(Absorb::Refused);
+        };
+        match absorption.outcome {
+            AbsorbOutcome::Absorbed(absorbed) => {
+                let taken = merge.covered().clone();
+                self.log.record_absorbed(plan, item, &taken);
+                if let Some(hlc) = absorbed.receive_hlc
+                    && let Ok(receipt) = self.clock.receive(hlc, now_ms)
+                {
+                    self.clock = receipt.clock;
+                }
+                touched.insert(item);
+                Some(Absorb::Taken)
+            }
+            AbsorbOutcome::Refused(refusal) if refusal.holds_cover() => Some(Absorb::Hold),
+            AbsorbOutcome::Refused(_) => Some(Absorb::Refused),
+        }
+    }
+
+    /// Holds a cover the merge refused only as `PurgeAboveCut` (ADR 0050 §2): the log counts it
+    /// for the chain check and the merge keeps its plaintext for a retry. `false` when the log
+    /// holds nothing more (its cap, `MAX_HELD_ITEMS`): the refusal is then final.
+    fn hold(&mut self, header: &SnapshotHeader, plaintext: &SecretBytes) -> bool {
+        if !self.log.hold_cover(header) {
+            return false;
+        }
+        let data = SecretBytes::copy_from_slice(plaintext.expose_secret());
+        let held = Self::merge_mut(&mut self.items, &self.item_keys, header.item_id)
+            .hold_claim(header.clone(), data)
+            .is_ok();
+        if !held {
+            self.log.release_hold(header.item_id);
+        }
+        held
+    }
+
+    /// Retries every held cover, unchanged, under the log's held plan (ADR 0050 §2): the merge
+    /// takes it, holds it again (still `PurgeAboveCut`), or refuses it for another reason, which
+    /// is final. A held cover that a cover absorbed since dominates is moot and dropped.
+    fn retry_holds(
+        &mut self,
+        served: &[ServedOp],
+        now_ms: u64,
+        touched: &mut BTreeSet<ItemId>,
+        outcome: &mut FetchOutcome,
+        settled: &mut Settled,
+    ) {
+        let items: Vec<ItemId> = self.log.held_items().collect();
+        if items.is_empty() {
+            return;
+        }
+        let plan = self.log.held_plan();
+        for item in items {
+            let claim = self.items.get_mut(&item).and_then(|merge| {
+                let moot = merge.held_claim_moot();
+                merge.take_held_claim().filter(|_| !moot)
+            });
+            let Some((header, plaintext)) = claim else {
+                self.log.release_hold(item);
+                continue;
+            };
+            match self.absorb_cover(&plan, &header, &plaintext, served, now_ms, touched) {
+                Some(Absorb::Taken) => {
+                    self.log.release_hold(item);
+                    outcome.absorbed += 1;
+                    settled.retried.push(item);
+                }
+                Some(Absorb::Hold) => {
+                    let held = self
+                        .items
+                        .get_mut(&item)
+                        .is_some_and(|merge| merge.hold_claim(header, plaintext).is_ok());
+                    if !held {
+                        self.log.release_hold(item);
+                        outcome.refused_covers += 1;
+                    }
+                }
+                Some(Absorb::Refused) | None => {
+                    self.log.release_hold(item);
+                    outcome.refused_covers += 1;
+                }
+            }
+        }
+    }
+
+    /// Journals and holds every absorbed snapshot record (ADR 0026 §4 step 2; held in memory
+    /// for a healing request, ADR 0021 §9), keeps the record of each cover the merge holds with
+    /// it, and journals and holds each one the merge took on a retry like any absorbed one (ADR
+    /// 0050 §2). `covers` and `cover_records` are the page's verified covers, by the indexes
+    /// `settled` names.
+    fn keep_covers(
+        &mut self,
+        settled: &Settled,
+        covers: &[(SnapshotHeader, SecretBytes)],
+        cover_records: &[(&SnapshotRecord, bool)],
+    ) {
+        for index in &settled.absorbed {
+            if let (Some((header, _)), Some((record, wrap))) =
+                (covers.get(*index), cover_records.get(*index))
+            {
+                self.hold_cover(header, record, *wrap);
+                if self.journal.is_some() {
+                    let row = self.snapshot_row(header, record, *wrap, own::SERVED);
+                    self.record(|| Write::PutSnapshot(row));
+                }
+            }
+        }
+        for index in &settled.held {
+            if let (Some((header, _)), Some((record, wrap))) =
+                (covers.get(*index), cover_records.get(*index))
+            {
+                self.pending_covers
+                    .insert(header.item_id, (header.clone(), (*record).clone(), *wrap));
+            }
+        }
+        for item in &settled.retried {
+            if let Some((header, record, wrap)) = self.pending_covers.remove(item) {
+                self.hold_cover(&header, &record, wrap);
+                if self.journal.is_some() {
+                    let row = self.snapshot_row(&header, &record, wrap, own::SERVED);
+                    self.record(|| Write::PutSnapshot(row));
+                }
+            }
+        }
+        let held: BTreeSet<ItemId> = self.log.held_items().collect();
+        self.pending_covers.retain(|item, _| held.contains(item));
+    }
+
+    /// Gives up every held cover at the end of a response sequence (ADR 0050 §2: "A hold that is
+    /// still unresolved once the response sequence completes … is reported now"): each counts as
+    /// a refused cover, and its links lapse into the gap the complete-Fetch reports name.
+    fn end_holds(&mut self, outcome: &mut FetchOutcome) {
+        for item in self.log.held_items().collect::<Vec<_>>() {
+            if self
+                .items
+                .get_mut(&item)
+                .and_then(ItemMerge::take_held_claim)
+                .is_some()
+            {
+                outcome.refused_covers += 1;
+            }
+        }
+        self.log.end_holds();
     }
 
     /// Re-tries the bodies that waited for their item key. A body served in the page being
@@ -1313,7 +1668,9 @@ impl VaultSync {
     ///   rebuilds the item from it exactly; an absorbed cover is another author's claim
     ///   (ADR 0018 §3 "Snapshots are claims"), which the in-memory merge folds the op into
     ///   before dropping it but a load from the snapshot alone could not, so it never lets a
-    ///   body go. The snapshot row is `own = 2`, which the load reads as a cover.
+    ///   body go. The snapshot row is `own = 2`, which the load reads as a cover;
+    /// - is not an op of a purged item: the load cannot take a tombstone's cover before the own
+    ///   chain puts its Purge back, so such a body is never let go either.
     fn prune_bodies(&mut self) {
         let mut keep: BTreeSet<Dot> = self
             .items
@@ -1332,11 +1689,17 @@ impl VaultSync {
             })
             .filter(|(dot, _)| {
                 self.log.header(**dot).is_some_and(|header| {
-                    self.held_covers.iter().any(|(cover, _)| {
-                        cover.author == own_device
-                            && cover.item_id == header.item_id
-                            && cover.covered.covers(**dot)
-                    })
+                    // Not under a tombstone: its cover records this device's own Purge, whose
+                    // header the load puts back only after the covers (the own chain comes
+                    // last), so the load holds that cover (`PurgeAboveCut`) instead of taking
+                    // it, the op stays unsettled without its body, and the own Trash and Purge
+                    // ops whose context names it no longer load.
+                    self.item_lifecycle(header.item_id) != ItemLifecycle::Purged
+                        && self.held_covers.iter().any(|(cover, _)| {
+                            cover.author == own_device
+                                && cover.item_id == header.item_id
+                                && cover.covered.covers(**dot)
+                        })
                 })
             })
             .map(|(dot, _)| *dot)
@@ -1365,7 +1728,7 @@ pub(crate) struct OwnChange<'a> {
 
 impl VaultSync {
     /// Whether the client holds an unapplied record of `item` (ADR 0018 §11: no purge then).
-    fn holds_unapplied(&self, item: ItemId) -> bool {
+    pub(crate) fn holds_unapplied(&self, item: ItemId) -> bool {
         self.log.waiting().iter().any(|w| w.item_id == item)
     }
 
@@ -1373,12 +1736,22 @@ impl VaultSync {
     /// `Ok(None)` when none is held or every held key is stale: the writer then generates a
     /// fresh item key at the current `vault_key_epoch`, carries its wrap with the op, and the
     /// merge makes a full snapshot due ([`OwnWrite::fresh_item_key`](rizzy_sync::merge::OwnWrite)).
-    fn writer_key(&self, item: ItemId) -> Option<&ItemKey> {
+    pub(crate) fn writer_key(&self, item: ItemId) -> Option<&ItemKey> {
         self.item_keys.get(&item).and_then(|keys| {
             keys.iter()
                 .rev()
                 .find(|k| !k.is_stale(self.vault_key.epoch()))
         })
+    }
+
+    /// The held item key of `item` whose derived id is `key_id`, current or old (CRYPTO.md
+    /// §11.6 reader rule): an `ATTACHMENT_KEY_WRAP` is never re-wrapped, so it may name an old
+    /// one (ADR 0054 §3).
+    pub(crate) fn item_key_by_id(&self, item: ItemId, key_id: &SymmetricKeyId) -> Option<&ItemKey> {
+        self.item_keys
+            .get(&item)?
+            .iter()
+            .find(|k| k.matches_key_id(key_id))
     }
 
     /// Writes one own op on `item` (ADR 0012 §2–§4, ADR 0018 §3; CRYPTO.md §8.4, §10.2):
@@ -1433,6 +1806,8 @@ impl VaultSync {
             Some(_) => None,
             None => Some(ItemKey::generate(rng, self.vault_key.epoch())),
         };
+        // ADR 0081 §A7: the next device_seq of the device, not of this vault alone.
+        self.merge_counters();
         let hlc = self.clock.tick(now_ms).map_err(|_| ClientError::Internal)?;
         let dot = Dot::new(self.device_id, self.next_seq).ok_or(ClientError::Internal)?;
         let schema = ItemSchemaVersion::new(ITEM_SCHEMA_VERSION).ok_or(ClientError::Internal)?;
@@ -1536,6 +1911,7 @@ impl VaultSync {
         }
         self.clock = hlc;
         self.next_seq = self.next_seq.checked_add(1).ok_or(ClientError::Internal)?;
+        self.merge_counters();
         self.synced = false;
         Ok(dot)
     }
@@ -1996,6 +2372,13 @@ impl VaultSync {
         self.items.get(&item)
     }
 
+    /// The merge of `item`, mutably, if any op reached it. Unlike [`VaultSync::merge_mut`]
+    /// (the static helper own writes use), this never creates one: a presentation-only call
+    /// (ADR 0018 §3 "Surfacing") has nothing to mark on an item this replica never saw.
+    pub(crate) fn existing_merge_mut(&mut self, item: ItemId) -> Option<&mut ItemMerge> {
+        self.items.get_mut(&item)
+    }
+
     /// Every item's merge, ascending by item id (the order of an export payload, ADR 0027 §1).
     pub(crate) fn merges(&self) -> impl Iterator<Item = (ItemId, &ItemMerge)> + '_ {
         self.items.iter().map(|(id, merge)| (*id, merge))
@@ -2039,6 +2422,20 @@ impl VaultSync {
     /// The highest `device_seq` this device holds from `device` in this vault.
     pub(crate) fn cursor_of(&self, device: DeviceId) -> u64 {
         self.log.cursor().get(device)
+    }
+
+    /// Test access to the ADR 0050 bookkeeping: the items whose cover the log holds, the
+    /// records kept with them, and the covers of `item` held for a healing request.
+    #[cfg(test)]
+    pub(crate) fn holds_for_tests(&self, item: ItemId) -> (Vec<ItemId>, usize, usize) {
+        (
+            self.log.held_items().collect(),
+            self.pending_covers.len(),
+            self.held_covers
+                .iter()
+                .filter(|(h, _)| h.item_id == item)
+                .count(),
+        )
     }
 
     /// The vault half of a rotation for this vault (ADR 0025 §2 steps 1–3; CRYPTO.md §11.6
@@ -2133,6 +2530,16 @@ impl VaultSync {
             .into_iter()
             .flatten()
             .filter_map(|k| Some((k.key_id().ok()?, k.created_vault_key_epoch())))
+            .collect()
+    }
+
+    /// Test access: the bytes of the vault key and of every item key held, for the INV-15
+    /// canary (`tests/canary.rs`), which searches what the fake server saw for them.
+    #[cfg(test)]
+    pub(crate) fn key_bytes_for_tests(&self) -> Vec<Vec<u8>> {
+        core::iter::once(self.vault_key.key())
+            .chain(self.item_keys.values().flatten().map(ItemKey::key))
+            .map(|k| k.expose_secret().to_vec())
             .collect()
     }
 
@@ -2444,7 +2851,7 @@ impl VaultSync {
         }
         let mut outcome = FetchOutcome::default();
         let settled = vault
-            .settle(&mut served, &covers, now_ms, &mut outcome)
+            .settle(&mut served, &covers, true, now_ms, &mut outcome)
             .map_err(|_| corrupt)?;
         // The records held for a healing request, as a Fetch holds them.
         for (op, (record, wrap)) in served.iter().zip(&served_records) {
@@ -2629,6 +3036,19 @@ impl VaultSync {
             };
             self.record(|| write);
         }
+    }
+
+    /// Whether the server acknowledged everything this driver wrote: no own op unacknowledged,
+    /// no own snapshot queued or due. What a move waits for on its target before it purges the
+    /// source ([ADR 0081] §A6 step 2, INV-104).
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    #[must_use]
+    pub fn fully_acknowledged(&self) -> bool {
+        self.log.unacknowledged().next().is_none()
+            && self.outbox.is_empty()
+            && self.pending_snapshots.is_empty()
+            && self.in_flight.is_empty()
     }
 
     /// How many own ops and own snapshots the server has not acknowledged: what removal of

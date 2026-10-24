@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The per-item merge: multi-value registers with history, trash, purge and tombstones, and
 //! snapshot absorption ([ADR 0012] §4–§5, as partially superseded by [ADR 0018] §3, §6 and §10;
 //! [ADR 0018] §3, §9, §10; [ADR 0021] §9 client rules).
@@ -128,9 +130,12 @@
 //! Besides the state, an [`ItemMerge`] keeps local evidence that no format freezes: the
 //! verified header of each dot, which dots it merged from bodies, every op body it merged or
 //! received with a snapshot (what each wrote), the retained ops and the newest-snapshot basis, the unresolved disagreements, and which late
-//! values it surfaced. `rizzy-client` persists them. A replica rebuilt from its kept records
-//! (every item header through [`ItemMerge::record_header`], its newest snapshot or pair through
-//! [`ItemMerge::absorb_snapshot`], then its retained ops) reaches the same state bytes.
+//! values it surfaced. `rizzy-client` persists them, except the surfaced marks: those live in
+//! session memory only, since the ADR 0026 cache has no slot for them (a new record would be a
+//! persistent-format change), so a notice shows again after the next unlock. A replica rebuilt
+//! from its kept records (every item header through [`ItemMerge::record_header`], its newest
+//! snapshot or pair through [`ItemMerge::absorb_snapshot`], then its retained ops) reaches the
+//! same state bytes.
 //!
 //! [ADR 0012]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0012-sync-engine.md
 //! [ADR 0018]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0018-item-record-encoding.md
@@ -345,6 +350,33 @@ impl Refusal {
             | Self::ValueAtPurgeDot { dot }
             | Self::WriteRecordedAsPurge { dot }
             | Self::PurgeKeyContradicts { dot } => Some(*dot),
+        }
+    }
+
+    /// Whether the client holds the cover instead of reporting the refusal at once (ADR 0050
+    /// §2): only [`Refusal::PurgeAboveCut`], which a paged Fetch can cause by serving the
+    /// tombstone in a page before the header of the Purge it records. Every other refusal names
+    /// a real protocol violation and is final.
+    #[must_use]
+    pub const fn holds_cover(&self) -> bool {
+        matches!(self, Self::PurgeAboveCut)
+    }
+}
+
+/// A cover the merge refused only as [`Refusal::PurgeAboveCut`] and keeps to retry
+/// ([`ItemMerge::hold_claim`]; ADR 0050 §2, §3). Its plaintext is zeroized on drop.
+struct HeldClaim {
+    /// The cover's verified header.
+    header: SnapshotHeader,
+    /// Its decrypted snapshot data, as `rizzy-client` opened it.
+    data: SecretBytes,
+}
+
+impl Clone for HeldClaim {
+    fn clone(&self) -> Self {
+        Self {
+            header: self.header.clone(),
+            data: SecretBytes::copy_from_slice(self.data.expose_secret()),
         }
     }
 }
@@ -593,6 +625,9 @@ pub struct ItemMerge {
     surfaced: BTreeSet<Dot>,
     /// The `key_id` of every item key in the item's wrap set.
     wrap_keys: BTreeSet<[u8; ID_LEN]>,
+    /// The cover held for a retry, if any ([`ItemMerge::hold_claim`]): one per item, for the
+    /// life of the response sequence that served it (ADR 0050 §3, "Risks").
+    held: Option<HeldClaim>,
 }
 
 impl fmt::Debug for ItemMerge {
@@ -622,6 +657,7 @@ impl ItemMerge {
             unresolved: BTreeSet::new(),
             surfaced: BTreeSet::new(),
             wrap_keys: BTreeSet::new(),
+            held: None,
         }
     }
 
@@ -789,15 +825,28 @@ impl ItemMerge {
 
     /// Absorbs a verified snapshot of the item under "Snapshots are claims" (ADR 0018 §3,
     /// owner decision 14), with `with`, the op bodies of the item that came in the same Fetch
-    /// response (their headers are recorded, and what they are is kept).
+    /// response (their headers are recorded, and what they are is kept), and `bound`, the
+    /// `cut` field of the causal layer's [`CoverPlan`](crate::causal::CoverPlan), or `None`
+    /// when the caller has no causal-layer plan to bound by (the merge's own tests, and the
+    /// convergence harness's independent, ADR-text-only checker).
     ///
     /// In Server-mode sync a replica absorbs a snapshot only as the cover of a bodiless header
-    /// (ADR 0021 §4); the causal layer decides which. The snapshot is cut to the item's
-    /// verified headers, checked against every op body the replica knows, `with` included, and joined
-    /// into the state. On every honest state the result is the join of the two states: what
-    /// applying every op either covers would give. The covered VV becomes the entrywise
-    /// maximum, and a dominated honest snapshot changes nothing. After a concurrent one, the
-    /// merged snapshot is due at [`ItemMerge::end_fetch`].
+    /// (ADR 0021 §4); the causal layer decides which. The snapshot is cut to the item's own
+    /// verified headers and checked against every op body the replica knows, `with` included --
+    /// that full, per-item cut is what contradiction and disagreement detection reads (ADR 0018
+    /// §3 points 2-3), so a header past `bound` still counts as evidence. But the item's own
+    /// headers cannot see a same-device gap on *another* item, which only the causal layer's
+    /// chain walk can (reading 7); nothing past that gap is applied (ADR 0012 §7). So a second,
+    /// `bound`-cut view of the same claim is what actually joins into the state: the covered VV
+    /// this returns ([`ItemMerge::covered`]) can never exceed `bound`. Headers and bodies past
+    /// `bound` stay recorded regardless, ready for the ordinary `apply_op` delivery once the gap
+    /// closes.
+    ///
+    /// On every honest, ungapped response `bound` already covers everything the per-item cut
+    /// covers, so the second cut changes nothing: the result is the join of the two states, what
+    /// applying every op either covers would give. The covered VV becomes the entrywise maximum,
+    /// and a dominated honest snapshot changes nothing. After a concurrent one, the merged
+    /// snapshot is due at [`ItemMerge::end_fetch`].
     ///
     /// # Errors
     /// [`MergeError::WrongItem`], [`MergeError::UnsupportedSchema`], or
@@ -807,6 +856,7 @@ impl ItemMerge {
         &mut self,
         snapshot: SnapshotInput<'_>,
         with: &[OpInput<'_>],
+        bound: Option<&VersionVector>,
     ) -> Result<Absorption, MergeError> {
         let header = snapshot.header;
         self.check_record(header.item_id, header.item_schema_version)?;
@@ -826,6 +876,8 @@ impl ItemMerge {
             outcome: AbsorbOutcome::Refused(refusal),
             claim_cuts: claim_cuts.clone(),
         };
+        // The full, per-item cut: what contradiction and disagreement detection reads, so a
+        // header past `bound` still counts as evidence (ADR 0018 §3 points 2-3).
         let cut = match evidence::cut(&offered, &heads, ev) {
             Ok(cut) => cut,
             Err(refusal) => return Ok(refused(refusal)),
@@ -834,12 +886,38 @@ impl ItemMerge {
             return Ok(refused(refusal));
         }
         let disagreements = evidence::disagreements(&self.state, &cut.state, &self.bodies, ev);
+        // From the unbounded claim, not from what `bound` lets settle below: a concurrent
+        // claim this device cannot yet fully take still schedules the merged-snapshot trigger
+        // (`end_fetch`), which only ever encodes `self.state` as it actually stands, so this
+        // can trigger on no real local change but never on an inconsistent one.
         let relation = cut.state.vv.compare(&self.state.vv);
         let receive_hlc = cut.state.max_hlc();
-        let taken = normalize(&cut.state, ev);
+        // The part that actually settles: the same claim, cut a second time to `heads` met
+        // with `bound`, when there is one (`None` keeps `bounded_heads == heads`, so this
+        // second cut repeats the first exactly, as a caller with no causal-layer plan needs).
+        // Re-cutting (rather than filtering `cut.state` after the fact) keeps the result
+        // well-formed: `evidence::cut`'s own per-key `take` drops values by dot and `normalize`
+        // then recomputes current-vs-history from exactly what is left, so a value that was
+        // history only because an above-`bound` value superseded it is correctly promoted back
+        // to current, and no key is left with an orphaned, empty register (ADR 0018 §4, §5
+        // rule 6). `Err` means even the cut claim's tombstone purge sits past `bound`
+        // (`Refusal::PurgeAboveCut`): nothing of this response may settle on this item yet, so
+        // it is reported exactly as the unbounded refusal above already is, not as a
+        // no-op `Absorbed` -- its headers and bodies, recorded above, remain usable once the
+        // gap closes and the causal layer's chain walk reaches them.
+        let mut bounded_heads = heads;
+        if let Some(bound) = bound {
+            bounded_heads.meet(bound);
+        }
+        let settled = match evidence::cut(&offered, &bounded_heads, ev) {
+            Ok(settled) => settled,
+            Err(refusal) => return Ok(refused(refusal)),
+        };
+        let taken = normalize(&settled.state, ev);
         join_into(&mut self.state, &taken, ev);
-        // The newest snapshot (ADR 0018 §10): the previous basis joined with the taken part;
-        // the retained ops the new basis covers are folded into it before they are dropped.
+        // The newest snapshot (ADR 0018 §10): the previous basis joined with the taken
+        // part; the retained ops the new basis covers are folded into it before they are
+        // dropped.
         join_into(&mut self.base, &taken, ev);
         let folded: Vec<Dot> = self
             .retained
@@ -865,6 +943,53 @@ impl ItemMerge {
             }),
             claim_cuts,
         })
+    }
+
+    /// Keeps a verified cover of the item that [`ItemMerge::absorb_snapshot`] refused only as
+    /// [`Refusal::PurgeAboveCut`] ([`Refusal::holds_cover`]), with its decrypted data, so the
+    /// client can retry the same absorption, unchanged, once the causal layer's chains advance
+    /// (ADR 0050 §2, §3). Nothing of it is taken: the state, the covered VV and "Snapshots are
+    /// claims" (ADR 0018 §3) are untouched. One cover per item; a later one replaces it.
+    ///
+    /// # Errors
+    /// [`MergeError::WrongItem`] or [`MergeError::UnsupportedSchema`] for a cover this merge
+    /// never absorbs; nothing is kept then.
+    pub fn hold_claim(
+        &mut self,
+        header: SnapshotHeader,
+        data: SecretBytes,
+    ) -> Result<(), MergeError> {
+        self.check_record(header.item_id, header.item_schema_version)?;
+        self.held = Some(HeldClaim { header, data });
+        Ok(())
+    }
+
+    /// The held cover ([`ItemMerge::hold_claim`]): its header and decrypted data, to parse and
+    /// pass to [`ItemMerge::absorb_snapshot`] again.
+    #[must_use]
+    pub fn held_claim(&self) -> Option<(&SnapshotHeader, &SecretBytes)> {
+        self.held.as_ref().map(|h| (&h.header, &h.data))
+    }
+
+    /// Whether the held cover changes nothing any more: the item VV covers its whole covered VV,
+    /// so a cover absorbed since dominates it (ADR 0050 §2; ADR 0018 §3: "a dominated snapshot
+    /// changes nothing"). `false` when no cover is held.
+    #[must_use]
+    pub fn held_claim_moot(&self) -> bool {
+        self.held.as_ref().is_some_and(|h| {
+            matches!(
+                self.state.vv.compare(&h.header.covered),
+                VvOrdering::Equal | VvOrdering::Greater
+            )
+        })
+    }
+
+    /// Takes the held cover out, if any: to retry it (and [`ItemMerge::hold_claim`] it again if
+    /// the retry is refused as [`Refusal::PurgeAboveCut`] again), or to drop it because it is
+    /// moot, was refused for another reason, or its response sequence ended (ADR 0050 §2). A
+    /// dropped plaintext is zeroized.
+    pub fn take_held_claim(&mut self) -> Option<(SnapshotHeader, SecretBytes)> {
+        self.held.take().map(|h| (h.header, h.data))
     }
 
     /// Ends a Fetch for this item, once the response's ops are applied: if a snapshot whose

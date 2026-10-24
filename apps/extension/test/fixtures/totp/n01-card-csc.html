@@ -1,0 +1,14 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!doctype html>
+<!-- ADR 0076 §1.3–§1.4 fixture: card security code -->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>card security code</title></head>
+  <body>
+    <form id="pay" action="/pay">
+      <input id="csc" name="cvc" type="text" autocomplete="cc-csc" inputmode="numeric" maxlength="4" placeholder="2FA otp" />
+      <input id="cvv" name="cvv" type="tel" maxlength="3" placeholder="one-time security code" />
+      <input id="sec" name="otp" type="text" inputmode="numeric" maxlength="6" aria-label="Card security code otp" />
+      <button type="submit">Verify</button>
+    </form>
+  </body>
+</html>

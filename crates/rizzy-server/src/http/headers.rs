@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Parsers for the request headers the `api` role reads: the bearer token, the two
 //! request-signing values, `Content-Length`, `Rizzy-Client` and `X-Forwarded-For` ([ADR 0028]
 //! items 4, 5, 7, 11 and 14; CRYPTO.md §5.10; threat model §7.6 "S", INV-52).

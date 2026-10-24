@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `/api/v1` HTTP conventions of [ADR 0028], pinned through the router: the error table
 //! and `Retry-After` (item 3), the credential header forms and the one `401` (items 4, 5), the
 //! `Content-Length` rule (item 7), the response headers (item 10), the trusted-proxy rule (item
-//! 11), `GET /api/meta` and `Rizzy-Client` (item 14), and the web role's paths (item 15).
+//! 11), `GET /api/meta` and `Rizzy-Client` (item 14), and the web role's paths (ADR 0049's route
+//! table, which supersedes item 15).
 //!
 //! The signed request-target and the replay window are in [`crate::signing`].
 //!

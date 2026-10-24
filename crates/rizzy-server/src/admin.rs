@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The admin subcommands the Accepted ADRs name for M1, as far as they are specified
 //! ([ADR 0010] §2, §4; [ADR 0011] "Migrations", "Backups"; CRYPTO.md §5.8, §5.11).
 //!
@@ -6,11 +8,12 @@
 //! | `secrets init` | ADR 0010 §4: "creates the secrets once, run as a one-off with the secrets mount writable" | none (no database) |
 //! | `secrets rotate` | CRYPTO.md §5.8 "Rotating `server_setup`" steps 1–2; ADR 0010 §4 | exclusive |
 //! | `secrets rotate --data-key` | CRYPTO.md §5.11 "Rotation" | exclusive |
+//! | `secrets rotate --backup-key` | [ADR 0071] (a new current backup key); ADR 0010 §2 | exclusive |
 //! | `secrets retire-setups [--grace-days N]` | CRYPTO.md §5.8 "Rotating `server_setup`" step 4; [ADR 0031] points 4–6 | exclusive |
 //! | `backup-secrets` | ADR 0011 "Backups" and owner decision 3; CRYPTO.md §5.11 | none (reads the secrets file only) |
 //! | `migrate` | ADR 0011 point 9 | exclusive |
-//! | `backup --out <file\|->` | ADR 0011 "Backups"; [ADR 0023] §4, §6 | none: the read-only reader on `SQLite`, a `REPEATABLE READ` transaction on `PostgreSQL` |
-//! | `restore --in <file\|->` | ADR 0011 "Backups"; [ADR 0023] §5, §6 | exclusive |
+//! | `backup --out <file\|-> [--encrypt]` | ADR 0011 "Backups"; [ADR 0023] §4, §6; with `--encrypt`, [ADR 0071] (format version 2, [`crate::db_backup`]) | none: the read-only reader on `SQLite`, a `REPEATABLE READ` transaction on `PostgreSQL` |
+//! | `restore --in <file\|->` | ADR 0011 "Backups"; [ADR 0023] §5, §6; a format version 2 file is opened first ([ADR 0071] "Commands and restore") | exclusive |
 //!
 //! **Exclusive** means every server process is shut out while the command runs (ADR 0010 §2:
 //! "`restore`, `migrate` and `secrets rotate` take the writer lock. They run only while the
@@ -108,6 +111,7 @@
 //! [ADR 0011]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0011-storage.md
 //! [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
 //! [ADR 0031]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0031-retiring-old-opaque-setups.md
+//! [ADR 0071]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0071-encrypted-db-backup-format.md
 
 use core::fmt;
 use std::io::{IsTerminal as _, Read as _, Write as _};
@@ -128,6 +132,7 @@ use rizzy_storage::{
 use zeroize::Zeroizing;
 
 use crate::config::{Config, DatabaseConfig};
+use crate::db_backup::{self, DbBackupError};
 use crate::fsutil::{self, ReadError};
 use crate::secrets_backup::{self, BackupError};
 use crate::secrets_file::{self, MAX_SECRETS_FILE_LEN, SecretsFileError};
@@ -179,6 +184,10 @@ pub enum AdminError {
     SchemaNotCurrent,
     /// `secrets retire-setups` could not read or write the database.
     Retire(AuthError),
+    /// `backup --encrypt` with no backup key in the secrets file (ADR 0071). A usage error.
+    NoBackupKey,
+    /// The format version 2 container could not be written or opened (ADR 0071).
+    DbBackup(DbBackupError),
 }
 
 impl AdminError {
@@ -186,7 +195,10 @@ impl AdminError {
     /// failure (exit code 1).
     #[must_use]
     pub const fn is_usage(&self) -> bool {
-        matches!(self, Self::StdoutIsTerminal | Self::GraceDays)
+        matches!(
+            self,
+            Self::StdoutIsTerminal | Self::GraceDays | Self::NoBackupKey
+        )
     }
 }
 
@@ -239,6 +251,11 @@ impl fmt::Display for AdminError {
                 "the secrets file does not belong to this backup ({e}); restore the instance's \
                  secrets file first, never a new one"
             ),
+            Self::NoBackupKey => f.write_str(
+                "--encrypt needs a backup key in the secrets file; run `rizzy-vault secrets rotate \
+                 --backup-key` first, then make a new secrets backup",
+            ),
+            Self::DbBackup(e) => write!(f, "{e}"),
         }
     }
 }
@@ -278,12 +295,14 @@ pub enum Rotate {
     Setup,
     /// A new current `server_data_key` (CRYPTO.md §5.11 "Rotation").
     DataKey,
+    /// A new current backup key, which `backup --encrypt` seals under (ADR 0071).
+    BackupKey,
 }
 
 /// What `secrets rotate` did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rotated {
-    /// The id of the new setup or data key.
+    /// The id of the new setup, data key or backup key.
     pub id: u32,
     /// The data keys dropped from the file because no sealed row names them any more
     /// (`--data-key` only; module docs), ascending.
@@ -343,7 +362,7 @@ async fn schema_is_current(db: &Database) -> bool {
     applied && db.pending_migrations().await.is_ok_and(|p| p.is_empty())
 }
 
-/// `rizzy-vault secrets rotate [--data-key]`: shuts every server process out (the `SQLite`
+/// `rizzy-vault secrets rotate [--data-key | --backup-key]`: shuts every server process out (the `SQLite`
 /// writer lock, or the `PostgreSQL` instance lock; the server must be stopped), adds the new
 /// secret, with `--data-key` drops the data keys no sealed row names any more (module docs),
 /// and replaces the file atomically with mode 0600.
@@ -353,9 +372,12 @@ async fn schema_is_current(db: &Database) -> bool {
 pub async fn secrets_rotate(config: &Config, what: Rotate) -> Result<Rotated, AdminError> {
     check_location(config)?;
     let exclusion = match &config.database {
-        // The setup rotation reads no row, and a database that does not exist yet has none:
+        // The setup and backup-key rotations read no row, and a database that does not exist
+        // yet has none:
         // the writer lock alone, without creating or opening the file.
-        DatabaseConfig::Sqlite(path) if what == Rotate::Setup || !path.exists() => {
+        DatabaseConfig::Sqlite(path)
+            if matches!(what, Rotate::Setup | Rotate::BackupKey) || !path.exists() =>
+        {
             Exclusion::WriterLock(WriterLock::acquire(path).map_err(AdminError::Lock)?)
         }
         DatabaseConfig::Sqlite(_) | DatabaseConfig::Postgres(_) => {
@@ -379,6 +401,7 @@ async fn rotate_excluded(
     let id = match what {
         Rotate::Setup => secrets.rotate_setup(&mut rng),
         Rotate::DataKey => secrets.rotate_data_key(&mut rng),
+        Rotate::BackupKey => secrets.rotate_backup_key(&mut rng),
     }
     .map_err(AdminError::Rotation)?;
     let dropped_data_keys = match (what, db) {
@@ -560,10 +583,24 @@ soon.";
 /// What `backup` wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BackupSummary {
-    /// The file's length in bytes.
+    /// The written file's length in bytes.
     pub len: usize,
-    /// The file's trailing SHA-256 (ADR 0023 §2): not secret, printed for the operator.
+    /// The format version 1 file's trailing SHA-256 (ADR 0023 §2): not secret, printed for the
+    /// operator of a plain backup. For an encrypted backup it is the digest of the sealed
+    /// payload and is not printed: that file has no outer digest (ADR 0071 "Size").
     pub digest: [u8; DIGEST_LEN],
+    /// For `--encrypt`, the format version 2 header's clear facts; `None` for a plain backup.
+    pub encrypted: Option<EncryptedSummary>,
+}
+
+/// The clear header facts of a format version 2 backup `backup --encrypt` wrote (ADR 0071).
+/// None is secret: they are in the file's header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EncryptedSummary {
+    /// The secrets file's backup key the chunks are sealed under.
+    pub backup_key_id: u32,
+    /// How many chunks the file holds.
+    pub chunk_count: u32,
 }
 
 impl BackupSummary {
@@ -602,27 +639,63 @@ async fn open_backup_reader(config: &Config) -> Result<Database, AdminError> {
     db.map_err(AdminError::Storage)
 }
 
-/// `rizzy-vault backup --out <file|->`: the logical backup file of ADR 0023 (module docs).
+/// `rizzy-vault backup --out <file|-> [--encrypt]`: the logical backup file of ADR 0023
+/// (module docs); with `encrypt`, that file sealed as format version 2 under the secrets file's
+/// current backup key ([ADR 0071], [`crate::db_backup`]).
+///
+/// With `encrypt`, the secrets file is read and its current backup key looked up before the
+/// database is dumped, so a missing key costs no dump.
 ///
 /// # Errors
 /// [`AdminError`]; with a file target, no file is left behind on a failure.
-pub async fn backup(config: &Config, out: &Path) -> Result<BackupSummary, AdminError> {
+/// [`AdminError::NoBackupKey`] (a usage error) for `encrypt` without a backup key.
+pub async fn backup(
+    config: &Config,
+    out: &Path,
+    encrypt: bool,
+) -> Result<BackupSummary, AdminError> {
     let to_stdout = is_stdio(out);
     if to_stdout && std::io::stdout().is_terminal() {
         return Err(AdminError::StdoutIsTerminal);
     }
+    let secrets = if encrypt {
+        check_location(config)?;
+        let secrets = secrets_file::load(&config.secrets_file).map_err(AdminError::Secrets)?;
+        if secrets.current_backup_key().is_none() {
+            return Err(AdminError::NoBackupKey);
+        }
+        Some(secrets)
+    } else {
+        None
+    };
     let db = open_backup_reader(config).await?;
     let dump = db.dump().await;
     db.close().await;
     let dump = dump.map_err(AdminError::Storage)?;
-    let file = backup_file::write(&dump, now_ms()).map_err(AdminError::BackupFile)?;
+    let created_at_ms = now_ms();
+    let plain = backup_file::write(&dump, created_at_ms).map_err(AdminError::BackupFile)?;
     drop(dump);
-    let digest = file
+    let digest = plain
         .len()
         .checked_sub(DIGEST_LEN)
-        .and_then(|start| file.get(start..))
+        .and_then(|start| plain.get(start..))
         .and_then(|d| <[u8; DIGEST_LEN]>::try_from(d).ok())
         .ok_or(AdminError::BackupFile(FileError::Truncated))?;
+    let (file, encrypted) = match secrets.as_ref().and_then(|s| s.current_backup_key()) {
+        Some(key) => {
+            let sealed = db_backup::seal(&mut os_rng(), key, &plain, created_at_ms)
+                .map_err(AdminError::DbBackup)?;
+            drop(plain);
+            let header = db_backup::parse_header(&sealed).map_err(AdminError::DbBackup)?;
+            let summary = EncryptedSummary {
+                backup_key_id: header.backup_key_id,
+                chunk_count: header.chunk_count,
+            };
+            (sealed, Some(summary))
+        }
+        None => (plain, None),
+    };
+    drop(secrets);
     if to_stdout {
         let mut stdout = std::io::stdout().lock();
         stdout
@@ -635,6 +708,7 @@ pub async fn backup(config: &Config, out: &Path) -> Result<BackupSummary, AdminE
     Ok(BackupSummary {
         len: file.len(),
         digest,
+        encrypted,
     })
 }
 
@@ -692,8 +766,17 @@ async fn restore_into(
     db.check_restore_target()
         .await
         .map_err(AdminError::Storage)?;
-    // 2. Read and parse: magic, format version and digest before anything else.
+    // 2. Read and parse: magic, format version and digest before anything else. A format
+    //    version 2 file is opened first with the secrets file's backup key named in its header
+    //    (ADR 0071): any framing, commitment or AEAD failure refuses it, and the format
+    //    version 1 bytes inside continue at this step.
     let bytes = read_backup(input)?;
+    let bytes = if db_backup::format_version(&bytes) == Some(db_backup::FORMAT_VERSION) {
+        let secrets = secrets_file::load(&config.secrets_file).map_err(AdminError::Secrets)?;
+        db_backup::open(|id| secrets.backup_key(id), &bytes).map_err(AdminError::DbBackup)?
+    } else {
+        bytes
+    };
     let parsed = backup_file::parse(&bytes).map_err(AdminError::BackupFile)?;
     drop(bytes);
     // 3. This release's schema version only.

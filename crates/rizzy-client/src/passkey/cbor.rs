@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The fixed, small set of CBOR structures `WebAuthn` needs: a COSE `EC2` key map for ES256,
 //! and the three-entry `"none"`-attestation `attestationObject` map (ADR 0039 §4, §5).
 //!
@@ -155,6 +157,18 @@ pub(super) fn attestation_object_none(auth_data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{attestation_object_none, cose_key_es256};
+
+    /// The CXF importer builds the same COSE map for an imported ES256 passkey (ADR 0074 §3:
+    /// "COSE-encoded as ADR 0039 §4 already does for a created credential").
+    #[test]
+    fn the_cxf_importer_writes_the_same_cose_ec2_map() {
+        for (x, y) in [([0u8; 32], [0xFF; 32]), ([0x5A; 32], [0x01; 32])] {
+            assert_eq!(
+                rizzy_import::cxf::cose_key_es256(&x, &y),
+                cose_key_es256(&x, &y)
+            );
+        }
+    }
 
     #[test]
     fn cose_key_es256_matches_a_hand_decoded_byte_layout() {

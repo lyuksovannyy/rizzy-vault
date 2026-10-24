@@ -1,0 +1,21 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!doctype html>
+<!-- ADR 0076 §1.3–§1.4 fixture: sign-up, checkout and contact forms -->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>sign-up, checkout and contact forms</title></head>
+  <body>
+    <form id="signup" action="/signup">
+      <input id="new" name="password" type="password" autocomplete="new-password" />
+      <input id="s-otp" name="otp" type="text" inputmode="numeric" maxlength="6" />
+      <button type="submit">Create account</button>
+    </form>
+    <form id="checkout" action="/checkout">
+      <input id="c-otp" name="otp" type="text" inputmode="numeric" maxlength="6" />
+      <button type="submit">Checkout</button>
+    </form>
+    <form id="contact" action="/contact">
+      <input id="k-otp" name="totp" type="text" inputmode="numeric" maxlength="6" />
+      <button type="submit">Contact us</button>
+    </form>
+  </body>
+</html>

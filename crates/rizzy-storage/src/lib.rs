@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-storage` — the server's storage layer (roadmap M1 step 3, [ADR 0011]; [ADR 0016] §3
 //! row `rizzy-storage`): sqlx pools, embedded migrations, the per-account lock, the `worker`
 //! leader lock, the instance lock, and backup and restore primitives. Server mode only
@@ -92,6 +94,7 @@ pub mod leader_lock;
 pub mod lock;
 pub mod meta;
 pub mod migrate;
+pub mod quota;
 pub mod tables;
 pub mod writer_lock;
 

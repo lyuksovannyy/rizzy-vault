@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Op and snapshot upload (ADR 0012 §7 "Upload" as ADR 0021 §9 supersedes it in part) and the
 //! restore-healing request (ADR 0021 §9 "Healing request", "Server acceptance").
 //!
@@ -64,13 +66,16 @@ use crate::store::{
 use crate::{VaultDomain, restore_generation, to_sql_time};
 
 /// Opens the store session of `vault_id` for `account_id` in `tx`: checks the vault's owner,
-/// takes the account lock, and reads the vault row, the heads and the certificates under it.
+/// takes the account lock, and reads the vault row, the heads, the certificates and the account's
+/// counted bytes under it. `byte_limit` is the quota plus headroom of an ordinary upload, `None`
+/// for a healing request (ADR 0048 §3).
 pub(crate) async fn open_session<D: DeviceDirectory>(
     tx: &mut WriteTx,
     directory: &D,
     account_id: AccountId,
     vault_id: VaultId,
     now_ms: u64,
+    byte_limit: Option<u64>,
 ) -> Result<Session, VaultError> {
     lock_account(tx, account_id.as_bytes()).await?;
     let vault = repo::vault(tx.conn(), vault_id)
@@ -79,7 +84,9 @@ pub(crate) async fn open_session<D: DeviceDirectory>(
         .ok_or(VaultError::NotFound)?;
     let heads = repo::heads(tx.conn(), vault_id).await?;
     let authors = directory.authors(tx.conn(), account_id).await?;
+    let bytes_used = rizzy_storage::quota::bytes_used(tx.conn(), account_id.as_bytes()).await?;
     Ok(Session {
+        account_id,
         vault_id,
         vault,
         heads,
@@ -87,6 +94,9 @@ pub(crate) async fn open_session<D: DeviceDirectory>(
         now_ms,
         now_sql: to_sql_time(now_ms)?,
         queued: std::collections::BTreeSet::new(),
+        bytes_used,
+        bytes_at_open: bytes_used,
+        byte_limit,
     })
 }
 
@@ -119,6 +129,9 @@ async fn upload_op(
     if op.header.vault_key_epoch < session.vault.vault_key_epoch && !op_stale_exempt(&op) {
         return Ok(Err(Refusal::Stale));
     }
+    if session.over_quota(session.op_bytes(&op)) {
+        return Ok(Err(Refusal::Quota));
+    }
     store_op(tx, session, &op).await?;
     Ok(Ok(UploadResult::Stored))
 }
@@ -147,6 +160,9 @@ async fn upload_snapshot(
     }
     if snapshot.header.vault_key_epoch < session.vault.vault_key_epoch {
         return Ok(Err(Refusal::Stale));
+    }
+    if session.over_quota(session.snapshot_bytes(&snapshot)) {
+        return Ok(Err(Refusal::Quota));
     }
     store_snapshot(tx, session, &snapshot).await?;
     Ok(Ok(UploadResult::Stored))
@@ -180,8 +196,15 @@ impl<D: DeviceDirectory> VaultDomain<D> {
     ) -> Result<UploadResponse, VaultError> {
         let vault_id = VaultId::from_bytes(request.vault_id.to_bytes());
         let mut tx = self.database().begin_write().await?;
-        let mut session =
-            open_session(&mut tx, self.directory(), account_id, vault_id, now_ms).await?;
+        let mut session = open_session(
+            &mut tx,
+            self.directory(),
+            account_id,
+            vault_id,
+            now_ms,
+            Some(self.quota().limit()),
+        )
+        .await?;
         let generation = restore_generation(tx.conn()).await?;
         let mut results = Vec::with_capacity(request.records.len());
         let mut rejected = false;
@@ -206,6 +229,7 @@ impl<D: DeviceDirectory> VaultDomain<D> {
                 }
             });
         }
+        session.settle(&mut tx).await?;
         tx.commit().await?;
         publish_queued(self, account_id, &session);
         Ok(UploadResponse {
@@ -238,8 +262,15 @@ impl<D: DeviceDirectory> VaultDomain<D> {
     ) -> Result<HealingResponse, HealingError> {
         let vault_id = VaultId::from_bytes(request.vault_id.to_bytes());
         let mut tx = self.database().begin_write().await?;
-        let mut session =
-            open_session(&mut tx, self.directory(), account_id, vault_id, now_ms).await?;
+        let mut session = open_session(
+            &mut tx,
+            self.directory(),
+            account_id,
+            vault_id,
+            now_ms,
+            None,
+        )
+        .await?;
         let generation = restore_generation(tx.conn()).await?;
         let outcome = match &request.self_grant {
             Some(grant) => {
@@ -255,6 +286,7 @@ impl<D: DeviceDirectory> VaultDomain<D> {
                 return Err(HealingError::Refused(refusal.code()));
             }
         }
+        session.settle(&mut tx).await?;
         tx.commit().await?;
         publish_queued(self, account_id, &session);
         Ok(HealingResponse {

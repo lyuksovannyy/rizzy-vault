@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `worker` leader lock: one active worker per database (ADR 0010 §2).
 //!
 //! ADR 0010 §2: "With PostgreSQL, a `worker` holds a session-level advisory lock on a

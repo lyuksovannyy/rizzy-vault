@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Derivations of CRYPTO.md §4.3 for the key hierarchy: `server_unlock_key`,
 //! `local_unlock_key`, the recovery wrap key and auth token, the device-set hash, the settings
 //! hash and the account fingerprint.

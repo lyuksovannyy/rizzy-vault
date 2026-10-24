@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The key hierarchy (CRYPTO.md §4.1, §4.2, §4.4; ADR 0006).
 //!
 //! **Role.** This module is the single home of every key an account owns and of every object
@@ -86,10 +88,10 @@ use core::fmt;
 use rand_core::CryptoRng;
 use subtle::ConstantTimeEq as _;
 
-use crate::error::DerivationError;
+use crate::error::{DerivationError, ParseError};
 use crate::hpke::{HpkePublicKey, HpkeSecretKey};
-use crate::ids::{KeyType, PublicKeyId, SymmetricKeyId, VaultId};
-use crate::secret::Key32;
+use crate::ids::{AccountId, DeviceId, KeyType, PublicKeyId, SymmetricKeyId, VaultId};
+use crate::secret::{KEY_LEN, Key32};
 use crate::sign::{DeviceSigningKey, DeviceVerifyingKey, IdentitySigningKey, IdentityVerifyingKey};
 
 mod derive;
@@ -231,6 +233,86 @@ impl AccountKey {
 impl fmt::Debug for AccountKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "AccountKey(epoch {}, [REDACTED])", self.epoch)
+    }
+}
+
+/// The keystore unlock secret (§4.2, M3/M7; ADR 0057): 32 random bytes per device, held in the
+/// OS keystore of that device and released only after an OS-enforced user-presence check
+/// (threat model INV-62). It opens `E_ks` and nothing else
+/// ([`KeystoreUnlockSecret::wrap_account_key`], [`KeystoreUnlockSecret::unwrap_account_key`]).
+///
+/// It is generated here from the injected CSPRNG ([`KeystoreUnlockSecret::generate`]) and
+/// handed to the host for its keystore ([`KeystoreUnlockSecret::expose_secret`]), or rebuilt
+/// from the bytes the keystore released ([`KeystoreUnlockSecret::from_slice`]). It records the
+/// account and device whose `E_ks` it addresses; a context naming another one is refused. It
+/// never enters the device-state record or the cache (INV-82). Not `Clone`; wiped on drop.
+pub struct KeystoreUnlockSecret {
+    /// The 32 secret bytes, wiped on drop.
+    key: Key32,
+    /// The account of the `E_ks` this secret opens.
+    account_id: AccountId,
+    /// The device whose keystore holds this secret.
+    device_id: DeviceId,
+}
+
+impl KeystoreUnlockSecret {
+    /// A fresh secret for `account_id` and `device_id`, drawn from the injected CSPRNG
+    /// straight into its heap buffer (§4.2 "CSPRNG per device").
+    #[must_use]
+    pub fn generate<R: CryptoRng + ?Sized>(
+        rng: &mut R,
+        account_id: AccountId,
+        device_id: DeviceId,
+    ) -> Self {
+        Self {
+            key: Key32::generate(rng),
+            account_id,
+            device_id,
+        }
+    }
+
+    /// Rebuilds the secret from the bytes the OS keystore released (ADR 0019 §3: secrets
+    /// cross as bytes). Wiping `bytes` is the caller's job.
+    ///
+    /// # Errors
+    /// [`ParseError::InvalidLength`] unless `bytes` is exactly 32 bytes long.
+    pub fn from_slice(
+        bytes: &[u8],
+        account_id: AccountId,
+        device_id: DeviceId,
+    ) -> Result<Self, ParseError> {
+        Ok(Self {
+            key: Key32::from_slice(bytes)?,
+            account_id,
+            device_id,
+        })
+    }
+
+    /// The secret bytes, for the host to store in its OS keystore. A secret: never log it.
+    #[must_use]
+    pub fn expose_secret(&self) -> &[u8; KEY_LEN] {
+        self.key.expose_secret()
+    }
+
+    /// The account of the `E_ks` this secret opens.
+    #[must_use]
+    pub const fn account_id(&self) -> AccountId {
+        self.account_id
+    }
+
+    /// The device whose keystore holds this secret.
+    #[must_use]
+    pub const fn device_id(&self) -> DeviceId {
+        self.device_id
+    }
+}
+
+impl fmt::Debug for KeystoreUnlockSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeystoreUnlockSecret")
+            .field("account_id", &self.account_id)
+            .field("device_id", &self.device_id)
+            .finish_non_exhaustive()
     }
 }
 

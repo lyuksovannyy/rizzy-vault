@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `transcript.json` (tier B, CRYPTO.md §15 item 1): the regression transcript of a whole
 //! Server-mode account life in M1, driven by one seeded `ChaCha20Rng` fed to opaque-ke through
 //! the §5.1 adapter.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Recovery with the Emergency Kit (CRYPTO.md §11.9; ADR 0008): the waiting period,
 //! cancellation by an enrolled device, the release, and the recovery commit.
 
@@ -122,6 +124,8 @@ fn recovery_wait_cancel_release_and_commit() {
             device_revocations: List::empty(),
             device_grants: List::empty(),
             vault_rotation: None,
+            vault_create: None,
+            vault_delete: None,
         };
         assert!(matches!(
             env.svc

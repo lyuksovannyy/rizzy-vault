@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `installCoreContextListener`'s `acceptContentScripts` routing (`core-host/listener.ts`):
 // `false` (Chromium: the service worker owns content-script validation) must ignore a raw
 // content-script sender outright; `true` (Firefox: no service worker exists) must validate and
 // handle it directly. Pure logic against a fake `WebExtNamespace` — no real browser APIs.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { IFRAME_INSTANCE_TTL_MS } from "../src/core-host/iframe-instance.ts";
 import { installCoreContextListener } from "../src/core-host/listener.ts";
 import { FakeIndexedDBFactory } from "./support/fake-idb.ts";
 
@@ -180,6 +183,36 @@ describe("installCoreContextListener: acceptContentScripts routing", () => {
 
 const inlineMenuFillChosen = { type: "inline_menu_fill_chosen", itemId: "item-1", confirmedEquivalence: false };
 
+/** The one refusal every rejected inline-menu-sender message gets (ADR 0043 point 4). */
+const REFUSED = { type: "content_error", code: "inline_menu_fill_chosen: malformed request" };
+
+/** Registers `token` for `tabId` the way the Chromium service worker's forward does (a
+ * `cs_request` from this extension's own page, `trustedTabId` taken from the real
+ * `sender.tab.id`), and waits for the acknowledgement. */
+async function registerToken(ext: WebExtNamespace, tabId: number, token: string): Promise<void> {
+  const sendResponse = vi.fn();
+  installedListener(ext)(
+    { type: "cs_request", message: { type: "register_iframe_instance", instanceToken: token }, trustedOrigin: "https://example.com", trustedTabId: tabId },
+    { id: EXT_ID },
+    sendResponse,
+  );
+  await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ type: "iframe_instance_done" }));
+}
+
+async function revokeToken(ext: WebExtNamespace, tabId: number, token: string): Promise<void> {
+  const sendResponse = vi.fn();
+  installedListener(ext)(
+    { type: "cs_request", message: { type: "revoke_iframe_instance", instanceToken: token }, trustedOrigin: "https://example.com", trustedTabId: tabId },
+    { id: EXT_ID },
+    sendResponse,
+  );
+  await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ type: "iframe_instance_done" }));
+}
+
+function iframeSender(tabId: number): WebExtMessageSender {
+  return { id: EXT_ID, origin: EXT_ORIGIN, tab: { id: tabId, url: "https://example.com/login" } };
+}
+
 // The security fix this suite now also covers: `inline_menu_fill_chosen` must only ever be
 // honoured from the one sender `isInlineMenuSender` vouches for (the extension-origin
 // inline-menu iframe), never from a real content script sending the exact same message shape.
@@ -210,29 +243,83 @@ describe("installCoreContextListener: inline_menu_fill_chosen routing (ADR 0040)
     expect(sendResponse).not.toHaveBeenCalled();
   });
 
-  it("routes a genuine inline-menu-iframe sender to the privileged handler regardless of acceptContentScripts", async () => {
+  it("routes a genuine inline-menu-iframe sender with a registered token to the privileged handler regardless of acceptContentScripts", async () => {
     const ext = fakeExt();
     installCoreContextListener(ext, { acceptContentScripts: false });
+    const token = crypto.randomUUID();
+    await registerToken(ext, 7, token);
     const sendResponse = vi.fn();
-    const sender: WebExtMessageSender = { id: EXT_ID, origin: EXT_ORIGIN, tab: { url: "https://example.com/login" } };
-    const result = installedListener(ext)(inlineMenuFillChosen, sender, sendResponse);
+    const result = installedListener(ext)({ ...inlineMenuFillChosen, instanceToken: token }, iframeSender(7), sendResponse);
     expect(result).toBe(true);
     // Locked (nothing enrolled/unlocked in this test's fake extension), so a locked
     // `content_error` — proof this reached `handleInlineMenuFillRequest` at all (a sender this
-    // listener did not recognise would get no response, as the two tests above show).
+    // listener did not recognise would get no response, as the two tests above show), and not
+    // the token refusal.
     await vi.waitFor(() =>
       expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ type: "content_error" })),
     );
+    expect(sendResponse).not.toHaveBeenCalledWith(REFUSED);
   });
 
   it("refuses a malformed inline-menu-iframe request (missing confirmedEquivalence)", async () => {
     const ext = fakeExt();
     installCoreContextListener(ext, { acceptContentScripts: false });
     const sendResponse = vi.fn();
-    const sender: WebExtMessageSender = { id: EXT_ID, origin: EXT_ORIGIN, tab: { url: "https://example.com/login" } };
-    const result = installedListener(ext)({ type: "inline_menu_fill_chosen", itemId: "item-1" }, sender, sendResponse);
+    const result = installedListener(ext)({ type: "inline_menu_fill_chosen", instanceToken: crypto.randomUUID(), itemId: "item-1" }, iframeSender(7), sendResponse);
     expect(result).toBe(true);
-    expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ type: "content_error" }));
+    expect(sendResponse).toHaveBeenCalledWith(REFUSED);
+  });
+});
+
+const inlineMenuGeneratePasswordChosen = { type: "inline_menu_generate_password_chosen" };
+
+// Gap 32 in the M2 gap audit: the generator's own privileged request, same ADR 0040 sender gate
+// as `inline_menu_fill_chosen` just above — mirrors that describe block's three routing cases.
+describe("installCoreContextListener: inline_menu_generate_password_chosen routing (ADR 0040)", () => {
+  it("refuses a real content-script sender's inline_menu_generate_password_chosen, even when acceptContentScripts is true", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: true });
+    const sendResponse = vi.fn();
+    const result = installedListener(ext)(
+      inlineMenuGeneratePasswordChosen,
+      { id: EXT_ID, tab: { url: "https://example.com/login" } },
+      sendResponse,
+    );
+    expect(result).toBe(true);
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ type: "content_error" })));
+  });
+
+  it("ignores a content-script sender's inline_menu_generate_password_chosen when acceptContentScripts is false (Chromium)", () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const sendResponse = vi.fn();
+    const result = installedListener(ext)(
+      inlineMenuGeneratePasswordChosen,
+      { id: EXT_ID, tab: { url: "https://example.com/login" } },
+      sendResponse,
+    );
+    expect(result).toBeUndefined();
+    expect(sendResponse).not.toHaveBeenCalled();
+  });
+
+  it("routes a genuine inline-menu-iframe sender to the privileged handler, never back through the iframe (ADR 0040)", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const token = crypto.randomUUID();
+    await registerToken(ext, 7, token);
+    const sendResponse = vi.fn();
+    const result = installedListener(ext)({ ...inlineMenuGeneratePasswordChosen, instanceToken: token }, iframeSender(7), sendResponse);
+    expect(result).toBe(true);
+    // Whatever the outcome (wasm may or may not be available in this test environment), the
+    // response must never carry a generated value itself (ADR 0040: "never back to the
+    // iframe") — only ever the plain dispatch acknowledgement or a content_error.
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+    const response = sendResponse.mock.calls[0]?.[0];
+    expect(["inline_menu_generate_password_dispatched", "content_error"]).toContain(
+      (response as { type?: string } | undefined)?.type,
+    );
+    expect(response).not.toHaveProperty("value");
+    expect(response).not.toHaveProperty("password");
   });
 });
 
@@ -255,9 +342,10 @@ describe("installCoreContextListener: passkey_ceremony routing (ADR 0039 §2, AD
   it("routes a genuine passkey-consent-iframe sender to the privileged handler", async () => {
     const ext = fakeExt();
     installCoreContextListener(ext, { acceptContentScripts: false });
+    const token = crypto.randomUUID();
+    await registerToken(ext, 1, token);
     const sendResponse = vi.fn();
-    const sender: WebExtMessageSender = { id: EXT_ID, origin: EXT_ORIGIN, tab: { id: 1, url: "https://example.com/login" } };
-    const result = installedListener(ext)(approved, sender, sendResponse);
+    const result = installedListener(ext)({ ...approved, instanceToken: token }, iframeSender(1), sendResponse);
     expect(result).toBe(true);
     // No pending ceremony exists in this test's fake extension, so `handlePasskeyCeremonyApproval`
     // still answers an acknowledgement (never a secret) — proof this reached the privileged
@@ -277,3 +365,141 @@ describe("installCoreContextListener: passkey_ceremony routing (ADR 0039 §2, AD
     expect(sendResponse).not.toHaveBeenCalled();
   });
 });
+
+// ADR 0043 point 4: every one of the three inline-menu-sender message kinds needs a live,
+// unexpired, unrevoked registration for exactly the sender's own tab, and every refusal is the
+// same single `content_error`, answered synchronously before any handler runs.
+describe("installCoreContextListener: the ADR 0043 instance-token check", () => {
+  const kinds = (token: string): Record<string, unknown>[] => [
+    { type: "inline_menu_fill_chosen", instanceToken: token, itemId: "item-1", confirmedEquivalence: false },
+    { type: "inline_menu_generate_password_chosen", instanceToken: token },
+    { type: "passkey_ceremony_approved", instanceToken: token, ceremonyToken: "tok-1" },
+    { type: "passkey_ceremony_declined", instanceToken: token, ceremonyToken: "tok-1" },
+  ];
+
+  function send(ext: WebExtNamespace, message: unknown, tabId: number): ReturnType<typeof vi.fn> {
+    const sendResponse = vi.fn();
+    expect(installedListener(ext)(message, iframeSender(tabId), sendResponse)).toBe(true);
+    return sendResponse;
+  }
+
+  it("refuses a token that was never registered (a clone of the iframe never has one), for every kind", () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    for (const message of kinds(crypto.randomUUID())) {
+      expect(send(ext, message, 7)).toHaveBeenCalledWith(REFUSED);
+    }
+  });
+
+  it("refuses a missing instanceToken with the very same code", () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    for (const message of kinds(crypto.randomUUID())) {
+      const { instanceToken, ...rest } = message;
+      void instanceToken;
+      expect(send(ext, rest, 7)).toHaveBeenCalledWith(REFUSED);
+    }
+  });
+
+  it("refuses a token registered for a different tab (cross-instance), for every kind", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const token = crypto.randomUUID();
+    await registerToken(ext, 7, token);
+    for (const message of kinds(token)) {
+      expect(send(ext, message, 8)).toHaveBeenCalledWith(REFUSED);
+    }
+  });
+
+  it("refuses a revoked token (a destroyed instance's replay), for every kind", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const token = crypto.randomUUID();
+    await registerToken(ext, 7, token);
+    await revokeToken(ext, 7, token);
+    for (const message of kinds(token)) {
+      expect(send(ext, message, 7)).toHaveBeenCalledWith(REFUSED);
+    }
+  });
+
+  it("ignores a revoke from a different tab than the one that registered the token", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const token = crypto.randomUUID();
+    await registerToken(ext, 7, token);
+    await revokeToken(ext, 8, token);
+    const sendResponse = send(ext, { type: "passkey_ceremony_declined", instanceToken: token, ceremonyToken: "tok-1" }, 7);
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ type: "passkey_ceremony_dispatched" }));
+  });
+
+  it("refuses an expired token (the 30-minute safety-net TTL), for every kind", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const ext = fakeExt();
+      installCoreContextListener(ext, { acceptContentScripts: false });
+      const token = crypto.randomUUID();
+      await registerToken(ext, 7, token);
+      vi.setSystemTime(Date.now() + IFRAME_INSTANCE_TTL_MS + 1);
+      for (const message of kinds(token)) {
+        expect(send(ext, message, 7)).toHaveBeenCalledWith(REFUSED);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses a second registration of a token already held, never rebinding it to another tab", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const token = crypto.randomUUID();
+    await registerToken(ext, 7, token);
+    const sendResponse = vi.fn();
+    installedListener(ext)(
+      { type: "cs_request", message: { type: "register_iframe_instance", instanceToken: token }, trustedOrigin: "https://other.example", trustedTabId: 8 },
+      { id: EXT_ID },
+      sendResponse,
+    );
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ type: "content_error" })));
+    expect(send(ext, { type: "inline_menu_generate_password_chosen", instanceToken: token }, 8)).toHaveBeenCalledWith(REFUSED);
+  });
+
+  it("a registration is refused for a content script with no tab id", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const sendResponse = vi.fn();
+    installedListener(ext)(
+      { type: "cs_request", message: { type: "register_iframe_instance", instanceToken: crypto.randomUUID() }, trustedOrigin: "https://example.com", trustedTabId: undefined },
+      { id: EXT_ID },
+      sendResponse,
+    );
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ type: "content_error" })));
+  });
+
+  it("registers over the raw content-script channel on Firefox (acceptContentScripts: true), bound to sender.tab.id", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: true });
+    const token = crypto.randomUUID();
+    const ack = vi.fn();
+    installedListener(ext)(
+      { type: "register_iframe_instance", instanceToken: token },
+      { id: EXT_ID, tab: { id: 9, url: "https://example.com/login" } },
+      ack,
+    );
+    await vi.waitFor(() => expect(ack).toHaveBeenCalledWith({ type: "iframe_instance_done" }));
+    expect(send(ext, { type: "passkey_ceremony_declined", instanceToken: token, ceremonyToken: "tok-1" }, 10)).toHaveBeenCalledWith(REFUSED);
+    const admitted = send(ext, { type: "passkey_ceremony_declined", instanceToken: token, ceremonyToken: "tok-1" }, 9);
+    await vi.waitFor(() => expect(admitted).toHaveBeenCalledWith({ type: "passkey_ceremony_dispatched" }));
+  });
+
+  it("a lock clears every registration", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const token = crypto.randomUUID();
+    await registerToken(ext, 7, token);
+    const locked = vi.fn();
+    installedListener(ext)({ type: "lock" }, { id: EXT_ID }, locked);
+    await vi.waitFor(() => expect(locked).toHaveBeenCalled());
+    expect(send(ext, { type: "inline_menu_generate_password_chosen", instanceToken: token }, 7)).toHaveBeenCalledWith(REFUSED);
+  });
+});
+

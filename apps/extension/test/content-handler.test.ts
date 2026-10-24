@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `handleContentScriptRequest` must never hand `decide()` a `pageUrl` the sender-validation step
 // did not itself vouch for (THREAT_MODEL.md row 2, "a compromised/malicious content script").
 // Pure logic, no browser APIs: `decide()` (the stub) is deterministic and synchronous.
 import { describe, expect, it } from "vitest";
 
-import { handleContentScriptRequest, handleInlineMenuFillRequest, selectFillCandidate } from "../src/core-host/content-handler.ts";
+import { handleContentScriptRequest, handleInlineMenuFillRequest, narrowFillValues, selectFillCandidate } from "../src/core-host/content-handler.ts";
 import type { CheckSavePromptMessage, FieldsDetectedMessage } from "../src/messaging/contract.ts";
 import type { MatchCandidate } from "../src/core-host/bindings.ts";
 
@@ -65,8 +67,8 @@ describe("handleContentScriptRequest: check_save_prompt", () => {
 // still needs its second confirmation (ADR 0037 §5). Pure and synchronous, so no session or
 // locked-device plumbing is needed to exercise it directly.
 describe("selectFillCandidate", () => {
-  const plainCandidate: MatchCandidate = { itemId: "item-1", uriId: "uri-1", needsWarning: false };
-  const warningCandidate: MatchCandidate = { itemId: "item-2", uriId: "uri-2", needsWarning: true };
+  const plainCandidate: MatchCandidate = { itemId: "item-1", uriId: "uri-1", needsWarning: false, savedHost: "example.com" };
+  const warningCandidate: MatchCandidate = { itemId: "item-2", uriId: "uri-2", needsWarning: true, savedHost: "example.net" };
 
   it("accepts an itemId that is a current candidate with no warning needed", () => {
     expect(selectFillCandidate([plainCandidate], "item-1", false)).toEqual({ ok: true });
@@ -106,6 +108,7 @@ describe("handleInlineMenuFillRequest", () => {
     const ext = { tabs: { sendMessage: async () => undefined } } as unknown as WebExtNamespace;
     const response = await handleInlineMenuFillRequest(ext, 1, "https://example.com/login", {
       type: "inline_menu_fill_chosen",
+      instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962",
       itemId: "item-1",
       confirmedEquivalence: false,
     });
@@ -116,9 +119,37 @@ describe("handleInlineMenuFillRequest", () => {
     const ext = { tabs: { sendMessage: async () => undefined } } as unknown as WebExtNamespace;
     const response = await handleInlineMenuFillRequest(ext, 1, "not-a-url", {
       type: "inline_menu_fill_chosen",
+      instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962",
       itemId: "item-1",
       confirmedEquivalence: false,
     });
     expect(response).toEqual({ type: "content_error", code: "inline_menu_fill_chosen: the sender's tab URL does not parse" });
+  });
+});
+
+// Multi-step login pages (ROADMAP §4.4 M3): the long-lived context sends the content script no
+// decrypted value beyond the one field kind the step fills (ADR 0036 §4).
+describe("narrowFillValues", () => {
+  const revealed = { username: "bob@example.com", password: "s3cret" };
+
+  it("sends both values for a one-page form (no `only`)", () => {
+    expect(narrowFillValues(revealed, undefined)).toEqual(revealed);
+    expect(narrowFillValues({ password: "s3cret" }, undefined)).toEqual({ password: "s3cret" });
+  });
+
+  it("sends only the username on an identifier-first step — never the password", () => {
+    const values = narrowFillValues(revealed, "username");
+    expect(values).toEqual({ username: "bob@example.com" });
+    expect(values !== undefined && "password" in values).toBe(false);
+  });
+
+  it("sends only the password on a password-only step — never the username", () => {
+    const values = narrowFillValues(revealed, "password");
+    expect(values).toEqual({ password: "s3cret" });
+    expect(values !== undefined && "username" in values).toBe(false);
+  });
+
+  it("sends nothing for an identifier-first step when the item has no username", () => {
+    expect(narrowFillValues({ password: "s3cret" }, "username")).toBeUndefined();
   });
 });

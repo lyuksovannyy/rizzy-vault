@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The HTTP conventions of `/api/v1` that the server and every client share ([ADR 0028] items
 //! 1, 4 and 5): the endpoint paths, the bearer-token header and the two request-signing
 //! headers.
@@ -10,7 +12,8 @@
 //!
 //! # Paths and methods (item 1)
 //!
-//! The 27 endpoints of [`paths`], all under [`crate::meta::API_V1_PREFIX`]. Every one is `POST`
+//! The 36 endpoints of [`paths`], all under [`crate::meta::API_V1_PREFIX`]: ADR 0028's 27, the
+//! four `sessions` endpoints of ADR 0075 §2 and the five `attachments` endpoints of ADR 0054 §6. Every one is `POST`
 //! except [`paths::DEVICES_GRANTS`], which is `GET` (and `HEAD`); `GET /api/meta` is the one
 //! unversioned endpoint. A request body never goes in a URL, and `v1` defines no query
 //! parameter, so a client sends no query.
@@ -128,15 +131,61 @@ pub mod paths {
     pub const TOTP_ENROL_CONFIRM: &str = "/api/v1/totp/enrol/confirm";
     /// TOTP removal.
     pub const TOTP_DISABLE: &str = "/api/v1/totp/disable";
+    /// `WebAuthn` security-key enrolment start (ADR 0058 point 2).
+    pub const WEBAUTHN_ENROL_START: &str = "/api/v1/webauthn/enrol/start";
+    /// `WebAuthn` security-key enrolment confirmation (ADR 0058 point 2).
+    pub const WEBAUTHN_ENROL_CONFIRM: &str = "/api/v1/webauthn/enrol/confirm";
+    /// The account's security keys.
+    pub const WEBAUTHN_LIST: &str = "/api/v1/webauthn/list";
+    /// Removes one security key.
+    pub const WEBAUTHN_REMOVE: &str = "/api/v1/webauthn/remove";
+    /// A login's security-key challenge, after `second_factor_required` (ADR 0058 point 3).
+    pub const WEBAUTHN_LOGIN_CHALLENGE: &str = "/api/v1/webauthn/login/challenge";
+    /// A login's security-key assertion, which issues the session (ADR 0058 point 3).
+    pub const WEBAUTHN_LOGIN_FINISH: &str = "/api/v1/webauthn/login/finish";
+    /// The account's live sessions (ADR 0075 §2, R1).
+    pub const SESSIONS_LIST: &str = "/api/v1/sessions/list";
+    /// Sign-out: ends the caller's own session (ADR 0075 R2).
+    pub const SESSIONS_CURRENT_END: &str = "/api/v1/sessions/current/end";
+    /// Ends one session of the account by `session_id` (ADR 0075 R3).
+    pub const SESSIONS_END: &str = "/api/v1/sessions/end";
+    /// Ends every other OPAQUE and recovery-only session of the account (ADR 0075 R4).
+    pub const SESSIONS_OTHERS_END: &str = "/api/v1/sessions/others/end";
     /// Vault upload.
     pub const VAULT_UPLOAD: &str = "/api/v1/vault/upload";
     /// Vault Fetch.
     pub const VAULT_FETCH: &str = "/api/v1/vault/fetch";
     /// Vault restore healing.
     pub const VAULT_HEAL: &str = "/api/v1/vault/heal";
+    /// Declare an attachment and store its key wrap (ADR 0054 §6).
+    pub const ATTACHMENTS_CREATE: &str = "/api/v1/attachments/create";
+    /// An attachment's key wrap (ADR 0054 §6).
+    pub const ATTACHMENTS_GET: &str = "/api/v1/attachments/get";
+    /// Store one chunk envelope (ADR 0054 §6).
+    pub const ATTACHMENTS_UPLOAD_CHUNK: &str = "/api/v1/attachments/upload-chunk";
+    /// Fetch one chunk envelope (ADR 0054 §6).
+    pub const ATTACHMENTS_DOWNLOAD_CHUNK: &str = "/api/v1/attachments/download-chunk";
+    /// Delete an attachment and release its quota (ADR 0054 §7).
+    pub const ATTACHMENTS_DELETE: &str = "/api/v1/attachments/delete";
+
+    /// The breach-check range query of the `icons` role ([ADR 0053]; [`crate::breach`]). Not
+    /// in [`ALL`]: the `api` role never serves it, the `icons` role's own listener does
+    /// (ADR 0010 §1–§2), so a reverse proxy routes `/api/v1/icons/` to that process.
+    ///
+    /// [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
+    pub const ICONS_BREACH_RANGE: &str = "/api/v1/icons/breach-range";
+
+    /// The favicon fetch of the `icons` role ([ADR 0052] point 6; [`crate::icons`]). Not in
+    /// [`ALL`], for the same reason as [`ICONS_BREACH_RANGE`].
+    ///
+    /// [ADR 0052]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0052-icon-proxy-role.md
+    pub const ICONS_FETCH: &str = "/api/v1/icons/fetch";
+
+    /// The prefix of every path the `icons` role serves.
+    pub const ICONS_PREFIX: &str = "/api/v1/icons/";
 
     /// Every `/api/v1` path, in the order above.
-    pub const ALL: [&str; 27] = [
+    pub const ALL: [&str; 42] = [
         REGISTER_START,
         REGISTER_FINISH,
         LOGIN_START,
@@ -161,9 +210,24 @@ pub mod paths {
         TOTP_ENROL_START,
         TOTP_ENROL_CONFIRM,
         TOTP_DISABLE,
+        WEBAUTHN_ENROL_START,
+        WEBAUTHN_ENROL_CONFIRM,
+        WEBAUTHN_LIST,
+        WEBAUTHN_REMOVE,
+        WEBAUTHN_LOGIN_CHALLENGE,
+        WEBAUTHN_LOGIN_FINISH,
+        SESSIONS_LIST,
+        SESSIONS_CURRENT_END,
+        SESSIONS_END,
+        SESSIONS_OTHERS_END,
         VAULT_UPLOAD,
         VAULT_FETCH,
         VAULT_HEAL,
+        ATTACHMENTS_CREATE,
+        ATTACHMENTS_GET,
+        ATTACHMENTS_UPLOAD_CHUNK,
+        ATTACHMENTS_DOWNLOAD_CHUNK,
+        ATTACHMENTS_DELETE,
     ];
 }
 
@@ -185,11 +249,23 @@ mod tests {
     }
 
     #[test]
+    fn icons_paths_stay_apart_from_the_api_role() {
+        assert!(paths::ICONS_BREACH_RANGE.starts_with(paths::ICONS_PREFIX));
+        assert!(paths::ICONS_FETCH.starts_with(paths::ICONS_PREFIX));
+        assert!(paths::ICONS_PREFIX.starts_with(API_V1_PREFIX));
+        assert!(
+            paths::ALL
+                .iter()
+                .all(|path| !path.starts_with(paths::ICONS_PREFIX))
+        );
+    }
+
+    #[test]
     fn paths_are_unique_literal_and_under_the_prefix() {
         let mut sorted = paths::ALL.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 27);
+        assert_eq!(sorted.len(), 42);
         for path in paths::ALL {
             assert!(path.starts_with(API_V1_PREFIX), "{path}");
             // Nothing a proxy or a URL library would rewrite, and no query.

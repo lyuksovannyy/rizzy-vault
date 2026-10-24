@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Signup in the order of "Secrets before commit" (CRYPTO.md §11): the registration runs, the
 // Emergency Kit is shown once (with a download), the user re-types the last group of the
 // Secret Key, and only then is the account committed and the first session opened.

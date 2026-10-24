@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Vite build of the extension's ES-module surfaces (ADR 0014 §3): the popup, the options page,
 // the inline-menu iframe, the service worker (Chromium) or background page (Firefox), and the
 // offscreen document (Chromium). These may freely share chunks (every one of them is loaded as
@@ -41,6 +43,8 @@ export default defineConfig(({ mode }) => {
     "src/options/index": entry("./src/options/index.html"),
     "src/inline-menu/index": entry("./src/inline-menu/index.html"),
     "src/passkey-consent/index": entry("./src/passkey-consent/index.html"),
+    // ADR 0076 §5.2: the extension-origin save dialog.
+    "src/save-dialog/index": entry("./src/save-dialog/index.html"),
   };
   if (target === "chromium") {
     input["src/background/service-worker"] = entry("./src/background/service-worker.ts");

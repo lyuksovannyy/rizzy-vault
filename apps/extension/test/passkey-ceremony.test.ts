@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The passkey consent ceremony store (`core-host/passkey-ceremony.ts`): pure and synchronous,
 // with an injected clock, same pattern as `save-prompt-location.test.ts`. The one rule this
 // store exists to enforce that `save-prompt-location.ts` deliberately does not: a navigation

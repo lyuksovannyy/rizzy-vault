@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `envelopes.json`: one envelope per M1 purpose of CRYPTO.md §8.4 (two for the padded ones),
-//! with its context bytes, AAD, subkey and commitment.
+//! plus the implemented later ones (`SERVER_DB_BACKUP`, M8; `ACCOUNT_KEY_KEYSTORE_WRAP` and
+//! `ACCOUNT_KEY_FORWARD`, M3/M7, ADR 0057), with its context bytes, AAD, subkey and commitment.
 //!
 //! Each vector gives the raw wrapping key (or, for the HPKE device grant, the recipient's
 //! X25519 secret key and the previous account key the PSK comes from), the context fields, the
@@ -15,10 +18,18 @@
 //! parser, re-encodes them byte for byte, rebuilds each context from the parsed header and
 //! opens the envelope under it.
 //!
-//! The plaintexts of `ITEM_OP`, `ITEM_SNAPSHOT`, `ACCOUNT_SETTINGS`, `EXPORT_FILE` and the
-//! server purposes are opaque placeholder bytes. The item-record encoding (ADR 0018) is
-//! implemented in `rizzy-sync`; the other plaintext formats are not implemented yet. The
-//! envelope does not look inside any of them.
+//! The plaintexts of `ITEM_OP`, `ITEM_SNAPSHOT`, `EXPORT_FILE` and the server purposes are
+//! opaque placeholder bytes. The item-record encoding (ADR 0018) is implemented in
+//! `rizzy-sync`; the other plaintext formats are not implemented yet. The envelope does not look
+//! inside any of them.
+//!
+//! The `ACCOUNT_SETTINGS` plaintext is a real `account_settings_plaintext` ([ADR 0042] §2–§3, "On
+//! acceptance" item 3), written by hand by [`account_settings_plaintext`]: the codec is
+//! `rizzy-client`'s and `rizzy-match`'s, which this crate cannot depend on (ADR 0016), and a
+//! `rizzy-client` test (`settings::vectors`) parses this vector's plaintext with that codec and
+//! re-encodes it byte for byte.
+//!
+//! [ADR 0042]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0042-account-settings-matching-layout.md
 
 use chacha20::ChaCha20Rng;
 use chacha20poly1305::aead::{Aead as _, Payload};
@@ -28,11 +39,11 @@ use serde_json::{Map, Value};
 use super::headers::{OpHeaderFields, SnapshotHeaderFields};
 use super::{ExactRng, Obj, Vector, arr, bytes, num, object, random, random_vec, small, u64_of};
 use crate::envelope::purpose::{
-    AccountKeyDeviceGrantCtx, AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx,
-    AccountKeyServerWrapCtx, AccountSettingsCtx, DeviceSecretKeysCtx, ExportFileCtx,
-    IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx, ItemSnapshotCtx, Milestone,
-    RetiredSecretKeyCtx, ServerLoginStateCtx, ServerSecretsBackupCtx, ServerTotpSecretCtx,
-    VaultKeySelfGrantCtx,
+    AccountKeyDeviceGrantCtx, AccountKeyForwardCtx, AccountKeyKeystoreWrapCtx,
+    AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx, AccountKeyServerWrapCtx, AccountSettingsCtx,
+    DeviceSecretKeysCtx, ExportFileCtx, IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx,
+    ItemSnapshotCtx, Milestone, RetiredSecretKeyCtx, ServerDbBackupCtx, ServerLoginStateCtx,
+    ServerSecretsBackupCtx, ServerTotpSecretCtx, VaultKeySelfGrantCtx,
 };
 use crate::envelope::symmetric::{server_open, server_seal};
 use crate::envelope::{
@@ -44,7 +55,7 @@ use crate::ids::{
     SnapshotId, VaultId,
 };
 use crate::kdf::{self, KdfId};
-use crate::keys::{AccountKey, ItemKey, RetiredSecretKey, VaultKey};
+use crate::keys::{AccountKey, ItemKey, KeystoreUnlockSecret, RetiredSecretKey, VaultKey};
 use crate::labels;
 use crate::padding;
 use crate::secret::Key32;
@@ -74,6 +85,44 @@ fn symmetric(rng: &mut ChaCha20Rng, ctx: Obj, plaintext: &[u8]) -> Obj {
         .obj("ctx", ctx)
         .bytes("plaintext", plaintext)
         .bytes("nonce", &random::<24>(rng))
+}
+
+/// A real `account_settings_plaintext` (ADR 0042 §2–§3; module docs), its ids taken from `draw`
+/// (the 120 bytes the earlier opaque placeholder drew, so no later vector of the file moves):
+/// `format_version` 1, one entry, tag `0x0001`: `match_default` Host (`0x0002`), two disabled
+/// global ids (sorted), one user group of `example.com` and `example.net` with
+/// `flag_third_party_hostable = 0x00`. Written field by field, independent of `rizzy-client`'s
+/// and `rizzy-match`'s encoders, which a `rizzy-client` test checks it against.
+fn account_settings_plaintext(draw: &[u8]) -> Vec<u8> {
+    let id = |at: usize| -> [u8; 16] {
+        draw.get(at..at + 16)
+            .and_then(|s| s.try_into().ok())
+            .expect("120 drawn bytes")
+    };
+    let mut disabled = [id(0), id(16)];
+    disabled.sort_unstable();
+    assert_ne!(disabled[0], disabled[1], "two distinct disabled ids");
+    let mut matching = Vec::new();
+    matching.extend_from_slice(&0x0002u16.to_be_bytes());
+    matching.extend_from_slice(&2u16.to_be_bytes());
+    for d in disabled {
+        matching.extend_from_slice(&d);
+    }
+    matching.extend_from_slice(&1u16.to_be_bytes());
+    matching.extend_from_slice(&id(32));
+    matching.extend_from_slice(&2u16.to_be_bytes());
+    for domain in ["example.com", "example.net"] {
+        matching.extend_from_slice(&u32::try_from(domain.len()).expect("short").to_be_bytes());
+        matching.extend_from_slice(domain.as_bytes());
+    }
+    matching.push(0x00);
+    let mut pt = Vec::new();
+    pt.extend_from_slice(&1u16.to_be_bytes()); // format_version
+    pt.extend_from_slice(&1u16.to_be_bytes()); // n
+    pt.extend_from_slice(&0x0001u16.to_be_bytes()); // tag: matching settings
+    pt.extend_from_slice(&u32::try_from(matching.len()).expect("short").to_be_bytes());
+    pt.extend_from_slice(&matching);
+    pt
 }
 
 /// Draws the inputs of one envelope per M1 purpose (two per padded purpose), in §8.4 table
@@ -170,7 +219,7 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
     let ctx = Obj::new()
         .bytes("account_id", &id(rng))
         .u64("settings_seq", 1 + u64::from(small(rng, 100)));
-    let pt = random_vec(rng, 120);
+    let pt = account_settings_plaintext(&random_vec(rng, 120));
     out.push(vector("ACCOUNT_SETTINGS", 0, symmetric(rng, ctx, &pt)));
 
     let ctx = Obj::new()
@@ -319,6 +368,40 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
         .bytes("backup_salt", &random::<16>(rng));
     let pt = random_vec(rng, 300);
     out.push(vector("SERVER_SECRETS_BACKUP", 0, symmetric(rng, ctx, &pt)));
+
+    // M8 (ADR 0071), drawn last so the earlier vectors keep their inputs. The key is the
+    // DB-backup subkey itself (its derivation is `derivation/server/db-backup`).
+    let ctx = Obj::new()
+        .bytes("backup_id", &id(rng))
+        .u64("created_at_ms", 1_780_000_000_000)
+        .num("backup_key_id", 2)
+        .num("chunk_index", 1)
+        .num("chunk_count", 3);
+    let pt = random_vec(rng, 500);
+    out.push(vector("SERVER_DB_BACKUP", 0, symmetric(rng, ctx, &pt)));
+
+    // M3 (ADR 0057), drawn after every earlier vector so those keep their inputs. `E_ks`: the
+    // key is the keystore unlock secret. The forward envelope: the key is the account key of
+    // `from_account_key_epoch`, the plaintext the newer one.
+    let ctx = Obj::new()
+        .bytes("account_id", &id(rng))
+        .bytes("device_id", &id(rng))
+        .num("account_key_epoch", small(rng, 4));
+    let pt = random::<32>(rng);
+    out.push(vector(
+        "ACCOUNT_KEY_KEYSTORE_WRAP",
+        0,
+        symmetric(rng, ctx, &pt),
+    ));
+
+    let from = small(rng, 4);
+    let ctx = Obj::new()
+        .bytes("account_id", &id(rng))
+        .bytes("device_id", &id(rng))
+        .num("from_account_key_epoch", from)
+        .num("to_account_key_epoch", from + 1 + small(rng, 3));
+    let pt = random::<32>(rng);
+    out.push(vector("ACCOUNT_KEY_FORWARD", 0, symmetric(rng, ctx, &pt)));
     out
 }
 
@@ -327,8 +410,17 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
 /// purpose.
 pub(super) fn check_file(vectors: &[Vector]) {
     for p in Purpose::ALL {
-        // VAULT_KEY_MEMBER_GRANT is M9; its context exists only in tests.
-        if p.spec().first_used != Milestone::M1 {
+        // VAULT_KEY_MEMBER_GRANT is M9; its context exists only in tests. SERVER_DB_BACKUP is
+        // M8 and implemented (ADR 0071); ACCOUNT_KEY_KEYSTORE_WRAP and ACCOUNT_KEY_FORWARD are
+        // M3/M7 and implemented (ADR 0057).
+        if p.spec().first_used != Milestone::M1
+            && !matches!(
+                p,
+                Purpose::ServerDbBackup
+                    | Purpose::AccountKeyKeystoreWrap
+                    | Purpose::AccountKeyForward
+            )
+        {
             continue;
         }
         let of_purpose: Vec<&Vector> = vectors.iter().filter(|v| v.name == p.name()).collect();
@@ -467,6 +559,43 @@ pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> 
             },
         ),
         "ACCOUNT_KEY_DEVICE_GRANT" => device_grant(m),
+        "ACCOUNT_KEY_KEYSTORE_WRAP" => {
+            let ctx = AccountKeyKeystoreWrapCtx {
+                account_id: account(c),
+                device_id: device(c, "device_id"),
+                account_key_epoch: num(c, "account_key_epoch"),
+            };
+            let out = symmetric_outputs(m, &ctx);
+            // Typed: the secret opens `E_ks` to the plaintext key, and wraps it back to the
+            // same bytes with the vector's nonce.
+            let secret = typed(m, |r| {
+                KeystoreUnlockSecret::generate(r, ctx.account_id, ctx.device_id)
+            });
+            let env = bytes(&out, "envelope");
+            let ak = secret.unwrap_account_key(&ctx, &env).expect("E_ks opens");
+            assert_eq!(ak.key().expose_secret().as_slice(), pt.as_slice());
+            assert_eq!(ak.epoch(), ctx.account_key_epoch);
+            let again = with_nonce(m, |r| secret.wrap_account_key(r, &ctx, &ak).expect("wrap"));
+            assert_eq!(again, env, "KeystoreUnlockSecret::wrap_account_key");
+            out
+        }
+        "ACCOUNT_KEY_FORWARD" => {
+            let ctx = AccountKeyForwardCtx {
+                account_id: account(c),
+                device_id: device(c, "device_id"),
+                from_account_key_epoch: num(c, "from_account_key_epoch"),
+                to_account_key_epoch: num(c, "to_account_key_epoch"),
+            };
+            let out = symmetric_outputs(m, &ctx);
+            let previous = typed(m, |r| AccountKey::generate(r, ctx.from_account_key_epoch));
+            let env = bytes(&out, "envelope");
+            let newer = previous.unwrap_forward(&ctx, &env).expect("forward opens");
+            assert_eq!(newer.key().expose_secret().as_slice(), pt.as_slice());
+            assert_eq!(newer.epoch(), ctx.to_account_key_epoch);
+            let again = with_nonce(m, |r| previous.wrap_forward(r, &ctx, &newer).expect("wrap"));
+            assert_eq!(again, env, "AccountKey::wrap_forward");
+            out
+        }
         "IDENTITY_SECRET_KEYS" => {
             let ctx = IdentitySecretKeysCtx {
                 account_id: account(c),
@@ -658,6 +787,16 @@ pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> 
                 created_at_ms: u64_of(c, "created_at_ms"),
                 kdf_id: kdf_id(c),
                 backup_salt: arr(c, "backup_salt"),
+            },
+        ),
+        "SERVER_DB_BACKUP" => server_outputs(
+            m,
+            &ServerDbBackupCtx {
+                backup_id: BackupId::from_bytes(arr(c, "backup_id")),
+                created_at_ms: u64_of(c, "created_at_ms"),
+                backup_key_id: num(c, "backup_key_id"),
+                chunk_index: num(c, "chunk_index"),
+                chunk_count: num(c, "chunk_count"),
             },
         ),
         other => panic!("unknown envelope vector {other}"),

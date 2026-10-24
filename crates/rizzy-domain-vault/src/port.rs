@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The vault domain's side of the `auth` domain's cross-domain flows (ADR 0016 R4).
 //!
 //! `rizzy-domain-auth` defines the trait (`VaultPort`) and `rizzy-server` implements it with the
@@ -10,11 +12,14 @@
 //! |---|---|
 //! | [`create_personal_vault`] | Signup (CRYPTO.md §11.1 step 8), with its byte-identical repeat |
 //! | [`self_grants`] | Account views (§11.2 step 5, §11.3 step 2.2); healing step 3a compares re-sent self-grants with them (ADR 0032 §3) |
+//! | [`vault_summaries`] | Account views: the per-vault summaries (ADR 0081 §A9, §A11) |
+//! | [`crate::keys::create_owned_vault`], [`crate::keys::delete_vault`] | The `vault_create` and `vault_delete` commits (ADR 0081 §A3, §A5) |
 //! | [`device_head`] | Revocation phase 1, H (§11.8 step 0; ADR 0012 §6) |
 //! | [`recovery_vaults`] | Recovery complete, the vaults with their heads and wraps (§11.9 step 3; ADR 0025 §1) |
 //! | [`crate::rotation::apply_rotation`] | The vault half of a rotation (§11.6 step 9; ADR 0025 §3) |
 
 use rizzy_core::ids::{AccountId, DeviceId, VaultId};
+use rizzy_proto::account::VaultSummary;
 use rizzy_proto::limits::MAX_ITEM_KEY_WRAPS;
 use rizzy_proto::objects::{ItemKeyWrap, KeyEnvelope, VaultSelfGrant};
 use rizzy_proto::recovery::RecoveryVault;
@@ -24,7 +29,8 @@ use rizzy_storage::{Conn, WriteTx};
 
 use crate::error::VaultError;
 use crate::keys::create_vault;
-use crate::repo;
+use crate::repo::{self, VaultKind};
+use crate::usage::vault_counted_bytes;
 
 /// The outcome of [`create_personal_vault`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,7 +69,7 @@ pub async fn create_personal_vault(
 ) -> Result<PersonalVaultOutcome, VaultError> {
     let vault_id = VaultId::from_bytes(grant.vault_id.to_bytes());
     let Some(vault) = repo::vault(tx.conn(), vault_id).await? else {
-        create_vault(tx, account_id, grant, now_ms).await?;
+        create_vault(tx, account_id, grant, VaultKind::Personal, now_ms).await?;
         return Ok(PersonalVaultOutcome::Created);
     };
     let stored = repo::self_grant(tx.conn(), vault_id).await?;
@@ -111,6 +117,29 @@ pub async fn self_grants(
         });
     }
     Ok(grants)
+}
+
+/// The account's vaults for the account answer ([ADR 0081] §A9, §A11): id, stored kind and
+/// counted bytes, ascending by id, on the caller's connection. Unsigned and informational.
+///
+/// # Errors
+/// [`VaultError::Storage`] or [`VaultError::Corrupt`].
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+pub async fn vault_summaries(
+    mut conn: Conn<'_>,
+    account_id: AccountId,
+) -> Result<Vec<VaultSummary>, VaultError> {
+    let vaults = repo::vault_kinds(reborrow(&mut conn), account_id).await?;
+    let mut out = Vec::with_capacity(vaults.len());
+    for (vault_id, kind) in vaults {
+        out.push(VaultSummary {
+            vault_id: Id::from_bytes(vault_id.to_bytes()),
+            kind: kind.code(),
+            bytes_used: vault_counted_bytes(reborrow(&mut conn), vault_id).await?,
+        });
+    }
+    Ok(out)
 }
 
 /// H: the highest `device_seq` the server holds from `device_id` in any of the account's

@@ -1,6 +1,6 @@
 # ADR 0038: Equivalent-domain list: format, signing and governance
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0044](0044-equivalence-group-member-rules.md) (§1 in part), [ADR 0080](0080-default-site-groups-vaultwarden-seed.md) (§2 in part)
 - Date: 2026-10-07
 - Deciders: project owner
 - Milestone: M2

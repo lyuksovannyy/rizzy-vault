@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Becoming a device: signup (CRYPTO.md §11.1) and login on a new device with its enrolment
 //! (§11.2), each ending with a cache file ([ADR 0026]).
 //!
@@ -49,10 +51,12 @@ use rizzy_client::store::record::Stage;
 use rizzy_client::store::rows::Changeset;
 use rizzy_client::store::{self};
 use rizzy_client::sync::{Authors, VaultSync};
+use rizzy_client::vaults::VaultCatalog;
+use rizzy_core::ids::VaultId;
 use zeroize::Zeroizing;
 
 use crate::db::Db;
-use crate::device::{Device, Env, copy_token, opaque_login};
+use crate::device::{Device, Env, catalog_of, copy_token, opaque_login};
 use crate::error::CliError;
 use crate::http::{Auth, Http};
 use crate::paths::{AccountLock, cache_path, ensure_data_dir};
@@ -279,6 +283,8 @@ impl PreparedSignup {
         floors.admit(&finalise)?;
         db.write(&finalise).await?;
         let vault = VaultSync::new(signed_up.vault_key, &signed_up.unlocked, 1)?;
+        // The one vault of a signup is its Personal vault; the first sync reads the directory.
+        let catalog = VaultCatalog::check(None, &[vault.vault_id()]);
         let mut device = Device::enrolled(
             lock,
             db,
@@ -291,8 +297,9 @@ impl PreparedSignup {
                 Vec::new(),
                 Authors::from_statements(&[signed_up.own_certificate], &[])?,
             ),
-            vault,
+            (vec![vault], catalog),
             password,
+            env.sign_outs.clone(),
         )?;
         device.sync(env.ui).await?;
         Ok(device)
@@ -352,14 +359,23 @@ pub async fn login(env: &mut Env<'_>, server: &str, login_name: &str) -> Result<
         first.append(store::account_writes(&enrolled.account));
         let (lock, db, floors) = create_cache(env, &account, &first).await?;
         let mut account_view = enrolled.account;
-        let vault_id = account_view
+        // ADR 0081 §A7: a driver for every vault the catalog opens, or, without a directory to
+        // say which one is Personal, for every served vault (read-only until it says).
+        let catalog = catalog_of(&account_view, &enrolled.unlocked);
+        let ids: Vec<VaultId> = account_view
             .vault_ids()
-            .next()
-            .ok_or(ClientError::InvalidServerResponse)?;
-        let vault_key = account_view
-            .take_vault_key(vault_id)
-            .ok_or(ClientError::InvalidServerResponse)?;
-        let vault = VaultSync::new(vault_key, &enrolled.unlocked, 1)?;
+            .filter(|v| !catalog.has_directory() || catalog.is_open(*v))
+            .collect();
+        let mut vaults = Vec::with_capacity(ids.len());
+        for vault_id in ids {
+            let vault_key = account_view
+                .take_vault_key(vault_id)
+                .ok_or(ClientError::InvalidServerResponse)?;
+            vaults.push(VaultSync::new(vault_key, &enrolled.unlocked, 1)?);
+        }
+        if vaults.is_empty() {
+            return Err(CliError::Client(ClientError::InvalidServerResponse));
+        }
         let mut device = Device::enrolled(
             lock,
             db,
@@ -372,8 +388,9 @@ pub async fn login(env: &mut Env<'_>, server: &str, login_name: &str) -> Result<
                 account_view.revocations().to_vec(),
                 Authors::from_account(&account_view)?,
             ),
-            vault,
+            (vaults, catalog),
             password,
+            env.sign_outs.clone(),
         )?;
         device.sync(env.ui).await?;
         return Ok(device);

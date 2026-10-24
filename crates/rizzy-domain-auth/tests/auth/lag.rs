@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The lag rule and the credentials that need the user (ADR 0032 §3–§4), against real SQLite:
 //! the rows a restore would leave behind the signed state are made by hand here (a column set,
 //! an envelope replaced), and the full restore drills run in `rizzy-cli`'s end-to-end tests.
@@ -115,6 +117,8 @@ fn change(state: &[u8], recovery: RecoveryUpload) -> AccountChange<Vec<VaultSelf
         device_revocations: List::empty(),
         device_grants: List::empty(),
         vault_rotation: None,
+        vault_create: None,
+        vault_delete: None,
     }
 }
 

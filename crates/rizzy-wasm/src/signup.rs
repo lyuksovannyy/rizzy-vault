@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The web vault's signup (CRYPTO.md §11.1, "Web-vault signup (kind 4)") as a request/response
 //! loop for JavaScript, in the order of "Secrets before commit" (CRYPTO.md §11).
 //!

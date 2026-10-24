@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Server-mode sync: upload, Fetch and the healing request (ADR 0012 §7 as ADR 0021 §1, §2, §4
 //! and §9 supersede it in part; ADR 0022: Server mode only).
 //!
@@ -189,8 +191,9 @@ pub enum UploadResult {
     /// the client treats it as an acknowledgement (ADR 0021 §9 "Already stored").
     AlreadyStored,
     /// Refused, with the reason: [`ErrorCode::StaleEpoch`], [`ErrorCode::RecordConflict`],
-    /// [`ErrorCode::PrevSeqMismatch`], or [`ErrorCode::InvalidRequest`] for a record that fails
-    /// parsing, signature or author checks.
+    /// [`ErrorCode::PrevSeqMismatch`], [`ErrorCode::QuotaExceeded`] for a record past the
+    /// account's storage quota and headroom (ADR 0048 §3), or [`ErrorCode::InvalidRequest`] for
+    /// a record that fails parsing, signature or author checks.
     Rejected {
         /// The reason.
         error: ErrorCode,

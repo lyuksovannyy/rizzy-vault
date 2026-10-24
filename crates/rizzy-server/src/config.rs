@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The server configuration: a file and environment variables ([ADR 0010] §1, §4; [ADR 0028]
 //! items 11 and 12).
 //!
@@ -43,12 +45,36 @@
 //!   and logs a warning at startup). ADR 0028 item 12 does not list this setting: the name and
 //!   the unit are this crate's choice, reported to the owner.
 //!
+//! - **The per-account storage quota** ([ADR 0048] §1): `RIZZY_ACCOUNT_QUOTA_BYTES`, a whole
+//!   number of bytes, default 5 GiB (5 368 709 120), at least 256 MiB, no maximum (the
+//!   operator's disk is the limit). One number for every account; no per-account override.
+//!
+//! - **The admin listener** ([ADR 0060] §2): `RIZZY_ADMIN_LISTEN`, parsed like
+//!   `RIZZY_LISTEN`, default `127.0.0.1:8081` (loopback, never `0.0.0.0`). It always binds
+//!   while the `api` role runs, so ADR 0010 §1's "Admin API and metrics bind a separate
+//!   listener" holds; the reverse proxy and the compose examples do not expose it. ADR 0028
+//!   item 12 does not list this setting: its name follows `RIZZY_LISTEN`'s.
+//! - **The `icons` role** ([ADR 0010] §1–§2; [ADR 0053]): `--roles icons` runs it, alone. It
+//!   refuses to start combined with another role, with `RIZZY_DATABASE_URL` set, or (checked
+//!   at startup, [`crate::server`]) when the secrets file or the `SQLite` database is visible
+//!   to it. Running the role turns the favicon fetch on (ADR 0052; the role is off by default,
+//!   ADR 0010 owner decision 5). Its breach check has its own switch, `RIZZY_BREACH_CHECK` =
+//!   `off` (the default) or `on` (ADR 0053 item 5, owner answer 2). Its cache volume is `RIZZY_ICON_CACHE_DIR` (default
+//!   `/cache`), with ADR 0052's `RIZZY_ICON_CACHE_TTL_SECS` (default 14 days, 60 s to 365
+//!   days) and `RIZZY_ICON_CACHE_MAX_BYTES` (default 256 MiB, at least 1 MiB). The names
+//!   `RIZZY_BREACH_CHECK` and `RIZZY_ICON_CACHE_DIR` and the bounds are this crate's choice,
+//!   reported to the owner. `RIZZY_LISTEN` is the role's listener; `RIZZY_TRUSTED_PROXIES`
+//!   names the proxies whose `X-Forwarded-For` its rate limit reads.
+//!
 //! Every value has a default except the canonical origin, which the `api` and `worker` roles
 //! require (both build the auth domain, which binds the origin into OPAQUE and every
 //! device signature).
 //!
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 //! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
+//! [ADR 0048]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0048-per-account-storage-quota.md
+//! [ADR 0060]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0060-admin-panel-stack-boundary.md
+//! [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
 
 use core::fmt;
 use std::collections::BTreeMap;
@@ -71,6 +97,8 @@ pub const CONFIG: &str = "RIZZY_CONFIG";
 pub const ORIGIN: &str = "RIZZY_ORIGIN";
 /// The public listener of `api` and `web`.
 pub const LISTEN: &str = "RIZZY_LISTEN";
+/// The admin listener of the `api` role (ADR 0060 §2), never part of the public one.
+pub const ADMIN_LISTEN: &str = "RIZZY_ADMIN_LISTEN";
 /// The data volume: the `SQLite` file and its pre-migration copy (ADR 0010 §4).
 pub const DATA_DIR: &str = "RIZZY_DATA_DIR";
 /// A `postgres://` URL; without it the database is `SQLite` in the data directory (ADR 0011
@@ -91,12 +119,23 @@ pub const WORKER_INTERVAL_SECS: &str = "RIZZY_WORKER_INTERVAL_SECS";
 pub const MAX_UPLOAD_BYTES: &str = "RIZZY_MAX_UPLOAD_BYTES";
 /// The recovery waiting period, in whole hours (ADR 0008 decision 5, CRYPTO.md §11.9 step 2).
 pub const RECOVERY_WAIT_HOURS: &str = "RIZZY_RECOVERY_WAIT_HOURS";
+/// The per-account storage quota, in bytes (ADR 0048 §1).
+pub const ACCOUNT_QUOTA_BYTES: &str = "RIZZY_ACCOUNT_QUOTA_BYTES";
+/// `off` (the default) or `on`: the `icons` role's breach check (ADR 0053 item 5).
+pub const BREACH_CHECK: &str = "RIZZY_BREACH_CHECK";
+/// The `icons` role's cache volume (ADR 0010 §4).
+pub const ICON_CACHE_DIR: &str = "RIZZY_ICON_CACHE_DIR";
+/// Seconds a cached `icons` answer stays fresh (ADR 0052 point 5).
+pub const ICON_CACHE_TTL_SECS: &str = "RIZZY_ICON_CACHE_TTL_SECS";
+/// The `icons` cache's total size cap, in bytes (ADR 0052 point 5).
+pub const ICON_CACHE_MAX_BYTES: &str = "RIZZY_ICON_CACHE_MAX_BYTES";
 
 /// Every setting name the file and the environment accept.
 pub const KEYS: &[&str] = &[
     ROLES,
     ORIGIN,
     LISTEN,
+    ADMIN_LISTEN,
     DATA_DIR,
     DATABASE_URL,
     SECRETS_FILE,
@@ -106,6 +145,11 @@ pub const KEYS: &[&str] = &[
     WORKER_INTERVAL_SECS,
     MAX_UPLOAD_BYTES,
     RECOVERY_WAIT_HOURS,
+    ACCOUNT_QUOTA_BYTES,
+    BREACH_CHECK,
+    ICON_CACHE_DIR,
+    ICON_CACHE_TTL_SECS,
+    ICON_CACHE_MAX_BYTES,
 ];
 
 /// The settings a configuration file holds, by name.
@@ -159,6 +203,10 @@ pub const MAX_CONFIG_FILE_LEN: usize = 64 * 1024;
 /// `RIZZY_LISTEN=0.0.0.0:8080` behind its reverse proxy.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8080";
 
+/// The default admin listener: loopback only, never `0.0.0.0` (ADR 0060 §2). Nothing exposes
+/// it; an operator reaches it over a tunnel or VPN.
+pub const DEFAULT_ADMIN_LISTEN: &str = "127.0.0.1:8081";
+
 /// The default data directory, the container's data volume.
 pub const DEFAULT_DATA_DIR: &str = "/data";
 
@@ -184,6 +232,25 @@ pub const DEFAULT_MAX_UPLOAD_BYTES: usize = DEFAULT_UPLOAD_BODY_LEN;
 /// The largest upload body limit an operator may set: 256 MiB.
 pub const MAX_MAX_UPLOAD_BYTES: usize = MAX_UPLOAD_BODY_LEN;
 
+/// The default cache volume of the `icons` role (ADR 0010 §4).
+pub const DEFAULT_ICON_CACHE_DIR: &str = "/cache";
+
+/// The shortest `icons` cache TTL an operator may set: 60 s.
+pub const MIN_ICON_CACHE_TTL_SECS: u64 = 60;
+
+/// The longest `icons` cache TTL an operator may set: 365 days.
+pub const MAX_ICON_CACHE_TTL_SECS: u64 = 365 * 24 * 3600;
+
+/// The smallest `icons` cache cap an operator may set: 1 MiB, room for one breach-check range
+/// of the largest accepted size.
+pub const MIN_ICON_CACHE_MAX_BYTES: u64 = 1024 * 1024;
+
+/// The default per-account storage quota: 5 GiB (ADR 0048 §1).
+pub const DEFAULT_ACCOUNT_QUOTA_BYTES: u64 = rizzy_storage::quota::DEFAULT_QUOTA_BYTES;
+
+/// The smallest per-account storage quota an operator may set: 256 MiB (ADR 0048 §1).
+pub const MIN_ACCOUNT_QUOTA_BYTES: u64 = rizzy_storage::quota::MIN_QUOTA_BYTES;
+
 /// The default recovery waiting period: 72 h (ADR 0008 decision 5: "After a **72 h** wait,
 /// admin-configurable from 0 to 30 days, the server releases `E_rec`").
 pub const DEFAULT_RECOVERY_WAIT_HOURS: u64 = DEFAULT_RECOVERY_WAIT_MS / MS_PER_HOUR;
@@ -195,7 +262,7 @@ pub const MAX_RECOVERY_WAIT_HOURS: u64 = MAX_RECOVERY_WAIT_MS / MS_PER_HOUR;
 /// Milliseconds in one hour.
 const MS_PER_HOUR: u64 = 3_600_000;
 
-/// A role of the binary (ADR 0010 §1). Only the M1 roles exist in this build.
+/// A role of the binary (ADR 0010 §1). The M1 roles and `icons` exist in this build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Role {
     /// OPAQUE, sessions, devices, vault and op log.
@@ -204,6 +271,8 @@ pub enum Role {
     Web,
     /// Scheduled deletion and compaction.
     Worker,
+    /// The egress role: the breach check (ADR 0053); runs alone.
+    Icons,
 }
 
 impl Role {
@@ -214,12 +283,17 @@ impl Role {
             Self::Api => "api",
             Self::Web => "web",
             Self::Worker => "worker",
+            Self::Icons => "icons",
         }
     }
 }
 
 /// The roles one process runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one flag per role of ADR 0010 §1; any combination is parsed, then checked"
+)]
 pub struct Roles {
     /// `api`.
     pub api: bool,
@@ -227,6 +301,8 @@ pub struct Roles {
     pub web: bool,
     /// `worker`.
     pub worker: bool,
+    /// `icons` (ADR 0010 §1, ADR 0053): never in the default set, always alone.
+    pub icons: bool,
 }
 
 impl Roles {
@@ -235,22 +311,25 @@ impl Roles {
         api: true,
         web: true,
         worker: true,
+        icons: false,
     };
 
     /// Parses a comma-separated role list.
     ///
-    /// `notify` and `icons` (M3) and `smtp` (M6) are refused: this build has no such role.
-    /// When they exist, ADR 0010 §2's isolation checks (`smtp` and `icons` run alone, see no
-    /// database setting and no secrets file) belong here.
+    /// `notify` (M3) and `smtp` (M6) are refused: this build has no such role. `icons` runs
+    /// alone (ADR 0010 §2); its other isolation checks (no database setting, no secrets file)
+    /// are [`Config::from_sources`]'s and [`crate::server`]'s.
     ///
     /// # Errors
     /// [`ConfigError::Invalid`] for an empty list, an empty entry or an unknown name;
-    /// [`ConfigError::RoleNotInThisBuild`] for a later milestone's role.
+    /// [`ConfigError::RoleNotInThisBuild`] for a later milestone's role;
+    /// [`ConfigError::RoleNotAlone`] for `icons` with any other role.
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let mut roles = Self {
             api: false,
             web: false,
             worker: false,
+            icons: false,
         };
         for name in text.split(',').map(str::trim) {
             match name {
@@ -258,10 +337,13 @@ impl Roles {
                 "web" => roles.web = true,
                 "worker" => roles.worker = true,
                 "notify" => return Err(ConfigError::RoleNotInThisBuild("notify")),
-                "icons" => return Err(ConfigError::RoleNotInThisBuild("icons")),
+                "icons" => roles.icons = true,
                 "smtp" => return Err(ConfigError::RoleNotInThisBuild("smtp")),
                 _ => return Err(ConfigError::Invalid(ROLES)),
             }
+        }
+        if roles.icons && (roles.api || roles.web || roles.worker) {
+            return Err(ConfigError::RoleNotAlone("icons"));
         }
         Ok(roles)
     }
@@ -281,6 +363,9 @@ impl Roles {
     /// The role names, for the startup log line.
     #[must_use]
     pub fn names(self) -> &'static str {
+        if self.icons {
+            return "icons";
+        }
         match (self.api, self.web, self.worker) {
             (true, true, true) => "api,web,worker",
             (true, true, false) => "api,web",
@@ -331,6 +416,8 @@ pub struct Config {
     pub origin: Option<ServerOrigin>,
     /// The public listener.
     pub listen: SocketAddr,
+    /// The admin listener, bound whenever the `api` role runs (ADR 0060 §2).
+    pub admin_listen: SocketAddr,
     /// The data directory.
     pub data_dir: PathBuf,
     /// The database.
@@ -347,9 +434,89 @@ pub struct Config {
     pub worker_interval: Duration,
     /// The upload body limit.
     pub max_upload_bytes: usize,
+    /// The per-account storage quota (ADR 0048 §1); the upload limit is its headroom (§3).
+    pub account_quota_bytes: u64,
     /// The recovery waiting period in milliseconds, 0 to 30 days (ADR 0008 decision 5): how
     /// long after a valid recovery code the server releases `E_rec`.
     pub recovery_wait_ms: u64,
+    /// Whether the `icons` role serves the breach check (ADR 0053 item 5; off by default).
+    pub breach_check: bool,
+    /// The `icons` role's cache volume.
+    pub icon_cache_dir: PathBuf,
+    /// How long a cached `icons` answer stays fresh.
+    pub icon_cache_ttl: Duration,
+    /// The `icons` cache's total size cap, in bytes.
+    pub icon_cache_max_bytes: u64,
+}
+
+/// `RIZZY_ACCOUNT_QUOTA_BYTES` (ADR 0048 §1): whole bytes, at least
+/// [`MIN_ACCOUNT_QUOTA_BYTES`], no maximum; [`DEFAULT_ACCOUNT_QUOTA_BYTES`] when unset.
+fn account_quota(sources: &Sources<'_>) -> Result<u64, ConfigError> {
+    match sources.get(ACCOUNT_QUOTA_BYTES)? {
+        None => Ok(DEFAULT_ACCOUNT_QUOTA_BYTES),
+        Some(text) => match text.parse::<u64>() {
+            Ok(n) if n >= MIN_ACCOUNT_QUOTA_BYTES => Ok(n),
+            _ => Err(ConfigError::Invalid(ACCOUNT_QUOTA_BYTES)),
+        },
+    }
+}
+
+/// `RIZZY_RECOVERY_WAIT_HOURS` (ADR 0008 decision 5): whole hours, 0 to 30 days, as
+/// milliseconds; [`DEFAULT_RECOVERY_WAIT_HOURS`] when unset.
+fn recovery_wait(sources: &Sources<'_>) -> Result<u64, ConfigError> {
+    match sources.get(RECOVERY_WAIT_HOURS)? {
+        None => Ok(DEFAULT_RECOVERY_WAIT_MS),
+        Some(text) => match text.parse::<u64>() {
+            Ok(hours) if hours <= MAX_RECOVERY_WAIT_HOURS => Ok(hours.saturating_mul(MS_PER_HOUR)),
+            _ => Err(ConfigError::Invalid(RECOVERY_WAIT_HOURS)),
+        },
+    }
+}
+
+/// The `icons` role's settings (module docs): the database-URL refusal when the role runs
+/// (ADR 0010 §2), then the breach-check switch and the cache's directory, TTL and cap.
+fn icon_settings(
+    sources: &Sources<'_>,
+    roles: Roles,
+) -> Result<(bool, PathBuf, Duration, u64), ConfigError> {
+    if roles.icons && sources.get_secret(DATABASE_URL)?.is_some() {
+        return Err(ConfigError::RoleSeesDatabase("icons"));
+    }
+    let breach_check = match sources.get(BREACH_CHECK)?.as_deref() {
+        None | Some("off") => false,
+        Some("on") => true,
+        Some(_) => return Err(ConfigError::Invalid(BREACH_CHECK)),
+    };
+    let icon_cache_dir = PathBuf::from(
+        sources
+            .get(ICON_CACHE_DIR)?
+            .unwrap_or_else(|| DEFAULT_ICON_CACHE_DIR.to_owned()),
+    );
+    if icon_cache_dir.as_os_str().is_empty() {
+        return Err(ConfigError::Invalid(ICON_CACHE_DIR));
+    }
+    let icon_cache_ttl = match sources.get(ICON_CACHE_TTL_SECS)? {
+        None => rizzy_icon_proxy::cache::DEFAULT_TTL,
+        Some(text) => match text.parse::<u64>() {
+            Ok(secs) if (MIN_ICON_CACHE_TTL_SECS..=MAX_ICON_CACHE_TTL_SECS).contains(&secs) => {
+                Duration::from_secs(secs)
+            }
+            _ => return Err(ConfigError::Invalid(ICON_CACHE_TTL_SECS)),
+        },
+    };
+    let icon_cache_max_bytes = match sources.get(ICON_CACHE_MAX_BYTES)? {
+        None => rizzy_icon_proxy::cache::DEFAULT_MAX_BYTES,
+        Some(text) => match text.parse::<u64>() {
+            Ok(n) if n >= MIN_ICON_CACHE_MAX_BYTES => n,
+            _ => return Err(ConfigError::Invalid(ICON_CACHE_MAX_BYTES)),
+        },
+    };
+    Ok((
+        breach_check,
+        icon_cache_dir,
+        icon_cache_ttl,
+        icon_cache_max_bytes,
+    ))
 }
 
 /// A configuration the server refuses. `Display` names the setting, never its value (the
@@ -365,6 +532,10 @@ pub enum ConfigError {
     NotUtf8(&'static str),
     /// The role belongs to a later milestone.
     RoleNotInThisBuild(&'static str),
+    /// The role must run alone (ADR 0010 §2: `icons`, later `smtp`).
+    RoleNotAlone(&'static str),
+    /// The role must not see a database setting (ADR 0010 §2).
+    RoleSeesDatabase(&'static str),
     /// The configuration file names a setting that does not exist.
     UnknownSetting,
     /// The configuration file names a setting twice.
@@ -391,6 +562,16 @@ impl fmt::Display for ConfigError {
             Self::RoleNotInThisBuild(role) => {
                 write!(f, "the {role} role is not available in this build")
             }
+            Self::RoleNotAlone(role) => {
+                write!(
+                    f,
+                    "the {role} role must run alone, in its own process (ADR 0010 §2)"
+                )
+            }
+            Self::RoleSeesDatabase(role) => write!(
+                f,
+                "the {role} role must not see a database setting; unset {DATABASE_URL} (ADR 0010 §2)"
+            ),
             Self::UnknownSetting => f.write_str("the configuration file names an unknown setting"),
             Self::RepeatedSetting(key) => {
                 write!(f, "the configuration file sets {key} more than once")
@@ -477,6 +658,14 @@ impl fmt::Debug for Sources<'_> {
 }
 
 impl Sources<'_> {
+    /// The listener address `key`, or `default` when it is unset.
+    fn socket_addr(&self, key: &'static str, default: &str) -> Result<SocketAddr, ConfigError> {
+        self.get(key)?
+            .unwrap_or_else(|| default.to_owned())
+            .parse::<SocketAddr>()
+            .map_err(|_| ConfigError::Invalid(key))
+    }
+
     /// The value of `key`: the environment if set, else the file.
     fn get(&self, key: &'static str) -> Result<Option<String>, ConfigError> {
         if let Some(value) = (self.env)(key) {
@@ -554,11 +743,8 @@ impl Config {
             }
             None => None,
         };
-        let listen = sources
-            .get(LISTEN)?
-            .unwrap_or_else(|| DEFAULT_LISTEN.to_owned())
-            .parse::<SocketAddr>()
-            .map_err(|_| ConfigError::Invalid(LISTEN))?;
+        let listen = sources.socket_addr(LISTEN, DEFAULT_LISTEN)?;
+        let admin_listen = sources.socket_addr(ADMIN_LISTEN, DEFAULT_ADMIN_LISTEN)?;
         let data_dir = PathBuf::from(
             sources
                 .get(DATA_DIR)?
@@ -611,17 +797,15 @@ impl Config {
                 _ => return Err(ConfigError::Invalid(MAX_UPLOAD_BYTES)),
             },
         };
-        let recovery_wait_ms = match sources.get(RECOVERY_WAIT_HOURS)? {
-            None => DEFAULT_RECOVERY_WAIT_MS,
-            Some(text) => match text.parse::<u64>() {
-                Ok(hours) if hours <= MAX_RECOVERY_WAIT_HOURS => hours.saturating_mul(MS_PER_HOUR),
-                _ => return Err(ConfigError::Invalid(RECOVERY_WAIT_HOURS)),
-            },
-        };
+        let account_quota_bytes = account_quota(sources)?;
+        let recovery_wait_ms = recovery_wait(sources)?;
+        let (breach_check, icon_cache_dir, icon_cache_ttl, icon_cache_max_bytes) =
+            icon_settings(sources, roles)?;
         Ok(Self {
             roles,
             origin,
             listen,
+            admin_listen,
             data_dir,
             database,
             secrets_file,
@@ -630,7 +814,12 @@ impl Config {
             log_level,
             worker_interval,
             max_upload_bytes,
+            account_quota_bytes,
             recovery_wait_ms,
+            breach_check,
+            icon_cache_dir,
+            icon_cache_ttl,
+            icon_cache_max_bytes,
         })
     }
 
@@ -766,6 +955,7 @@ mod tests {
         assert_eq!(config.roles, Roles::DEFAULT);
         assert_eq!(config.signup, SignupMode::Closed);
         assert_eq!(config.listen.to_string(), DEFAULT_LISTEN);
+        assert_eq!(config.admin_listen.to_string(), DEFAULT_ADMIN_LISTEN);
         assert!(matches!(config.database, DatabaseConfig::Sqlite(_)));
 
         let none = env_of(&[]);
@@ -792,7 +982,9 @@ mod tests {
 
         for (roles, err) in [
             ("smtp", ConfigError::RoleNotInThisBuild("smtp")),
-            ("api,icons", ConfigError::RoleNotInThisBuild("icons")),
+            ("api,icons", ConfigError::RoleNotAlone("icons")),
+            ("icons,web", ConfigError::RoleNotAlone("icons")),
+            ("worker,icons", ConfigError::RoleNotAlone("icons")),
             ("", ConfigError::Invalid(ROLES)),
             ("api,,web", ConfigError::Invalid(ROLES)),
         ] {
@@ -857,6 +1049,101 @@ mod tests {
             env: &env,
             roles_flag: None,
         })
+    }
+
+    /// ADR 0060 §2: the admin listener defaults to loopback port 8081, never `0.0.0.0`; it is
+    /// parsed like `RIZZY_LISTEN`, and a value that is not a socket address refuses the
+    /// configuration, naming the setting.
+    #[test]
+    fn admin_listen_is_loopback_by_default_and_parsed_like_listen() {
+        let default = from_env(&[]).unwrap().admin_listen;
+        assert_eq!(default.to_string(), "127.0.0.1:8081");
+        assert!(default.ip().is_loopback());
+        assert_ne!(default, from_env(&[]).unwrap().listen);
+        assert_eq!(
+            from_env(&[(ADMIN_LISTEN, "127.0.0.1:0")])
+                .unwrap()
+                .admin_listen
+                .to_string(),
+            "127.0.0.1:0"
+        );
+        assert_eq!(
+            from_env(&[(ADMIN_LISTEN, "[::1]:9091")])
+                .unwrap()
+                .admin_listen
+                .to_string(),
+            "[::1]:9091"
+        );
+        for bad in [
+            &[(ADMIN_LISTEN, "")],
+            &[(ADMIN_LISTEN, "localhost:8081")],
+            &[(ADMIN_LISTEN, "127.0.0.1")],
+            &[(ADMIN_LISTEN, "8081")],
+        ] {
+            assert_eq!(
+                from_env(bad).unwrap_err(),
+                ConfigError::Invalid(ADMIN_LISTEN),
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// The `icons` role (ADR 0010 §2, ADR 0053): alone, no database URL; the breach-check
+    /// switch is off by default; the cache settings and their bounds.
+    #[test]
+    fn icons_role_settings() {
+        let config = from_env(&[(ROLES, "icons")]).unwrap();
+        assert!(
+            config.roles.icons && !config.roles.need_database() && !config.roles.need_listener()
+        );
+        assert_eq!(config.roles.names(), "icons");
+        assert!(config.check_serve().is_ok(), "icons needs no origin");
+        assert!(!config.breach_check);
+        assert_eq!(config.icon_cache_dir, PathBuf::from(DEFAULT_ICON_CACHE_DIR));
+        assert_eq!(config.icon_cache_ttl, Duration::from_secs(14 * 24 * 3600));
+        assert_eq!(config.icon_cache_max_bytes, 256 * 1024 * 1024);
+        const { assert!(!Roles::DEFAULT.icons, "never in the default set") };
+
+        let on = from_env(&[
+            (ROLES, "icons"),
+            (BREACH_CHECK, "on"),
+            (ICON_CACHE_DIR, "/var/cache/rizzy"),
+            (ICON_CACHE_TTL_SECS, "60"),
+            (ICON_CACHE_MAX_BYTES, "1048576"),
+        ])
+        .unwrap();
+        assert!(on.breach_check);
+        assert_eq!(on.icon_cache_dir, PathBuf::from("/var/cache/rizzy"));
+        assert_eq!(on.icon_cache_ttl, Duration::from_secs(60));
+        assert_eq!(on.icon_cache_max_bytes, 1_048_576);
+        assert!(!from_env(&[(BREACH_CHECK, "off")]).unwrap().breach_check);
+
+        assert_eq!(
+            from_env(&[(ROLES, "icons"), (DATABASE_URL, "postgres://db/x")]).unwrap_err(),
+            ConfigError::RoleSeesDatabase("icons")
+        );
+        for (key, bad) in [
+            (BREACH_CHECK, "yes"),
+            (BREACH_CHECK, "ON"),
+            (BREACH_CHECK, ""),
+            (ICON_CACHE_DIR, ""),
+            (ICON_CACHE_TTL_SECS, "59"),
+            (ICON_CACHE_TTL_SECS, "31536001"),
+            (ICON_CACHE_TTL_SECS, "x"),
+            (ICON_CACHE_MAX_BYTES, "1048575"),
+            (ICON_CACHE_MAX_BYTES, "-1"),
+        ] {
+            let pairs: &'static [(&'static str, &'static str)] =
+                Box::leak(vec![(ROLES, "icons"), (key, bad)].into_boxed_slice());
+            assert_eq!(
+                from_env(pairs).unwrap_err(),
+                ConfigError::Invalid(key),
+                "{key}={bad}"
+            );
+        }
+        // The messages name the setting or the role, never a value.
+        let text = ConfigError::RoleSeesDatabase("icons").to_string();
+        assert!(text.contains(DATABASE_URL) && !text.contains("postgres"));
     }
 
     /// ADR 0028 item 10, open question 6: a public origin is HTTPS.
@@ -968,6 +1255,35 @@ mod tests {
             assert_eq!(
                 from_env(pairs).unwrap_err(),
                 ConfigError::Invalid(MAX_UPLOAD_BYTES),
+                "{bad}"
+            );
+        }
+    }
+
+    /// ADR 0048 §1: `RIZZY_ACCOUNT_QUOTA_BYTES`, default 5 GiB, at least 256 MiB, no maximum.
+    #[test]
+    fn the_account_quota_is_at_least_256_mib() {
+        const O: (&str, &str) = (ORIGIN, "https://vault.example.com");
+        assert_eq!(from_env(&[O]).unwrap().account_quota_bytes, 5_368_709_120);
+        for (text, expected) in [
+            ("268435456", 256 << 20),
+            ("5368709120", 5 << 30),
+            ("18446744073709551615", u64::MAX),
+        ] {
+            let pairs: &'static [(&str, &str)] =
+                Box::leak(Box::new([O, (ACCOUNT_QUOTA_BYTES, text)]));
+            assert_eq!(
+                from_env(pairs).unwrap().account_quota_bytes,
+                expected,
+                "{text}"
+            );
+        }
+        for bad in ["268435455", "0", "", "5GiB", "-1", "18446744073709551616"] {
+            let pairs: &'static [(&str, &str)] =
+                Box::leak(Box::new([O, (ACCOUNT_QUOTA_BYTES, bad)]));
+            assert_eq!(
+                from_env(pairs).unwrap_err(),
+                ConfigError::Invalid(ACCOUNT_QUOTA_BYTES),
                 "{bad}"
             );
         }

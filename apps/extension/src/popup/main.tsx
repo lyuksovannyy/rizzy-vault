@@ -1,5 +1,11 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The popup's entry point (ADR 0036 §4, §6): a short-lived React app that never loads wasm
 // directly, reaching the core only through `core/client.ts`'s messaging-backed client.
+import "@rizzy-vault/ui/tokens.css";
+import "@rizzy-vault/ui/motion.css";
+import "../surface.css";
+
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 

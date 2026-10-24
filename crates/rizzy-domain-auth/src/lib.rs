@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-domain-auth` — the server's auth domain (roadmap M1 step 3; [ADR 0016] §3 row
 //! `rizzy-domain-auth`; [ADR 0010] §5; CRYPTO.md §5, §10.2, §11): OPAQUE server side,
 //! sessions, device authentication and request signing, devices, key bundles, the signed
@@ -54,6 +56,7 @@
 //! | `change` | CRYPTO.md §11 "Replacing credentials", §11.3 step 5, §11.5, §11.6, §11.8, §11.9 step 6 | [`AuthService::commit_change`]: every atomic change of the signed state with credentials, keys or devices |
 //! | `recovery` | CRYPTO.md §11.9; ADR 0008 | [`AuthService::recovery_start`], [`AuthService::recovery_cancel`], [`AuthService::recovery_complete`] |
 //! | `totp` | CRYPTO.md §5.11, §11.15 | Server-side 2FA enrolment and removal |
+//! | `sessions` | CRYPTO.md §5.10; ADR 0075 | [`AuthService::list_sessions`], [`AuthService::end_current_session`], [`AuthService::end_session`], [`AuthService::end_other_sessions`] |
 //! | `requests` | CRYPTO.md §11 "Replacing credentials", §11.5, §11.8 step 0, §11.9, §11.15 | The `rizzy-proto` entry points of the flows above that take typed arguments ([`AuthService::commit_change_request`] and the others) |
 //! | `healing` | ADR 0012 §7 "Healing a server rollback" steps 1–3 as ADR 0032 §2–§3 replace them; INV-59 | The reconciliation epoch after a restore; the lag rule for `E_id` and `ACCOUNT_SETTINGS` |
 //! | `maintenance` | ADR 0010 §5; ADR 0012 §7; CRYPTO.md §5.11 "Rotation" | What `worker` runs: expired auth state, stale reconciliation epochs, re-sealing TOTP secrets after a data-key rotation |
@@ -155,12 +158,14 @@ mod maintenance;
 mod ratelimit;
 mod recovery;
 mod requests;
+mod sessions;
 mod signup;
 mod sql;
 mod store;
 mod totp;
 mod trust;
 mod view;
+mod webauthn;
 
 use std::sync::Arc;
 
@@ -178,6 +183,8 @@ pub use recovery::{RecoveryPending, RecoveryRelease};
 pub use secrets::{ServerSecrets, StartupCheckError};
 pub use session::{Session, SessionKind};
 pub use totp::TotpEnrolment;
+#[doc(hidden)]
+pub use webauthn::fuzz_stored_json;
 
 pub mod types {
     //! The `rizzy-core` and `rizzy-proto` items that [`crate::AuthService`]'s public API is
@@ -200,15 +207,24 @@ pub mod types {
     pub use rizzy_core::normalize::ServerOrigin;
     /// The `server_setup` and `enum_key` of [`crate::ServerSecrets`] (CRYPTO.md §5.8).
     pub use rizzy_core::opaque::{EnumKey, SERVER_SETUP_LEN, ServerSetup};
+    pub use rizzy_core::server_seal::{BackupHeader, ServerDataKey, ServerSecretsBackupKey};
     /// The data keys of [`crate::ServerSecrets`] and the sealed backup of the secrets file
     /// (CRYPTO.md §5.11).
-    pub use rizzy_core::server_seal::{BackupHeader, ServerDataKey, ServerSecretsBackupKey};
+    /// The backup keys of [`crate::ServerSecrets`], which seal a format version 2 database
+    /// backup (ADR 0071, CRYPTO.md §9.8), and the chunk context they seal under.
+    pub use rizzy_core::{
+        envelope::purpose::ServerDbBackupCtx, ids::BackupId, server_seal::ServerDbBackupKey,
+    };
     /// The backup key's KDF, its passphrase and plaintext type, the RNG trait every flow
     /// takes, and the bound on a sealed field (CRYPTO.md §5.11 "Backup").
     pub use rizzy_core::{
         export::MAX_DATA_FIELD_LEN, kdf::KdfId, rng::CryptoRng, secret::SecretBytes,
     };
 
+    /// The per-vault summary of the account answer and the vault id a `vault_delete` names,
+    /// which [`crate::VaultPort`] takes from and hands to the vault domain (ADR 0081 §A11).
+    pub use rizzy_core::ids::VaultId;
+    pub use rizzy_proto::account::VaultSummary;
     /// `/api/v1` errors and `/api/meta` (ADR 0002 point 3).
     pub use rizzy_proto::error::{ErrorCode, ErrorResponse};
     /// `/api/meta` and the `Rizzy-Client` header (ADR 0002 point 3, as ADR 0022 amends it; ADR
@@ -254,6 +270,9 @@ pub struct AuthService<V> {
     config: AuthConfig,
     /// The vault domain's side of the cross-domain flows.
     vault: V,
+    /// The `WebAuthn` relying party for `config.server_origin`; `None` when its host cannot be
+    /// an RP ID (an IP address), and then no `WebAuthn` endpoint is served (`webauthn` module).
+    webauthn: Option<webauthn_rs::Webauthn>,
 }
 
 impl<V: VaultPort> AuthService<V> {
@@ -269,11 +288,13 @@ impl<V: VaultPort> AuthService<V> {
         vault: V,
     ) -> Result<Self, ConfigError> {
         config.validate()?;
+        let webauthn = webauthn::relying_party(&config.server_origin);
         Ok(Self {
             db,
             secrets,
             config,
             vault,
+            webauthn,
         })
     }
 
@@ -338,6 +359,8 @@ pub(crate) const fn is_refusal(e: &AuthError) -> bool {
             | AuthError::InvalidRequest
             | AuthError::SecondFactorRequired
             | AuthError::CredentialsStale
+            | AuthError::KeyAlgorithm
+            | AuthError::PossibleClone { .. }
             | AuthError::RateLimited { .. }
     )
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `cargo xtask`: repository checks for rizzy-vault (ADR 0016 §5). Never shipped.
 //!
 //! ```text
@@ -8,6 +10,11 @@
 //! cargo xtask expand-bindings [--write]
 //! cargo xtask build-wasm
 //! cargo xtask check-js
+//! cargo xtask check-manifest
+//! cargo xtask check-spdx [--fix]
+//! cargo xtask check-tables [--root <dir>]
+//! cargo xtask generate-tokens [--check]
+//! cargo xtask identity-data --faker <checkout> --cldr <checkout> [--check]
 //! ```
 //!
 //! `check-deps` enforces the crate-boundary rules of ADR 0016 (R1–R8) and the dependency rules
@@ -53,6 +60,9 @@
 //! - **ADR 0019 §4.1 (b)** the committed expansion baseline of `rizzy-wasm` exists, records the
 //!   `wasm-bindgen` version of `Cargo.lock`, and its `unsafe`/`extern`/`no_mangle`/`export_name`
 //!   counts are those of the committed expansion ([`mod@bindings`]).
+//! - **ADR 0037 §3** the resolved `psl` package's `data/rules.txt` and `src/list.rs` hash to
+//!   the constants pinned in `rizzy_match::suffix`, and its version matches
+//!   `rizzy_match::suffix::PSL_VERSION` ([`mod@psl_check`]).
 //!
 //! R3, R5 and R6 cover dev-dependencies too. The rules table is in `rules.rs`.
 //!
@@ -74,6 +84,38 @@
 //! locked `wasm-bindgen-cli` (ADR 0013 §4).
 //!
 //! `check-js` checks the JavaScript dependency policy of ADR 0014 §3 ([`mod@js`]).
+//!
+//! `check-manifest` checks the built browser-extension manifests (Chromium and Firefox) against
+//! INV-40 and ADR 0036 §4/§5 / ADR 0040 ([`mod@ext_manifest`]): no `externally_connectable`, an
+//! allow-listed `permissions`/`host_permissions`, `all_frames: false` on every content script,
+//! an allow-listed `web_accessible_resources`, and a CSP that bans remote code and inline/eval
+//! beyond the one wasm exception. It needs `apps/extension/dist/{chromium,firefox}/manifest.json`
+//! already built (`cargo xtask build-wasm` then `pnpm run build` in `apps/extension`).
+//!
+//! `check-spdx` checks the SPDX header of ADR 0017 Decision 6 on every first-party Rust,
+//! TypeScript/JavaScript, shell, CSS and HTML file ([`mod@spdx`]); `--fix` inserts or corrects
+//! it. Wiring it into CI (`.github/workflows/ci.yml`) is a separate change the owner has not
+//! asked for yet.
+//!
+//! `check-tables` checks the table ownership of ADR 0011 points 5–7 and ADR 0016 R4 on the
+//! domain crates' `queries/` files and the migrations ([`mod@tables`]): every table name after
+//! `FROM`, `JOIN`, `INTO`, `UPDATE`, `TABLE` and `REFERENCES` carries its owner's prefix, apart
+//! from the one foreign key to `auth_accounts (id)` with `ON DELETE CASCADE`. `--root` checks
+//! another tree instead of this workspace. Wiring it into CI (`.github/workflows/ci.yml`) is a
+//! separate change the owner has not asked for yet.
+//!
+//! `generate-tokens` generates the web CSS and the per-toolkit design-token files from the one
+//! platform-neutral source, and checks every declared colour pair for WCAG AA contrast
+//! ([`mod@tokens`], ADR 0014 §5, ADR 0019 §13, ROADMAP §4.5). `--check` reports a stale generated
+//! file instead of writing it; wiring either mode into CI is, as with `check-spdx`, a separate
+//! change the owner has not asked for yet.
+//!
+//! `identity-data` compiles the identity generator's bundled name and address data from local
+//! checkouts of the pinned faker-js and Unicode CLDR tags, verifying every input file against
+//! the SHA-256 in `data/identity/SOURCES.md` first ([`mod@identity_data`], ADR 0079 §6).
+//! `--check` regenerates the data and the generated part of `SOURCES.md` and fails on any byte
+//! difference instead of writing. The checkouts are not committed, so CI cannot run it: a
+//! maintainer runs it by hand before a data change is merged, and the reviewer re-runs it.
 //!
 //! # How `check-deps` works
 //!
@@ -108,11 +150,17 @@
 mod bindings;
 mod check;
 mod equivalence_list;
+mod ext_manifest;
+mod identity_data;
 mod js;
 mod manifest;
 mod metadata;
+mod psl_check;
 mod rules;
 mod signoff;
+mod spdx;
+mod tables;
+mod tokens;
 mod unsafe_scan;
 
 use std::collections::BTreeSet;
@@ -153,11 +201,40 @@ COMMANDS:
     check-js        Check the JavaScript dependency policy: exact versions, pinned pnpm,
                     empty install-script allow-list, deny.toml licences, pnpm audit
                     (ADR 0014 §3)
+    check-manifest  Check the built browser-extension manifests (Chromium and Firefox) against
+                    INV-40 and ADR 0036 §4/§5 / ADR 0040: no externally_connectable,
+                    allow-listed permissions/host_permissions/web_accessible_resources,
+                    all_frames: false, and the extension-pages CSP. Needs apps/extension/dist/
+                    already built (cargo xtask build-wasm, then pnpm run build)
+    check-spdx      Check that every covered first-party file starts with the SPDX header
+                    (ADR 0017 Decision 6)
+    check-spdx --fix
+                    Insert or correct the SPDX header on every covered first-party file
+    check-tables [--root <dir>]
+                    Check that every table name after FROM/JOIN/INTO/UPDATE/TABLE/REFERENCES
+                    in the domain crates' queries/ and the migrations carries its owning
+                    domain's prefix (auth_, vault_), apart from the one foreign key to
+                    auth_accounts (id) ON DELETE CASCADE (ADR 0011 points 5-7, ADR 0016 R4).
+                    storage_ tables and backup queries are not checked. --root checks
+                    another tree instead of this workspace
     equivalence-list <source> <key-file> <list-version> <published-at-ms>
                     Compile data/equivalence/groups.txt-style source into the signed
                     equivalence list (ADR 0038 §3) and write its wire bytes to stdout.
                     <key-file> is the raw 32-byte Ed25519 seed; redirect stdout to a .bin
                     file, e.g. > data/equivalence/list.bin
+    generate-tokens Generate the web CSS (packages/ui/src/tokens.css) and the per-toolkit
+                    design-token files from packages/ui/tokens/tokens.json, after checking
+                    every declared colour pair for WCAG AA contrast (ADR 0014 §5,
+                    ADR 0019 §13)
+    generate-tokens --check
+                    Check that every generated file already matches the token source,
+                    without writing; fails if any is stale or a contrast pair fails
+    identity-data --faker <checkout> --cldr <checkout> [--check]
+                    Compile crates/rizzy-client/src/identity_gen/identity-data-v1.txt from
+                    local checkouts of the pinned faker-js and CLDR tags, after checking
+                    every input file against data/identity/SOURCES.md, and rewrite that
+                    file's generated report (ADR 0079 §6). --check compares instead of
+                    writing and fails on any byte difference
 ";
 
 /// The second target the getrandom rule is checked on, besides the host (ADR 0016 R1).
@@ -188,6 +265,11 @@ fn main() -> ExitCode {
         }
         [Some("build-wasm")] => report(bindings::build_wasm(&workspace_root())),
         [Some("check-js")] => report(js::check_js(&workspace_root())),
+        [Some("check-manifest")] => report(ext_manifest::check_built_manifests(&workspace_root())),
+        [Some("check-spdx")] => check_spdx(false),
+        [Some("check-spdx"), Some("--fix")] => check_spdx(true),
+        [Some("check-tables")] => report(tables::run(&workspace_root())),
+        [Some("check-tables"), Some("--root"), Some(root)] => report(tables::run(Path::new(root))),
         [
             Some("equivalence-list"),
             Some(source),
@@ -195,6 +277,21 @@ fn main() -> ExitCode {
             Some(list_version),
             Some(published_at_ms),
         ] => equivalence_list_command(source, key, list_version, published_at_ms),
+        [Some("generate-tokens")] => report(tokens::run(&workspace_root(), true)),
+        [Some("generate-tokens"), Some("--check")] => report(tokens::run(&workspace_root(), false)),
+        [
+            Some("identity-data"),
+            Some("--faker"),
+            Some(faker),
+            Some("--cldr"),
+            Some(cldr),
+            check @ ..,
+        ] if matches!(check, [] | [Some("--check")]) => report(identity_data::run(
+            &workspace_root(),
+            Path::new(faker),
+            Path::new(cldr),
+            !check.is_empty(),
+        )),
         [Some("-h" | "--help")] => {
             let _ = write!(io::stdout().lock(), "{USAGE}");
             ExitCode::SUCCESS
@@ -281,26 +378,32 @@ fn check_deps() -> ExitCode {
         }
     };
     let violations = check::run(&inputs);
-    if violations.is_empty() {
+    let psl_violations = psl_check::check(&inputs.all_targets)
+        .err()
+        .unwrap_or_default();
+    if violations.is_empty() && psl_violations.is_empty() {
         let members = inputs.all_targets.members().count();
         let sources = inputs.rust_sources.len();
         let _ = writeln!(
             io::stdout().lock(),
             "check-deps: ok ({members} workspace crates, {sources} first-party .rs files; \
-             ADR 0016 R1–R8, ADR 0009, ADR 0019 §4.1, ADR 0024, ADR 0030)"
+             ADR 0016 R1–R8, ADR 0009, ADR 0019 §4.1, ADR 0024, ADR 0030, ADR 0037 §3)"
         );
         return ExitCode::SUCCESS;
     }
     for v in &violations {
         let _ = writeln!(err, "error: {v}");
     }
+    for v in &psl_violations {
+        let _ = writeln!(err, "error: [ADR 0037 §3] {v}");
+    }
     let _ = writeln!(
         err,
-        "check-deps: {} violation(s) of the crate-boundary rules (ADR 0016 §4, ADR 0009) or \
-         the token scans (`unsafe`: ADR 0019 §4.1; rustls `dangerous()`: ADR 0030). The rules \
-         table is crates/xtask/src/rules.rs; \
+        "check-deps: {} violation(s) of the crate-boundary rules (ADR 0016 §4, ADR 0009), the \
+         token scans (`unsafe`: ADR 0019 §4.1; rustls `dangerous()`: ADR 0030), or the PSL \
+         snapshot check (ADR 0037 §3). The rules table is crates/xtask/src/rules.rs; \
          changing it is a security review.",
-        violations.len()
+        violations.len() + psl_violations.len()
     );
     ExitCode::FAILURE
 }
@@ -365,6 +468,65 @@ fn check_clippy() -> ExitCode {
         warnings.len()
     );
     ExitCode::FAILURE
+}
+
+/// `cargo xtask check-spdx [--fix]`: checks, or inserts, the SPDX header of ADR 0017 Decision 6
+/// on every covered first-party file ([`mod@spdx`]).
+///
+/// Without `--fix`: prints `check-spdx: ok (...)` and exits 0 when every file already has its
+/// header; otherwise prints each violation and a summary to stderr and exits 1. With `--fix`:
+/// writes the header to every file that needs it, prints each one, and exits 0 (a file that
+/// needs no change is silent); an input or write error from either mode exits 1.
+fn check_spdx(fix: bool) -> ExitCode {
+    let root = workspace_root();
+    let mut err = io::stderr().lock();
+    if fix {
+        return match spdx::fix(&root) {
+            Ok(written) => {
+                let mut out = io::stdout().lock();
+                for path in &written {
+                    let _ = writeln!(out, "fixed: {path}");
+                }
+                let _ = writeln!(
+                    out,
+                    "check-spdx --fix: wrote the SPDX header (ADR 0017 Decision 6) to {} \
+                     file(s)",
+                    written.len()
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                let _ = writeln!(err, "check-spdx --fix: error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    match spdx::check(&root) {
+        Ok(violations) if violations.is_empty() => {
+            let _ = writeln!(
+                io::stdout().lock(),
+                "check-spdx: ok (every covered first-party file starts with the SPDX header; \
+                 ADR 0017 Decision 6)"
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(violations) => {
+            for v in &violations {
+                let _ = writeln!(err, "error: {v}");
+            }
+            let _ = writeln!(
+                err,
+                "check-spdx: {} file(s) with a missing or wrong SPDX header (ADR 0017 Decision \
+                 6); run `cargo xtask check-spdx --fix`",
+                violations.len()
+            );
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            let _ = writeln!(err, "check-spdx: error: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// The workspace root: two levels above this crate's manifest directory.

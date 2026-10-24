@@ -1,0 +1,17 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!doctype html>
+<!-- ADR 0076 §1.3–§1.4 fixture: six maxlength=1 boxes -->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>six maxlength=1 boxes</title></head>
+  <body>
+    <form id="split" action="/2fa">
+      <input id="d1" name="otp1" type="text" autocomplete="one-time-code" inputmode="numeric" maxlength="1" />
+      <input id="d2" name="otp2" type="text" inputmode="numeric" maxlength="1" />
+      <input id="d3" name="otp3" type="text" inputmode="numeric" maxlength="1" />
+      <input id="d4" name="otp4" type="text" inputmode="numeric" maxlength="1" />
+      <input id="d5" name="otp5" type="text" inputmode="numeric" maxlength="1" />
+      <input id="d6" name="otp6" type="text" inputmode="numeric" maxlength="1" />
+      <button type="submit">Verify</button>
+    </form>
+  </body>
+</html>

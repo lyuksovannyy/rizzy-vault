@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Compaction through the `worker` job and the covers Fetch serves (ADR 0021 §3–§5, §8
 //! "Storage").
 
@@ -7,8 +9,8 @@ use rizzy_proto::vault::{Record, SeqVector};
 use rizzy_storage::on_engine;
 
 use crate::common::{
-    Device, Env, OpSpec, VAULT, block_on, chain, covers_of, fetch_all_with, item, op_dot, ops_of,
-    sign_op, sign_snapshot, sign_snapshot_id, snapshot_header,
+    Device, Env, NOW, OpSpec, VAULT, block_on, chain, covers_of, fetch_all_with, item, op_dot,
+    ops_of, sign_op, sign_snapshot, sign_snapshot_id, snapshot_header,
 };
 
 /// The dots of a complete Fetch's bodiless headers, as (device byte, seq).
@@ -43,7 +45,7 @@ fn an_item_snapshotted_by_one_device_is_never_compacted() {
             Record::Snapshot(sign_snapshot(&a, item(1), 2, &[(&a, 5)], 0)),
         ])
         .await;
-        let run = env.domain.run_compaction(16).await.unwrap();
+        let run = env.domain.run_compaction(16, NOW).await.unwrap();
         let (items, report) = (run.processed, run.report);
         assert_eq!(items, 1);
         assert_eq!(report, CompactionReport::default());
@@ -69,7 +71,7 @@ fn two_author_covers_delete_bodies_drop_snapshots_and_are_served() {
 
         // R1: the older of the two newest (B's, a ≤ 4) covers 1–4, and A's snapshots cover
         // them too. R3: A's oldest snapshot is not needed for two-author cover.
-        let run = env.domain.run_compaction(16).await.unwrap();
+        let run = env.domain.run_compaction(16, NOW).await.unwrap();
         let (items, report) = (run.processed, run.report);
         assert_eq!(items, 1);
         assert_eq!(
@@ -80,9 +82,12 @@ fn two_author_covers_delete_bodies_drop_snapshots_and_are_served() {
             }
         );
         // The job is idempotent and the queue is empty.
-        assert_eq!(env.domain.run_compaction(16).await.unwrap().processed, 0);
         assert_eq!(
-            env.domain.compact_item(VAULT, item(1)).await.unwrap(),
+            env.domain.run_compaction(16, NOW).await.unwrap().processed,
+            0
+        );
+        assert_eq!(
+            env.domain.compact_item(VAULT, item(1), NOW).await.unwrap(),
             CompactionReport::default()
         );
 
@@ -122,7 +127,7 @@ fn concurrent_purges_keep_their_bodies_until_two_authors_cover_them() {
             Record::Snapshot(sign_snapshot(&b, item(1), 2, &[(&a, 1), (&b, 2)], 0)),
         ])
         .await;
-        env.domain.run_compaction(16).await.unwrap();
+        env.domain.run_compaction(16, NOW).await.unwrap();
         // Only the ops both authors cover lost their bodies; each purge keeps its body, and a
         // device that was behind sees no gap (every page passed `check_page`).
         let pages = env.fetch_all(&[]).await;
@@ -135,7 +140,7 @@ fn concurrent_purges_keep_their_bodies_until_two_authors_cover_them() {
             Record::Snapshot(sign_snapshot(&a, item(1), 4, &[(&a, 2), (&b, 2)], 0)),
         ])
         .await;
-        let report = env.domain.run_compaction(16).await.unwrap().report;
+        let report = env.domain.run_compaction(16, NOW).await.unwrap().report;
         assert_eq!(
             report,
             CompactionReport {
@@ -162,7 +167,7 @@ fn each_page_carries_its_own_covers() {
             Record::Snapshot(sign_snapshot(&b, item(1), 2, &[(&a, n)], 0)),
         ])
         .await;
-        let report = env.domain.run_compaction(16).await.unwrap().report;
+        let report = env.domain.run_compaction(16, NOW).await.unwrap().report;
         assert_eq!(report.bodies_deleted, usize::try_from(n).unwrap());
         let pages = env.fetch_all(&[]).await;
         assert_eq!(pages.len(), 2);
@@ -186,7 +191,7 @@ fn a_bodiless_header_without_a_cover_is_served_alone_and_reported() {
             Record::Snapshot(sign_snapshot(&b, item(1), 2, &[(&a, 2)], 0)),
         ])
         .await;
-        env.domain.run_compaction(16).await.unwrap();
+        env.domain.run_compaction(16, NOW).await.unwrap();
         // Damage the database: the covers disappear behind the domain's back.
         let mut tx = env.db.begin_write().await.unwrap();
         on_engine!(tx.conn(), |c| sqlx::query("DELETE FROM vault_snapshots")
@@ -252,7 +257,7 @@ fn a_failing_item_does_not_stop_compaction_of_the_others() {
         compactable(&env, &a, &b, item(2), 3, 4).await;
         damage_clamped_vv(&env, item(1)).await;
 
-        let run = env.domain.run_compaction(16).await.unwrap();
+        let run = env.domain.run_compaction(16, NOW).await.unwrap();
         assert_eq!(run.processed, 1);
         assert_eq!(run.report.bodies_deleted, 2);
         assert_eq!(run.failures.len(), 1);
@@ -267,10 +272,10 @@ fn a_failing_item_does_not_stop_compaction_of_the_others() {
         // Item 1 stays queued, but behind items queued after it: a one-item run compacts
         // item 3, not item 1 again.
         compactable(&env, &a, &b, item(3), 5, 6).await;
-        let run = env.domain.run_compaction(1).await.unwrap();
+        let run = env.domain.run_compaction(1, NOW).await.unwrap();
         assert_eq!((run.processed, run.report.bodies_deleted), (1, 2));
         assert!(run.failures.is_empty());
-        let run = env.domain.run_compaction(16).await.unwrap();
+        let run = env.domain.run_compaction(16, NOW).await.unwrap();
         assert_eq!((run.processed, run.failures.len()), (0, 1));
     });
 }
@@ -316,7 +321,7 @@ fn covers_count_in_the_page_budget() {
             let first = u64::from(n) * 2 + 1;
             compactable(&env, &a, &b, item(n + 1), first, first + 1).await;
         }
-        let run = env.domain.run_compaction(64).await.unwrap();
+        let run = env.domain.run_compaction(64, NOW).await.unwrap();
         assert_eq!(run.report.bodies_deleted, usize::from(items) * 2);
         let total_ops = usize::from(items) * 2;
 
@@ -483,7 +488,7 @@ async fn race_once(
     before_bodiless: usize,
 ) -> Race {
     let domain = std::sync::Arc::clone(&env.domain);
-    let worker = tokio::spawn(async move { domain.compact_item(VAULT, item).await });
+    let worker = tokio::spawn(async move { domain.compact_item(VAULT, item, NOW).await });
     for _ in 0..(spin % 5) {
         tokio::task::yield_now().await;
     }

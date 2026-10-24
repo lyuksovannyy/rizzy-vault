@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! A bounded reader that knows its byte offset, shared by the header parser
 //! ([`header`](crate::header)) and the record parser ([`record`](crate::record)).
 //!

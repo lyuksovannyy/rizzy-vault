@@ -1,10 +1,12 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Shared helpers: a real SQLite database in a temporary directory, an in-memory vault port,
 //! and a client that runs `rizzy-core`'s client-side functions (the other half of every flow).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chacha20::ChaCha20Rng;
 use chacha20::rand_core::SeedableRng as _;
@@ -32,6 +34,7 @@ use rizzy_domain_auth::{
     AuthConfig, AuthError, AuthService, PersonalVault, RequestParts, ServerSecrets, Session,
     SignupPolicy, VaultPort,
 };
+use rizzy_proto::account::VaultSummary;
 use rizzy_proto::auth::{
     DeviceAuthFinishRequest, DeviceAuthStartRequest, LoginFinishRequest, LoginFinishResponse,
     LoginStartRequest, RecoveryRegistration, RegisterFinishRequest, RegisterStartRequest,
@@ -44,7 +47,7 @@ use rizzy_proto::objects::{
 use rizzy_proto::recovery::RecoveryVault;
 use rizzy_proto::vault::SeqVector;
 use rizzy_proto::wire::{Bytes, Fixed, Id, List, SessionToken, Text};
-use rizzy_storage::{Conn, Database, SqliteOptions, WriteTx, WriterLock};
+use rizzy_storage::{Conn, Database, PostgresOptions, SqliteOptions, WriteTx, WriterLock};
 
 /// The server's canonical origin in every test.
 pub(crate) const ORIGIN: &str = "https://vault.example.com";
@@ -235,6 +238,80 @@ impl VaultPort for SharedVault {
             .copied()
             .unwrap_or(0))
     }
+
+    /// ADR 0081 §A3 as the vault domain decides it, in memory: the account's first grant is its
+    /// Personal vault, the rest are owned.
+    async fn create_owned_vault(
+        &self,
+        _tx: &mut WriteTx,
+        account_id: AccountId,
+        grant: &VaultSelfGrant,
+        account_key_epoch: u32,
+        _account_key_id: [u8; 16],
+        _now_ms: u64,
+    ) -> Result<(), AuthError> {
+        let mut grants = self.grants.lock().unwrap();
+        if grants
+            .values()
+            .flatten()
+            .any(|g| g.vault_id == grant.vault_id)
+        {
+            return Err(AuthError::StateConflict);
+        }
+        let held = grants.entry(account_id.to_bytes()).or_default();
+        if grant.vault_key_epoch != 0
+            || grant.account_key_epoch != account_key_epoch
+            || held.len() >= rizzy_proto::limits::MAX_OWNED_VAULTS
+        {
+            return Err(AuthError::InvalidRequest);
+        }
+        held.push(grant.clone());
+        Ok(())
+    }
+
+    /// ADR 0081 §A5 in memory: the Personal (first) vault is refused, an unknown one not found.
+    async fn delete_vault(
+        &self,
+        _tx: &mut WriteTx,
+        account_id: AccountId,
+        vault_id: VaultId,
+        _now_ms: u64,
+    ) -> Result<(), AuthError> {
+        let mut grants = self.grants.lock().unwrap();
+        let held = grants.entry(account_id.to_bytes()).or_default();
+        match held
+            .iter()
+            .position(|g| g.vault_id.to_bytes() == vault_id.to_bytes())
+        {
+            Some(0) => Err(AuthError::InvalidRequest),
+            Some(i) => {
+                held.remove(i);
+                Ok(())
+            }
+            None => Err(AuthError::NotFound),
+        }
+    }
+
+    async fn vault_summaries(
+        &self,
+        _conn: Conn<'_>,
+        account_id: AccountId,
+    ) -> Result<Vec<VaultSummary>, AuthError> {
+        let grants = self.grants.lock().unwrap();
+        Ok(grants
+            .get(&account_id.to_bytes())
+            .map(|g| {
+                g.iter()
+                    .enumerate()
+                    .map(|(i, g)| VaultSummary {
+                        vault_id: g.vault_id,
+                        kind: if i == 0 { 1 } else { 2 },
+                        bytes_used: 0,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
 }
 
 /// Invites admit exactly the token `"invite:" + login name`.
@@ -264,7 +341,22 @@ pub(crate) struct Env {
     pub(crate) now: u64,
     /// The client's source address.
     pub(crate) source: Vec<u8>,
+    /// This test's turn on the shared PostgreSQL database ([`Env::on_either_engine`]), released
+    /// on drop. Last, so it is dropped after the handles above.
+    pub(crate) _postgres_turn: Option<PostgresTurn>,
 }
+
+/// A test's turn on the shared PostgreSQL database, released on drop.
+pub(crate) struct PostgresTurn {
+    /// The held lock.
+    _guard: MutexGuard<'static, ()>,
+}
+
+/// The PostgreSQL database [`Env::on_either_engine`] uses instead of SQLite when set.
+const POSTGRES_URL_VAR: &str = "RIZZY_TEST_POSTGRES_URL";
+
+/// Serialises the tests on PostgreSQL: they share the one database the URL names.
+static POSTGRES_LOCK: Mutex<()> = Mutex::new(());
 
 /// The origin.
 pub(crate) fn origin() -> ServerOrigin {
@@ -285,6 +377,48 @@ impl Env {
         let db = Database::open_sqlite(&SqliteOptions::new(&path), lock)
             .await
             .unwrap();
+        Self::over(db, dir, None, seed, adjust).await
+    }
+
+    /// As [`Env::with_config`], on PostgreSQL when `RIZZY_TEST_POSTGRES_URL` names a database
+    /// the tests may **wipe** (owned by the connecting role; ADR 0011 point 3, both engines):
+    /// the tests take turns on it, and each drops and re-creates its `public` schema first. For
+    /// example `RIZZY_TEST_POSTGRES_URL=postgres://rizzy:rizzy@localhost/rizzy_test cargo test
+    /// -p rizzy-domain-auth --test auth sessions`. On SQLite otherwise.
+    pub(crate) async fn on_either_engine(seed: u64, adjust: impl FnOnce(&mut AuthConfig)) -> Self {
+        let url = match std::env::var(POSTGRES_URL_VAR) {
+            Ok(url) if !url.is_empty() => url,
+            _ => return Self::with_config(seed, adjust).await,
+        };
+        let turn = PostgresTurn {
+            _guard: POSTGRES_LOCK.lock().unwrap_or_else(PoisonError::into_inner),
+        };
+        let db = Database::open_postgres(&PostgresOptions::from_url(&url).unwrap())
+            .await
+            .unwrap();
+        let mut tx = db.begin_write().await.unwrap();
+        for statement in [
+            "DROP SCHEMA IF EXISTS public CASCADE",
+            "CREATE SCHEMA public",
+        ] {
+            rizzy_storage::on_engine!(tx.conn(), |c| sqlx::query(statement)
+                .execute(&mut *c)
+                .await
+                .map(|_| ())
+                .unwrap());
+        }
+        tx.commit().await.unwrap();
+        Self::over(db, TempDir::new(), Some(turn), seed, adjust).await
+    }
+
+    /// A new server over the empty database `db`.
+    async fn over(
+        db: Database,
+        dir: TempDir,
+        postgres_turn: Option<PostgresTurn>,
+        seed: u64,
+        adjust: impl FnOnce(&mut AuthConfig),
+    ) -> Self {
         db.migrate().await.unwrap();
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
         let secrets = Arc::new(ServerSecrets::generate(&mut rng));
@@ -309,6 +443,7 @@ impl Env {
             rng,
             now: T0,
             source: b"192.0.2.1".to_vec(),
+            _postgres_turn: postgres_turn,
         }
     }
 
@@ -834,6 +969,38 @@ impl Env {
         self.svc
             .login_finish(&mut self.rng, &finish, &self.source, reauth, self.now)
             .await
+    }
+
+    /// Runs an OPAQUE login for `client` that must stop at the second factor, and returns its
+    /// `login_id`: the `pending_id` of a `WebAuthn` second factor (ADR 0058 point 3).
+    pub(crate) async fn login_pending(&mut self, client: &Client) -> Id {
+        let pw_in = PasswordInput::derive(&client.password, &client.secret_key).unwrap();
+        let (state, ke1) = client_login_start(&mut self.rng, &pw_in).unwrap();
+        let start = LoginStartRequest {
+            login_name: Text::new(client.name.clone()).unwrap(),
+            ke1: bytes(ke1),
+        };
+        let started = self
+            .svc
+            .login_start(&mut self.rng, &start, &self.source, None, self.now)
+            .await
+            .unwrap();
+        let context =
+            OpaqueContext::for_login(&origin(), started.kdf_id, started.server_origin.as_str())
+                .unwrap();
+        let fin = client_login_finish(
+            &mut self.rng,
+            state,
+            &pw_in,
+            started.ke2.as_slice(),
+            &context,
+        )
+        .unwrap();
+        let answer = self
+            .finish_login(started.login_id, fin.ke3, None, None)
+            .await;
+        assert!(matches!(answer, Err(AuthError::SecondFactorRequired)));
+        started.login_id
     }
 
     /// Logs `client` in with its password.

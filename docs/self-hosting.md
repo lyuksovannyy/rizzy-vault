@@ -17,10 +17,12 @@ Contents:
 10. [The restore drill](#10-the-restore-drill)
 11. [Logs](#11-logs)
 12. [Checklist](#12-checklist)
+13. [Podman Quadlet (systemd-managed, rootless)](#13-podman-quadlet-systemd-managed-rootless)
+14. [The `icons` role: item icons and the breach check](#14-the-icons-role-item-icons-and-the-breach-check)
 
 ## 1. What you run
 
-One image holds one binary, `rizzy-vault`, with every role ([ADR 0010](adr/0010-server-shape.md) §1). The M1 roles are `api` (login, devices, vault sync), `web` (the web vault page) and `worker` (expired-state purges, compaction). **Profile A (solo)**, the M1 profile, runs all three in one container on SQLite, behind a TLS reverse proxy:
+One image holds one binary, `rizzy-vault`, with every role ([ADR 0010](adr/0010-server-shape.md) §1). The M1 roles are `api` (login, devices, vault sync), `web` (the web vault page) and `worker` (expired-state purges, compaction, unfinished attachment uploads). **Profile A (solo)**, the M1 profile, runs all three in one container on SQLite, behind a TLS reverse proxy:
 
 ```text
  clients ──HTTPS──▶ proxy (Caddy) ──HTTP──▶ rizzy-vault (api,web,worker)
@@ -38,6 +40,7 @@ The files are in [`deploy/`](../deploy/):
 | [`compose.yaml`](../deploy/compose.yaml) | Profile A for `docker compose` and `podman compose`, the one-off admin commands, and a commented PostgreSQL variant |
 | [`Caddyfile`](../deploy/Caddyfile) | The TLS proxy: certificate from ACME, everything forwarded to `rizzy-vault` |
 | [`rizzy-vault.env.example`](../deploy/rizzy-vault.env.example) | The settings `compose.yaml` reads; copy it to `deploy/.env` |
+| [`quadlet/`](../deploy/quadlet/) | Podman Quadlet units for the same profile A, systemd-managed and rootless ([§13](#13-podman-quadlet-systemd-managed-rootless)) |
 
 The server keeps two kinds of data, on two volumes, with **different backup targets** ([ADR 0010](adr/0010-server-shape.md) §4, [INV-50](THREAT_MODEL.md#8-security-invariants)):
 
@@ -49,7 +52,7 @@ Never put both into one backup, one archive or one volume.
 **Not in this build** (M1 is in progress):
 - A verified image build with the web vault. [`deploy/Containerfile`](../deploy/Containerfile) now builds the web vault (`apps/web`, M1 step 5) and embeds it with the `embed-web` feature ([ADR 0010](adr/0010-server-shape.md) §4): a `wasm` stage (wasm-bindgen-cli at the locked version, `cargo xtask build-wasm`), a `web` stage (Node.js 24, pnpm, `pnpm install --frozen-lockfile`, `pnpm run build`), then the server. That image build has not been run end to end yet; until it has, check that `/` of a new image serves the web vault, not the fixed "no web vault in this build" page. To build a binary with it from source instead: `pnpm install --frozen-lockfile`, `pnpm run build:wasm` (needs `wasm-bindgen-cli` at the locked version), `pnpm run build`, then `cargo build --locked --release -p rizzy-server --bin rizzy-vault --features embed-web`. The API is complete for the M1 clients.
 - PostgreSQL as a supported setup (M3). This build runs every M1 role on it, the `worker` included (one active worker per database, the others wait as standbys), but its PostgreSQL tests are not run in CI yet, and the PostgreSQL side of the instance lock, of `restore`, `migrate` and `secrets rotate` ([§9](#9-restore)) has not been run against a real PostgreSQL server at all. Do not rely on it before M3.
-- The admin panel and API (M3), `notify`, `icons` (M3), `smtp` (M6), Quadlet units (M3), signed images (M8).
+- The admin panel (M3; only its separate listener is in this build, serving nothing yet, [§6](#the-admin-listener)), metrics, `notify`, `smtp` (M6), signed images (M8). Quadlet units are covered by this build ([§13](#13-podman-quadlet-systemd-managed-rootless)), written without a Podman install to test them against — see that section's "Unverified" list.
 
 **Core dumps are off.** A crash must never write the server's memory (keys, the OPAQUE secrets, session state) to disk ([INV-60](THREAT_MODEL.md#8-security-invariants), [ADR 0024](adr/0024-core-dump-disabling-rustix.md)). Before it reads its configuration, `rizzy-vault` sets its core-file limit (`RLIMIT_CORE`) to 0 and, on Linux, marks itself non-dumpable (`PR_SET_DUMPABLE` 0); it reads both back and refuses to start (exit 1, `cannot disable core dumps: ...` on stderr) if either did not take. There is no setting to turn this off. As defence in depth, [`compose.yaml`](../deploy/compose.yaml) also sets `ulimits: core: 0` on every container; under systemd, set `LimitCORE=0` in the unit. On the host, the kernel's `core_pattern` is global to all containers: if it pipes to a crash collector (`systemd-coredump`, `apport`, `abrt`) and `fs.suid_dumpable` is 2, check that the collector stores nothing for this container ([AR-10](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope); whether such a collector can still capture a non-dumpable process is unverified).
 
@@ -67,7 +70,7 @@ docker compose build              # or: podman compose build
 
 There is no published image yet: CI builds the image for `linux/amd64` and `linux/arm64` on every pull request but pushes nothing, and its publish jobs stay off unless the project owner enables them (they would push unsigned development builds to `ghcr.io`; signed images are M8). `docker compose build` builds `localhost/rizzy-vault:dev` from the repository ([`deploy/Containerfile`](../deploy/Containerfile)). Building needs network access to the base images' registry (`docker.io`), to crates.io (`index.crates.io`, `static.crates.io`), to the npm registry (`registry.npmjs.org`, for pnpm and the web vault's locked JavaScript dependencies), and to `static.rust-lang.org`: the repository's `rust-toolchain.toml` pins a toolchain with `rustfmt`, `clippy` and the `wasm32-unknown-unknown` target, and rustup downloads whatever of it the base image lacks. Behind an egress allow-list or a registry mirror, allow all four. For both architectures at once: `docker buildx build --platform linux/amd64,linux/arm64 -f deploy/Containerfile -t <name> ..` (from `deploy/`), or `podman build --platform linux/amd64,linux/arm64 --manifest <name> -f deploy/Containerfile ..`.
 
-Every command in this guide runs from `deploy/`. With Podman, replace `docker` by `podman`.
+Every command in this guide runs from `deploy/`. With Podman, replace `docker` by `podman`. To run this same image under systemd instead of `podman compose`, see [§13](#13-podman-quadlet-systemd-managed-rootless); build the image here first either way.
 
 ## 3. First run
 
@@ -86,9 +89,9 @@ docker compose up -d
 docker compose logs rizzy-vault
 ```
 
-A healthy start logs `database_created` (first start only) and `listening`. A start that fails logs why and exits; see [§4](#4-configuration-reference) for configuration errors (exit code 2). The server refuses to start if the secrets file is inside the data directory, if it does not fit the database (a different setup, a missing data key), or, with SQLite, if another process holds the database's writer lock (with PostgreSQL: while `restore`, `migrate`, `secrets rotate` or `secrets retire-setups` holds the instance lock, [§9](#9-restore)), or if the secrets file holds an OPAQUE setup the database marks retired ([§5](#5-the-secrets-file)).
+A healthy start logs `database_created` (first start only), `listening` and `admin_listening` ([§6](#the-admin-listener)). A start that fails logs why and exits; see [§4](#4-configuration-reference) for configuration errors (exit code 2). The server refuses to start if the secrets file is inside the data directory, if it does not fit the database (a different setup, a missing data key), or, with SQLite, if another process holds the database's writer lock (with PostgreSQL: while `restore`, `migrate`, `secrets rotate` or `secrets retire-setups` holds the instance lock, [§9](#9-restore)), or if the secrets file holds an OPAQUE setup the database marks retired ([§5](#5-the-secrets-file)).
 
-**Create the first accounts.** Signup is `closed` by default, and the admin panel that issues invites comes in M3. Until then:
+**Create the first accounts.** Signup is `closed` by default, and invite-only signup is not in this build (it needs its own design decision, [§6](#the-admin-listener)). Until then:
 
 1. set `RIZZY_SIGNUP=open` in `.env` and `docker compose up -d` (the container restarts with the new value);
 2. create the accounts from the clients;
@@ -96,7 +99,7 @@ A healthy start logs `database_created` (first start only) and `listening`. A st
 
 While signup is open, anyone who reaches the server can create an account (rate-limited per source and per name, [CRYPTO.md §5.9](CRYPTO.md#59-account-enumeration)). Keep that window short, or restrict the proxy to your own addresses for it (Caddy's `remote_ip` matcher).
 
-**The bootstrap token** ([INV-69](THREAT_MODEL.md#8-security-invariants)) is in the secrets file. This build never prints or logs it; its only reader is the M3 admin API, which shows it once. Nothing to do with it now.
+**The bootstrap token** ([INV-69](THREAT_MODEL.md#8-security-invariants)) is in the secrets file. This build never prints or logs it, and nothing reads it yet: its reader will be the admin login on the admin listener ([§6](#the-admin-listener)), which is not in this build. Nothing to do with it now.
 
 ## 4. Configuration reference
 
@@ -104,9 +107,10 @@ Settings are `RIZZY_*` names. Each comes from the environment, or from a configu
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `RIZZY_ORIGIN` | – (required by `api` and `worker`) | The canonical origin clients use, for example `https://vault.example.com` or `https://vault.example.com:8443`. It is bound into OPAQUE and every device signature: **changing it later locks every account out**. It must be an `https://` origin: the server refuses to start with an `http://` one, unless the host is `localhost` or a loopback address (`127.0.0.1`, `[::1]`), which is for local testing only. |
-| `RIZZY_ROLES` | `api,web,worker` | Comma-separated roles. `notify`, `icons` and `smtp` are refused in this build. |
+| `RIZZY_ORIGIN` | – (required by `api` and `worker`) | The canonical origin clients use, for example `https://vault.example.com` or `https://vault.example.com:8443`. It is bound into OPAQUE and every device signature: **changing it later locks every account out**. It must be an `https://` origin: the server refuses to start with an `http://` one, unless the host is `localhost` or a loopback address (`127.0.0.1`, `[::1]`), which is for local testing only. Security keys as a second factor (WebAuthn, [ADR 0058](adr/0058-webauthn-2fa-second-factor.md)) need a host name: browsers refuse an IP address as the relying party, so with an IP origin the server offers no security keys (its `webauthn/*` endpoints answer `not_found`) and TOTP is the only second factor. The security-key relying party is exactly this origin's host, with no subdomains and no other port. A security key only needs a touch: the server never asks for its PIN or fingerprint. |
+| `RIZZY_ROLES` | `api,web,worker` | Comma-separated roles. `icons` runs alone, in its own process ([§14](#14-the-icons-role-item-icons-and-the-breach-check)). `notify` and `smtp` are refused in this build. |
 | `RIZZY_LISTEN` | `127.0.0.1:8080` (the image sets `0.0.0.0:8080`) | The HTTP listener of `api` and `web`. Plain HTTP: always behind the TLS proxy. |
+| `RIZZY_ADMIN_LISTEN` | `127.0.0.1:8081` | The admin listener ([§6](#the-admin-listener)), bound whenever the `api` role runs; a start whose address is taken fails. Never publish it or route the proxy to it. |
 | `RIZZY_DATA_DIR` | `/data` | The data volume: `rizzy-vault.sqlite3`, its WAL, its lock file, and the pre-migration copy. |
 | `RIZZY_DATABASE_URL` | – (SQLite in the data directory) | A `postgres://` URL. Not supported before M3 (see `compose.yaml`). It may carry the password; it is never logged or printed. It is the one setting that can hold a secret: a configuration file that holds it must be readable by the server's user only (the server does not check the file's mode). |
 | `RIZZY_SECRETS_FILE` | `/run/rizzy-secrets/secrets.json` | The secrets file. Must resolve outside the data directory, or the server refuses to start. |
@@ -116,6 +120,11 @@ Settings are `RIZZY_*` names. Each comes from the environment, or from a configu
 | `RIZZY_WORKER_INTERVAL_SECS` | `60` | Seconds between two worker runs, 1 to 86400. |
 | `RIZZY_MAX_UPLOAD_BYTES` | `33554432` (32 MiB) | Body limit of vault uploads, restore healing and the account commit that carries a key rotation, 32 MiB to 256 MiB. The proxy must allow at least this much (Caddy has no limit by default). |
 | `RIZZY_RECOVERY_WAIT_HOURS` | `72` | The recovery waiting period in whole hours, 0 to 720 (30 days); anything else refuses the start. See "The recovery waiting period" below. |
+| `RIZZY_BREACH_CHECK` | `off` | `icons` role only: `off` or `on`, the breach check of the web vault's Password health ([§14](#14-the-icons-role-item-icons-and-the-breach-check)). Anything else refuses the start. |
+| `RIZZY_ICON_CACHE_DIR` | `/cache` | `icons` role only: the cache volume (re-encoded item icons and breach-check ranges, shared by all users), created if missing. |
+| `RIZZY_ICON_CACHE_TTL_SECS` | `1209600` (14 days) | `icons` role only: how long a cached answer is used before it is fetched again, 60 s to 365 days. |
+| `RIZZY_ICON_CACHE_MAX_BYTES` | `268435456` (256 MiB) | `icons` role only: the cache's total size, at least 1048576 (1 MiB); the oldest entries are removed first. |
+| `RIZZY_ACCOUNT_QUOTA_BYTES` | `5368709120` (5 GiB) | The storage quota of every account, in bytes: at least 268435456 (256 MiB), no maximum; anything else refuses the start. One number for all accounts. See "The storage quota" below. |
 
 **The recovery waiting period** ([ADR 0008](adr/0008-account-recovery.md) decision 5, [CRYPTO.md §11.9](CRYPTO.md#119-recovery-with-the-emergency-kit)). A user who lost every device recovers the account with the recovery code from the Emergency Kit. A valid code does not release the account at once: it opens a pending recovery, and the server releases the account only `RIZZY_RECOVERY_WAIT_HOURS` later. During the wait, any enrolled device of the account can cancel the recovery. That is what protects a user whose printed kit was stolen: the thief has to wait, and the user's own device can say no.
 - **Default 72 h.** Keep it unless you have a reason. Longer (up to 30 days) gives users more time to notice; shorter gives a thief less to wait out.
@@ -124,6 +133,17 @@ Settings are `RIZZY_*` names. Each comes from the environment, or from a configu
 - The wait is enforced by the server. It protects against a kit thief, not against whoever runs the server.
 - In this build a change of the setting is not recorded in the users' security event log (that log is part of the M3 admin work, [INV-69](THREAT_MODEL.md#8-security-invariants)); tell your users when you change it.
 - With `compose.yaml`, set it in `.env`; the server container reads it from there.
+
+**The storage quota** ([ADR 0048](adr/0048-per-account-storage-quota.md)). The server counts, per account, the bytes it stores for the account's vault: every change record and snapshot at its wire size (the encrypted body and key wrap, the signed header and signature). It counts lengths only; it never opens anything. Your disk is the limit that matters, so size the quota for it: the default 5 GiB is far more than any password vault needs, and the quota is a ceiling against a faulty or runaway client, not a budget for users to manage.
+- **Headroom of one upload.** An upload is refused record by record once the account would pass the quota **plus `RIZZY_MAX_UPLOAD_BYTES`**, so a sync that starts under the quota always finishes. An account can thus end up to one upload limit above the quota.
+- **What users see.** A refused record answers `quota_exceeded`. The web vault says the account has reached its storage limit; `rv` says the same and keeps the change on the device, unsent, so the next `rv sync` sends it again. The web vault's Settings → What the server stores, and `rv unlock` (`storage:`), show the account's use and the quota as the server reports them.
+- **Raising it** takes effect at the next restart: changes refused before are accepted at their next sync. Lowering it below an account's use refuses that account's new changes until it is under the new limit again; nothing stored is deleted.
+- **Restore healing is never refused** for quota: a device that re-publishes its records after a restore ([§9](#9-restore)) must be able to, so a restore that needed healing can leave an account above the quota by up to two upload limits per vault.
+- **Attachments** ([ADR 0054](adr/0054-attachments-envelope-and-api.md)) count at their full encrypted size from the moment a client declares one (each file is at most 25 MiB, in 512 KiB chunks; no setting changes either number). A declaration that would pass the quota itself (no upload headroom applies) is refused with `quota_exceeded`, and the web vault says the account has reached its storage limit. Deleting an attachment releases its bytes at once; the `worker` deletes uploads left unfinished for 24 hours and releases theirs. A finished attachment that no item names any more (an app deleted the item without deleting its files) stays and keeps counting: the server cannot tell, and this build has no clean-up for it.
+- **Several vaults** ([ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) Part A). Every vault an account owns, its Personal vault and up to 63 more it creates, counts against that account's one quota. The account answer reports each vault's bytes for display. Deleting a vault deletes everything stored for it at once and releases its bytes in the same transaction; there is no vault-level trash on the server. Migration 9 (`vault_kinds`) records which vault of each existing account is its Personal vault; on PostgreSQL it runs with `rizzy-vault migrate` like every other migration.
+- **Single-device accounts only grow.** Old versions are dropped only once snapshots from two devices cover them, so the count of an account with one device rarely shrinks.
+- **Bookkeeping.** The count lives in the database table `storage_account_usage`, part of every backup. The first start after the upgrade that adds it (migration 6; on PostgreSQL after `rizzy-vault migrate`) fills it from the stored rows before the server opens, logging `storage_usage_seeded` with the number of accounts. Once a day the worker recomputes every account's count from the rows and corrects any drift, logging `storage_usage_corrected` with the account id and both values (never content); a correction now and then after a crash is harmless, a correction on every run is worth a bug report.
+- With `compose.yaml`, set it in `.env`.
 
 `compose.yaml` also reads these, for the containers around the server: `RIZZY_DOMAIN` (the proxy's host name), `RIZZY_HTTP_PORT` and `RIZZY_HTTPS_PORT` (the proxy's host ports, default 8080 and 8443), `RIZZY_IMAGE`, `RIZZY_PROXY_IMAGE`, `RIZZY_EDGE_SUBNET`, `RIZZY_PROXY_IP`, and `RIZZY_SECRETS_BACKUP_DIR` (the host directory `backup-secrets` writes to, default `./backup-secrets`, [§5](#5-the-secrets-file)).
 
@@ -146,7 +166,7 @@ Exit codes: 0 success, 1 a runtime failure, 2 a usage or configuration error. Me
 
 ## 5. The secrets file
 
-What it holds: every OPAQUE server setup (the OPRF seed and server keypair) by `setup_id`, `enum_key` (fake login answers for unknown names), every server data key by `data_key_id` (they seal 2FA secrets and in-flight login state), and the bootstrap token ([CRYPTO.md §5.11](CRYPTO.md#511-server-side-encryption-not-zero-knowledge)).
+What it holds: every OPAQUE server setup (the OPRF seed and server keypair) by `setup_id`, `enum_key` (fake login answers for unknown names), every server data key by `data_key_id` (they seal 2FA secrets and in-flight login state), the bootstrap token, and, once you add one, every backup key by `backup_key_id` (they seal encrypted database backups, [§8](#8-backup)) ([CRYPTO.md §5.11](CRYPTO.md#511-server-side-encryption-not-zero-knowledge)).
 
 **Handling.**
 - It lives on its own volume, `rizzy-vault-secrets`, mounted **read-only** into the server. Only `secrets init`, `secrets rotate` and `secrets retire-setups` mount it writable, as one-offs. The server never writes it.
@@ -177,7 +197,7 @@ The file is written with mode 0600 and never overwrites, so move it away before 
 >
 > In this build that encrypted copy is the **only** way to restore the secrets.
 
-**Rotation** ([CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets), §5.11): `secrets rotate` adds a new OPAQUE setup, which new registrations use; an existing account moves to it the next time a client logs in, or unlocks an enrolled device, with the typed password (a transparent re-registration with the same password, [ADR 0031](adr/0031-retiring-old-opaque-setups.md)). `secrets rotate --data-key` adds a new data key and marks it current. Stop the server first (every replica, on PostgreSQL; the command refuses otherwise):
+**Rotation** ([CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets), §5.11): `secrets rotate --backup-key` adds a new current backup key for `backup --encrypt` ([§8](#8-backup)). `secrets rotate` adds a new OPAQUE setup, which new registrations use; an existing account moves to it the next time a client logs in, or unlocks an enrolled device, with the typed password (a transparent re-registration with the same password, [ADR 0031](adr/0031-retiring-old-opaque-setups.md)). `secrets rotate --data-key` adds a new data key and marks it current. Stop the server first (every replica, on PostgreSQL; the command refuses otherwise):
 
 ```sh
 docker compose stop rizzy-vault
@@ -219,6 +239,18 @@ TLS ends at the reverse proxy, a second container ([ADR 0010](adr/0010-server-sh
 - **Serve on 8443**: `RIZZY_ORIGIN=https://<domain>:8443`. Caddy's automatic certificate needs ports 80 or 443 reachable from the internet for the ACME challenge, so on high ports you need a DNS-challenge Caddy build or your own certificate (`tls /path/cert.pem /path/key.pem` in the `Caddyfile`).
 
 Whichever you choose, `RIZZY_ORIGIN` must be exactly the origin users type, and it must not change afterwards.
+
+### The admin listener
+
+The server has a second listener for operators, separate from the public one ([ADR 0060](adr/0060-admin-panel-stack-boundary.md) §2, [ADR 0010](adr/0010-server-shape.md) §1). Whenever the `api` role runs, it binds `RIZZY_ADMIN_LISTEN`, by default `127.0.0.1:8081`: loopback only, never `0.0.0.0`. A process without `api` (`--roles web`, `--roles worker`) binds none. A healthy start logs `admin_listening` with its port after `listening`; if the address is taken, the start fails with `admin listener (RIZZY_ADMIN_LISTEN): ...`. Under compose and Quadlet the default address is the container's own loopback, so nothing outside the container reaches it.
+
+The two listeners share no route. Admin paths (`/admin/...`) do not exist on the public listener and answer its plain `404`, and the public API does not exist on the admin listener, so a vault login or session can never act as an admin credential there. Every answer of the admin listener carries its own strict Content-Security-Policy: no script at all, styles and images from the same origin, forms posting only to the same origin, no framing.
+
+**What it serves in this build: nothing yet.** Every request answers `404`. The admin panel's screens (user list, disable a user, the signup mode, SMTP settings for notifications) are designed ([ADR 0060](adr/0060-admin-panel-stack-boundary.md) §1, §4) but none ships before its admin login does. That login (separate admin credentials, the bootstrap token from [§3](#3-first-run), a second factor; [INV-69](THREAT_MODEL.md#8-security-invariants)) needs its own design decision first.
+
+> **Gap.** No admin panel, admin login or metrics endpoint is served yet. Until then you manage the instance with the settings in [§4](#4-configuration-reference) (`RIZZY_SIGNUP`, `RIZZY_ACCOUNT_QUOTA_BYTES`, `RIZZY_RECOVERY_WAIT_HOURS`) and a restart, and with the admin commands in [§5](#5-the-secrets-file) and [§8](#8-backup). Invite-only signup is not available: `RIZZY_SIGNUP` is `closed` or `open`.
+
+**Reaching it, once it serves something.** Do not publish `RIZZY_ADMIN_LISTEN`'s port and do not route the reverse proxy to it: `compose.yaml` and the Quadlet files do neither. Reach it only over an SSH tunnel or a VPN to the host. An admin listener exposed to the internet loses the protection this split gives and falls back on the admin login's own defences alone.
 
 **What `rv` needs from the certificate** ([ADR 0030](adr/0030-client-tls-rv.md)). The command-line client speaks **TLS 1.3 only** (Caddy offers it by default; a proxy configured for TLS 1.2 alone is refused) and checks the certificate against Mozilla's root CAs built into `rv`, not the operating system's store. A certificate from a public CA, such as Caddy's automatic one, needs nothing more. With your own certificate (the `tls /path/cert.pem /path/key.pem` line above) issued by a **private CA**, users give `rv` that CA's certificate with `--ca-file <path>` or `RIZZY_CLI_CA_FILE` ([rv.md](rv.md#tls-and-a-private-ca)); it then replaces the public roots for them. The certificate must name the host (or IP address) of `RIZZY_ORIGIN`.
 
@@ -276,13 +308,15 @@ To run the migration as its own step (for example to see it succeed before servi
 
 If the upgraded server does not start, keep the old image, restore the pre-upgrade backup ([§9](#9-restore)), and report the problem.
 
+Under the Quadlet units ([§13](#13-podman-quadlet-systemd-managed-rootless)), replace the `docker compose stop/up` pair above with `systemctl --user stop/start rizzy-vault.service`; the backup, `migrate` and restore commands are unchanged (they run next to the server, or with it stopped, regardless of what starts it).
+
 ## 8. Backup
 
 **What to back up:**
 
 | What | How | Where to keep it |
 |---|---|---|
-| The database (`rizzy-vault-data`) | `rizzy-vault backup` below; also the native copy, for losing the disk | With your data backups, encrypted at rest |
+| The database (`rizzy-vault-data`) | `rizzy-vault backup` below, or `backup --encrypt`; also the native copy, for losing the disk | With your data backups, encrypted at rest (an encrypted backup already is) |
 | The secrets (`rizzy-vault-secrets`) | `backup-secrets`, plus the encrypted copy of [§5](#5-the-secrets-file) | **Apart** from the database backups |
 | `deploy/.env`, `deploy/Caddyfile` | Any | Anywhere (no secret in profile A) |
 
@@ -303,9 +337,41 @@ What the file is, and is not:
 - **Integrity, not authentication.** The file ends with a SHA-256 of everything before it; `restore` checks it before reading anything, so a truncated or corrupted file is refused. It does not stop a deliberate edit: anyone who can write the file can recompute it. Protect the archives like the database itself.
 - **Not encrypted.** It holds what the database holds: every user's ciphertext, login names, device metadata, OPAQUE records and timestamps ([THREAT_MODEL §3.4](THREAT_MODEL.md#34-what-the-server-holds-by-sync-mode)). It never holds the server secrets ([INV-50](THREAT_MODEL.md#8-security-invariants)), but a database backup **plus** the secrets allows offline password guessing, so encrypt it (`age` above, or your backup tool's encryption) and store it apart from the secrets backup.
 - **Tied to its release.** It restores only with a release of the same database schema version. After an upgrade, take a new backup; to restore an older one, use the release that wrote it, then upgrade ([§7](#7-upgrades-and-migrations)).
-- **At most 2 GiB** in this release, which reads the whole file into memory. `backup` refuses to write a larger one, so every backup it writes can be restored. Sessions and in-flight login state are not in it: after a restore every user signs in again.
+- **At most 2 GiB** in this release, which reads the whole file into memory. `backup` refuses to write a larger one, so every backup it writes can be restored. **Attachments count toward it:** they are stored as database rows, so every attachment byte is in every backup ([ADR 0054](adr/0054-attachments-envelope-and-api.md) §5). A server with many large attachments reaches this limit sooner; watch the size `backup` prints. Sessions and in-flight login state are not in it: after a restore every user signs in again.
 
 It works the same on PostgreSQL (one `REPEATABLE READ` snapshot), and the same pair moves an instance from SQLite to PostgreSQL: `backup` on the SQLite instance, `restore` into the empty PostgreSQL database ([§9](#9-restore)).
+
+### The encrypted backup: `rizzy-vault backup --encrypt`
+
+`--encrypt` writes the same backup sealed under a **backup key** held in the secrets file: format version 2 of [ADR 0071](adr/0071-encrypted-db-backup-format.md) ([CRYPTO.md §9.8](CRYPTO.md#98-chunked-db-backup-format_version-2-m8)). No passphrase and no extra tool are involved, so it suits unattended runs and copies kept off site. It is optional: without the flag, `backup` writes format version 1 as above.
+
+1. **Add a backup key once**, with the server stopped, like any rotation ([§5](#5-the-secrets-file)):
+
+   ```sh
+   docker compose stop rizzy-vault
+   docker compose --profile admin run --rm secrets-rotate secrets rotate --backup-key
+   docker compose start rizzy-vault
+   ```
+
+   The key is 32 random bytes in the secrets file (`backup_keys`, [CRYPTO.md §5.11](CRYPTO.md#511-server-side-encryption-not-zero-knowledge); [INV-98](THREAT_MODEL.md#8-security-invariants)). It is never derived from a passphrase and never shared with another server key. **Then make a new secrets backup** (`backup-secrets`, [§5](#5-the-secrets-file)): no encrypted database backup can be restored without the secrets file that holds its key. `backup --encrypt` without a backup key is refused (exit 2) and names this command.
+
+2. **Back up** next to the running server, like the plain backup:
+
+   ```sh
+   mkdir -p backup-db
+   docker compose exec -T rizzy-vault /usr/local/bin/rizzy-vault backup --encrypt --out - \
+     > "backup-db/rizzy-db-$(date +%Y%m%dT%H%M%S).rvbackup"
+   ```
+
+   On stderr it prints the size, the chunk count and the id of the backup key it used. There is no SHA-256 to record: the file is authenticated chunk by chunk instead.
+
+What the file is:
+- **Encrypted and authenticated.** The whole format version 1 file, table names and row counts included, is split into 8 MiB chunks, each sealed with the server's `0x01` envelope under purpose `SERVER_DB_BACKUP`. Each chunk's associated data binds its position and the chunk count. Someone who can write to the backup storage but does not hold the secrets file cannot read the file, and cannot forge, truncate or reorder it, or splice in a chunk from another backup. `restore` refuses all of these before it loads anything.
+- **Bound to the secrets file.** A holder of the file **and** the secrets file has the same exposure as with a plain backup: store the encrypted backups apart from the secrets file and from its backup, exactly as before. At-rest encryption of the archive (`age`) is now optional defence in depth.
+- **Rotation keeps old backups restorable.** `secrets rotate --backup-key` adds a new current key. The older keys stay in the file and nothing drops them ([ADR 0071](adr/0071-encrypted-db-backup-format.md) owner answer 3), so a backup made under key 1 still restores after key 2 is added. Keep the secrets backup that holds a key for as long as you keep database backups sealed under it.
+- **One-way compatibility.** A secrets file that holds a backup key is refused by an older `rizzy-vault` binary, which does not know the field. Upgrade every instance that shares the file first, and keep the pre-rotation secrets backup if you might roll back.
+- **The same limits otherwise:** at most 2 GiB for the encrypted file (header, data and 90 bytes per 8 MiB chunk), so a database just under the plain limit may not fit encrypted. Restore needs a release of the same schema version, and the backup works the same on PostgreSQL.
+- **A lost secrets file strands every encrypted backup.** This build has no `secrets restore` command yet ([§5](#5-the-secrets-file)). Recover the file from your secrets backup by hand, as §5 describes.
 
 ### The native copy, for losing the disk
 
@@ -351,7 +417,7 @@ An account used only from the web vault has no device that can heal it, and stay
 
 `rizzy-vault restore` loads a `rizzy-vault backup` file into an **empty** database, with the server stopped. In order ([ADR 0023](adr/0023-logical-backup-format.md) §5), it:
 1. shuts every server process out, with the SQLite writer lock or the PostgreSQL instance lock (below; it refuses while a server runs), and checks that the database is empty: no row, and either new or at exactly this release's schema;
-2. reads the file (at most 2 GiB) and checks its magic, format version and SHA-256 before anything else, then parses it strictly;
+2. reads the file (at most 2 GiB) and checks its magic, format version and SHA-256 before anything else, then parses it strictly. An **encrypted** backup (format version 2, `backup --encrypt`) is opened first with the backup key its header names, which must still be in the secrets file (it need not be the current one). Every chunk is checked, and a damaged, truncated, reordered or foreign file, or a missing key, is refused before anything is loaded. The plain backup inside then goes through this step;
 3. requires the backup's schema version to be this release's;
 4. checks the secrets file against the backup, as the server's startup check does: the OPAQUE setups the backup records must be the secrets file's, and every data key a 2FA row names must be in it. A fresh secrets file is refused; restore the instance's own secrets first;
 5. loads every row in one transaction, draws a **new restore generation** and puts **every account into a reconciliation epoch**;
@@ -371,7 +437,7 @@ docker compose start rizzy-vault
 docker compose logs rizzy-vault        # expect: listening
 ```
 
-If the secrets volume was lost too, restore it **before** running `restore` (below). `restore` exits with 0 on success, 1 when it refused or failed (a running server, a non-empty database, a damaged file, another schema version, secrets that do not belong to the backup), and 2 on a usage error.
+If the secrets volume was lost too, restore it **before** running `restore` (below). `restore` exits with 0 on success, 1 when it refused or failed (a running server, a non-empty database, a damaged file, another schema version, secrets that do not belong to the backup or lack its backup key), and 2 on a usage error. An encrypted backup needs no `age -d`: pipe or name the file as it is.
 
 ### The PostgreSQL instance lock
 
@@ -433,6 +499,8 @@ A backup you have never restored is a hope, not a backup ([ROADMAP §4.9](ROADMA
 
 **Automated (runs with `cargo test`).** [`crates/rizzy-server/tests/drill.rs`](../crates/rizzy-server/tests/drill.rs) runs the backup → wipe → restore drill in a fast form, against real SQLite files, through the functions the binary runs: `secrets init`, a populated instance, a start with the startup checks, `rizzy-vault backup` to a file next to the running server, `backup-secrets`, the native copy, a wipe, the secrets restored byte for byte from the encrypted backup, `rizzy-vault restore` of the backup file into an empty database, and a restart. It checks that the data reads back exactly, that the restore draws a new restore generation and opens a reconciliation epoch for every account (INV-59), that the backup file holds none of the secrets file's secrets (INV-50: every OPAQUE server setup, `enum_key`, every data key and the bootstrap token, searched for both as bytes and as their base64url text), and that a restore next to the running server, into a non-empty database, with a fresh secrets file, or of a damaged file is refused, as is a wrong passphrase. It also checks the warning of [§9](#9-restore): a native copy restored in place starts, but keeps the old restore generation and opens no epoch. `crates/rizzy-server/tests/cli.rs` runs the two commands as processes: through a pipe and a file, the digest on stderr, and the refusals.
 
+The same file runs the **encrypted** drill ([ADR 0071](adr/0071-encrypted-db-backup-format.md)), in the same way. `backup --encrypt` without a backup key is refused. Then `secrets rotate --backup-key`, and `backup --encrypt` next to the running server, whose file must hold no table name, no row value and no secret of the secrets file. A second rotation follows: the backup still restores with its older key. A tampered file, a truncated one and another instance's secrets file (with and without a backup key 1) are each refused into an empty database, which stays empty. Then wipe, `restore` from the encrypted file, and start. A PostgreSQL variant is `#[ignore]`d unless `RIZZY_TEST_POSTGRES_URL` names an empty database: a tampered file is refused into PostgreSQL, the real one restored, and `backup --encrypt` from PostgreSQL gives the same dump back. `crates/rizzy-server/tests/cli.rs` runs the encrypted commands through the binary, and `crates/rizzy-server/tests/db_backup.rs` replays the container's known-answer vectors.
+
 > **Gap: the full drill of ADR 0011 is automated on SQLite only.** ADR 0011 requires simulated clients that change a password, enrol and revoke devices and rotate keys after the backup, then reconnect to the restored server and heal it, on SQLite and PostgreSQL. `rv`'s end-to-end tests run it on SQLite against the built binary: a restore after an enrolment and after vault edits (`crates/rizzy-cli/tests/e2e.rs`), and after a standard rotation, a revocation with a full rotation, a password change and a Secret Key change with a full rotation, with the login record re-registered, a device that missed the rotation catching up and the recovery repair ([ADR 0032](adr/0032-healing-rotation-after-backup.md); `crates/rizzy-cli/tests/healing.rs`). The same drill against PostgreSQL is not run yet.
 
 **Manual, on your own backups (monthly, and after every upgrade).** Restore the newest backups into **scratch volumes**, start a server on them **with no network**, and check that it passes its startup checks. The scratch server never talks to clients: it would honour the backup's old credentials.
@@ -460,14 +528,18 @@ docker volume rm rizzy-drill-data rizzy-drill-secrets
 
 ## 11. Logs
 
-The server writes one JSON object per line to stderr: `ts_ms`, `level`, `event`, and fields that are integers or fixed strings. By construction it never logs secrets, tokens, request bodies, headers, login names, file paths or IP addresses ([INV-48](THREAT_MODEL.md#8-security-invariants)). Retention is the container runtime's: `compose.yaml` keeps at most 5 files of 10 MB (`json-file` driver); change `logging` there. Rootless Podman may ignore some of these options; check `podman inspect` and set `log_size_max` in `containers.conf` if needed.
+The server writes one JSON object per line to stderr: `ts_ms`, `level`, `event`, and fields that are integers or fixed strings; the one exception is `storage_usage_corrected`, which names the account by its random 32-hex-digit id ([ADR 0048](adr/0048-per-account-storage-quota.md) §4). By construction it never logs secrets, tokens, request bodies, headers, login names, file paths or IP addresses ([INV-48](THREAT_MODEL.md#8-security-invariants)). Retention is the container runtime's: `compose.yaml` keeps at most 5 files of 10 MB (`json-file` driver); change `logging` there. Rootless Podman may ignore some of these options; check `podman inspect` and set `log_size_max` in `containers.conf` if needed.
+
+The web vault's Settings → "What the server stores" tells your users what the server holds for their account and how long it is kept, including that this server's logs hold no IP addresses, that your reverse proxy may log them, and that your backups keep deleted data until they expire ([AR-11](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope)). Keep your proxy logging and backup retention ([§8](#8-backup)) in line with what you tell them.
 
 ## 12. Checklist
 
+- [ ] `RIZZY_ADMIN_LISTEN` is a loopback address (the default), its port is not published, and the proxy does not route to it ([§6](#the-admin-listener)).
 - [ ] `RIZZY_ORIGIN` is the exact `https://` origin users type, and will not change.
 - [ ] The secrets volume is mounted read-only into the server and is not inside the data volume.
 - [ ] A `backup-secrets` file **and** an encrypted copy of `secrets.json` exist, stored apart from the database backups; the passphrase is stored safely.
-- [ ] Database backups (`rizzy-vault backup`) run on a schedule, are encrypted, and are pruned; their SHA-256 is recorded.
+- [ ] Database backups (`rizzy-vault backup`) run on a schedule, are encrypted (`backup --encrypt`, or `age` over a plain backup), and are pruned; a plain backup's SHA-256 is recorded.
+- [ ] If you use `backup --encrypt`: a secrets backup taken after the last `secrets rotate --backup-key` exists, kept for as long as the database backups sealed under its keys.
 - [ ] No backup holds both volumes (whole-host snapshots included).
 - [ ] The database is on a local disk, not NFS or SMB.
 - [ ] `RIZZY_SIGNUP` is `closed` outside the first-accounts window.
@@ -475,3 +547,173 @@ The server writes one JSON object per line to stderr: `ts_ms`, `level`, `event`,
 - [ ] The manual drill of [§10](#10-the-restore-drill) passed this month.
 - [ ] Base images are pinned by digest if you build your own image.
 - [ ] The host's crash collector (if `core_pattern` pipes to one) stores no dumps of the rizzy-vault container ([§1](#1-what-you-run)).
+
+## 13. Podman Quadlet (systemd-managed, rootless)
+
+[ROADMAP §4.9](ROADMAP.md#49-server-self-hosting--ops-m1-onward) (Should, M3): Podman Quadlet units, systemd-managed and rootless, for the same profile A `compose.yaml` runs ([§1](#1-what-you-run)). The units are in [`deploy/quadlet/`](../deploy/quadlet/): `rizzy-vault.container`, `rizzy-vault-proxy.container`, four `.volume` files and one `.network` file, plus `rizzy-vault.env.example` and `rizzy-vault-proxy.env.example`. They cover the two long-running services only — `rizzy-vault` (`api,web,worker`) and the Caddy proxy — the same two `compose.yaml` runs without the `admin` profile. The one-off admin commands (`secrets init`, `secrets rotate`, `secrets retire-setups`, `backup-secrets`, `migrate`, `restore`) stay plain `podman run --rm` invocations under systemd too; see "Admin one-offs" below.
+
+**These units were written without a Podman install to test them against in this environment.** Every key used is believed correct from `podman-systemd.unit(5)`, but none of it has been loaded by a real `systemd --user`, generated into a unit by `/usr/lib/systemd/user-generators/podman-system-generator`, or started. Treat the "Unverified" list at the end of this section as a to-do before you rely on this in production, not as a formality.
+
+**Install (rootless):**
+
+```sh
+mkdir -p ~/.config/containers/systemd
+cp deploy/quadlet/*.container deploy/quadlet/*.volume deploy/quadlet/*.network ~/.config/containers/systemd/
+cp deploy/Caddyfile ~/.config/containers/systemd/Caddyfile
+cp deploy/quadlet/rizzy-vault.env.example ~/.config/containers/systemd/rizzy-vault.env
+cp deploy/quadlet/rizzy-vault-proxy.env.example ~/.config/containers/systemd/rizzy-vault-proxy.env
+$EDITOR ~/.config/containers/systemd/rizzy-vault.env ~/.config/containers/systemd/rizzy-vault-proxy.env
+(cd deploy && docker compose build)   # or podman compose build / podman build — §2 still builds the image
+systemctl --user daemon-reload
+loginctl enable-linger "$USER"      # so the units run without an active login session
+systemctl --user start rizzy-vault-data-volume.service rizzy-vault-secrets-volume.service
+# Create the secrets once, the same as compose.yaml's secrets-init (ADR 0010 §4). The flags
+# repeat compose.yaml's `x-hardening` anchor, which every one-off service uses too (see "Admin
+# one-offs" below for the rest of them, with the same flags):
+podman run --rm --network=none -v rizzy-vault-secrets:/run/rizzy-secrets \
+  --user 65532:65532 --read-only --cap-drop=all --security-opt=no-new-privileges:true \
+  localhost/rizzy-vault:dev secrets init
+systemctl --user enable --now rizzy-vault.service rizzy-vault-proxy.service
+journalctl --user -u rizzy-vault.service -f
+```
+
+These files never live inside this repository's working tree, so there is nothing for this repository's `.gitignore` to cover there one way or the other (its `.env` / `.env.*` patterns are literal basenames anyway, and would not match `rizzy-vault.env` or `rizzy-vault-proxy.env`). They hold no secret values in profile A regardless: `RIZZY_ORIGIN`, `RIZZY_DOMAIN` and the rest are not sensitive — see [`deploy/quadlet/rizzy-vault.env.example`](../deploy/quadlet/rizzy-vault.env.example) and [`rizzy-vault-proxy.env.example`](../deploy/quadlet/rizzy-vault-proxy.env.example).
+
+**Why two env files, not one.** `compose.yaml`'s `.env` is read only while `docker compose`/`podman compose` parses the YAML's `${VAR}` placeholders — it never becomes a container's own environment except for the handful of names each service's `environment:` block repeats. Quadlet has no such substitution step: a unit file's `Image=`, `PublishPort=`, `Subnet=` and `IP=` are literal, edited directly (a drop-in file under `rizzy-vault.container.d/` also works, for example to change `Image=` without touching the shipped file). `EnvironmentFile=` is the one place that *does* mirror compose's `environment:` block: it passes every `NAME=value` line in the file straight into that one container's process environment, the way compose passes `RIZZY_ORIGIN` etc. into `rizzy-vault` and `RIZZY_DOMAIN` into `proxy`. So `rizzy-vault.env` holds only what the `rizzy-vault` service's `environment:` block reads, and `rizzy-vault-proxy.env` only what `proxy`'s does — checked against `crates/rizzy-server/src/config.rs`, which looks up each `RIZZY_*` name individually from the environment rather than rejecting ones it does not recognise (that refusal is for the `--config` file format only, [§4](#4-configuration-reference)), so an extra unrelated variable in either file would be harmless, but keeping them separate keeps each file an honest match for one container.
+
+**Mapping from `compose.yaml`,** so every hardened property has a named equivalent here:
+
+| `compose.yaml` (`rizzy-vault` service, under `x-hardening`) | Quadlet key |
+|---|---|
+| `image:` | `Image=` (literal; edit the line or add a drop-in, no `${VAR:-default}`) |
+| `command: ["serve"]` | `Exec=serve` |
+| `read_only: true` | `ReadOnly=true` |
+| `cap_drop: [ALL]`, no `cap_add` | `DropCapability=ALL`, no `AddCapability=` |
+| `security_opt: ["no-new-privileges:true"]` | `NoNewPrivileges=true` |
+| `user: "65532:65532"` | `User=65532` + `Group=65532` |
+| `ulimits: core: 0` | `[Service] LimitCORE=0` (already named by this guide's [§1](#1-what-you-run), for "under systemd") |
+| `tmpfs: [/tmp:size=64m,mode=1777]` | `Tmpfs=/tmp:size=64m,mode=1777`, with `ReadOnlyTmpfs=false` so nothing else gets an implicit tmpfs |
+| `restart: unless-stopped` | `[Service] Restart=always` (covers crashes the same way `unless-stopped` does, and an explicit stop doesn't trigger either; diverges on a reboot after that stop — see the note below the table) |
+| `stop_grace_period: 40s` | `[Service] TimeoutStopSec=40` |
+| `expose: ["8080"]`, no host port | no `PublishPort=` |
+| `volumes: data:/data`, `secrets:/run/rizzy-secrets:ro` | `Volume=rizzy-vault-data.volume:/data`, `Volume=rizzy-vault-secrets.volume:/run/rizzy-secrets:ro` |
+| `networks: edge:` | `Network=rizzy-vault-edge.network` |
+| healthcheck | none either way — see below |
+
+**`Restart=always` does not keep a deliberately stopped service down across a reboot, unlike `unless-stopped`.** Within one boot the two match: neither restarts after an operator's own stop (`docker stop` / `systemctl --user stop`). They diverge at the next reboot or login: Docker remembers that an `unless-stopped` container was manually stopped and leaves it stopped across a daemon restart, but systemd's `Restart=` only governs what happens after the *service's own* exit (a crash or kill), not whether an *enabled* unit starts at the next boot — `rizzy-vault.service` is enabled (`[Install] WantedBy=default.target`, started with `systemctl --user enable --now` above), so it starts again at the next boot or login regardless of a prior manual stop. An operator who wants it to stay down after a reboot must also `systemctl --user disable rizzy-vault.service` (and `rizzy-vault-proxy.service`), not just stop it.
+
+`proxy` is **not** under `compose.yaml`'s `x-hardening` anchor, so `rizzy-vault-proxy.container` carries none of the hardening keys above either; that mirrors the file, it is not an oversight. Its own mapping: `ports: 8080:80, 8443:443` → two `PublishPort=` lines; `networks.edge.ipam_address` (the fixed proxy address `compose.yaml` gives `RIZZY_TRUSTED_PROXIES` something to name) → `IP=172.30.87.10` on a `.network` file carrying the matching `Subnet=`; the bind-mounted `Caddyfile` → a `Volume=` line to the same unmodified file; `caddy-data`/`caddy-config` → their own `.volume` files; `depends_on: [rizzy-vault]` → `[Unit] After=rizzy-vault.service` with no `Requires=`, so a stopped `rizzy-vault.service` does not pull the proxy down too, matching compose's plain (conditionless) `depends_on`.
+
+**Health check.** Neither `compose.yaml` nor these units define one: [§1](#1-what-you-run) and [§6](#6-tls-the-reverse-proxy-and-ports) already say why — the distroless image has no shell and no HTTP client to run a check with. Monitor `GET https://<domain>/api/meta` from outside the container, as compose-based installs already do.
+
+**Logging differs from `compose.yaml`, on purpose.** `compose.yaml` sets the `json-file` driver with `max-size: 10m`, `max-file: 5` ([§11](#11-logs)); that is a Docker-specific driver and option set with no Podman equivalent. These units set none, so Podman's own default under systemd (`journald`) applies: `journalctl --user -u rizzy-vault.service` reads it, and retention is `journald`'s own (`SystemMaxUse=` etc. in `~/.config/systemd/journald@user.conf` or the system `journald.conf`, depending on your distribution's user-journal setup), not the container runtime's.
+
+**Auto-update is off by default.** [THREAT_MODEL.md Q-17](THREAT_MODEL.md#10-open-questions-for-the-owner) is still an open question, not a decided one (unlike the "Decided" rows around it): it recommends shipping Quadlet units with `podman auto-update` **off** until signed images and a verifying `policy.json` exist — [ROADMAP §4.9](ROADMAP.md#49-server-self-hosting--ops-m1-onward) lists "Signed images (cosign), SBOM, provenance" as a Should, M8; [§1](#1-what-you-run) already names it as not in this build. No Accepted ADR covers the signing mechanism yet, so this guide does not name one. [AR-22](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope) tracks the interim risk as opt-in only, "with the trade-off stated where it is enabled." Both unit files carry a commented-out `AutoUpdate=registry` line rather than an active one. Turning it on needs two things, deliberately, so a stray edit cannot turn it on by itself:
+1. Uncomment `AutoUpdate=registry` in the unit (and `systemctl --user daemon-reload`).
+2. Enable the timer that actually checks: `systemctl --user enable --now podman-auto-update.timer`. Nothing updates until this runs, label or no label.
+
+> **Gap: the trade-off is accepted by you, not decided by this project.** Before M8, an instance with auto-update on installs whatever the image registry serves under that tag on the next timer run, with no signature check ([A10](THREAT_MODEL.md#a10-compromised-ci-or-release-credentials)) — a compromised registry account or release job reaches it, and it then serves a possibly-backdoored web vault to every user of that instance ([§4.2.1](THREAT_MODEL.md#421-the-web-vault-delivery-problem)). It also conflicts with pinning images by digest ([§7.17](THREAT_MODEL.md#717-distribution-channels-m1-onward)), which this guide otherwise recommends. Decide this with that trade-off in view, not by habit.
+
+Also: `rizzy-vault.container`'s default `Image=localhost/rizzy-vault:dev` is a local build with no registry behind it at all ([§2](#2-install): "There is no published image yet"). `AutoUpdate=registry` has nothing to check against for that tag, so it is a no-op there regardless of the timer, until `Image=` names a real registry reference. The Caddy proxy's image is already a real registry reference, so its own `AutoUpdate=registry` line would do something the moment it is enabled — which is exactly why it stays commented out by the same default, not left on because "it's just Caddy."
+
+**Admin one-offs.** Systemd units are the wrong shape for a command meant to run once and exit; these stay `podman run --rm`, matching each `compose.yaml` one-off service ([§4](#4-configuration-reference) "Commands") with the matching volumes. Every one of them carries `--network=none` and the same `--read-only --cap-drop=all --security-opt=no-new-privileges:true --user 65532:65532` flags `compose.yaml`'s `x-hardening` anchor gives every one-off service there — including `secrets init` above — not only the one shown with them spelled out below. `migrate` and `restore` also carry `--tmpfs /tmp:size=64m,mode=1777`, matching the `tmpfs:` `compose.yaml` gives those two services only; the rest have no tmpfs, matching `compose.yaml` too:
+
+```sh
+# secrets rotate / retire-setups (server stopped first; swap the trailing command for either):
+systemctl --user stop rizzy-vault.service
+podman run --rm --network=none -v rizzy-vault-data:/data -v rizzy-vault-secrets:/run/rizzy-secrets \
+  --user 65532:65532 --read-only --cap-drop=all --security-opt=no-new-privileges:true \
+  localhost/rizzy-vault:dev secrets rotate
+systemctl --user start rizzy-vault.service
+
+# migrate (server stopped first). Unlike secrets rotate, compose.yaml's `migrate` service
+# mounts no secrets volume, and does carry --tmpfs:
+systemctl --user stop rizzy-vault.service
+podman run --rm --network=none -v rizzy-vault-data:/data --tmpfs /tmp:size=64m,mode=1777 \
+  --user 65532:65532 --read-only --cap-drop=all --security-opt=no-new-privileges:true \
+  localhost/rizzy-vault:dev migrate
+systemctl --user start rizzy-vault.service
+
+# backup-secrets, with the passphrase on stdin, secrets volume read-only is enough. The
+# staging directory needs the same owner and mode as §5's rootful example, done the rootless
+# way (§5 already shows `podman unshare chown` for this):
+mkdir -p ~/rizzy-backup-secrets
+podman unshare chown 65532:65532 ~/rizzy-backup-secrets && chmod 0700 ~/rizzy-backup-secrets
+podman run --rm -i --network=none -v rizzy-vault-secrets:/run/rizzy-secrets:ro \
+  -v ~/rizzy-backup-secrets:/backup --user 65532:65532 --read-only --cap-drop=all \
+  --security-opt=no-new-privileges:true localhost/rizzy-vault:dev backup-secrets \
+  --out /backup/rizzy-secrets-backup.json --passphrase-file - < ~/rizzy-backup-passphrase
+mv ~/rizzy-backup-secrets/rizzy-secrets-backup.json /somewhere/safe/rizzy-secrets-$(date +%F).json
+
+# backup (server running): no one-off, it runs next to the server, as §8 already does.
+podman exec rizzy-vault rizzy-vault backup --out - > "rizzy-data-$(date +%Y%m%dT%H%M%S).rvbackup"
+
+# restore (server stopped first), reading from stdin, as compose.yaml's `restore` service:
+podman run --rm -i --network=none -v rizzy-vault-data:/data -v rizzy-vault-secrets:/run/rizzy-secrets:ro \
+  --tmpfs /tmp:size=64m,mode=1777 --user 65532:65532 --read-only --cap-drop=all \
+  --security-opt=no-new-privileges:true localhost/rizzy-vault:dev restore --in -
+```
+
+`backup` needs none of this: it runs inside the already-networked, already-hardened `rizzy-vault` container through `exec`, the same as under `compose.yaml`.
+
+**Rootful.** The system-wide path is `/etc/containers/systemd/` instead of `~/.config/containers/systemd/`, `systemctl` instead of `systemctl --user`, `[Install] WantedBy=multi-user.target` instead of `default.target`, no `loginctl enable-linger`, and `podman run` as root for the admin one-offs. Not tested here either way; the rootless path above is what [ROADMAP §4.9](ROADMAP.md#49-server-self-hosting--ops-m1-onward) actually asks for.
+
+**Unverified** (no Podman available in this environment to confirm any of it — check each against `man 5 podman-systemd.unit` on your host before depending on it):
+- Whether `systemctl --user disable` on a Quadlet-generated `.service` behaves like disabling an ordinary unit — clearing the boot-time want so it does not start again at the next boot or login — or whether Quadlet's generator re-establishes that want on the next `daemon-reload`/generator run regardless of the disable.
+- The minimum Podman version for `VolumeName=` and `NetworkName=`; without them the generated volume/network names would be `systemd-<unit-name>` instead of the `rizzy-vault-*` names this guide and its backup commands use by name.
+- Whether `%h` expands inside a Quadlet `Volume=`/`EnvironmentFile=` path value, as used above, or needs to be replaced with a literal home-directory path.
+- `IP=` used together with a `Network=` reference to a `.network` file that itself sets `Subnet=` — the exact supported combination.
+- `[Service] LimitCORE=0`, `Restart=always` and `TimeoutStopSec=40` passing through into the generated unit's `[Service]` section unchanged (this one is plain systemd syntax, so it is the least likely of this list to be wrong).
+- `ReadOnlyTmpfs=false` next to an explicit `Tmpfs=/tmp:...` line — that the two combine to "only `/tmp` is writable, with these exact options" and not something broader or narrower.
+- That `DropCapability=ALL` accepts that spelling (as opposed to lowercase `all`) the same way `cap_drop: [ALL]` does in `compose.yaml`.
+- The exact generated systemd unit names Quadlet derives from these file names (assumed here: `<name>.container` → `<name>.service`, `<name>.volume` → `<name>-volume.service`, `<name>.network` → `<name>-network.service`), and that Quadlet adds `Requires=`/`After=` for the `Volume=`/`Network=` references on its own, without this guide spelling them out.
+- The entire auto-update path once enabled: that `AutoUpdate=registry` plus `podman-auto-update.timer` actually re-pulls and restarts the service, and what it does on a failed pull or a failed new-image start (rollback behaviour).
+
+## 14. The `icons` role: item icons and the breach check
+
+The `icons` role is the one part of rizzy-vault that reaches the internet. It does two things, for every client of this server: it fetches **item icons** (the small site icons next to items with a website, in the web vault and the browser extension; [ADR 0052](adr/0052-icon-proxy-role.md)) and, if you also switch it on, the **breach check** of Password health ([ADR 0053](adr/0053-hibp-breach-check-egress.md)). It is **off unless you run it** ([ADR 0010](adr/0010-server-shape.md) owner decision 5): without it, items show their type icon, the vault says "Breach checking is not enabled on this server", and nothing leaves the server.
+
+### Item icons
+
+**What leaves the browser, and what your server sees.** For an item that has a website, the client sends that website's **hostname** (for example `accounts.example.com`, lowercased, in its IDNA `xn--` form) to `POST /api/v1/icons/fetch`, and nothing else: no path, no full address, no session token, account or item id. The `icons` process therefore learns which sites your users have items for, but not who asked: the cache is shared by everyone and keyed by the site, and the role logs no hostname (its log lines are the route, the status and, at `debug` level, a fixed cause such as `no_icon` or `refused_address`). Your reverse proxy sees the request bodies too; keep its access log off (§6). The sites themselves see your **server's** address, never your users': the browser never loads an image from anywhere but your server. A request moments after a vault request from the same address can be linked to that account by timing; ADR 0052 accepts that.
+
+**What the role does with a hostname** ([ADR 0052](adr/0052-icon-proxy-role.md) points 2–5, [INV-51](THREAT_MODEL.md#8-security-invariants), [INV-76](THREAT_MODEL.md#8-security-invariants)):
+- It resolves the name once and connects only to an address on the allow-list (globally routable unicast; private, loopback, link-local, carrier-grade NAT, documentation and other special ranges refused, including IPv4 hidden in IPv4-mapped or NAT64 form), on ports 443 and 80 only, to exactly the address it checked. Redirects (at most 3) and icon links are checked the same way, again; a redirect from `https` to `http` on the same host is refused.
+- It asks `https://<host>/favicon.ico` (TLS 1.3, Mozilla's roots, verified against the name). Only when the TCP connection to port 443 fails does it try plain HTTP on port 80, on the same address. If there is no usable `/favicon.ico`, it reads at most the first 64 KiB of the site's home page for a `<link rel="icon">` and fetches that (which may be on another host, such as a CDN). SVG is never fetched or served.
+- It decodes the image (PNG, JPEG, GIF, BMP, ICO or WebP, at most 2 MiB, at most 2048×2048 pixels; a header claiming more is refused before any pixel is decoded) and **re-encodes** it as a fresh PNG of at most 128×128 pixels. The whole fetch has 10 seconds.
+- It caches the PNG in its cache volume as `<host>-<scheme>-<port>.png` for `RIZZY_ICON_CACHE_TTL_SECS` (14 days by default); when the cache passes `RIZZY_ICON_CACHE_MAX_BYTES` (256 MiB), the oldest entries go first. Breach-check answers share the volume and the cap.
+
+A site with no icon, an unreachable one, or one that answers anything unusable gets `404`, and the client shows the type icon. The web vault fetches each hostname at most once per unlocked session, two at a time.
+
+### The breach check
+
+The web vault's **Password health** and its "Check for breaches" buttons ask whether a password appears in [Have I Been Pwned](https://haveibeenpwned.com/Passwords)'s corpus of breached passwords ([ADR 0053](adr/0053-hibp-breach-check-egress.md), [CRYPTO.md §11.16](CRYPTO.md#1116-breach-check-hibp-k-anonymity-m3)). It is **off unless you run it**: without it, the vault says "Breach checking is not enabled on this server" and nothing leaves the server.
+
+**What leaves the browser, and what your server sees.** The browser hashes the password (SHA-1) and sends only the first 5 hex characters of the hash, with no session token, account or item id ([INV-77](THREAT_MODEL.md#8-security-invariants)). The `icons` role asks `https://api.pwnedpasswords.com/range/<those 5 characters>` for every hash that starts with them and relays the answer; the browser compares the rest itself. So the `icons` process sees 20-bit hash prefixes of the passwords users check, never a password or a full hash, and Have I Been Pwned sees your server's address, not your users'. The answers are cached by prefix, shared by all users, and the role logs no prefix: its log lines are the route, the status and, on a failure, a fixed cause. Your reverse proxy sees the request bodies too; keep its access log off (§6). A request moments after a vault request from the same address can be linked to that account by timing; ADR 0053 accepts that.
+
+### How to run it
+
+The role is the same binary with `--roles icons`, in **its own container** ([ADR 0010](adr/0010-server-shape.md) §2): it refuses to start combined with another role, with `RIZZY_DATABASE_URL` set, or when it can see the secrets file or the SQLite database, so never mount the data or secrets volumes into it. It needs outbound HTTP and HTTPS (ports 80 and 443) and a writable cache volume. The breach check has its own switch, `RIZZY_BREACH_CHECK` (default `off`); item icons are on whenever the role runs.
+
+With [`deploy/compose.yaml`](../deploy/compose.yaml), the `icons` service is ready behind a compose profile:
+
+1. In `deploy/.env`, set `RIZZY_ICONS_UPSTREAM=icons:8080` (and `RIZZY_BREACH_CHECK=on` if you want the breach check).
+2. `docker compose --profile icons up -d` (the proxy is recreated with the new route).
+
+The shipped [`Caddyfile`](../deploy/Caddyfile) routes `/api/v1/icons/*` to `{$RIZZY_ICONS_UPSTREAM}` before its catch-all; by default that is `rizzy-vault:8080`, which answers `404` for those paths, the "not enabled" answer the clients expect. With your own proxy, add the same path rule:
+
+```text
+{$RIZZY_DOMAIN} {
+	reverse_proxy /api/v1/icons/* icons:8080
+	reverse_proxy rizzy-vault:8080
+}
+```
+
+With Quadlet (§13), copy [`rizzy-vault-icons.container`](../deploy/quadlet/rizzy-vault-icons.container), [`rizzy-vault-icon-cache.volume`](../deploy/quadlet/rizzy-vault-icon-cache.volume) and `rizzy-vault-icons.env` (from [`rizzy-vault-icons.env.example`](../deploy/quadlet/rizzy-vault-icons.env.example)) next to the other units, set `RIZZY_ICONS_UPSTREAM=rizzy-vault-icons:8080` in `rizzy-vault-proxy.env`, reload, start `rizzy-vault-icons.service` and restart the proxy. The unit has no `[Install]` section, so it does not start at login until you add one.
+
+**Limits.** Both endpoints, `POST /api/v1/icons/fetch` and `POST /api/v1/icons/breach-range`, need no login: anyone who reaches your proxy can use them. Each has its own per-address rate limit (30 requests a minute, bursts of 10; the /64 of an IPv6 address counts as one), behind a trusted proxy by `X-Forwarded-For` as for `api` (`RIZZY_TRUSTED_PROXIES`); with several `icons` replicas, each has its own limit, so the effective limit multiplies (ADR 0052 point 6). A breach-check request whose upstream fetch fails (unreachable, slow past 10 s, or an answer that is not a range) answers `500` and the vault shows "unavailable".
+
+**To turn it off**, stop the `icons` container and point the proxy's icons route back at `rizzy-vault:8080` (unset `RIZZY_ICONS_UPSTREAM`). To keep item icons but not the breach check, set `RIZZY_BREACH_CHECK=off`; there is no switch for item icons other than the role itself. Clearing the cache volume is safe at any time.
+
+**Unverified here:** the compose service, the Caddy route and the Quadlet units were not run under Docker, Podman or Caddy in this change (the end-to-end tests mock the role's endpoints in the browser; the role itself is tested against fake sites on local sockets, never the internet). Caddy's `{$VAR:default}` with a `host:port` default is read from Caddy's documentation, not tested.
+

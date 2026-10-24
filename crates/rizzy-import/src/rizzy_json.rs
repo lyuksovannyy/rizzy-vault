@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! rizzy-vault's own plaintext JSON export, read back ([ADR 0027] §3 and §6; roadmap §4.2).
 //!
 //! **Document** (ADR 0027 §3). `rizzy-client` writes it; this module reads it:
@@ -39,7 +41,7 @@
 //!
 //! | Member | Rule |
 //! |---|---|
-//! | `type` | required; an integer 0–65,535. A type the schema refuses (unknown, reserved, `0x0000`) and the vault-settings type `0xF001` skip the item ([`WarningKind::UnsupportedItemType`]) |
+//! | `type` | required; an integer 0–65,535. A type the schema refuses (unknown, reserved, `0x0000`, the retired `0x0009` of ADR 0078 §1) and the vault-settings type `0xF001` skip the item ([`WarningKind::UnsupportedItemType`]) |
 //! | `fields` | required; an array of ≤ 4,096 entries ([`MAX_ITEM_FIELDS`]) |
 //! | `trashed` | optional boolean, default false |
 //! | `created_ms` | optional integer fitting a `u64`; written as `import.created_ms` |
@@ -67,13 +69,20 @@
 //!
 //! # Readings (conservative, where ADR 0027 §6 leaves a detail open)
 //!
-//! - **A write the op may not make.** `check_carried` refuses a known key that belongs to
-//!   another item type and a key this client never writes (`share/<id>/secret`, M5's;
-//!   `uri/<id>/match` was the same in M1, owner decision 2, and carries from M2 once ADR 0037,
-//!   Accepted, assigned its enum values). Such a field is left out, counted
-//!   ([`Counts::dropped_fields`](crate::Counts)) and warned about
-//!   ([`WarningKind::FieldSkipped`]); the item's other fields are imported. This is how
-//!   `rizzy-core` already treats those keys in a restore or duplicate as a new item.
+//! - **A key of another item type.** `check_carried` refuses a known key that belongs to
+//!   another item type (`WrongItemType`: a `ssh.host` on a Login, a `card.number` on an
+//!   Identity); the whole item is skipped ([`WarningKind::MalformedEntry`]), like any other
+//!   per-item write failure (ADR 0055 owner answer 4, option (a), under ADR 0027 §6 "Per-item
+//!   failures skip the item, never the file"). The `ssh.`, `api.`, `license.` and `wifi.`
+//!   keys are known keys of their own types since ADR 0055; before, they were reserved and
+//!   carried on any type. The `bank.` keys ADR 0055 also assigned are reserved again since
+//!   ADR 0078 §2 retired them, so they are carried on any type.
+//! - **A write the op may not make.** `check_carried` refuses a key this client never writes
+//!   (`share/<id>/secret`, M5's; `uri/<id>/match` was the same in M1, owner decision 2, and
+//!   carries from M2 once ADR 0037, Accepted, assigned its enum values) with `NotWritable`.
+//!   Such a field is left out, counted ([`Counts::dropped_fields`](crate::Counts)) and warned
+//!   about ([`WarningKind::FieldSkipped`]); the item's other fields are imported. This is how
+//!   `rizzy-core` already treats that key in a restore or duplicate as a new item.
 //! - **An empty `raw`** decodes to the Cleared value, which a new item never writes (the
 //!   writer leaves a cleared field out): a mistyped member, so the item is skipped.
 //! - **A `sort_key` that is not a `SortKey` payload** (empty, over 64 bytes, ending in
@@ -394,9 +403,10 @@ fn map_item<R: CryptoRng + ?Sized>(
             value.expose_secret(),
         ) {
             Ok(()) => writes.push(budget.take(key, value)?),
-            Err(WriteError::NotWritable | WriteError::WrongItemType) => {
+            Err(WriteError::NotWritable) => {
                 tally.fields = tally.fields.saturating_add(1);
             }
+            // `WrongItemType` among them: ADR 0055 owner answer 4 skips the whole item.
             Err(_) => return Err(BAD),
         }
     }

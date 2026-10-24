@@ -1,0 +1,389 @@
+{
+  "file": "db_backup",
+  "generator": "ChaCha20Rng (chacha20 =0.10.2), seed_from_u64",
+  "schema": "rizzy-vault/test-vectors/v1",
+  "seed": "2312",
+  "spec": "CRYPTO.md §9.8 (ADR 0071); replayed by rizzy-server tests/db_backup.rs",
+  "tier": "A",
+  "vectors": [
+    {
+      "id": "db-backup/single-chunk/0",
+      "inputs": {
+        "backup_id": "0d57b2699b31af84cd471bb969637490",
+        "backup_key": "887e2d6f085155b3f2d8f01b6bb1d5a24106fe5730811ece387d9f077cbc80f5",
+        "backup_key_id": 1,
+        "created_at_ms": "1780000000000",
+        "nonces": [
+          "33cdbab660a3285203d91fa7007971f17547e7217dcfc2df"
+        ],
+        "plaintext": "fd9f6a3b4787775183313a5aeb253bd62890a3596cb5732b39e03c6ba18781ec15b82d00b169d463791f3260ae9da9878140ea1c76b8673b8d500afdc0ca874aef10daac5524ba4efb12676d3eacf9c9412606da3a83562adf049fa5b725c9b7be4df78652fcca13d15a31fe3373580a48ec6f95565e8fabee6033967b8cdbcc770ebd6af1f719f3da3cc308b8b9a9aa3425183b67b79ab26266891e837971fd747cc64cc48be217bf959deac7dadb6d6131c54441b8870bb5cd626614a45f45d8d350440562a215c1e2369ee2437036da708cfed4e3820d8af1d4070dff239be859bcacb4af3da5cc498bba132dce65d122488bf85bfbe39836650ecd12b985c96f4feb805c4e991fac1e718968775e366a91d0fa29b0eda98459e457387ed724dc5a592bcb74b3044634420e22b6bd4659e8baa427e0b83053428b27b36aa999ba96b97f0657fa4d64fe083a7376bda9049ec11e86e840f2de61e82ba71e0c4925a3144aa8abee62d0ee3859fa1c735518be1a0be676178e488c9bc6cd7e769c8feae34a13ba32b284c9182171d1d36843e361119b03db6c2d0fc6d59e32831f6d337902b2f3e084f54721ffe8afd57a30158c1edcc327517ad927923be2665e462034cc9e561c631037fc3fb9a4cbbfe3f1b068ec8fd24b3ae6269be6eb9db028a08796dbd52ce63935683077f3f1353dc2d1c1dddf55520c84827c9a78d523b1c048d86a4ed16b890df71286246077d93faa110c307437b145bde0f9ef1ba5be8fb05994f408488d83b113b4a994eb7cf94107dc0aa51ef6376dbe7854d7efdeeb804f3c3258c210d1f40d0bcba36c8c41347e05305c3b1f7429820a2acd769aa1fb618c57d921c39ca0efa624438e1742dd868c37481c522949a3a28b4db3cff344fa5d45f2233a0926ddcf95b8d1ea880dd0709d20c2158bdca001f10183cba93d53d5c6fd40dc67ef2eaf4689fc176a5bdbf9ce5de03b27fd939867e47a42f05f074b41241e91a7a131f9e1cf78d7c33f28b562863297969f2f89c36d5f6a7dea4cbaa8ff842d7fce784978b7a08bbe1c417d37a84c692c020052492d000d34e5c3e22f912d525f802792f3e04243b0db16c6a8e36f0ee08cf40cf9f582212aefb4ef9a01e4fa130d0caca43ce24ab8791a9dc49128adeed56ae157baa61c971858158b3309244e1712510bb26afd9f44bf89ca871e028d8eb6b45388907bf1809d9e80512a29e8770c05ba2e627d8ade71ab5507980bc93accf2ce8363d031a4476e0c508c3f6b0ae86979d819d278dcff7f7acf6755f43df33c0e8b1397e5f9027d77638d3785652fd6b7cae88415e7cd675200727abff0b1a12d83e76d5758cefa10e55999f30296a546bc44fcb6acaf5457f5a29ab3638bc79c8a4541778960974608"
+      },
+      "kind": "db-backup",
+      "name": "single-chunk",
+      "outputs": {
+        "chunk_ctx": [
+          "0d57b2699b31af84cd471bb9696374900000019e70448800000000010000000000000001"
+        ],
+        "file": "72697a7a792d7661756c742d64622d6261636b75700000020d57b2699b31af84cd471bb9696374900000019e704488000000000100000000000003e8000000010101029a150f2ed7d4fdeea12fe5176123f233cdbab660a3285203d91fa7007971f17547e7217dcfc2df265e7abd0750b87d770104d3549d1409954585ff35fbdc1f12ee57695566463a2b84a9f51c8bb84b6ca531be335afde84ed02b53d46a6e6971b72ca8d9712cc6c56e76d5315806d3dbf51c0fde559280d1e235b231d4b3fbf3216d2abf2d9cc11255d56e7668200048f52f3969ce51ac65f0e9b98a2f954db13e6adc1e589565775cc9b91b961d971ed54860d54ac1d9b91021ee02f05bf556df8551815b23512371e9071c217302ebff56fea8f534515500f108ff0c538732a9f68f2173e648e1ce5472cc10a1b1c474d24f85716fc9dabd9db9d27f9b819987961de8098155db0b172ab1c2581c8a177a6de9b8be258d00c425be342a51e50bd6dbb00936f23faf772125d936be0417b9fa456891a4728c2c849ce7bce264006fc28a8376ded99d1205169206179c31a363a2ee746c3c720fa30a788420159aa69b240650766190fc1798f65ade5daaa07a2e1269f324ce346b4b5ff162dcc6e0f4c80044209262e21bb6f9ac22d8df9f5f69db31066a0af0c11e46b12a59620b6c39a773aabb68e3fca09d5637f6bdb1d67f041cfdf8b79fbc9e1c05ebfb9c17135a64d9e6030740269a7c43c5350317f1dc7cdf57e5a3481847f81e7dad0934d499f7297c1bea6a85203c436f3288d94947d0ada37e8a66a2b438db1ce16a3c5601988eb127fdf37d81df080e5b43a1456ac0c213734716676cc228570f8b28c4de628e2bdbddcba0b3c390f27ff13b1f481e4586fcad502ae901b903cf780472df2013e9dd7a1ae444beebe776d477e4026bda251dcf381caca5a972c855087c157435d8b89e313a25f521809087fcc13c72983c1c8a4a440b18afeddc17f386b2d25c370d512b7c8156208c4d335a74f8d99cc1b80bec7790709d2810dd5a78aba9e54e767b4385149c744ccf2458765d088de35c2658c95dc9cd863eb0c4cb79f0ee5c0e8e7e5b40270a4c77a4ab8f896a0d3e6be41180ae5df8716ae797c6f9d715b0cd20871d508658068698dd1e6dddd7c3246f48e45515bebf8e34742c76707b28d4f8fd63419ab821f356b2b555b1486ca07d1d610fbd27a6777134479406a97a77f866d133be60d9414181066db7ca9cd4a008efa169fbec780a2c7a26207794cd993a3302df5e02944d43284d1066c5be0be7ad03bc410159848279238df6fd13f4976fa8f608b86229566f43c6f34ed34e7ff4a715e5c0ad9c145da6eda99799a98a0c15b9cb912224834d23a60176e6db944746466a360586c74a88d8674196ef648bb7c3c63d3c68c259f01695e04f64864cfd6e863a87896a399ce48a0680a00156ef54e0cb71e1cbf9184b35058e2e1e9cee6d5655de6df6c1b410cc8b917a69472ccd58ce967a18c59c78e6be126d51f213f5b8b86ac1c7ce4af99ac7fbad646db3a818014d579d136fdea0d39ee299be4d92880ed294f24170b34966ec34902b0b3564730d3d72f5957a8019d54cd2316323417e",
+        "header": "72697a7a792d7661756c742d64622d6261636b75700000020d57b2699b31af84cd471bb9696374900000019e704488000000000100000000000003e800000001",
+        "key_id": "029a150f2ed7d4fdeea12fe5176123f2"
+      }
+    },
+    {
+      "id": "db-backup/single-chunk/1",
+      "inputs": {
+        "backup_id": "be44153687dbd49c807a1a978c773c66",
+        "backup_key": "887e2d6f085155b3f2d8f01b6bb1d5a24106fe5730811ece387d9f077cbc80f5",
+        "backup_key_id": 1,
+        "created_at_ms": "1780000000000",
+        "nonces": [
+          "cd0b482f34b4e91e4a438b845fc194990a91d0e532c925bb"
+        ],
+        "plaintext": "b4a9810cc8aad35a880b5b1e175c0a4524003ff6788dcd7f51569a5238b03791cd66ee332535b04aeca255661cb5e57685a629b2886f509665a64e5fced3bf6ab4caebe248b44545564613350294fd85ff5e804705919d9d15265027c3ece17f62d0bf0d801d0a217b2c4799d54c7fd022f52a2aee727fa3c0cd99c59de29845b408527af558febddaed5e62c1ba4f629294d417b32ca98f2e26c86163e0744010d6c4feb40bd2c97a47592714e418a0b1e071ef8908ff12cd51ae2ff416755dc5f5e2e6f4a8892a3090e58f3c32da74b2f5d6b091a2281cb304cf4505b5e12803ec81107723aeddb9c0d020b8ff4a85d47ab5b0844e2f2afbd5e183c0a98f27b0c97b9c8f6fe6f4be0109693a7a1e3306aba676b447201d60cea8dfee55d704b17d2eb563d1e09b5f30080f60e4ad4318c064b212aa263c2a014229a80404bd19de6936b76a9f1a6b8777263d9242b0b0b006d56d2582c78b3abb6300f7c2e5c00b27d01092c21fc82c648745f1a0eb2336a0e4ebc2bd0af001b5ffadde522d1c343f3a5bbb11c7b6c0a22eca2c69aed9c94e7acd6278b224c2d27926fc8e4d418fdcc11fbe817b9b1048927ae39d2af7d47129b6b88b702ee1d878f1b06a1ecce96a610045132966db3127e394ee37af414e13ff1370548e1cd337f81cf489fa4673541cfd3d863c85464983a3187353fea0755f3db700731ef27a8edc93b77eb81eca008c8ce5d4bd199be81939a96397459bf1f9743a573562726c7f872c19c22d73557b4447b368ce765d2f9ee24d397fb592be6c40150f81a9713a727d98c2c06221ede3e8675179ed5cf04494a7775855fd132b35e9331f3ee21ae8ee3173b8ddcddabf22c056fc0c912902a8029e7934fb872dca5a3970d6f6d4a8454fa5c0e5af24bb7a78c26e81ab29f5e4e67b78103af51af6f8c40c677b307e748fd0013af2806f4eda0a7039282beeaedeee62b44374697f6ccb00d60bbf0fbe6e3de15e4c88cdfbd23f25ef2209a36842b0d328801476366f138f40956e4971204ed0a927a975c452e506db3476200a29bddb45e754a0ac4daca3d131ef2c759aeffb0ca8e22cbb764d7b7978b067ff6e7965f62f4daea7557aad450fcc3f82abb5e7cb08f8bbc33a782da7bf88f8117175f312588fb651dc00032a52b8691c7ddfe1590f52b2892da749c61ff3e50be26385df933ed5a6dca8b0e2428ac034ed5b51533ea159d53aff678c7d5cecede8b592f6401c468cde4a0824cb2d3651db36ba46d7cb0eeefa2e57d30f6c61685633be06e2e60a919806740c5e975c25f7646d80772d085ea1114390979b9812a4e7db00ae70a4106c53b47b63ffe86faa33214a27e2be3d4c43a5edafc14047a164bd06919d63cd922403eb854430187951ad76f1eebd26"
+      },
+      "kind": "db-backup",
+      "name": "single-chunk",
+      "outputs": {
+        "chunk_ctx": [
+          "be44153687dbd49c807a1a978c773c660000019e70448800000000010000000000000001"
+        ],
+        "file": "72697a7a792d7661756c742d64622d6261636b7570000002be44153687dbd49c807a1a978c773c660000019e704488000000000100000000000003e8000000010101029a150f2ed7d4fdeea12fe5176123f2cd0b482f34b4e91e4a438b845fc194990a91d0e532c925bb5633cbef08e3e72c8806bf148a16f1b6faf04fd824cc3cda1a7e01960464e1f0df473e3ca9a174a0550da8c8b9da87ab7c2641da076aaed000f9312a52d3d78894e96def007af46ab6e6a55f31b95b2b8dd1720b832003f3adb28d3cd3168ec2c5f2d87d37869e53bed2bd3547de1f9de1490c25df24db7f74f31a5a9d14f03beb0207ac4eccead3cefd85e59e2c63c70bc93ecd37d8e5bcb49d3a81d6986437bb9e8e54bad4ef4b2471244fa96d2da3eed9baecb225a0b223e6822c807a01f93e7baca1bce74b06e526a70531431712d8c5f0bbe08d6cbf5a67e508e73d23753585cfa55a32172d121c42df101836267cbc22ce476a0e7d8031e2987c1c27bb312c7346c766201f55432a5aea989d1facccd21a75341869485c4b6baf163ec8eea0401c89ce91f874806c18392ccc9565683725df575d4f96a05f7fcaea50f61c69c472a2cc054bb6c5fa0ec6302debd892ef176f3eab0c750a75e93ce1be65d02f0089af5d57b839fb6aa97f479472ad1e0862abbf8a23f4c820303f0a9a2a9229a37711ece7fc5f0442016a4ce58ca3a0db83b092092ff74bfbc6779926a01451077b6943b618555538bdb01022c6101f7a041a93c911459ecd5270726fde69b31740c5906331686940d02a155cbab7770a241f7de7f7ce68a33a76202ff64e732f79461a256402db6b3e136614804296f53a9dbf9d8c6996fa1e7d9761104e5c2e0e17777d80dde6aa1bb4d8bb20990f8609d6fe38bf12143550e7f5d2f088e7d8c81313c3a4ce4c414411b906c0ec793cac6231696eb4772e3152cf8804d9a4aae705426fe4f5fa4305a5f15fdc89a775daecc65def80bc7bb6034fc476b1de9f9e8e9a3a31bf8889ab527e687145191f17eafe5c93e172128de5352877e2df072dcbe676fe7f2f7ef15a056fdf70b4e954f2cf8aae1c1efb683082842d6f94dda2cee31d546a77d0562f5e547c2b0b9ea36fceecea5f4d3c803b9039774c71c742ac7d098d0b03855c01dfc129f26cbabfcd18935f8945f6819a8d55763a343edb0733d9db6fe35095c5e1ac6ae1236abb6cbab39c354506a871ec6eb02dba44cf055c78dd0d86a1751708ede3d6b151734936ba9514ea311d05a8d48c5439a07e9c7edd2e35ad686c3e4cc557eff53d58facf2dcbf89c4af48ca97a74b56ade1cc8b9b481729d0f8f8f2a4036ddf4b38e72afbb7f3244b509e071831418034993e191fd005960514756aaca6d67a0ff1db90f6bc1addb2edcbd405866940b3adbdc6535866674bc0c300a76f7aef0d40c7a3e2daf4a9cf68856f4ae418084ee7459f797dbf4bce2042ab070b0447faa26787b211c7722890db58d90c0e46babd8321b8bacb0f5185079f7f4447a07ac0a76f9af19842a243cf4ed4b80fd8dbc1198f9f86a3fdc526c44acba5d843adb777c06eadc3d4c149e2db860e10a0a8b9d3a6cd819b5aa4c2189199dd41ba1eeb94bef05d0",
+        "header": "72697a7a792d7661756c742d64622d6261636b7570000002be44153687dbd49c807a1a978c773c660000019e704488000000000100000000000003e800000001",
+        "key_id": "029a150f2ed7d4fdeea12fe5176123f2"
+      }
+    },
+    {
+      "id": "db-backup/three-chunk/0",
+      "inputs": {
+        "backup_id": "b794f9ce07c4945f6043dd739fae01dc",
+        "backup_key": "887e2d6f085155b3f2d8f01b6bb1d5a24106fe5730811ece387d9f077cbc80f5",
+        "backup_key_id": 1,
+        "created_at_ms": "1780000000000",
+        "nonces": [
+          "600f9d1c4ab1ddc4a9473ed7325475ad85543067f163cb17",
+          "b2bfeb15107fe57ab30b3562109e0090fda5ea5431244c9e",
+          "67b79dfe24e5530f815028aa1708f8bbef573a7ccbb4e841"
+        ],
+        "plaintext_len": "16778216",
+        "plaintext_rule": "byte i = i mod 251"
+      },
+      "kind": "db-backup",
+      "name": "three-chunk",
+      "outputs": {
+        "chunk_ctx": [
+          "b794f9ce07c4945f6043dd739fae01dc0000019e70448800000000010000000000000003",
+          "b794f9ce07c4945f6043dd739fae01dc0000019e70448800000000010000000100000003",
+          "b794f9ce07c4945f6043dd739fae01dc0000019e70448800000000010000000200000003"
+        ],
+        "chunk_sha256": [
+          "85ef54e6f9fb25ecc7c358757bac8233f06e64168dd527c938db675d59472cc1",
+          "10df1b730ddbaa88e9748bfe026567d27017cde3b4b4f41703383a0724ed6cda",
+          "a38f920f36e0880aa7ec0889b55c2f234bbe111316d9ee8ca838b519501e5ad4"
+        ],
+        "file_sha256": "40c394e6016124e43a7696e01726276d8f2bf64019f7c4cbc430fa6a3fec44fe",
+        "final_chunk": "0101029a150f2ed7d4fdeea12fe5176123f267b79dfe24e5530f815028aa1708f8bbef573a7ccbb4e8412a980e7da97c0f8977e8b8d61a8c05a3e4e243c649dba28d3165eb861317869a72f29ecb0f89c88d66e717cc25c425c9669d8dc829150b4483e11f4f079ec84fd663626892353148e4f1656b16c4f22e435322847929bb4bdfe89667d4c69f0ad5d5ee424725c20bb523ef3708b4e1db909d087e99aee9d378cd25585081d060f0427105afba9fdedfa97676a12ca5ce43eaa2e6bb80098359de3e2415f9e8f219719b2873b1e33e0e835c6644e656a7589b38a60a00a42ec21a82115de920476f29697aaf46132eaa1f2c9c7cfe25cc481c30811f7c07544ed240f3ebff446998e260af2181410c8caac1ef7def2e8df7043d7d7ebfcb1932b819803f2376f19e4002f9c53819772d01f7c446068129390b5610b39163d6a46fc0c786d227cb27779e69ad685e9bc7ed5fc6323f4e224613cd02119356954555072fce6768df565d31b251dbd1f1a0cd9d6cd5ec6f78448a9155e8b481f094ef0311a74f40c4a7b6f8022f5794ea27a767f6864b5f61e33b39dbd65c302badfb1f21a789edc5f188df912204e1813c6f927fbd018eaef076df5cdfbdf9ded6112ea389153062f3edfe49590009c31cbfb4220ca7c356a98a9b05f3b69bc5259e07d48483addaa578073777e7717d69e85db342696df88c45024f033f9e7b0ca59da3c8e18adbf0a0bf52540e42bfb118541669779b6bcad0eb9fbd6e41380267df6d1058051dae40a0c10fafcf0bed6af09cc7fd3ab0e30f6dddf014920d4ba81c4bf85b4f8f475b5a3d9622871b84807a3a2ffdf0d40bf567ad478abd7f8a3539cd1997fb04ed6036a9515b76d1fac781777dd240ef5d2c7da86ff9ce54d95f535d0c5bd1807e72bb1fee87a73a37e892bf4c0b3b8dd24f938e2eae0ea79d005a683a3a2af5867bd9f4dba8b0c33bc9fa11fab506d3cfd6393e02c5456cab985c300ccace7aab03e545a6dd59dd77f45cab7c4b2e91ce3cfe121e81b37555ea6026f1038d0f9cdc8e04b93532424b00a28ceec93f52c453b77966bb0e9b9e1d8b0b6aa9a39541933ba31fe91a6f3a0ad88fe50080bee89a2710b2bb51c18541c76ac979b98083cf09e13c1fa4cce8b12efdc8a24df8a2370a740f723b4cf628b50e7d565e6342c408f14aec24f62d13fbd6342141361d8d09aa31e3f6e5ea62c3f0fc005f46a7db0d23ad6513f15da0559a924ada1a4c62c17d284ac85b84182d9e883e3c3e202bb1575635f17989104dbe754e56d0c533a0c5332546e39c1d5f65e919301cd83ae6f73d173d07d76e7699104859504655d94065d5144a83fc539905cf9d5a29643a0f11ff6026a8fe61784b2fd7179f8efcae90915fdf499b226042e38348f18762906bf0214cfbc19d8bc981f5795a8057e3c1934544724a6d9444b1efae3fe0f5e6cc475f080b0e27a589cf04371793645b6141920baff52a7ce0c337f9df80cf01ca2bdb7ce93373adbe43f96c8a60862984f3ccf6",
+        "header": "72697a7a792d7661756c742d64622d6261636b7570000002b794f9ce07c4945f6043dd739fae01dc0000019e704488000000000100000000010003e800000003",
+        "key_id": "029a150f2ed7d4fdeea12fe5176123f2"
+      }
+    },
+    {
+      "id": "db-backup/reject/0",
+      "inputs": {
+        "base": "db-backup/single-chunk/0",
+        "mutation": {
+          "len": 1153,
+          "op": "truncate"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "kind": "malformed",
+          "rule": "the file length does not match plaintext_len and chunk_count"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/1",
+      "inputs": {
+        "base": "db-backup/single-chunk/0",
+        "mutation": {
+          "len": 64,
+          "op": "truncate"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "kind": "malformed",
+          "rule": "the file length does not match plaintext_len and chunk_count"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/2",
+      "inputs": {
+        "base": "db-backup/single-chunk/0",
+        "mutation": {
+          "bytes": "00",
+          "op": "append"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "kind": "malformed",
+          "rule": "the file length does not match plaintext_len and chunk_count"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/3",
+      "inputs": {
+        "base": "db-backup/three-chunk/0",
+        "mutation": {
+          "a": 0,
+          "b": 1,
+          "op": "swap_chunks"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "chunk_index": 0,
+          "kind": "authentication"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/4",
+      "inputs": {
+        "base": "db-backup/three-chunk/0",
+        "mutation": {
+          "op": "drop_last_chunk_and_fix_header"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "chunk_index": 0,
+          "kind": "authentication"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/5",
+      "inputs": {
+        "base": "db-backup/single-chunk/0",
+        "mutation": {
+          "chunk": 0,
+          "from": "db-backup/single-chunk/1",
+          "op": "splice_chunk"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "chunk_index": 0,
+          "kind": "authentication"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/6",
+      "inputs": {
+        "base": "db-backup/single-chunk/0",
+        "mutation": {
+          "bit": 0,
+          "offset": 24,
+          "op": "flip"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "chunk_index": 0,
+          "kind": "authentication"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/7",
+      "inputs": {
+        "base": "db-backup/single-chunk/0",
+        "mutation": {
+          "field": "created_at_ms",
+          "op": "set_header",
+          "value": "1780000000001"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "chunk_index": 0,
+          "kind": "authentication"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/8",
+      "inputs": {
+        "base": "db-backup/single-chunk/0",
+        "mutation": {
+          "field": "backup_key_id",
+          "op": "set_header",
+          "value": "9"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "backup_key_id": 9,
+          "kind": "unknown_backup_key"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/9",
+      "inputs": {
+        "base": "db-backup/single-chunk/0",
+        "mutation": {
+          "field": "chunk_count",
+          "op": "set_header",
+          "value": "2"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "kind": "malformed",
+          "rule": "chunk_count is not ceil(plaintext_len / CHUNK_LEN)"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/10",
+      "inputs": {
+        "base": "db-backup/single-chunk/0",
+        "mutation": {
+          "field": "plaintext_len",
+          "op": "set_header",
+          "value": "999"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "kind": "malformed",
+          "rule": "the file length does not match plaintext_len and chunk_count"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/11",
+      "inputs": {
+        "base": "db-backup/three-chunk/0",
+        "mutation": {
+          "field": "plaintext_len",
+          "op": "set_header",
+          "value": "16778217"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "kind": "malformed",
+          "rule": "the file length does not match plaintext_len and chunk_count"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/12",
+      "inputs": {
+        "base": "db-backup/single-chunk/0",
+        "mutation": {
+          "bit": 0,
+          "offset": 23,
+          "op": "flip"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "kind": "malformed",
+          "rule": "format_version is not 2"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/13",
+      "inputs": {
+        "base": "db-backup/single-chunk/0",
+        "mutation": {
+          "bit": 7,
+          "offset": 0,
+          "op": "flip"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "kind": "malformed",
+          "rule": "not a rizzy-vault database backup"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/14",
+      "inputs": {
+        "base": "db-backup/single-chunk/0",
+        "mutation": {
+          "bit": 3,
+          "offset": 106,
+          "op": "flip"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "chunk_index": 0,
+          "kind": "authentication"
+        }
+      }
+    },
+    {
+      "id": "db-backup/reject/15",
+      "inputs": {
+        "base": "db-backup/three-chunk/0",
+        "mutation": {
+          "bit": 0,
+          "offset": 16777534,
+          "op": "flip"
+        }
+      },
+      "kind": "db-backup",
+      "name": "reject",
+      "outputs": {
+        "error": {
+          "chunk_index": 2,
+          "kind": "authentication"
+        }
+      }
+    }
+  ]
+}

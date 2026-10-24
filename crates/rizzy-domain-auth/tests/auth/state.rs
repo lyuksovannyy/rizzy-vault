@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The signed account state: enrolment by compare-and-swap, lost races, forks and repeats
 //! (CRYPTO.md §10.2, §11.2 step 7; INV-25).
 

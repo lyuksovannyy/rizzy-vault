@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `AliasVault`'s CSV importer (roadmap §4.2, M1; threat model A16). It may not panic,
 //! and every item that comes out keeps the importer's guarantees ([`import_common::check`]).
 //!

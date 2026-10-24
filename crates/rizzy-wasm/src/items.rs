@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Items across the boundary: what a list or an item view shows, and what an edit asks for
 //! (ADR 0013 §3 rule 3, "Plaintext crosses at the smallest useful size"; ADR 0018 §6–§7; the
 //! writes are `rizzy-client`'s `items` and `lists`).
@@ -9,11 +11,39 @@
 //!   list, element and attribute, its kind, and its value **only if the schema shows it**. A
 //!   concealed value (passwords, TOTP secrets, card numbers, hidden custom fields, and to be
 //!   safe every key this build does not know) crosses only through
-//!   [`crate::Session::reveal_field`], on the user's request.
+//!   [`crate::Session::reveal_field`], on the user's request. The `pwhist` list (imported
+//!   password history, ADR 0018 §7) is left out: the schema shows its values, but they are
+//!   former passwords, so they cross only as a password-history entry.
+//! - **Password history** ([`HistoryEntryView`]) carries, per entry, its source (`merge` for
+//!   the history of `login.password`, ADR 0012 §5; `imported` for `pwhist`), its position, its
+//!   date and its identity (the entry's dot for `merge`, the `pwhist` element id for
+//!   `imported`): never two entries share one, unlike the date. Never the value: one value
+//!   crosses through [`crate::Session::reveal_password_history`], on the user's request, so
+//!   the Worker never sends the whole history to the UI thread (ADR 0013 §3 rule 3). The host
+//!   names the entry's identity, not its date, on that call, so a sync that only reorders the
+//!   list between the listing and the reveal still reveals the entry the user asked for.
+//! - **Item history** ([`FieldHistoryView`]; ROADMAP §4.2 "Item revision history (restore old
+//!   versions)", M3) generalizes password history to every field: one entry list per field
+//!   that has history, the same `(index, id)` identity, the same values-only-on-request rule
+//!   through [`crate::Session::reveal_field_history`]. A dot is not unique across different
+//!   fields (one op writing two fields shares a dot between their histories), so a listing's
+//!   entries are only ever read, revealed or restored under the field they were listed under.
+//!   [`crate::Session::restore_field_history`] writes an entry back as its field's current
+//!   value, an ordinary edit (`rizzy-client`'s `restore_field_history`).
 //! - **An edit** ([`ItemDraft`]) is built in Rust from the user's input, call by call, and
 //!   written as one op by [`crate::Session::create_item`] or [`crate::Session::edit_item`],
 //!   where every write passes the schema checks. The draft holds the typed values in zeroizing
 //!   buffers until then.
+//!
+//! - **A conflict** ([`ConflictValueView`]; ROADMAP §4.5 "keep both / pick one", M3; ADR 0012
+//!   §4 step 5, ADR 0018 §6) lists a conflicting field's distinct values, the displayed one
+//!   first, each with its identity (the hex of the dot of the op that wrote it), its device and
+//!   its date. A value crosses only if the field's key is shown by default, as in
+//!   [`FieldView`]; a concealed one crosses through [`crate::Session::reveal_conflict_value`],
+//!   on the user's request. [`crate::Session::resolve_conflict_pick`] and
+//!   [`crate::Session::resolve_conflict_keep_both`] write the resolution as an ordinary edit
+//!   (`rizzy-client`'s `conflicts` module), naming the value by `(index, id)` as the history
+//!   calls do.
 //!
 //! The draft's calls mirror `rv item create`/`item edit`: `set` (a field, by its final key,
 //! including an existing element's attribute such as `uri/<id>/value`), `clear`, `tag` and
@@ -23,15 +53,16 @@ use core::fmt;
 use std::collections::HashMap;
 
 use rizzy_client::ClientError;
-use rizzy_client::items::{FieldKey, ItemId, ItemLifecycle, ItemType, Value};
+use rizzy_client::items::{Dot, FieldKey, ItemId, ItemLifecycle, ItemType, Value};
 use rizzy_client::lists::{ListMove, ListPlace, MAX_WRITES_PER_OP};
+use rizzy_client::rizzy_core::ids::VaultId;
 use rizzy_client::rizzy_core::item::key::ElementId;
 use rizzy_client::rizzy_core::item::schema::{
     ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_DISCOVERABLE, ATTR_KIND, ATTR_LABEL,
     ATTR_PRIVATE_KEY, ATTR_PUBLIC_KEY_COSE, ATTR_RP_ID, ATTR_USER_HANDLE, ATTR_VALUE,
     CUSTOM_KIND_BOOLEAN, CUSTOM_KIND_HIDDEN, CUSTOM_KIND_TEXT, Concealment, CustomFieldKind,
-    Expected, ITEM_FAVORITE, ITEM_NAME, KeyClass, LIST_FIELD, LIST_PASSKEY, LIST_TAG, LIST_URI,
-    LOGIN_TOTP, LOGIN_USERNAME, classify,
+    Expected, ITEM_FAVORITE, ITEM_NAME, KeyClass, LIST_FIELD, LIST_PASSKEY, LIST_PWHIST, LIST_TAG,
+    LIST_URI, LOGIN_TOTP, LOGIN_USERNAME, classify,
 };
 use rizzy_client::rizzy_core::item::tag::{tag_key, tag_name};
 use rizzy_client::rizzy_core::item::value::ValueRef;
@@ -50,7 +81,10 @@ pub const MAX_DRAFT_ENTRIES: usize = 1024;
 /// No `"passkey"` entry: `0x000A` (the standalone-passkey candidate ADR 0018 reserved) was
 /// released back to unassigned by ADR 0039 §1, which puts passkeys on the `passkey/<id>/…` list
 /// of an existing Login item instead (`rizzy-core`'s `item::schema::LIST_PASSKEY`).
-pub const TYPES: [(&str, ItemType); 9] = [
+///
+/// No `"bank-account"` entry either: ADR 0078 §1 retired `0x0009`, so a Bank account an older
+/// build wrote is `unknown` here and shows as "Unsupported item" (ADR 0018 §8).
+pub const TYPES: [(&str, ItemType); 8] = [
     ("login", ItemType::LOGIN),
     ("note", ItemType::SECURE_NOTE),
     ("card", ItemType::CARD),
@@ -59,7 +93,6 @@ pub const TYPES: [(&str, ItemType); 9] = [
     ("api-credential", ItemType::API_CREDENTIAL),
     ("software-license", ItemType::SOFTWARE_LICENSE),
     ("wifi", ItemType::WIFI),
-    ("bank-account", ItemType::BANK_ACCOUNT),
 ];
 
 /// The name of an item type; `unknown` for one this build does not name.
@@ -124,6 +157,37 @@ pub(crate) fn item_id(text: &str) -> CoreResult<ItemId> {
     Ok(ItemId::from_bytes(parse_id(text)?))
 }
 
+/// The vault a hex id names.
+pub(crate) fn vault_id(text: &str) -> CoreResult<VaultId> {
+    Ok(VaultId::from_bytes(parse_id(text)?))
+}
+
+/// The item reference every export takes and hands out ([ADR 0081] §A7, INV-103: an item is
+/// named by `(vault_id, item_id)` everywhere): the vault's 32 hex digits, `:`, the item's 32
+/// hex digits, lowercase.
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+#[must_use]
+pub fn item_ref(vault: VaultId, item: ItemId) -> String {
+    let mut out = hex(vault.as_bytes());
+    out.push(':');
+    out.push_str(&hex(item.as_bytes()));
+    out
+}
+
+/// The `(vault, item)` an [`item_ref`] names, upper or lower case. Host input: bounded and
+/// parsed without panics; a bare item id (no vault) is refused, as nothing looks an item up by
+/// its id alone (INV-103).
+///
+/// # Errors
+/// `invalid_input` for anything but two 32-digit hex ids joined by `:`.
+pub fn parse_ref(text: &str) -> CoreResult<(VaultId, ItemId)> {
+    let (vault, item) = text
+        .split_once(':')
+        .ok_or(CoreError::from(ClientError::InvalidInput))?;
+    Ok((vault_id(vault)?, item_id(item)?))
+}
+
 /// The element id a hex id names.
 fn element_id_of(text: &str) -> CoreResult<ElementId> {
     Ok(ElementId::from_bytes(parse_id(text)?))
@@ -161,8 +225,10 @@ pub(crate) fn concealed(key: &FieldKey) -> bool {
 /// One row of an item list (module docs). Wiped when freed.
 #[wasm_bindgen]
 pub struct ItemSummary {
-    /// The item id, 32 hex digits.
+    /// The item reference ([`item_ref`]).
     id: String,
+    /// The item's vault, 32 hex digits.
+    vault_id: String,
     /// The type's name ([`TYPES`]).
     item_type: &'static str,
     /// `item.name`, or empty.
@@ -193,15 +259,23 @@ impl fmt::Debug for ItemSummary {
 
 #[wasm_bindgen]
 impl ItemSummary {
-    /// The item id, 32 lowercase hex digits.
+    /// The item reference, `<vault hex>:<item hex>` ([`item_ref`]): what every item call takes.
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn id(&self) -> String {
         self.id.clone()
     }
 
+    /// The item's vault, 32 lowercase hex digits.
+    #[wasm_bindgen(getter, js_name = vaultId)]
+    #[must_use]
+    pub fn vault_id(&self) -> String {
+        self.vault_id.clone()
+    }
+
     /// The type's name: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`,
-    /// `software-license`, `wifi`, `bank-account`, `passkey`, or `unknown`.
+    /// `software-license`, `wifi`, `passkey`, or `unknown` (a retired Bank account, ADR 0078
+    /// §1, included).
     #[wasm_bindgen(getter, js_name = itemType)]
     #[must_use]
     pub fn item_type(&self) -> String {
@@ -276,7 +350,8 @@ pub(crate) fn summary(vault: &VaultSync, item: ItemId) -> Option<ItemSummary> {
         .field_value(item, LOGIN_TOTP)
         .is_some_and(|v| matches!(v.decode(), Ok(ValueRef::Text(t)) if !t.is_empty()));
     Some(ItemSummary {
-        id: hex(item.as_bytes()),
+        id: item_ref(vault.vault_id(), item),
+        vault_id: hex(vault.vault_id().as_bytes()),
         item_type: type_name(item_type),
         title: text_field(vault, item, ITEM_NAME).unwrap_or_default(),
         username: text_field(vault, item, LOGIN_USERNAME).filter(|u| !u.is_empty()),
@@ -467,16 +542,36 @@ fn kind_and_text(value: &Value) -> (&'static str, Option<Zeroizing<String>>) {
     }
 }
 
-/// The item that `id` names, if it is active or trashed.
+/// The item that the reference `id` ([`item_ref`]) names in `vault`, if it is active or
+/// trashed; `unknown_item` for a reference into another vault.
 pub(crate) fn visible_item(vault: &VaultSync, id: &str) -> CoreResult<ItemId> {
-    let item = item_id(id)?;
+    let (vault_id, item) = parse_ref(id)?;
+    if vault_id != vault.vault_id() {
+        return Err(ClientError::UnknownItem.into());
+    }
+    visible(vault, item)
+}
+
+/// The item the reference `id` names in `vault`, whatever its lifecycle; `unknown_item` for a
+/// reference into another vault.
+pub(crate) fn item_in(vault: &VaultSync, id: &str) -> CoreResult<ItemId> {
+    let (vault_id, item) = parse_ref(id)?;
+    if vault_id != vault.vault_id() {
+        return Err(ClientError::UnknownItem.into());
+    }
+    Ok(item)
+}
+
+/// `item` if it is active or trashed in `vault`.
+pub(crate) fn visible(vault: &VaultSync, item: ItemId) -> CoreResult<ItemId> {
     match vault.item_lifecycle(item) {
         ItemLifecycle::Active | ItemLifecycle::Trashed => Ok(item),
         _ => Err(ClientError::UnknownItem.into()),
     }
 }
 
-/// The displayed fields of `item`, concealed values withheld (module docs).
+/// The displayed fields of `item`, concealed values withheld, the `pwhist` list left out
+/// (module docs).
 ///
 /// `vault.field_keys` gives no guarantee about the order of two elements of the same list: the
 /// `order` attribute (ADR 0018 §6) is a value elements carry, not a property of the key's
@@ -488,13 +583,18 @@ pub(crate) fn fields(vault: &VaultSync, item: ItemId) -> Vec<FieldView> {
         let Ok(parsed) = FieldKey::parse(key.as_bytes()) else {
             continue;
         };
+        let parts = parsed.as_key();
+        // Former passwords: only [`password_history`] lists them, and only
+        // [`reveal_history`] sends one value (module docs).
+        if parts.list() == Some(LIST_PWHIST) {
+            continue;
+        }
         let Some(value) = vault.field_value(item, &key) else {
             continue;
         };
         if value.is_cleared() {
             continue;
         }
-        let parts = parsed.as_key();
         let hidden = concealed(&parsed);
         let (kind, text) = kind_and_text(&value);
         out.push(FieldView {
@@ -557,6 +657,456 @@ pub(crate) fn reveal(vault: &VaultSync, item: ItemId, key: &str) -> CoreResult<Z
         .field_value(item, key)
         .filter(|v| !v.is_cleared())
         .ok_or(ClientError::UnknownItem)?;
+    kind_and_text(&value)
+        .1
+        .ok_or(ClientError::InvalidInput.into())
+}
+
+/// [`HistoryEntryView::source`] of the history of `login.password` (ADR 0012 §5).
+pub const HISTORY_MERGE: &str = "merge";
+/// [`HistoryEntryView::source`] of password history imported from another manager (`pwhist`,
+/// ADR 0018 §7).
+pub const HISTORY_IMPORTED: &str = "imported";
+
+/// Hex encoding of a dot's canonical bytes (`device_id ‖ seq`, [`Dot::encode`]): a merge
+/// history entry's identity, stable across a sync that only reorders the list (ADR 0012 §2).
+/// Also [`crate::session`]'s building block for a concurrent-trash notice's own identity.
+/// Not a persistent or wire format: computed fresh for one in-memory host call, never stored.
+pub(crate) fn dot_hex(dot: Dot) -> String {
+    let mut buf = Vec::with_capacity(Dot::ENCODED_LEN);
+    dot.encode(&mut buf);
+    hex(&buf)
+}
+
+/// One password-history entry without its value (module docs): the UI lists these, and asks
+/// for one value at a time.
+#[wasm_bindgen]
+#[derive(Clone, Debug)]
+pub struct HistoryEntryView {
+    /// [`HISTORY_MERGE`] or [`HISTORY_IMPORTED`].
+    source: &'static str,
+    /// The entry's position within its source: newest first for `merge`, list order for
+    /// `imported` (`rizzy-client`'s `password_history` and `imported_password_history`).
+    index: usize,
+    /// When the value stopped being current (`merge`), or the source manager's own date
+    /// (`imported`, if it gave one), in Unix milliseconds. Display only.
+    changed_ms: Option<u64>,
+    /// The entry's identity: the hex of its dot (`merge`) or its `pwhist` element id
+    /// (`imported`), the id [`crate::Session::reveal_password_history`] takes. Unlike
+    /// `changed_ms`, never shared by two entries and never absent.
+    id: String,
+}
+
+#[wasm_bindgen]
+impl HistoryEntryView {
+    /// `merge` or `imported`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn source(&self) -> String {
+        self.source.to_owned()
+    }
+
+    /// The position within its source, for display and list keys.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// The entry's date in Unix milliseconds, or `undefined` for an imported entry without one.
+    #[wasm_bindgen(getter, js_name = changedMs)]
+    #[must_use]
+    pub fn changed_ms(&self) -> Option<u64> {
+        self.changed_ms
+    }
+
+    /// The id to pass to [`crate::Session::reveal_password_history`].
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+}
+
+/// The password history of `item`, without values (module docs): the `merge` entries newest
+/// first, then the `imported` ones in list order. The ADR defines no order across the two
+/// sources, so they are never interleaved. Empty when the item has none.
+pub(crate) fn password_history(vault: &VaultSync, item: ItemId) -> Vec<HistoryEntryView> {
+    let merge = vault
+        .password_history(item)
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| HistoryEntryView {
+            source: HISTORY_MERGE,
+            index,
+            changed_ms: Some(entry.changed_ms),
+            id: dot_hex(entry.dot),
+        });
+    let imported = vault
+        .imported_password_history(item)
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| HistoryEntryView {
+            source: HISTORY_IMPORTED,
+            index,
+            changed_ms: entry.changed_ms,
+            id: entry.id.as_str().to_owned(),
+        });
+    merge.chain(imported).collect()
+}
+
+/// The value of one password-history entry as text: call it only on the user's request (ADR
+/// 0013 §3 rule 3). The history is read again here and the index bounds-checked: an index past
+/// the end is `unknown_item`. A sync between the listing and the reveal can shift the entries
+/// of the same item, so the caller passes the entry's own id as the listing gave it
+/// ([`HistoryEntryView::id`]), and an entry at `index` with another id is `unknown_item` too:
+/// a stale position never reveals a value under another entry's identity, including when the
+/// two happen to share the same displayed date, or when neither has one (ADR 0012 §2).
+///
+/// # Errors
+/// `invalid_input` for a source other than `merge` or `imported`, or a value with no text
+/// form; `unknown_item` for an index past the end, an id that does not match, or an imported
+/// entry without a value.
+pub(crate) fn reveal_history(
+    vault: &VaultSync,
+    item: ItemId,
+    source: &str,
+    index: usize,
+    entry_id: &str,
+) -> CoreResult<Zeroizing<String>> {
+    let value = match source {
+        HISTORY_MERGE => vault
+            .password_history(item)
+            .into_iter()
+            .nth(index)
+            .filter(|entry| dot_hex(entry.dot) == entry_id)
+            .map(|entry| entry.value),
+        HISTORY_IMPORTED => vault
+            .imported_password_history(item)
+            .into_iter()
+            .nth(index)
+            .filter(|entry| entry.id.as_str() == entry_id)
+            .and_then(|entry| entry.value),
+        _ => return Err(ClientError::InvalidInput.into()),
+    }
+    .filter(|v| !v.is_cleared())
+    .ok_or(ClientError::UnknownItem)?;
+    kind_and_text(&value)
+        .1
+        .ok_or(ClientError::InvalidInput.into())
+}
+
+/// One field's merge history, without values (ROADMAP §4.2 "Item revision history (restore
+/// old versions)", M3): generalizes [`HistoryEntryView`] and
+/// [`Session::password_history`](crate::session::Session::password_history) to every field.
+/// Every entry's `source` is [`HISTORY_MERGE`]: imported `pwhist` history stays
+/// `login.password`-only and out of this listing ([`VaultSync::item_history`]'s own doc).
+///
+/// Wiped when freed, and `Debug` prints only the entry count, never the key: the key is user
+/// content (a tag key holds the tag's name, ADR 0018 §2 "Keys are user content too"), as in
+/// [`FieldView`].
+#[wasm_bindgen]
+pub struct FieldHistoryView {
+    /// The field's final key (ADR 0018 §7).
+    key: Zeroizing<String>,
+    /// Its history entries, newest first.
+    entries: Vec<HistoryEntryView>,
+}
+
+impl fmt::Debug for FieldHistoryView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FieldHistoryView")
+            .field("entries", &self.entries.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[wasm_bindgen]
+impl FieldHistoryView {
+    /// The field's final key.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn key(&self) -> String {
+        self.key.as_str().to_owned()
+    }
+
+    /// Its history entries, newest first; each `source` is [`HISTORY_MERGE`].
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn entries(&self) -> Vec<HistoryEntryView> {
+        self.entries.clone()
+    }
+}
+
+/// Every field's history, without values (module docs; [`VaultSync::item_history`]): one
+/// [`FieldHistoryView`] per field that has at least one entry, in the item's field order.
+/// Empty when the item has none.
+pub(crate) fn item_history(vault: &VaultSync, item: ItemId) -> Vec<FieldHistoryView> {
+    vault
+        .item_history(item)
+        .into_iter()
+        .map(|field| FieldHistoryView {
+            key: field.key,
+            entries: field
+                .entries
+                .into_iter()
+                .enumerate()
+                .map(|(index, entry)| HistoryEntryView {
+                    source: HISTORY_MERGE,
+                    index,
+                    changed_ms: Some(entry.changed_ms),
+                    id: dot_hex(entry.dot),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// The value of one field-history entry as text: call it only on the user's request (ADR 0013
+/// §3 rule 3). As [`reveal_history`], generalized to any field: the history is read again here
+/// and the (position, id) pair checked against it, so a stale listing never reveals a value
+/// under another entry's identity, and an id from one field's listing never reveals another
+/// field's value even when the two share a dot ([`VaultSync::field_history`]'s own doc: a dot
+/// is not unique across different fields).
+///
+/// # Errors
+/// `unknown_item` for an index past the end or an id that does not match; `invalid_input` for a
+/// value with no text form.
+pub(crate) fn reveal_field_history(
+    vault: &VaultSync,
+    item: ItemId,
+    key: &str,
+    index: usize,
+    entry_id: &str,
+) -> CoreResult<Zeroizing<String>> {
+    let value = history_entry(vault, item, key, index, entry_id)?.value;
+    kind_and_text(&value)
+        .1
+        .ok_or(ClientError::InvalidInput.into())
+}
+
+/// The dot `index`/`entry_id` name within `key`'s history, checked the same way as
+/// [`reveal_field_history`] (module docs): [`crate::Session::restore_field_history`]'s
+/// building block, so a restore resolves the exact entry a listing showed, never a stale one.
+///
+/// # Errors
+/// `unknown_item` for an index past the end or an id that does not match.
+pub(crate) fn restore_field_history_dot(
+    vault: &VaultSync,
+    item: ItemId,
+    key: &str,
+    index: usize,
+    entry_id: &str,
+) -> CoreResult<Dot> {
+    Ok(history_entry(vault, item, key, index, entry_id)?.dot)
+}
+
+/// `key`'s history entry at `index`, checked against `entry_id` ([`reveal_history`]'s own
+/// doc): shared by [`reveal_field_history`] and [`restore_field_history_dot`].
+///
+/// # Errors
+/// `unknown_item` for an index past the end, an id that does not match, or a Cleared value.
+fn history_entry(
+    vault: &VaultSync,
+    item: ItemId,
+    key: &str,
+    index: usize,
+    entry_id: &str,
+) -> CoreResult<rizzy_client::items::HistoryEntry> {
+    vault
+        .field_history(item, key)
+        .into_iter()
+        .nth(index)
+        .filter(|entry| dot_hex(entry.dot) == entry_id)
+        .filter(|entry| !entry.value.is_cleared())
+        .ok_or(ClientError::UnknownItem.into())
+}
+
+/// One distinct value of a conflicting field (ROADMAP §4.5 "keep both / pick one"; ADR 0018 §6;
+/// module docs), as [`crate::Session::field_conflict`] lists them: the displayed one first. The
+/// value crosses here only when the field's key is shown by default; a concealed one (and to be
+/// safe every key this build does not know) crosses only through
+/// [`crate::Session::reveal_conflict_value`], on the user's request (ADR 0013 §3 rule 3).
+/// Wiped when freed; `Debug` shows the shape only.
+#[wasm_bindgen]
+pub struct ConflictValueView {
+    /// The value's position in the listing.
+    index: usize,
+    /// The value's identity: the hex of its dot (the op that wrote it), the id
+    /// [`crate::Session::reveal_conflict_value`] and the resolutions take.
+    id: String,
+    /// The id of the device that wrote it ("edited on X"), 32 hex digits.
+    device: String,
+    /// When it was written, in Unix milliseconds (its op's HLC). Display only.
+    written_ms: u64,
+    /// Whether this is the value the field displays.
+    displayed: bool,
+    /// Whether the value is Cleared: "cleared on X" (ADR 0018 §6).
+    cleared: bool,
+    /// `text`, `bool`, `number`, `enum`, `bytes`, `sort_key` or `unknown`.
+    kind: &'static str,
+    /// Whether the value is withheld until revealed.
+    concealed: bool,
+    /// The value as text, unless concealed, Cleared or not text-like.
+    value: Option<Zeroizing<String>>,
+}
+
+impl fmt::Debug for ConflictValueView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConflictValueView")
+            .field("index", &self.index)
+            .field("kind", &self.kind)
+            .field("concealed", &self.concealed)
+            .finish_non_exhaustive()
+    }
+}
+
+#[wasm_bindgen]
+impl ConflictValueView {
+    /// The position in the listing, for display and list keys.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// The id to pass back with [`ConflictValueView::index`].
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    /// The writing device's id; name it from the device list.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn device(&self) -> String {
+        self.device.clone()
+    }
+
+    /// When the value was written, in Unix milliseconds.
+    #[wasm_bindgen(getter, js_name = writtenMs)]
+    #[must_use]
+    pub fn written_ms(&self) -> u64 {
+        self.written_ms
+    }
+
+    /// Whether this is the value the field displays.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn displayed(&self) -> bool {
+        self.displayed
+    }
+
+    /// Whether the value is Cleared ("cleared on X").
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn cleared(&self) -> bool {
+        self.cleared
+    }
+
+    /// `text`, `bool`, `number`, `enum`, `bytes`, `sort_key` or `unknown`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn kind(&self) -> String {
+        self.kind.to_owned()
+    }
+
+    /// Whether the value is withheld until revealed.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn concealed(&self) -> bool {
+        self.concealed
+    }
+
+    /// The value as text, or `undefined` when concealed, Cleared or not text-like.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn value(&self) -> Option<String> {
+        self.value.as_ref().map(|v| v.as_str().to_owned())
+    }
+}
+
+/// The distinct values of `key` while it conflicts (`rizzy-client`'s `field_conflict`),
+/// concealed values withheld (module docs). Empty when the field does not conflict, and for the
+/// `pwhist` list, whose values cross only as password history.
+///
+/// # Errors
+/// `invalid_input` for a key outside the grammar.
+pub(crate) fn field_conflict(
+    vault: &VaultSync,
+    item: ItemId,
+    key: &str,
+) -> CoreResult<Vec<ConflictValueView>> {
+    let parsed = FieldKey::parse(key.as_bytes()).map_err(|_| ClientError::InvalidInput)?;
+    if parsed.as_key().list() == Some(LIST_PWHIST) {
+        return Ok(Vec::new());
+    }
+    let hidden = concealed(&parsed);
+    Ok(vault
+        .field_conflict(item, key)
+        .into_iter()
+        .enumerate()
+        .map(|(index, v)| {
+            let (kind, text) = kind_and_text(&v.value);
+            ConflictValueView {
+                index,
+                id: dot_hex(v.dot),
+                device: hex(v.dot.device_id().as_bytes()),
+                written_ms: v.written_ms,
+                displayed: v.displayed,
+                cleared: v.value.is_cleared(),
+                kind,
+                concealed: hidden,
+                value: if hidden { None } else { text },
+            }
+        })
+        .collect())
+}
+
+/// The dot `index`/`value_id` name in `key`'s conflict listing, checked the way
+/// [`restore_field_history_dot`] checks a history entry: the listing is read again, and an
+/// index past its end or an id that differs is refused, so a sync between the listing and the
+/// call never resolves or reveals another value than the one the user saw.
+///
+/// # Errors
+/// `unknown_item` for an index past the end or an id that does not match (the conflict may be
+/// resolved by now); `invalid_input` for a key outside the grammar.
+pub(crate) fn conflict_value(
+    vault: &VaultSync,
+    item: ItemId,
+    key: &str,
+    index: usize,
+    value_id: &str,
+) -> CoreResult<rizzy_client::conflicts::ConflictValue> {
+    let parsed = FieldKey::parse(key.as_bytes()).map_err(|_| ClientError::InvalidInput)?;
+    if parsed.as_key().list() == Some(LIST_PWHIST) {
+        return Err(ClientError::UnknownItem.into());
+    }
+    vault
+        .field_conflict(item, key)
+        .into_iter()
+        .nth(index)
+        .filter(|v| dot_hex(v.dot) == value_id)
+        .ok_or(ClientError::UnknownItem.into())
+}
+
+/// One conflicting value as text, concealed or not: call it only on the user's request (ADR
+/// 0013 §3 rule 3).
+///
+/// # Errors
+/// As [`conflict_value`]; `invalid_input` for a Cleared value or one with no text form.
+pub(crate) fn reveal_conflict_value(
+    vault: &VaultSync,
+    item: ItemId,
+    key: &str,
+    index: usize,
+    value_id: &str,
+) -> CoreResult<Zeroizing<String>> {
+    let value = conflict_value(vault, item, key, index, value_id)?.value;
+    if value.is_cleared() {
+        return Err(ClientError::InvalidInput.into());
+    }
     kind_and_text(&value)
         .1
         .ok_or(ClientError::InvalidInput.into())
@@ -1038,6 +1588,32 @@ pub(crate) fn writes(
 mod tests {
     use super::*;
 
+    /// ADR 0081 §A7, INV-103: every item call names an item by vault and item.
+    #[test]
+    fn item_references_round_trip_and_refuse_a_bare_id() {
+        let vault = VaultId::from_bytes([0xab; 16]);
+        let item = ItemId::from_bytes([0x01; 16]);
+        let text = item_ref(vault, item);
+        assert_eq!(text.len(), 65);
+        assert_eq!(text, format!("{}:{}", "ab".repeat(16), "01".repeat(16)));
+        assert_eq!(parse_ref(&text).unwrap(), (vault, item));
+        assert_eq!(parse_ref(&text.to_uppercase()).unwrap(), (vault, item));
+        for bad in [
+            "",
+            ":",
+            &"01".repeat(16),
+            &format!("{}:", "ab".repeat(16)),
+            &format!(":{}", "01".repeat(16)),
+            &format!("{}:{}:", "ab".repeat(16), "01".repeat(16)),
+        ] {
+            assert_eq!(
+                parse_ref(bad).unwrap_err().as_str(),
+                "invalid_input",
+                "{bad}"
+            );
+        }
+    }
+
     #[test]
     fn hex_ids_round_trip() {
         let bytes = [0xab_u8; 16];
@@ -1058,6 +1634,55 @@ mod tests {
         }
         assert!(type_from_name("vault-settings").is_err());
         assert_eq!(type_name(None), "unknown");
+        // A type no ADR assigns yet shows generically (ADR 0018 §8, §11), as the M3 types did
+        // in a build before ADR 0055.
+        assert_eq!(type_name(Some(ItemType::from_id(0x000B))), "unknown");
+        // The Bank account type ADR 0078 §1 retired is unknown here, and not a name a create
+        // takes.
+        assert_eq!(type_name(Some(ItemType::RETIRED_BANK_ACCOUNT)), "unknown");
+        assert!(type_from_name("bank-account").is_err());
+    }
+
+    /// ADR 0055 §4: the six concealed M3 keys cross only through a reveal; the other 11 are
+    /// shown in the item view. Every key under the `bank.` prefix ADR 0078 §2 retired is
+    /// reserved, so concealed, the two ADR 0055 concealed and the three it showed alike.
+    #[test]
+    fn m3_keys_are_concealed_as_the_schema_says() {
+        let key = |k: &str| FieldKey::parse(k.as_bytes()).unwrap();
+        for k in [
+            "ssh.private_key",
+            "ssh.passphrase",
+            "api.key",
+            "api.secret",
+            "license.key",
+            "wifi.password",
+            // Unassigned under an M3 prefix: reserved, so concealed to be safe.
+            "ssh.key_type",
+            // Retired (ADR 0078 §2): reserved, so concealed.
+            "bank.bank_name",
+            "bank.account_holder",
+            "bank.account_number",
+            "bank.routing_number",
+            "bank.account_type",
+            "bank.other",
+        ] {
+            assert!(concealed(&key(k)), "{k}");
+        }
+        for k in [
+            "ssh.host",
+            "ssh.port",
+            "ssh.username",
+            "ssh.public_key",
+            "api.name",
+            "api.endpoint",
+            "license.name",
+            "license.seats",
+            "license.expires",
+            "wifi.ssid",
+            "wifi.security_type",
+        ] {
+            assert!(!concealed(&key(k)), "{k}");
+        }
     }
 
     #[test]
@@ -1153,5 +1778,19 @@ mod tests {
         // private key passed in above must never show up in it (module docs on `NewPasskey`,
         // "must never outlive this one write").
         assert_eq!(format!("{draft:?}"), "ItemDraft { entries: 1 }");
+    }
+
+    /// A field-history listing's key is user content (a tag key holds the tag's name), so its
+    /// `Debug` prints the entry count only, like [`FieldView`]'s.
+    #[test]
+    fn field_history_view_debug_prints_no_key() {
+        let view = FieldHistoryView {
+            key: Zeroizing::new("tag/73656372657420746167".to_owned()),
+            entries: Vec::new(),
+        };
+        assert_eq!(view.key(), "tag/73656372657420746167");
+        let shown = format!("{view:?}");
+        assert!(!shown.contains("tag/"), "{shown}");
+        assert!(!shown.contains("7365"), "{shown}");
     }
 }

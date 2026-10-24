@@ -1,0 +1,20 @@
+{
+  "name": "@rizzy-vault/i18n",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Message catalogues and helpers for the web surfaces (ADR 0014 §4; ROADMAP §4.5 \"i18n from day one of M3, English only at first\"): a typed English catalogue and a small t() with named placeholders. No third-party runtime.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vitest": "4.1.12"
+  }
+}

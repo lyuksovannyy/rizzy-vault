@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The file-system facts the server is responsible for (ADR 0010 §4; CRYPTO.md §5.8, §5.11):
 //! bounded reads, private files (mode 0600), atomic replacement, and whether one path lies
 //! inside another.
@@ -204,8 +206,17 @@ mod tests {
         let data = dir.join("data");
         fs::create_dir_all(&data).unwrap();
         assert!(is_inside(&data, &data.join("secrets.json")).unwrap());
-        // `..` below a missing directory cannot be resolved: an error, never "outside".
-        assert!(is_inside(&data, &data.join("missing/../secrets.json")).is_err());
+        // `..` below a missing directory is never judged "outside" (the server would then accept a
+        // secrets file inside the data directory). On Unix it cannot be resolved: an error. Windows
+        // removes `missing\..` before it checks that `missing` exists, so the path resolves to
+        // `data\secrets.json`, inside (CI run 40115292493); the server refuses either way.
+        let below_missing = is_inside(&data, &data.join("missing/../secrets.json"));
+        assert!(
+            !matches!(below_missing, Ok(false)),
+            "never outside: {below_missing:?}"
+        );
+        #[cfg(unix)]
+        assert!(below_missing.is_err());
         assert!(!is_inside(&data, &dir.join("secrets.json")).unwrap());
         #[cfg(unix)]
         {

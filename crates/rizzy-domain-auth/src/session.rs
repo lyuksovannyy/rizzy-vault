@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Sessions after authentication (CRYPTO.md §5.10; threat model INV-8, INV-52).
 //!
 //! - **Tokens.** Every session gets a random 32-byte bearer token from the injected CSPRNG.
@@ -32,7 +34,7 @@ use zeroize::Zeroizing;
 use crate::config::FRESH_SESSION_MS;
 use crate::error::AuthError;
 use crate::rules::RequestWindow;
-use crate::sql::{self, exec, fetch_opt};
+use crate::sql::{self, exec, fetch_all, fetch_opt};
 
 /// Which authentication a session came from. Stored as `session_kind`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -59,7 +61,7 @@ impl SessionKind {
     }
 
     /// Reads a stored `session_kind`.
-    fn from_sql(value: i64) -> Result<Self, AuthError> {
+    pub(crate) fn from_sql(value: i64) -> Result<Self, AuthError> {
         match value {
             1 => Ok(Self::Opaque),
             2 => Ok(Self::Device),
@@ -303,4 +305,99 @@ pub(crate) async fn end_kind_except(
         &keep.token_hash[..]
     )?;
     Ok(())
+}
+
+/// One row of [`list_account`]: a session's stored metadata, without its token hash or its
+/// request-counter window (ADR 0075 §3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ListedSession {
+    /// The `session_id`.
+    pub(crate) session_id: SessionId,
+    /// The device of a device session or of a bound OPAQUE re-authentication.
+    pub(crate) device_id: Option<DeviceId>,
+    /// The kind.
+    pub(crate) kind: SessionKind,
+    /// Creation time, ms since the Unix epoch.
+    pub(crate) created_at_ms: u64,
+    /// Expiry, ms since the Unix epoch.
+    pub(crate) expires_at_ms: u64,
+}
+
+/// The unexpired sessions of `account_id` at `now_ms` (`expires_at_ms > now_ms`), newest first
+/// (`created_at_ms` descending, then `session_id` bytes ascending), at most `limit` rows
+/// (ADR 0075 R1).
+pub(crate) async fn list_account(
+    conn: Conn<'_>,
+    account_id: AccountId,
+    now_ms: u64,
+    limit: usize,
+) -> Result<Vec<ListedSession>, AuthError> {
+    type Row = (Vec<u8>, Option<Vec<u8>>, i64, i64, i64);
+    let limit = i64::try_from(limit).map_err(|_| AuthError::Internal("session list limit"))?;
+    let rows: Vec<Row> = fetch_all!(
+        conn,
+        Row,
+        sql::SESSIONS_LIST_ACCOUNT,
+        &account_id.as_bytes()[..],
+        sql::u64_sql(now_ms, "now_ms")?,
+        limit,
+    )?;
+    rows.into_iter()
+        .map(|(session_id, device_id, kind, created, expires)| {
+            Ok(ListedSession {
+                session_id: SessionId::from_bytes(sql::id16(&session_id, "session_id")?),
+                device_id: device_id
+                    .map(|d| sql::id16(&d, "device_id").map(DeviceId::from_bytes))
+                    .transpose()?,
+                kind: SessionKind::from_sql(kind)?,
+                created_at_ms: sql::sql_u64(created, "created_at_ms")?,
+                expires_at_ms: sql::sql_u64(expires, "expires_at_ms")?,
+            })
+        })
+        .collect()
+}
+
+/// The kind of the session `session_id` of `account_id` if it is unexpired at `now_ms`, or
+/// `None` for an unknown, expired or other account's id (ADR 0075 R3).
+pub(crate) async fn kind_by_id(
+    conn: Conn<'_>,
+    account_id: AccountId,
+    session_id: SessionId,
+    now_ms: u64,
+) -> Result<Option<SessionKind>, AuthError> {
+    let row: Option<(i64, i64)> = fetch_opt!(
+        conn,
+        (i64, i64),
+        sql::SESSION_GET_BY_ID,
+        &account_id.as_bytes()[..],
+        &session_id.as_bytes()[..],
+    )?;
+    let Some((kind, expires)) = row else {
+        return Ok(None);
+    };
+    if now_ms >= sql::sql_u64(expires, "expires_at_ms")? {
+        return Ok(None);
+    }
+    SessionKind::from_sql(kind).map(Some)
+}
+
+/// Ends the session `session_id` of `account_id` (ADR 0075 R3).
+pub(crate) async fn end_by_id(
+    conn: Conn<'_>,
+    account_id: AccountId,
+    session_id: SessionId,
+) -> Result<(), AuthError> {
+    exec!(
+        conn,
+        sql::SESSION_DELETE_ID,
+        &account_id.as_bytes()[..],
+        &session_id.as_bytes()[..]
+    )?;
+    Ok(())
+}
+
+/// Ends `session` itself, by its token hash (ADR 0075 R2). Returns whether a row was deleted.
+pub(crate) async fn end_own(conn: Conn<'_>, session: &Session) -> Result<bool, AuthError> {
+    let deleted = exec!(conn, sql::SESSION_DELETE, &session.token_hash[..])?;
+    Ok(deleted > 0)
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Export and import (ROADMAP §4.2; CRYPTO.md §11.14; ADR 0027; owner decision 2026-10-05).
 //
 // - Every export, encrypted or plaintext, first needs the Secret Key and master password typed
@@ -8,17 +10,24 @@
 //   addition), counts down 10 seconds with the confirm button disabled (the count starts over
 //   when the dialog is opened again), and needs the typed phrase. The core enforces all of it;
 //   this view collects and shows it.
-// - Import: the file's format is recognised from its bytes; our encrypted export then asks for
-//   the file's password. A format can still be chosen by hand. The file is read in the browser
+// - Passkey export (CXF, ADR 0074 §2): every passkey as a FIDO Credential Exchange Format
+//   document sealed under a new password for that file, typed twice in a dialog that is gated
+//   like the plaintext one: its own warning, the 10-second countdown, the typed phrase. There
+//   is no unencrypted CXF export (ADR 0074 owner answer 4).
+// - Import: the file's format is recognised from its bytes; our encrypted export and our CXF
+//   export then ask for the file's password; a bare CXF file of another product needs nothing
+//   more (ADR 0074 §3). A format can still be chosen by hand. The file is read in the browser
 //   and handed to the core as bytes; nothing is uploaded but the resulting encrypted items.
 import type { DetectedImportFormat, ImportReport } from "@rizzy-vault/core";
-import { SecretField } from "@rizzy-vault/ui";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { t } from "@rizzy-vault/i18n";
+import { SecretField, setModalOpen, trapTab } from "@rizzy-vault/ui";
+import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 
 import { codeOf, secretBytes } from "../core-client.ts";
 import { dateStamp, saveFile } from "../download.ts";
-import { FORMAT_LABELS, confirmIdentity, encryptedExport, importPlan } from "../export-flow.ts";
+import { FORMAT_LABELS, confirmIdentity, cxfExport, encryptedExport, importPlan } from "../export-flow.ts";
 import { confirmEnabled, startCountdown } from "../hold.ts";
+import { defaultVault, vaultLabel, writableVaults } from "../vaults.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, takeSecret, useAction } from "./common.tsx";
 
@@ -52,7 +61,7 @@ function Reauthenticate(props: { readonly ctx: VaultContext; readonly onDone: ()
 
   return (
     <form onSubmit={submit} aria-labelledby="export-reauth-title">
-      <h3 id="export-reauth-title">Confirm it is you</h3>
+      <h2 id="export-reauth-title">Confirm it is you</h2>
       <p>
         Every export, encrypted or not, needs your Secret Key and master password again. The
         confirmation allows one export within five minutes.
@@ -72,6 +81,8 @@ function Reauthenticate(props: { readonly ctx: VaultContext; readonly onDone: ()
 /** The encrypted export form, after the re-authentication. */
 function EncryptedExport(props: {
   readonly ctx: VaultContext;
+  /** The vault exported (ADR 0081 §A8: one export is one vault). */
+  readonly vaultId: string;
   readonly onDone: (message: string | undefined, code: string | undefined) => void;
 }) {
   const { ctx } = props;
@@ -85,8 +96,8 @@ function EncryptedExport(props: {
     const again = takeSecret(repeat.current);
     void run(async () => {
       try {
-        const blockers = await ctx.client.call("exportBlockers");
-        const out = await encryptedExport(ctx.client, pw, again);
+        const blockers = await ctx.client.call("exportBlockers", props.vaultId);
+        const out = await encryptedExport(ctx.client, props.vaultId, pw, again);
         saveFile(`rizzy-vault-export-${dateStamp()}.json`, out.file, "application/json");
         props.onDone(
           `Exported ${out.items} item(s). Keep the file's password: it is needed to import the file.` +
@@ -106,7 +117,7 @@ function EncryptedExport(props: {
 
   return (
     <form onSubmit={submit} aria-labelledby="export-enc-title">
-      <h3 id="export-enc-title">Encrypted export</h3>
+      <h2 id="export-enc-title">Encrypted export</h2>
       <p className="muted">
         Choose a password for this export file. It is needed to import the file. It is not your
         master password, and nobody can recover it if it is lost.
@@ -132,9 +143,14 @@ function EncryptedExport(props: {
  * The plaintext export dialog: the warning, the 10-second countdown with the confirm button
  * disabled, and the typed phrase. Mounting it starts the hold (in the core and here);
  * closing and opening it again starts it over.
+ *
+ * A modal dialog like `ConfirmDialog`: the focus moves to the phrase field when it opens and
+ * back to what opened it when it closes, Tab stays inside it (`trapTab`), Escape cancels, and
+ * it registers in the modal registry so the vault's global shortcuts stay silent behind it.
  */
 function PlaintextDialog(props: {
   readonly ctx: VaultContext;
+  readonly vaultId: string;
   readonly format: "json" | "csv";
   readonly onClose: (message: string | undefined, code: string | undefined) => void;
 }) {
@@ -145,6 +161,21 @@ function PlaintextDialog(props: {
   const [typed, setTyped] = useState("");
   const [left, setLeft] = useState<number | undefined>(undefined);
   const { busy, error, run } = useAction();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const phraseRef = useRef<HTMLInputElement>(null);
+  const { onClose } = props;
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement;
+    phraseRef.current?.focus();
+    setModalOpen(true);
+    return () => {
+      setModalOpen(false);
+      if (previouslyFocused instanceof HTMLElement) {
+        previouslyFocused.focus();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     let stop = () => {};
@@ -152,7 +183,7 @@ function PlaintextDialog(props: {
     void Promise.all([
       ctx.client.call("plaintextExportWarning"),
       ctx.client.call("plaintextExportPhrase"),
-      format === "csv" ? ctx.client.call("csvExportWarning") : Promise.resolve(""),
+      format === "csv" ? ctx.client.call("csvExportWarning", props.vaultId) : Promise.resolve(""),
     ]).then(async ([w, p, c]) => {
       if (!live) {
         return;
@@ -170,13 +201,13 @@ function PlaintextDialog(props: {
       live = false;
       stop();
     };
-  }, [ctx.client, format]);
+  }, [ctx.client, format, props.vaultId]);
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
     void run(async () => {
       try {
-        const bytes = await ctx.client.call("exportPlaintext", format, typed);
+        const bytes = await ctx.client.call("exportPlaintext", props.vaultId, format, typed);
         saveFile(
           `rizzy-vault-plaintext-${dateStamp()}.${format}`,
           bytes,
@@ -197,47 +228,60 @@ function PlaintextDialog(props: {
   const ready = left !== undefined && confirmEnabled(left, busy);
   return (
     <div className="overlay">
-      <form
+      {/* The dialog is a `div` around the form: ARIA in HTML does not allow `role="dialog"` on
+          a `<form>`. */}
+      <div
+        ref={dialogRef}
         className="panel dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="export-plain-title"
-        onSubmit={submit}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onClose(undefined, undefined);
+            return;
+          }
+          trapTab(e, dialogRef.current);
+        }}
       >
-        <h2 id="export-plain-title">Plaintext export ({format.toUpperCase()})</h2>
-        <p className="warning" data-testid="plaintext-warning">
-          {warning}
-        </p>
-        {format === "csv" && (
-          <p className="warning" data-testid="plaintext-csv-warning">
-            {csvWarning}
+        <form onSubmit={submit}>
+          <h2 id="export-plain-title">Plaintext export ({format.toUpperCase()})</h2>
+          <p className="warning" data-testid="plaintext-warning">
+            {warning}
           </p>
-        )}
-        <p data-testid="plaintext-countdown" aria-live="polite">
-          {left === undefined || left > 0
-            ? `Read the warning. You can continue in ${left ?? 10} s.`
-            : "You can continue now."}
-        </p>
-        <label htmlFor="plain-phrase">
-          Type <strong>{phrase}</strong> to continue
-        </label>
-        <input
-          id="plain-phrase"
-          autoComplete="off"
-          spellCheck={false}
-          value={typed}
-          onChange={(e) => setTyped(e.currentTarget.value)}
-        />
-        <ErrorText code={error} />
-        <div className="actions">
-          <button type="submit" className="danger" disabled={!ready}>
-            Export in plaintext
-          </button>
-          <button type="button" className="secondary" onClick={() => props.onClose(undefined, undefined)}>
-            Cancel
-          </button>
-        </div>
-      </form>
+          {format === "csv" && (
+            <p className="warning" data-testid="plaintext-csv-warning">
+              {csvWarning}
+            </p>
+          )}
+          <p data-testid="plaintext-countdown" aria-live="polite">
+            {left === undefined || left > 0
+              ? `Read the warning. You can continue in ${left ?? 10} s.`
+              : "You can continue now."}
+          </p>
+          <label htmlFor="plain-phrase">
+            Type <strong>{phrase}</strong> to continue
+          </label>
+          <input
+            ref={phraseRef}
+            id="plain-phrase"
+            autoComplete="off"
+            spellCheck={false}
+            value={typed}
+            onChange={(e) => setTyped(e.currentTarget.value)}
+          />
+          <ErrorText code={error} />
+          <div className="actions">
+            <button type="submit" className="danger" disabled={!ready}>
+              Export in plaintext
+            </button>
+            <button type="button" className="secondary" onClick={() => props.onClose(undefined, undefined)}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
@@ -245,13 +289,14 @@ function PlaintextDialog(props: {
 /** The plaintext export: the format, and the button that opens the dialog. */
 function PlaintextExport(props: {
   readonly ctx: VaultContext;
+  readonly vaultId: string;
   readonly onDone: (message: string | undefined, code: string | undefined) => void;
 }) {
   const [format, setFormat] = useState<"json" | "csv">("json");
   const [open, setOpen] = useState(false);
   return (
     <div aria-labelledby="export-plain-choice-title">
-      <h3 id="export-plain-choice-title">Plaintext export</h3>
+      <h2 id="export-plain-choice-title">Plaintext export</h2>
       <p className="muted">
         A file anyone can read. Use it only to move to another product; the encrypted export is
         the safe copy.
@@ -275,6 +320,7 @@ function PlaintextExport(props: {
       {open && (
         <PlaintextDialog
           ctx={props.ctx}
+          vaultId={props.vaultId}
           format={format}
           onClose={(message, code) => {
             setOpen(false);
@@ -288,9 +334,201 @@ function PlaintextExport(props: {
   );
 }
 
-/** Export: the re-authentication, then the encrypted and plaintext exports. */
+/**
+ * The CXF passkey export dialog (ADR 0074 §2): its own warning, the 10-second countdown with
+ * the confirm button disabled, the new password for the file typed twice, and the typed
+ * phrase. Mounting it starts the hold; a modal dialog like {@link PlaintextDialog} (focus in on
+ * open and back on close, Tab trapped, Escape cancels, global shortcuts silent behind it).
+ */
+function CxfDialog(props: {
+  readonly ctx: VaultContext;
+  readonly vaultId: string;
+  readonly onClose: (message: string | undefined, code: string | undefined) => void;
+}) {
+  const { ctx, onClose } = props;
+  const [warning, setWarning] = useState("");
+  const [phrase, setPhrase] = useState("");
+  const [typed, setTyped] = useState("");
+  const [left, setLeft] = useState<number | undefined>(undefined);
+  const { busy, error, run } = useAction();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const password = useRef<HTMLInputElement>(null);
+  const repeat = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement;
+    password.current?.focus();
+    setModalOpen(true);
+    return () => {
+      setModalOpen(false);
+      if (previouslyFocused instanceof HTMLElement) {
+        previouslyFocused.focus();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let stop = () => {};
+    let live = true;
+    void Promise.all([ctx.client.call("cxfExportWarning"), ctx.client.call("plaintextExportPhrase")]).then(
+      async ([w, p]) => {
+        if (!live) {
+          return;
+        }
+        setWarning(w);
+        setPhrase(p);
+        // The warning is on screen: the hold starts now, in the core and in the countdown.
+        const holdMs = await ctx.client.call("plaintextWarningShown");
+        if (live) {
+          stop = startCountdown(holdMs, setLeft);
+        }
+      },
+    );
+    return () => {
+      live = false;
+      stop();
+    };
+  }, [ctx.client]);
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const pw = takeSecret(password.current);
+    const again = takeSecret(repeat.current);
+    void run(async () => {
+      try {
+        const exported = await cxfExport(ctx.client, props.vaultId, pw, again, typed);
+        saveFile(`rizzy-vault-passkeys-${dateStamp()}.json`, exported.file, "application/json");
+        onClose(t("transfer.cxfWritten", { count: String(exported.passkeys) }), undefined);
+      } catch (err) {
+        if (codeOf(err) === "reauth_required") {
+          onClose(undefined, "reauth_required");
+          return;
+        }
+        throw err;
+      }
+    });
+  };
+
+  const ready = left !== undefined && confirmEnabled(left, busy);
+  return (
+    <div className="overlay">
+      <div
+        ref={dialogRef}
+        className="panel dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="export-cxf-title"
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onClose(undefined, undefined);
+            return;
+          }
+          trapTab(e, dialogRef.current);
+        }}
+      >
+        <form onSubmit={submit}>
+          <h2 id="export-cxf-title">{t("transfer.cxfDialogTitle")}</h2>
+          <p className="warning" data-testid="cxf-warning">
+            {warning}
+          </p>
+          <p data-testid="cxf-countdown" aria-live="polite">
+            {left === undefined || left > 0
+              ? t("transfer.countdown", { seconds: String(left ?? 10) })
+              : t("transfer.countdownDone")}
+          </p>
+          <SecretField
+            label={t("transfer.cxfPassword")}
+            name="cxf-password"
+            inputRef={password}
+            hint={t("transfer.cxfPasswordHint")}
+            required
+          />
+          <SecretField label={t("transfer.cxfPasswordRepeat")} name="cxf-password-repeat" inputRef={repeat} required />
+          <label htmlFor="cxf-phrase">{t("transfer.typePhrase", { phrase })}</label>
+          <input
+            id="cxf-phrase"
+            autoComplete="off"
+            spellCheck={false}
+            value={typed}
+            onChange={(e) => setTyped(e.currentTarget.value)}
+          />
+          <ErrorText code={error} />
+          <div className="actions">
+            <button type="submit" className="danger" disabled={!ready}>
+              {t("transfer.cxfConfirm")}
+            </button>
+            <button type="button" className="secondary" onClick={() => onClose(undefined, undefined)}>
+              {t("action.cancel")}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+/** The CXF passkey export: how many passkeys it would hold, and the button that opens the
+ * dialog. */
+function CxfExport(props: {
+  readonly ctx: VaultContext;
+  readonly vaultId: string;
+  readonly onDone: (message: string | undefined, code: string | undefined) => void;
+}) {
+  const { ctx } = props;
+  const [open, setOpen] = useState(false);
+  const [count, setCount] = useState<number | undefined>();
+  useEffect(() => {
+    let live = true;
+    ctx.client.call("cxfExportPasskeys", props.vaultId).then(
+      (n) => {
+        if (live) {
+          setCount(n);
+        }
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [ctx.client, props.vaultId]);
+  return (
+    <div aria-labelledby="export-cxf-choice-title">
+      <h2 id="export-cxf-choice-title">{t("transfer.cxfTitle")}</h2>
+      <p className="muted">{t("transfer.cxfIntro")}</p>
+      {count !== undefined && <p data-testid="cxf-count">{t("transfer.cxfCount", { count: String(count) })}</p>}
+      <div className="actions">
+        <button type="button" className="danger" onClick={() => setOpen(true)}>
+          {t("transfer.cxfOpen")}
+        </button>
+      </div>
+      {open && (
+        <CxfDialog
+          ctx={ctx}
+          vaultId={props.vaultId}
+          onClose={(message, code) => {
+            setOpen(false);
+            if (message !== undefined || code !== undefined) {
+              props.onDone(message, code);
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Export: the re-authentication, then the encrypted, plaintext and passkey exports. */
 function Export(props: { readonly ctx: VaultContext }) {
+  const { ctx } = props;
   const [authed, setAuthed] = useState(false);
+  /** The vault exported (ADR 0081 §A8: one export is one vault), Personal preselected. */
+  const [vaultId, setVaultId] = useState<string | undefined>(() =>
+    ctx.vaults.find((v) => v.id === ctx.personalVaultId && v.status === "open")?.id ??
+    ctx.vaults.find((v) => v.status === "open")?.id,
+  );
+  const exportVaultSelect = useId();
+  const exportable = ctx.vaults.filter((v) => v.status === "open");
   const [result, setResult] = useState<string | undefined>();
   const [code, setCode] = useState<string | undefined>();
   // One export per re-authentication: whatever an export did, the next one asks again.
@@ -313,23 +551,49 @@ function Export(props: { readonly ctx: VaultContext }) {
           }}
         />
       ) : (
-        <>
-          <EncryptedExport ctx={props.ctx} onDone={done} />
-          <hr />
-          <PlaintextExport ctx={props.ctx} onDone={done} />
-        </>
+        vaultId !== undefined && (
+          <>
+            <label htmlFor={exportVaultSelect}>{t("vaults.picker")}</label>
+            <select
+              id={exportVaultSelect}
+              name="export-vault"
+              value={vaultId}
+              onChange={(e) => setVaultId(e.currentTarget.value)}
+            >
+              {exportable.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {vaultLabel(v)}
+                </option>
+              ))}
+            </select>
+            <EncryptedExport ctx={props.ctx} vaultId={vaultId} onDone={done} />
+            <hr />
+            <PlaintextExport ctx={props.ctx} vaultId={vaultId} onDone={done} />
+            <hr />
+            <CxfExport ctx={props.ctx} vaultId={vaultId} onDone={done} />
+          </>
+        )
       )}
     </section>
   );
 }
 
-/** The import form. */
-function Import(props: { readonly ctx: VaultContext }) {
+/** The import form. The getting-started guide (`OnboardingView.tsx`) shows it as its import
+ * step; the two are never on screen together, so its element ids stay unique. */
+export function ImportForm(props: {
+  readonly ctx: VaultContext;
+  /** The level of the form's "Import" heading: 2 under this pane's h1 (the default), 3 inside
+   * the getting-started guide's step, whose own title is an h2. */
+  readonly headingLevel?: 2 | 3;
+}) {
   const { ctx } = props;
   const [file, setFile] = useState<File | undefined>();
   const [detected, setDetected] = useState<DetectedImportFormat | undefined>();
   const [chosen, setChosen] = useState<DetectedImportFormat | "auto">("auto");
   const [report, setReport] = useState<ImportReport | undefined>();
+  /** The import's target vault (ADR 0081 §A8): the Personal vault, preselected every time. */
+  const [vaultId, setVaultId] = useState<string | undefined>(() => defaultVault(ctx.vaults, ctx.personalVaultId));
+  const importVaultSelect = useId();
   const password = useRef<HTMLInputElement>(null);
   const { busy, error, setError, run } = useAction();
 
@@ -364,13 +628,21 @@ function Import(props: { readonly ctx: VaultContext }) {
       setError(plan.code);
       return;
     }
-    const pw = plan.kind === "encrypted" ? takeSecret(password.current) : undefined;
+    const sealed = plan.kind === "encrypted" || plan.kind === "cxf-encrypted";
+    const pw = sealed ? takeSecret(password.current) : undefined;
+    const target = vaultId ?? defaultVault(ctx.vaults, ctx.personalVaultId);
+    if (target === undefined) {
+      setError("vault_set_mismatch");
+      return;
+    }
     void run(async () => {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const r =
         plan.kind === "encrypted"
-          ? await ctx.client.call("importEncrypted", bytes, secretBytes(pw ?? ""))
-          : await ctx.client.call("importFile", plan.format, bytes);
+          ? await ctx.client.call("importEncrypted", target, bytes, secretBytes(pw ?? ""))
+          : plan.kind === "cxf-encrypted"
+            ? await ctx.client.call("importCxfEncrypted", target, bytes, secretBytes(pw ?? ""))
+            : await ctx.client.call("importFile", target, plan.format, bytes);
       setReport(r);
       await ctx.afterWrite();
     });
@@ -378,7 +650,7 @@ function Import(props: { readonly ctx: VaultContext }) {
 
   return (
     <form onSubmit={submit} aria-labelledby="import-title">
-      <h3 id="import-title">Import</h3>
+      {props.headingLevel === 3 ? <h3 id="import-title">Import</h3> : <h2 id="import-title">Import</h2>}
       <label htmlFor="import-file">File</label>
       <input id="import-file" type="file" onChange={(e) => pick(e.currentTarget.files?.[0])} required />
       {detected !== undefined && (
@@ -401,7 +673,24 @@ function Import(props: { readonly ctx: VaultContext }) {
           </option>
         ))}
       </select>
-      {plan?.kind === "encrypted" && (
+      {writableVaults(ctx.vaults).length > 0 && (
+        <>
+          <label htmlFor={importVaultSelect}>{t("vaults.picker")}</label>
+          <select
+            id={importVaultSelect}
+            name="import-vault"
+            value={vaultId ?? ""}
+            onChange={(e) => setVaultId(e.currentTarget.value)}
+          >
+            {writableVaults(ctx.vaults).map((v) => (
+              <option key={v.id} value={v.id}>
+                {vaultLabel(v)}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
+      {(plan?.kind === "encrypted" || plan?.kind === "cxf-encrypted") && (
         <SecretField
           label="Password of this export file"
           name="import-password"
@@ -421,6 +710,9 @@ function Import(props: { readonly ctx: VaultContext }) {
           {report.fieldsNotCarried > 0 ? `, fields not carried ${report.fieldsNotCarried}` : ""}
           {report.historyNotCarried > 0 ? `, history entries not carried ${report.historyNotCarried}` : ""}
           {report.collapsedConflicts > 0 ? `, conflicts collapsed ${report.collapsedConflicts}` : ""}.
+          {report.credentialsSkipped > 0
+            ? ` ${t("transfer.credentialsSkipped", { count: String(report.credentialsSkipped) })}`
+            : ""}
         </p>
       )}
       <div className="actions">
@@ -436,10 +728,10 @@ function Import(props: { readonly ctx: VaultContext }) {
 export function TransferPane(props: { readonly ctx: VaultContext }) {
   return (
     <div className="panel narrow">
-      <h2>Export and import</h2>
+      <h1>Export and import</h1>
       <Export ctx={props.ctx} />
       <hr />
-      <Import ctx={props.ctx} />
+      <ImportForm ctx={props.ctx} />
     </div>
   );
 }

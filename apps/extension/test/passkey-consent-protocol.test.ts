@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The relay content script <-> passkey-consent iframe channel (`passkey-consent/protocol.ts`),
 // the same asymmetric-trust pattern as `inline-menu/protocol.ts`'s own tested validators
 // (`inline-menu-protocol.test.ts`) — this validator only bounds the shape before display; the
@@ -15,6 +17,7 @@ import {
 const createOffer = {
   type: PASSKEY_CONSENT_SHOW,
   pageOrigin: "https://example.com",
+  instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962",
   ceremonyToken: "tok-1",
   kind: "create",
   rpId: "example.com",
@@ -25,6 +28,7 @@ const createOffer = {
 const getOffer = {
   type: PASSKEY_CONSENT_SHOW,
   pageOrigin: "https://example.com",
+  instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962",
   ceremonyToken: "tok-2",
   kind: "get",
   rpId: "example.com",
@@ -46,6 +50,13 @@ describe("isPasskeyConsentShowMessage", () => {
 
   it("rejects an unknown kind", () => {
     expect(isPasskeyConsentShowMessage({ ...createOffer, kind: "delete" })).toBe(false);
+  });
+
+  it("rejects a missing or malformed instanceToken (ADR 0043)", () => {
+    const { instanceToken, ...rest } = createOffer;
+    void instanceToken;
+    expect(isPasskeyConsentShowMessage(rest)).toBe(false);
+    expect(isPasskeyConsentShowMessage({ ...createOffer, instanceToken: "tok-1" })).toBe(false);
   });
 
   it("rejects a missing ceremonyToken", () => {

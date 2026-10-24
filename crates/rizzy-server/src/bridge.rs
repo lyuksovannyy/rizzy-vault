@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The two cross-domain traits, implemented by wiring in the other domain's public API
 //! ([ADR 0016] R4: "A domain that needs something from another defines a trait for it.
 //! `rizzy-server` implements the trait by wiring in the other domain's public API").
@@ -27,11 +29,13 @@
 
 use rizzy_domain_auth::directory::{DeviceStanding, device_authors, signed_account_key};
 use rizzy_domain_auth::types::{AccountId, DeviceId};
-use rizzy_domain_auth::types::{RecoveryVault, VaultRotationUpload, VaultSelfGrant};
+use rizzy_domain_auth::types::{
+    RecoveryVault, VaultId, VaultRotationUpload, VaultSelfGrant, VaultSummary,
+};
 use rizzy_domain_auth::{AuthError, PersonalVault, VaultPort};
 use rizzy_domain_vault::{
     AccountKeyState, AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError,
-    PersonalVaultOutcome, VaultError,
+    PersonalVaultOutcome, VaultError, create_owned_vault, delete_vault,
 };
 use rizzy_domain_vault::{port, rotation};
 use rizzy_storage::{Conn, WriteTx};
@@ -120,6 +124,53 @@ impl VaultPort for VaultBridge {
         device_id: DeviceId,
     ) -> Result<u64, AuthError> {
         port::device_head(conn, account_id, device_id)
+            .await
+            .map_err(|e| vault_error(&e))
+    }
+
+    async fn create_owned_vault(
+        &self,
+        tx: &mut WriteTx,
+        account_id: AccountId,
+        grant: &VaultSelfGrant,
+        account_key_epoch: u32,
+        account_key_id: [u8; 16],
+        now_ms: u64,
+    ) -> Result<(), AuthError> {
+        create_owned_vault(
+            tx,
+            account_id,
+            grant,
+            account_key_epoch,
+            &account_key_id,
+            now_ms,
+        )
+        .await
+        .map_err(|e| vault_error(&e))
+    }
+
+    async fn delete_vault(
+        &self,
+        tx: &mut WriteTx,
+        account_id: AccountId,
+        vault_id: VaultId,
+        now_ms: u64,
+    ) -> Result<(), AuthError> {
+        // ADR 0081 §A5: a vault the caller does not own is `not_found`, the Personal vault
+        // `invalid_request`.
+        match delete_vault(tx, account_id, vault_id, now_ms).await {
+            Ok(_) => Ok(()),
+            Err(VaultError::NotFound) => Err(AuthError::NotFound),
+            Err(e) => Err(vault_error(&e)),
+        }
+    }
+
+    async fn vault_summaries(
+        &self,
+        conn: Conn<'_>,
+        account_id: AccountId,
+    ) -> Result<Vec<VaultSummary>, AuthError> {
+        port::vault_summaries(conn, account_id)
             .await
             .map_err(|e| vault_error(&e))
     }

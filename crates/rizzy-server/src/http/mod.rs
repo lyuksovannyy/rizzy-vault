@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The public listener's router: the `api` role under `/api/`, the `web` role everywhere else
-//! ([ADR 0010] §1, §4; [ADR 0002] point 3; [ADR 0028] items 1, 3, 10 and 15).
+//! ([ADR 0010] §1, §4; [ADR 0002] point 3; [ADR 0028] items 1, 3 and 10; ADR 0049's route
+//! table for the web role, which supersedes item 15 and item 10's first sentence).
 //!
 //! One listener serves both roles when both run; each is present only when its role is. A
 //! request under `/api/` with no `api` role, or to an unknown `/api/` path, answers
@@ -14,12 +17,19 @@
 //! never the raw path, a header or a body). No response is compressed ([ADR 0028] item 9), and
 //! none carries a CORS header (item 10).
 //!
+//! The admin listener has its own router, [`admin_panel::router`], which is never merged into
+//! this one (ADR 0060 §2): no path here reaches it, `/admin/...` included.
+//! The `icons` role has its own listener and router ([`icons_router`]; ADR 0010 §2: it runs
+//! alone), with the same fallback, access log and common headers.
+//!
 //! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
 //! [ADR 0002]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0002-own-protocol.md
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 
+pub mod admin_panel;
 pub mod api;
 pub mod headers;
+pub mod icons;
 pub mod security;
 pub mod web;
 
@@ -31,7 +41,7 @@ use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::{MethodFilter, get, on};
+use axum::routing::{MethodFilter, get, on, post};
 use rizzy_domain_auth::types::ErrorCode;
 use rizzy_domain_auth::types::META_PATH;
 
@@ -74,6 +84,40 @@ pub fn router(api: Option<Arc<Api>>, web: bool) -> Router {
         .layer(middleware::map_response(finish))
 }
 
+/// Builds the router of the `icons` role ([ADR 0052] points 1 and 6, [ADR 0053]): the favicon
+/// route (whenever the role runs), the breach-check route when the breach check is on, nothing
+/// else. Every other path answers `404` like the public router with no role (so a disabled
+/// breach check is `404 not_found`, ADR 0028 item 3: "a role not running"), and every response
+/// gets the common headers and one access line naming the route template, never the path or
+/// the body.
+///
+/// [ADR 0052]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0052-icon-proxy-role.md
+/// [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
+pub fn icons_router(state: Arc<icons::Icons>) -> Router {
+    let mut router = Router::new();
+    if state.favicons_on() {
+        router = router.route(
+            icons::FETCH_ROUTE,
+            post(icons::fetch).with_state(state.clone()),
+        );
+    }
+    if state.breach_check_on() {
+        router = router.route(
+            icons::BREACH_RANGE_ROUTE,
+            post(icons::breach_range).with_state(state),
+        );
+    }
+    router
+        .method_not_allowed_fallback(|| async {
+            let mut response = error_response(ErrorCode::InvalidRequest, "method_not_allowed");
+            *response.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
+            response
+        })
+        .fallback(|request: Request| async move { fallback(false, &request) })
+        .layer(middleware::from_fn(access_log))
+        .layer(middleware::map_response(finish))
+}
+
 /// Answers a request no route matched (module docs).
 fn fallback(web: bool, request: &Request) -> Response {
     let path = request.uri().path();
@@ -111,7 +155,8 @@ fn method_name(method: &Method) -> &'static str {
     }
 }
 
-/// Writes one access-log line per request (module docs).
+/// Writes one access-log line per request (module docs); the admin listener's router
+/// ([`admin_panel`]) logs through it too.
 async fn access_log(request: Request, next: Next) -> Response {
     let method = method_name(request.method());
     let start = Instant::now();
@@ -131,4 +176,47 @@ async fn access_log(request: Request, next: Next) -> Response {
         ],
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    //! ADR 0049, INV-73: the access log names a web-role answer by a fixed route template, never
+    //! by the request's path, for every row of the route table and every path it refuses.
+
+    use super::*;
+
+    /// The route name `fallback` records for `method path`.
+    fn logged_route(method: Method, path: &str) -> &'static str {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .body(axum::body::Body::empty())
+            .unwrap_or_default();
+        let response = fallback(true, &request);
+        response
+            .extensions()
+            .get::<RouteName>()
+            .map_or("none", |r| r.0)
+    }
+
+    #[test]
+    fn the_logged_route_is_a_template_never_the_path() {
+        let mut paths: Vec<&str> = web::ROUTES
+            .iter()
+            .map(|r| match r {
+                web::Route::Literal(p) | web::Route::Segment(p) => *p,
+            })
+            .collect();
+        paths.extend([
+            "/nothing",
+            "/s/some-share-id",
+            "/assets/../index.html",
+            "/%2e%2e/",
+        ]);
+        for path in paths {
+            for method in [Method::GET, Method::HEAD, Method::POST] {
+                assert_eq!(logged_route(method, path), "web", "{path}");
+            }
+        }
+    }
 }

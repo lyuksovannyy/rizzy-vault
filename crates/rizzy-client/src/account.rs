@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Verifying what the server says about the account (CRYPTO.md §11.2 step 6, §11.3 steps
 //! 2.3–3; threat model §5.4–§5.6, INV-25, INV-30).
 //!
@@ -159,6 +161,42 @@ pub struct VerifiedAccount {
     /// The served objects this answer verified, as served, for the cache
     /// ([`crate::store::account_writes`], ADR 0026 §1 "Account objects").
     pub(crate) served: ServedObjects,
+    /// The account's storage usage as the server reported it (ADR 0048 §5), if it did.
+    pub(crate) usage: Option<StorageUsage>,
+    /// The server's per-vault counted bytes ([ADR 0081] §A9): unsigned, for display only.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    pub(crate) vault_bytes: Vec<(VaultId, u64)>,
+}
+
+/// The account's storage usage as the server reports it with every account answer (ADR 0048
+/// §5): its counted bytes and the instance's quota.
+///
+/// **Not verified.** Nothing signs these two numbers; they are the server's word, shown to the
+/// user for information only and never used for a decision. A server that lies about them can
+/// at most mislead the display; uploads it refuses still answer `quota_exceeded`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StorageUsage {
+    /// The account's counted bytes.
+    pub bytes_used: u64,
+    /// The instance's per-account quota.
+    pub quota_bytes: u64,
+}
+
+impl StorageUsage {
+    /// The usage of `view`: `None` when the view carries no quota (a view rebuilt from the
+    /// cache, which never stores these numbers).
+    #[must_use]
+    pub const fn of_view(view: &AccountView) -> Option<Self> {
+        if view.quota_bytes == 0 {
+            None
+        } else {
+            Some(Self {
+                bytes_used: view.bytes_used,
+                quota_bytes: view.quota_bytes,
+            })
+        }
+    }
 }
 
 /// The objects of a verified account answer that the cache keeps as served (ADR 0026 §1):
@@ -250,6 +288,36 @@ impl VerifiedAccount {
         self.vault_keys.iter().map(VaultKey::vault_id)
     }
 
+    /// The counted bytes the server reported for `vault_id` with this answer ([ADR 0081] §A9):
+    /// unverified, for display only; `None` when it reported none.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    #[must_use]
+    pub fn vault_bytes_used(&self, vault_id: VaultId) -> Option<u64> {
+        self.vault_bytes
+            .iter()
+            .find(|(v, _)| *v == vault_id)
+            .map(|(_, b)| *b)
+    }
+
+    /// The vaults whose self-grants this answer served, ascending by id: what the vault
+    /// directory's completeness check compares with the directory ([ADR 0081] §A2), whether or
+    /// not their keys were taken out since ([`VerifiedAccount::take_vault_key`]).
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    #[must_use]
+    pub fn served_vault_ids(&self) -> Vec<VaultId> {
+        let mut ids: Vec<VaultId> = self
+            .served
+            .self_grants
+            .iter()
+            .map(|(g, _)| VaultId::from_bytes(g.vault_id.to_bytes()))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
     /// Whether the identity keys changed with this answer (after the user confirmed them).
     #[must_use]
     pub const fn identity_changed(&self) -> bool {
@@ -261,6 +329,13 @@ impl VerifiedAccount {
     #[must_use]
     pub const fn settings(&self) -> Option<&AccountSettings> {
         self.settings.as_ref()
+    }
+
+    /// The storage usage the server reported with this answer (ADR 0048 §5); unverified, for
+    /// display only ([`StorageUsage`]).
+    #[must_use]
+    pub const fn usage(&self) -> Option<StorageUsage> {
+        self.usage
     }
 
     /// Takes the vault key of `vault_id` out of this answer, to build that vault's
@@ -447,6 +522,13 @@ pub(crate) fn verify_account_view(
     let served = ServedObjects::of_view(view, &vault_keys)?;
     Ok(VerifiedAccount {
         served,
+        usage: StorageUsage::of_view(view),
+        vault_bytes: view
+            .vaults
+            .as_slice()
+            .iter()
+            .map(|v| (VaultId::from_bytes(v.vault_id.to_bytes()), v.bytes_used))
+            .collect(),
         account_id,
         pin: AccountPin {
             bundle: public.bundle,

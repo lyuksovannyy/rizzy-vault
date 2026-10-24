@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Named scenarios: the examples the ADRs name, and the merge spike's named regression cases
 //! (`tests/model.rs`, `tests/families.rs`) ported to whole-system runs. Each ends with the
 //! quiescent checks of [`World::check_quiescent`], so each also checks properties 1–4, 6 and 7.
@@ -15,18 +17,30 @@
 //! | [`adr0018_purge_over_active_and_ops_after_the_purge`] | ADR 0018 §3 "A Purge is never rejected", "Applying" 3; spike test of the same name |
 //! | [`an_oversize_item_across_compaction_and_a_restore`] | ADR 0021 §5 "Oversize items", §8; ADR 0018 owner decision 12 |
 //! | [`a_lost_answer_across_a_restore`] | ADR 0021 §2 "Restore generation", §9; spike `stale_sent_resolution` |
-//! | [`finding_a_paged_tombstone_cover_split_from_its_purge_stalls`] | a finding: ADR 0021 §4 paging against ADR 0018 §3 "Snapshots are claims" |
+//! | [`a_paged_tombstone_cover_split_from_its_purge_is_held_and_taken`] | ADR 0050 §4, the boundary case (gap 14) |
+//! | [`a_tombstone_cover_whose_purge_is_on_a_later_devices_chain_is_held_and_taken`] | ADR 0050 §4, the cross-device case, the purge one to many pages later |
 //! | [`a_claimed_dot_never_swallows_the_genuine_op`] | ADR 0018 §3 "Snapshots are claims"; ADR 0021 §8 claims of unheld dots; spike `tests/faulty.rs` test of the same name |
 //! | [`an_omitting_snapshot_never_removes_a_held_value`] | ADR 0018 §3 "The absence of a value is never evidence"; spike `tests/faulty.rs` test of the same name |
 //! | [`a_tombstone_that_records_a_known_write_is_refused`] | ADR 0018 §3 "refuses ... a snapshot that contradicts an op body it holds"; spike `tests/faulty.rs` test of the same name |
 //! | [`heal_prefers_bodies_against_faulty_sole_covers`] | ADR 0021 §9 "Healing request"; spike `tests/families.rs` test of the same name |
+//! | [`a_revoked_device_decrypts_nothing_written_after_the_rotation`] | ADR 0012 §12 property 6; CRYPTO.md §11.6 (writer rule, wraps), §11.8; ADR 0021 §9 "Stale epoch" |
+//! | [`property_6_reports_a_record_sealed_under_a_revoked_key`] | the property 6 check itself: a record sealed under a key the revoked device holds is reported |
+//! | [`a_stale_answer_lost_across_a_restore`] | ADR 0021 §9 "Stale epoch" (re-issue, or re-publication of an op that may have been served), §2 "Restore generation"; ADR 0032 §3 lag repair |
+//! | [`a_kind4_snapshot_after_expiry`] | ADR 0021 §9 "Revoked and kind-4 authors"; CRYPTO.md §10.2 "Web-vault certificates" |
+//! | [`server_rotate_refuses_a_non_advancing_epoch`] | ADR 0025 §3 check 2; a negative control for `Server::rotate`'s `RotationRefusal::Epoch` |
+//! | [`server_rotate_refuses_a_cursor_that_is_not_every_head`] | ADR 0025 §3 check 4 ("Rotation cut-off"); a negative control for `RotationRefusal::Cursor`, below and above a head |
+//! | [`server_rotate_refuses_a_mismatched_wrap_set`] | ADR 0025 §3 check 3; a negative control for `RotationRefusal::Wraps`: a wrong epoch, a duplicated row, a row named in neither list |
+//! | [`a_kind4_author_retrying_an_already_stored_snapshot_is_acknowledged`] | ADR 0021 §9 "Already stored" vs. "Revoked and kind-4 authors": a byte-identical retry from an expired author is acknowledged; a fresh one is refused |
 
-use super::KEYS;
 use super::faults::{self, Fault};
 use super::oracle::{State, held};
+use super::server::{Rotation, RotationRefusal, SnapAnswer, SnapRecord, Wrap, WrapRow};
 use super::world::{Faults, Step, World};
+use super::{KEYS, crypto};
 use crate::causal::Report;
+use crate::dot::Dot;
 use crate::merge::ItemLifecycle;
+use crate::vv::VersionVector;
 
 /// Uploads then fetches for device `d`.
 fn sync(w: &mut World, d: usize) {
@@ -500,18 +514,16 @@ fn a_lost_answer_across_a_restore() {
     );
 }
 
-/// **Finding** (reported, not fixed here): a paged Fetch can put a tombstone cover in the page
-/// of the bodiless headers it covers while its recorded purge, a later link of the same chain,
-/// falls in the next page. The merge cuts the cover to the headers verified so far (ADR 0018 §3
-/// "Snapshots are claims"), so it refuses the tombstone (`PurgeAboveCut`); the bodiless headers
-/// then count against no accepted cover, the chain stops at a gap, the cursor stays, and every
-/// later Fetch with the same paging repeats it: against an honest server the device never
-/// converges. The server cannot page around it: the purge dot is inside the encrypted snapshot.
-/// ADR 0021 §4 ("Each page of a paged response carries its own covers") and the spike (which
-/// does not model paging) leave this open. This test pins the stall; when the owner settles the
-/// rule and the engine changes, it fails and becomes a convergence test.
+/// ADR 0050 §4, the boundary case (formerly a finding, gap 14): a paged Fetch puts a tombstone
+/// cover in the page of the bodiless headers it covers while its recorded purge, a later link of
+/// the same chain, falls in the next page. The merge cuts the cover to the headers verified so
+/// far (ADR 0018 §3 "Snapshots are claims") and refuses it (`PurgeAboveCut`); before ADR 0050
+/// the chain stopped at a gap, the cursor stayed, and every later Fetch with the same paging
+/// repeated it, so the device never converged against an honest server. Now the device holds
+/// the cover, its chain and cursor go past the held headers, and the next page's purge header
+/// lets the retry take it.
 #[test]
-fn finding_a_paged_tombstone_cover_split_from_its_purge_stalls() {
+fn a_paged_tombstone_cover_split_from_its_purge_is_held_and_taken() {
     let faults = Faults {
         page_len: 3,
         page_in_drain: true,
@@ -534,16 +546,106 @@ fn finding_a_paged_tombstone_cover_split_from_its_purge_stalls() {
     w.step(Step::Worker);
     assert_eq!(w.server.bodiless(w.items[0]).len(), 4, "not compacted");
     w.join(2);
-    w.drain();
-    w.check_quiescent(1);
+    // One Fetch: three pages of three records, the purge (seq 4) alone in the second.
+    w.step(Step::Fetch { d: 2 });
     let a = w.id(0).unwrap();
     let c = &w.devices[2];
-    assert!(c.stats.paged_refused > 0, "the split cover was not refused");
-    assert_eq!(c.log.head(a), 0, "the chain went past the refused cover");
-    assert!(
-        w.verdict().is_err(),
-        "the stall no longer happens: settle the finding"
+    assert!(c.stats.held > 0, "the split cover was not held");
+    assert_eq!(
+        c.stats.holds_resolved, c.stats.held,
+        "a held cover was not resolved"
     );
+    assert_eq!(c.stats.refused, 0, "a held cover was given up");
+    assert_eq!(c.log.head(a), 4, "the chain stopped at the held cover");
+    assert_eq!(
+        c.log.settled(w.items[0]).get(a),
+        4,
+        "the purge did not settle"
+    );
+    assert!(c.last_complete.is_empty(), "{:?}", c.last_complete);
+    settle(&mut w);
+}
+
+/// ADR 0050 §4, the cross-device case: the tombstone's recorded purge is another device's op,
+/// on a chain the server serves only after the chain of the bodiless headers the cover is
+/// selected for (devices in ascending id order, ADR 0021 §4), so the purge header comes one,
+/// two or many pages later. The device holds the cover across every page in between and
+/// takes it once the purger's chain reaches the purge.
+#[test]
+fn a_tombstone_cover_whose_purge_is_on_a_later_devices_chain_is_held_and_taken() {
+    for (seed, page_len, pad) in [(21, 3, 0), (22, 2, 2), (23, 1, 5), (24, 2, 9)] {
+        let faults = Faults {
+            page_len,
+            page_in_drain: true,
+            ..Faults::default()
+        };
+        let mut w = World::new(3, 2, 2, seed, faults);
+        // The writer is the device with the lower id, the purger the other one, so the
+        // purger's chain comes after the writer's in every response.
+        let (writer, purger) = if w.id(0) < w.id(1) { (0, 1) } else { (1, 0) };
+        w.step(Step::Write {
+            d: writer,
+            i: 0,
+            k: 0,
+        });
+        w.step(Step::Write {
+            d: writer,
+            i: 0,
+            k: 1,
+        });
+        w.step(Step::Trash { d: writer, i: 0 });
+        sync(&mut w, writer);
+        // `pad` ops of the purger on another item put pages between the cover and the purge.
+        for k in 0..pad {
+            w.step(Step::Write {
+                d: purger,
+                i: 1,
+                k: k % 3,
+            });
+        }
+        w.step(Step::Fetch { d: purger });
+        w.step(Step::Purge { d: purger, i: 0 });
+        sync(&mut w, purger);
+        // The writer learns the purge and writes the tombstone that records it; the purger
+        // writes none, so the only cover of the writer's headers names the purger's purge.
+        w.step(Step::Fetch { d: writer });
+        w.step(Step::Snapshot { d: writer, i: 0 });
+        w.step(Step::Upload {
+            d: writer,
+            lose: false,
+        });
+        w.step(Step::Worker);
+        assert!(
+            !w.server.bodiless(w.items[0]).is_empty(),
+            "seed {seed}: not compacted"
+        );
+        w.join(2);
+        w.step(Step::Fetch { d: 2 });
+        let c = &w.devices[2];
+        assert!(
+            c.stats.held > 0,
+            "seed {seed}: the split cover was not held"
+        );
+        assert_eq!(c.stats.holds_resolved, c.stats.held, "seed {seed}");
+        assert_eq!(c.stats.refused, 0, "seed {seed}: a held cover was given up");
+        let (wid, pid) = (w.id(writer).unwrap(), w.id(purger).unwrap());
+        assert_eq!(
+            c.log.head(wid),
+            w.devices[writer].log.head(wid),
+            "seed {seed}"
+        );
+        assert_eq!(
+            c.log.head(pid),
+            w.devices[purger].log.head(pid),
+            "seed {seed}"
+        );
+        assert!(
+            c.last_complete.is_empty(),
+            "seed {seed}: {:?}",
+            c.last_complete
+        );
+        settle(&mut w);
+    }
 }
 
 /// Device `d` writes a snapshot of item `i` telling `fault`.
@@ -721,4 +823,483 @@ fn heal_prefers_bodies_against_faulty_sole_covers() {
     w.join(2);
     settle(&mut w);
     assert_eq!(state(&w, 2, 0), w.expected_state(0));
+}
+
+/// ADR 0012 §12 property 6 and CRYPTO.md §11.6: device 3 is revoked in one request with a
+/// rotation; the others write on both items afterwards, under fresh item keys created at the
+/// new epoch, and devices that had not fetched get stale-epoch answers and re-issue. No envelope
+/// written after the rotation opens under any item key the revoked device holds, and no
+/// wrap-set row opens under a vault key it holds, while the remaining devices open both.
+#[test]
+fn a_revoked_device_decrypts_nothing_written_after_the_rotation() {
+    let mut w = World::new(4, 4, 2, 23, Faults::default());
+    for d in 0..4 {
+        w.step(Step::Write { d, i: d % 2, k: 0 });
+        sync(&mut w, d);
+    }
+    for d in 0..4 {
+        w.step(Step::Fetch { d });
+    }
+    // Device 2 writes before the rotation and uploads after it, without fetching first.
+    w.step(Step::Write { d: 2, i: 0, k: 1 });
+    w.step(Step::Revoke { d: 3 });
+    assert_eq!(w.server.epoch(), 1, "the revocation did not rotate");
+    w.step(Step::Upload { d: 2, lose: false });
+    assert_eq!(w.devices[2].stats.stale_ops, 1, "no stale-epoch answer");
+    assert_eq!(
+        w.devices[2].stats.reissued, 1,
+        "the stale op was not re-issued"
+    );
+    for d in 0..3 {
+        for i in 0..2 {
+            w.step(Step::Write { d, i, k: 2 });
+        }
+        sync(&mut w, d);
+        w.step(Step::Snapshot { d, i: 0 });
+        w.step(Step::Upload { d, lose: false });
+    }
+    // The revoked device writes on, unaware; the server refuses it.
+    w.step(Step::Write { d: 3, i: 0, k: 3 });
+    w.step(Step::Upload { d: 3, lose: false });
+    settle(&mut w);
+    assert!(
+        w.p6_checked.0 > 0 && w.p6_checked.1 > 0,
+        "{:?}",
+        w.p6_checked
+    );
+
+    // The same checks spelled out here: every op body and snapshot of the server written at the
+    // new epoch, against every key the revoked device holds.
+    let revoked = w.devices[3].held_keys();
+    let vault_keys = w.devices[3].vault_keys.clone();
+    assert!(!vault_keys.contains(&1));
+    let (ops, snaps) = w.server.envelopes();
+    let mut fresh = 0;
+    for (header, envelope) in ops.iter().filter(|(h, _)| h.vault_key_epoch >= 1) {
+        fresh += 1;
+        let key = crypto::envelope_key(envelope).unwrap();
+        assert!(!revoked.contains(&key));
+        assert!(
+            revoked
+                .iter()
+                .all(|k| !crypto::op_opens_under(header, envelope, k))
+        );
+        assert!(crypto::op_opens_under(header, envelope, &key));
+    }
+    for s in snaps.iter().filter(|s| s.header.vault_key_epoch >= 1) {
+        fresh += 1;
+        let key = crypto::envelope_key(&s.data).unwrap();
+        assert!(
+            revoked
+                .iter()
+                .all(|k| !crypto::snapshot_opens_under(&s.header, &s.data, k))
+        );
+        assert!(crypto::snapshot_opens_under(&s.header, &s.data, &key));
+    }
+    assert!(fresh > 0, "nothing was written after the rotation");
+    let rows = w.server.rows();
+    assert!(!rows.is_empty(), "no fresh item key was wrapped");
+    for row in &rows {
+        assert_eq!(row.wrap.epoch, 1);
+        assert!(
+            vault_keys
+                .iter()
+                .all(|&v| crypto::unwrap(v, row.item, &row.wrap.envelope).is_none())
+        );
+        assert_eq!(
+            crypto::unwrap(1, row.item, &row.wrap.envelope),
+            Some(row.key)
+        );
+    }
+}
+
+/// The checks of property 6 can fail: a record sealed after the rotation under an item key the
+/// revoked device holds (an initial key, which the writer rule forbids at the new epoch), signed
+/// by a remaining device and stored by the server, which holds no key and cannot tell, is
+/// reported.
+#[test]
+fn property_6_reports_a_record_sealed_under_a_revoked_key() {
+    let mut w = World::new(4, 4, 1, 24, Faults::default());
+    for d in 0..4 {
+        w.step(Step::Write { d, i: 0, k: 0 });
+        sync(&mut w, d);
+    }
+    w.step(Step::Revoke { d: 3 });
+    w.step(Step::Fetch { d: 0 });
+    let item = w.items[0];
+    let header = crate::header::SnapshotHeader {
+        vault_id: super::VAULT,
+        item_id: item,
+        snapshot_id: rizzy_core::ids::SnapshotId::from_bytes([0x99; 16]),
+        author: w.devices[0].id,
+        item_schema_version: crate::header::ItemSchemaVersion::V1,
+        vault_key_epoch: 1,
+        covered: w.devices[0].items[&item].covered().clone(),
+    };
+    let data = w.devices[0].items[&item].snapshot_data().unwrap().unwrap();
+    let data = crate::record::encode_snapshot(&header.covered, &data).unwrap();
+    let mut nonces = crypto::Nonces::new(24, w.devices[0].id);
+    let old = crypto::initial_key(item);
+    let envelope = crypto::seal_snapshot(&mut nonces, &header, &old, data.expose_secret()).unwrap();
+    let record = SnapRecord {
+        signed: crypto::sign_snapshot(&header, &envelope).unwrap(),
+        header,
+        data: envelope,
+        wrap: None,
+        tainted: false,
+    };
+    assert_eq!(w.server.upload_snapshot(&record), SnapAnswer::Stored);
+    w.step(Step::Worker);
+    let found: Vec<&String> = w
+        .violations
+        .iter()
+        .filter(|v| v.contains("property 6") || v.contains("writer rule"))
+        .collect();
+    assert!(
+        found.iter().any(|v| v.contains("property 6"))
+            && found.iter().any(|v| v.contains("writer rule")),
+        "{:?}",
+        w.violations
+    );
+}
+
+/// ADR 0021 §9 "Stale epoch" across a restore (ADR 0032): a backup, then a rotation; device B,
+/// which has not fetched since, writes an op at the old epoch; the server is restored to the
+/// backup, rolling its epoch back, and C, whose epoch is newer, repairs it first (ADR 0032 §3).
+/// B's upload then gets a stale-epoch answer. If B's first send of the op went without an
+/// answer before the restore, the server may have stored and served it: B never re-issues it,
+/// and re-publishes it verbatim in a healing request. Otherwise B re-issues it with the same
+/// `device_seq` under the current epoch and a fresh item key. Both converge.
+#[test]
+fn a_stale_answer_lost_across_a_restore() {
+    for lost in [true, false] {
+        let mut w = World::new(3, 3, 1, 21, Faults::default());
+        w.step(Step::Write { d: 0, i: 0, k: 0 });
+        sync(&mut w, 0);
+        w.step(Step::Fetch { d: 1 });
+        w.step(Step::Fetch { d: 2 });
+        w.step(Step::Backup);
+        w.step(Step::Rotate { d: 2 });
+        assert_eq!(w.server.epoch(), 1, "lost {lost}: no rotation");
+        w.step(Step::Write { d: 1, i: 0, k: 1 });
+        let op = *w.dots_of(1, 0).last().unwrap();
+        assert_eq!(w.header_of(op).unwrap().vault_key_epoch, 0);
+        if lost {
+            // The server answers "stale epoch"; the answer never arrives.
+            w.step(Step::Upload { d: 1, lose: true });
+            assert!(w.server.stored_header(op).is_none());
+            assert_eq!(w.server.stats.stale_ops, 1);
+        }
+        w.step(Step::RestoreServer);
+        assert_eq!(w.server.epoch(), 0, "the restore kept the epoch");
+        sync(&mut w, 2);
+        assert_eq!(
+            w.server.epoch(),
+            1,
+            "lost {lost}: C did not repair the epoch"
+        );
+        assert_eq!(w.server.stats.epoch_heals, 1);
+        sync(&mut w, 1);
+        sync(&mut w, 1);
+        let b = &w.devices[1].stats;
+        assert!(b.stale_ops >= 1, "lost {lost}: {b:?}");
+        let stored = w.server.stored_header(op).cloned().unwrap();
+        if lost {
+            assert_eq!((b.republished, b.reissued), (1, 0), "{b:?}");
+            assert_eq!(stored.vault_key_epoch, 0, "a maybe-served op was re-issued");
+        } else {
+            assert_eq!((b.republished, b.reissued), (0, 1), "{b:?}");
+            assert_eq!(stored.vault_key_epoch, 1);
+            assert_eq!(stored.dot, op, "the re-issue changed the dot");
+        }
+        assert_eq!(Some(&stored), w.header_of(op), "the ledger disagrees");
+        settle(&mut w);
+    }
+}
+
+/// ADR 0021 §9 "Revoked and kind-4 authors": a web vault (kind 4) and a durable device each
+/// snapshot the item, `worker` compacts behind both, then the certificate expires with an op
+/// and a snapshot unsent: the server refuses both, the web vault is gone, and its retained
+/// snapshot keeps counting as a cover for a device enrolled after the expiry, which converges
+/// on the state of the ops the server holds.
+#[test]
+fn a_kind4_snapshot_after_expiry() {
+    let mut w = World::new(4, 3, 1, 22, Faults::default());
+    w.set_kind4(2, super::T0 + 10_000);
+    for d in [2, 0, 2, 0] {
+        w.step(Step::Write { d, i: 0, k: d });
+        sync(&mut w, d);
+    }
+    for d in [2, 0] {
+        sync(&mut w, d);
+        w.step(Step::Snapshot { d, i: 0 });
+        w.step(Step::Upload { d, lose: false });
+    }
+    w.step(Step::Worker);
+    assert!(!w.server.bodiless(w.items[0]).is_empty(), "not compacted");
+    // An op and a snapshot the web vault never sends before its certificate expires.
+    w.step(Step::Write { d: 2, i: 0, k: 3 });
+    let unsent = *w.dots_of(2, 0).last().unwrap();
+    w.pass_time(20_000);
+    assert!(w.is_expired(2));
+    assert!(w.server.stored_header(unsent).is_none());
+    assert!(w.server.stats.expired_uploads > 0, "{:?}", w.server.stats);
+    assert!(w.server.stats.expired_snapshots > 0, "{:?}", w.server.stats);
+    w.join(3);
+    settle(&mut w);
+    assert!(w.server.stats.expired_covers > 0, "{:?}", w.server.stats);
+    assert_eq!(state(&w, 3, 0), w.expected_state(0));
+}
+
+/// ADR 0025 §3 check 2: a rotation whose epoch is not above the vault's stored one is refused
+/// as `RotationRefusal::Epoch`, and changes nothing. [`World::rotate`] never builds one of
+/// these (it always computes a strictly-increasing epoch), so there was no negative control on
+/// [`Server::rotate`] itself.
+#[test]
+fn server_rotate_refuses_a_non_advancing_epoch() {
+    let mut w = World::new(3, 3, 1, 101, Faults::default());
+    w.step(Step::Write { d: 0, i: 0, k: 0 });
+    sync(&mut w, 0);
+    w.step(Step::Rotate { d: 0 });
+    assert_eq!(w.server.epoch(), 1, "the rotation did not land");
+    let epoch_before = w.server.epoch();
+    let rows_before = w.server.rows();
+    let heads = w.server.heads();
+
+    // Equal to the stored epoch, and below it: neither advances.
+    for stale_epoch in [epoch_before, 0] {
+        let rotation = Rotation {
+            epoch: stale_epoch,
+            cursor: heads.clone(),
+            rewrapped: Vec::new(),
+            dropped: Vec::new(),
+            revoke: None,
+        };
+        assert_eq!(w.server.rotate(&rotation), Err(RotationRefusal::Epoch));
+        assert_eq!(
+            w.server.epoch(),
+            epoch_before,
+            "a refused rotation moved the epoch"
+        );
+        assert_eq!(
+            w.server.rows(),
+            rows_before,
+            "a refused rotation changed the rows"
+        );
+    }
+}
+
+/// ADR 0025 §3 check 4 ("Rotation cut-off"): a rotation whose cursor is not every head h(V, d)
+/// is refused as `RotationRefusal::Cursor`, both below a head (ADR 0012 §6's refusal
+/// territory) and above one ("the server is behind", ADR 0021 §9), and changes nothing.
+/// [`World::rotate`] pre-validates this with the server's own predicate before ever sending a
+/// `Rotation`, so there was no negative control on [`Server::rotate`] itself.
+#[test]
+fn server_rotate_refuses_a_cursor_that_is_not_every_head() {
+    let mut w = World::new(3, 3, 1, 102, Faults::default());
+    w.step(Step::Write { d: 0, i: 0, k: 0 });
+    sync(&mut w, 0);
+    w.step(Step::Rotate { d: 0 });
+    assert_eq!(w.server.epoch(), 1, "the rotation did not land");
+    let epoch_before = w.server.epoch();
+    let rows_before = w.server.rows();
+    let heads = w.server.heads();
+    let author = w.devices[0].id;
+
+    let below = Rotation {
+        epoch: epoch_before + 1,
+        cursor: VersionVector::new(),
+        rewrapped: Vec::new(),
+        dropped: Vec::new(),
+        revoke: None,
+    };
+    assert_eq!(w.server.rotate(&below), Err(RotationRefusal::Cursor));
+    assert_eq!(
+        w.server.epoch(),
+        epoch_before,
+        "a refused rotation moved the epoch"
+    );
+    assert_eq!(
+        w.server.rows(),
+        rows_before,
+        "a refused rotation changed the rows"
+    );
+
+    let mut above_cursor = heads.clone();
+    above_cursor.add(Dot::new(author, heads.get(author) + 1).expect("a nonzero seq"));
+    let above = Rotation {
+        epoch: epoch_before + 1,
+        cursor: above_cursor,
+        rewrapped: Vec::new(),
+        dropped: Vec::new(),
+        revoke: None,
+    };
+    assert_eq!(w.server.rotate(&above), Err(RotationRefusal::Cursor));
+    assert_eq!(
+        w.server.epoch(),
+        epoch_before,
+        "a refused rotation moved the epoch"
+    );
+    assert_eq!(
+        w.server.rows(),
+        rows_before,
+        "a refused rotation changed the rows"
+    );
+}
+
+/// ADR 0025 §3 check 3: a rotation is refused as `RotationRefusal::Wraps` when a rewrapped row
+/// is not at the new epoch, when a row is named twice across `rewrapped` and `dropped`, or when
+/// a stored row is named in neither list, and each refusal changes nothing.
+/// [`World::rotate`] always builds `rewrapped`/`dropped` directly from the server's own rows
+/// ([`Device::rewrap`](super::device::Device::rewrap)), so there was no negative control on
+/// [`Server::rotate`] itself.
+#[test]
+fn server_rotate_refuses_a_mismatched_wrap_set() {
+    let mut w = World::new(3, 3, 1, 103, Faults::default());
+    // The initial, enrolment-time item key has no wrap-set row (CRYPTO.md §11.6): one is
+    // created only once the writer rule gives this item a fresh key after a rotation.
+    w.step(Step::Write { d: 0, i: 0, k: 0 });
+    sync(&mut w, 0);
+    w.step(Step::Rotate { d: 0 });
+    assert_eq!(w.server.epoch(), 1, "the rotation did not land");
+    w.step(Step::Write { d: 0, i: 0, k: 1 });
+    sync(&mut w, 0);
+    let epoch_before = w.server.epoch();
+    let rows_before = w.server.rows();
+    assert_eq!(
+        rows_before.len(),
+        1,
+        "expected exactly one post-rotation row: {rows_before:?}"
+    );
+    let row = rows_before[0].clone();
+    let heads = w.server.heads();
+
+    // A rewrapped row not at the new epoch.
+    let wrong_epoch = Rotation {
+        epoch: epoch_before + 1,
+        cursor: heads.clone(),
+        rewrapped: vec![WrapRow {
+            item: row.item,
+            key: row.key,
+            wrap: Wrap {
+                epoch: epoch_before,
+                envelope: row.wrap.envelope.clone(),
+            },
+        }],
+        dropped: Vec::new(),
+        revoke: None,
+    };
+    assert_eq!(w.server.rotate(&wrong_epoch), Err(RotationRefusal::Wraps));
+    assert_eq!(
+        w.server.epoch(),
+        epoch_before,
+        "a refused rotation moved the epoch"
+    );
+    assert_eq!(
+        w.server.rows(),
+        rows_before,
+        "a refused rotation changed the rows"
+    );
+
+    // The same (item, key) named twice, across rewrapped and dropped.
+    let duplicate = Rotation {
+        epoch: epoch_before + 1,
+        cursor: heads.clone(),
+        rewrapped: vec![WrapRow {
+            item: row.item,
+            key: row.key,
+            wrap: Wrap {
+                epoch: epoch_before + 1,
+                envelope: row.wrap.envelope.clone(),
+            },
+        }],
+        dropped: vec![(row.item, row.key)],
+        revoke: None,
+    };
+    assert_eq!(w.server.rotate(&duplicate), Err(RotationRefusal::Wraps));
+    assert_eq!(
+        w.server.epoch(),
+        epoch_before,
+        "a refused rotation moved the epoch"
+    );
+    assert_eq!(
+        w.server.rows(),
+        rows_before,
+        "a refused rotation changed the rows"
+    );
+
+    // A stored row named in neither list.
+    let incomplete = Rotation {
+        epoch: epoch_before + 1,
+        cursor: heads,
+        rewrapped: Vec::new(),
+        dropped: Vec::new(),
+        revoke: None,
+    };
+    assert_eq!(w.server.rotate(&incomplete), Err(RotationRefusal::Wraps));
+    assert_eq!(
+        w.server.epoch(),
+        epoch_before,
+        "a refused rotation moved the epoch"
+    );
+    assert_eq!(
+        w.server.rows(),
+        rows_before,
+        "a refused rotation changed the rows"
+    );
+}
+
+/// ADR 0021 §9 "Already stored" is checked before the kind-4 expiry refusal (CRYPTO.md §10.2
+/// "Web-vault certificates"): a web vault retrying a byte-identical snapshot the server already
+/// holds, after its certificate has expired, is acknowledged like any other "already stored"
+/// upload, the client's own retry-as-acknowledgement path; a *new* snapshot from the same
+/// expired author is refused ([`SnapshotRefusal::AuthorExpired`](crate::compaction::SnapshotRefusal::AuthorExpired)),
+/// as the module doc's "its new snapshots refused" already distinguishes from a plain retry.
+#[test]
+fn a_kind4_author_retrying_an_already_stored_snapshot_is_acknowledged() {
+    let mut w = World::new(3, 3, 1, 104, Faults::default());
+    w.set_kind4(0, super::T0 + 10_000);
+    w.step(Step::Write { d: 0, i: 0, k: 0 });
+    sync(&mut w, 0);
+    w.step(Step::Snapshot { d: 0, i: 0 });
+    w.step(Step::Upload { d: 0, lose: false });
+    let item = w.items[0];
+    let stored = w
+        .server
+        .snapshot_records()
+        .find(|s| s.header.item_id == item)
+        .cloned()
+        .expect("the honest snapshot was stored");
+    w.pass_time(20_000);
+    assert!(w.is_expired(0));
+
+    // A byte-identical retry: "already stored" wins over the expiry refusal.
+    assert_eq!(
+        w.server.upload_snapshot(&stored),
+        SnapAnswer::AlreadyStored,
+        "a retried already-stored snapshot from an expired author must still be acknowledged"
+    );
+
+    // A fresh snapshot (same state, a new id) from the now-expired author: refused.
+    let mut header = stored.header.clone();
+    header.snapshot_id = rizzy_core::ids::SnapshotId::from_bytes([0x77; 16]);
+    let data = w.devices[0].items[&item]
+        .snapshot_data()
+        .unwrap()
+        .expect("the item has a snapshot");
+    let data = crate::record::encode_snapshot(&header.covered, &data).unwrap();
+    let mut nonces = crypto::Nonces::new(62, w.devices[0].id);
+    let key = crypto::initial_key(item);
+    let envelope = crypto::seal_snapshot(&mut nonces, &header, &key, data.expose_secret()).unwrap();
+    let fresh = SnapRecord {
+        signed: crypto::sign_snapshot(&header, &envelope).unwrap(),
+        header,
+        data: envelope,
+        wrap: None,
+        tainted: false,
+    };
+    assert_eq!(
+        w.server.upload_snapshot(&fresh),
+        SnapAnswer::Refused(crate::compaction::SnapshotRefusal::AuthorExpired)
+    );
 }

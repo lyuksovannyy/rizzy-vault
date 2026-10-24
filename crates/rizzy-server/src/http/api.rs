@@ -1,9 +1,13 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `api` role's endpoints: every M1 message of `rizzy-proto`, over the two domains
 //! ([ADR 0002] point 3; [ADR 0010] §1; [ADR 0028]; CRYPTO.md §5.10, §11).
 //!
 //! # Endpoints
 //!
-//! [ADR 0028] item 1 freezes this table for `v1`: the 27 endpoints under `/api/v1/`, grouped by
+//! [ADR 0028] item 1 freezes this table for `v1`: the 27 endpoints under `/api/v1/`, the four
+//! of the `sessions` resource that [ADR 0075] §2 adds, and the five of the `attachments`
+//! resource that [ADR 0054] §6 adds (36 in all), grouped by
 //! resource, verb last; `POST` for everything, including reads that carry a body, and `GET`
 //! (and `HEAD`) only for `GET /api/v1/devices/grants`. The path strings are `rizzy-proto`'s
 //! (`http::paths`), shared with every client. The router matches them byte for byte: a path
@@ -37,9 +41,24 @@
 //! | `POST /api/v1/totp/enrol/start` | no body → `TotpEnrolStartResponse` | OPAQUE or device (fresh OPAQUE; checked by the domain) |
 //! | `POST /api/v1/totp/enrol/confirm` | `TotpEnrolConfirmRequest` → 204 | OPAQUE or device (fresh OPAQUE; checked by the domain) |
 //! | `POST /api/v1/totp/disable` | `TotpDisableRequest` → 204 | OPAQUE or device (fresh OPAQUE; checked by the domain) |
+//! | `POST /api/v1/webauthn/enrol/start` | no body → `WebauthnEnrolStartResponse` | OPAQUE or device (fresh OPAQUE; checked by the domain) |
+//! | `POST /api/v1/webauthn/enrol/confirm` | `WebauthnEnrolConfirmRequest` → 204 | OPAQUE or device (fresh OPAQUE; checked by the domain) |
+//! | `POST /api/v1/webauthn/list` | no body → `WebauthnListResponse` | OPAQUE or device |
+//! | `POST /api/v1/webauthn/remove` | `WebauthnRemoveRequest` → 204 | OPAQUE or device (fresh OPAQUE; checked by the domain) |
+//! | `POST /api/v1/webauthn/login/challenge` | `WebauthnLoginChallengeRequest` → `WebauthnLoginChallengeResponse` | none |
+//! | `POST /api/v1/webauthn/login/finish` | `WebauthnLoginFinishRequest` → `LoginFinishResponse` | optional (as `login/finish`) |
+//! | `POST /api/v1/sessions/list` | no body → `SessionListResponse` | OPAQUE or device |
+//! | `POST /api/v1/sessions/current/end` | no body → 204 | any (OPAQUE, device or recovery-only) |
+//! | `POST /api/v1/sessions/end` | `EndSessionRequest` → 204 | fresh OPAQUE or device (checked by the domain) |
+//! | `POST /api/v1/sessions/others/end` | no body → 204 | fresh OPAQUE or device (checked by the domain) |
 //! | `POST /api/v1/vault/upload` | `UploadRequest` → `UploadResponse` | OPAQUE or device |
 //! | `POST /api/v1/vault/fetch` | `FetchRequest` → `FetchResponse` | OPAQUE or device |
 //! | `POST /api/v1/vault/heal` | `HealingRequest` → `HealingResponse` | OPAQUE or device |
+//! | `POST /api/v1/attachments/create` | `CreateAttachmentRequest` → 204 | OPAQUE or device |
+//! | `POST /api/v1/attachments/get` | `AttachmentRequest` → `GetAttachmentResponse` | OPAQUE or device |
+//! | `POST /api/v1/attachments/upload-chunk` | `UploadChunkRequest` → 204 | OPAQUE or device |
+//! | `POST /api/v1/attachments/download-chunk` | `DownloadChunkRequest` → `DownloadChunkResponse` | OPAQUE or device |
+//! | `POST /api/v1/attachments/delete` | `AttachmentRequest` → 204 | OPAQUE or device |
 //!
 //! "Empty success" (`rizzy-proto`'s tables) is `204 No Content`; "no body" endpoints take an
 //! empty body (limit 0) and are `POST` because they change state. The recovery-only session
@@ -128,6 +147,7 @@
 //! [ADR 0002]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0002-own-protocol.md
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 //! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
+//! [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
 //! [`rizzy-proto`]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/crates/rizzy-proto/src/lib.rs
 
 use std::net::{IpAddr, SocketAddr};
@@ -179,7 +199,7 @@ const UNKNOWN_SOURCE: &[u8] = b"unknown";
 /// `Forwarded` (RFC 7239) is not read.
 ///
 /// [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
-const X_FORWARDED_FOR: &str = "x-forwarded-for";
+pub(crate) const X_FORWARDED_FOR: &str = "x-forwarded-for";
 
 /// The fixed part of a body's read deadline ([`body_deadline`]; [ADR 0028] item 8).
 ///
@@ -365,12 +385,42 @@ pub enum Endpoint {
     TotpEnrolConfirm,
     /// TOTP removal.
     TotpDisable,
+    /// Security-key enrolment start (ADR 0058 point 2).
+    WebauthnEnrolStart,
+    /// Security-key enrolment confirmation (ADR 0058 point 2).
+    WebauthnEnrolConfirm,
+    /// The account's security keys.
+    WebauthnList,
+    /// Security-key removal.
+    WebauthnRemove,
+    /// A login's security-key challenge (ADR 0058 point 3).
+    WebauthnLoginChallenge,
+    /// A login's security-key assertion (ADR 0058 point 3).
+    WebauthnLoginFinish,
+    /// The account's live sessions (ADR 0075 R1).
+    SessionsList,
+    /// Sign-out of the caller's own session (ADR 0075 R2).
+    SessionsCurrentEnd,
+    /// Ending one session by id (ADR 0075 R3).
+    SessionsEnd,
+    /// Ending every other OPAQUE and recovery-only session (ADR 0075 R4).
+    SessionsOthersEnd,
     /// Vault upload.
     Upload,
     /// Vault Fetch.
     Fetch,
     /// Vault restore healing.
     Heal,
+    /// Declare an attachment (ADR 0054 §6).
+    AttachmentCreate,
+    /// An attachment's key wrap (ADR 0054 §6).
+    AttachmentGet,
+    /// Store one attachment chunk (ADR 0054 §6).
+    AttachmentUploadChunk,
+    /// Fetch one attachment chunk (ADR 0054 §6).
+    AttachmentDownloadChunk,
+    /// Delete an attachment (ADR 0054 §7).
+    AttachmentDelete,
 }
 
 impl Endpoint {
@@ -400,9 +450,24 @@ impl Endpoint {
         Self::TotpEnrolStart,
         Self::TotpEnrolConfirm,
         Self::TotpDisable,
+        Self::WebauthnEnrolStart,
+        Self::WebauthnEnrolConfirm,
+        Self::WebauthnList,
+        Self::WebauthnRemove,
+        Self::WebauthnLoginChallenge,
+        Self::WebauthnLoginFinish,
+        Self::SessionsList,
+        Self::SessionsCurrentEnd,
+        Self::SessionsEnd,
+        Self::SessionsOthersEnd,
         Self::Upload,
         Self::Fetch,
         Self::Heal,
+        Self::AttachmentCreate,
+        Self::AttachmentGet,
+        Self::AttachmentUploadChunk,
+        Self::AttachmentDownloadChunk,
+        Self::AttachmentDelete,
     ];
 
     /// The path.
@@ -433,9 +498,24 @@ impl Endpoint {
             Self::TotpEnrolStart => paths::TOTP_ENROL_START,
             Self::TotpEnrolConfirm => paths::TOTP_ENROL_CONFIRM,
             Self::TotpDisable => paths::TOTP_DISABLE,
+            Self::WebauthnEnrolStart => paths::WEBAUTHN_ENROL_START,
+            Self::WebauthnEnrolConfirm => paths::WEBAUTHN_ENROL_CONFIRM,
+            Self::WebauthnList => paths::WEBAUTHN_LIST,
+            Self::WebauthnRemove => paths::WEBAUTHN_REMOVE,
+            Self::WebauthnLoginChallenge => paths::WEBAUTHN_LOGIN_CHALLENGE,
+            Self::WebauthnLoginFinish => paths::WEBAUTHN_LOGIN_FINISH,
+            Self::SessionsList => paths::SESSIONS_LIST,
+            Self::SessionsCurrentEnd => paths::SESSIONS_CURRENT_END,
+            Self::SessionsEnd => paths::SESSIONS_END,
+            Self::SessionsOthersEnd => paths::SESSIONS_OTHERS_END,
             Self::Upload => paths::VAULT_UPLOAD,
             Self::Fetch => paths::VAULT_FETCH,
             Self::Heal => paths::VAULT_HEAL,
+            Self::AttachmentCreate => paths::ATTACHMENTS_CREATE,
+            Self::AttachmentGet => paths::ATTACHMENTS_GET,
+            Self::AttachmentUploadChunk => paths::ATTACHMENTS_UPLOAD_CHUNK,
+            Self::AttachmentDownloadChunk => paths::ATTACHMENTS_DOWNLOAD_CHUNK,
+            Self::AttachmentDelete => paths::ATTACHMENTS_DELETE,
         }
     }
 
@@ -456,8 +536,11 @@ impl Endpoint {
             | Self::DeviceAuthStart
             | Self::DeviceAuthFinish
             | Self::RecoveryStart
-            | Self::RecoveryComplete => SessionNeed::None,
-            Self::LoginStart | Self::LoginFinish => SessionNeed::Optional,
+            | Self::RecoveryComplete
+            | Self::WebauthnLoginChallenge => SessionNeed::None,
+            Self::LoginStart | Self::LoginFinish | Self::WebauthnLoginFinish => {
+                SessionNeed::Optional
+            }
             Self::AccountState
             | Self::EnrolDevice
             | Self::WebCertificate
@@ -467,35 +550,56 @@ impl Endpoint {
             | Self::PublishAccountState
             | Self::PublishGrants
             | Self::ReregisterStart
-            | Self::CommitChange => SessionNeed::Required,
+            | Self::CommitChange
+            | Self::SessionsCurrentEnd => SessionNeed::Required,
             Self::SuspendDevice
             | Self::UnsuspendDevice
             | Self::RecoveryCancel
             | Self::TotpEnrolStart
             | Self::TotpEnrolConfirm
             | Self::TotpDisable
+            | Self::WebauthnEnrolStart
+            | Self::WebauthnEnrolConfirm
+            | Self::WebauthnList
+            | Self::WebauthnRemove
+            | Self::SessionsList
+            | Self::SessionsEnd
+            | Self::SessionsOthersEnd
             | Self::Upload
             | Self::Fetch
-            | Self::Heal => SessionNeed::NotRecovery,
+            | Self::Heal
+            | Self::AttachmentCreate
+            | Self::AttachmentGet
+            | Self::AttachmentUploadChunk
+            | Self::AttachmentDownloadChunk
+            | Self::AttachmentDelete => SessionNeed::NotRecovery,
         }
     }
 
     /// The body-size limit: [`BODY_LIMIT`], the configured upload limit for upload, healing and
     /// the account commit (which carries a rotation's re-wrapped wrap set, ADR 0025 §1),
     /// and 0 for the endpoints that take no body (the `GET` endpoint, recovery cancel and TOTP
-    /// enrolment start).
+    /// enrolment start). The empty-body `sessions` endpoints keep [`BODY_LIMIT`], as [ADR 0075]
+    /// §2 says ("The default body limit (`MAX_BODY_LEN`) applies"); their body is not read.
+    ///
+    /// [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md
     #[must_use]
     pub const fn body_limit(self, max_upload_bytes: usize) -> usize {
         match self {
             Self::Upload | Self::Heal | Self::CommitChange => max_upload_bytes,
-            Self::DeviceGrants | Self::RecoveryCancel | Self::TotpEnrolStart => 0,
+            Self::DeviceGrants
+            | Self::RecoveryCancel
+            | Self::TotpEnrolStart
+            | Self::WebauthnEnrolStart
+            | Self::WebauthnList => 0,
             _ => BODY_LIMIT,
         }
     }
 }
 
 /// The HTTP status of an error code ([ADR 0028] item 3, with `setup_retired` 409 as ADR 0031 point
-/// 3 adds it and `credentials_stale` 409 as ADR 0032 adds it). A code this build does not send
+/// 3 adds it, `credentials_stale` 409 as ADR 0032 adds it, and `quota_exceeded` 409 as ADR 0048
+/// §5 restates the item with it). A code this build does not send
 /// (`unknown`) maps to `500` like `internal`. Clients branch on the code, never on the status.
 ///
 /// [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
@@ -513,14 +617,15 @@ pub const fn status(code: ErrorCode) -> StatusCode {
         | ErrorCode::RecordConflict
         | ErrorCode::PrevSeqMismatch
         | ErrorCode::SetupRetired
-        | ErrorCode::CredentialsStale => StatusCode::CONFLICT,
+        | ErrorCode::CredentialsStale
+        | ErrorCode::QuotaExceeded => StatusCode::CONFLICT,
         ErrorCode::ApiVersionGone => StatusCode::GONE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
 /// A JSON response with `status`, marked `no-store` and with its route name.
-fn json_response(status: StatusCode, body: Vec<u8>, route: &'static str) -> Response {
+pub(crate) fn json_response(status: StatusCode, body: Vec<u8>, route: &'static str) -> Response {
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
     response
@@ -556,6 +661,17 @@ fn failure_response(failure: Failure, route: &'static str) -> Response {
             .insert(RETRY_AFTER, HeaderValue::from(seconds));
     }
     response
+}
+
+/// A `429 rate_limited` answer whose `Retry-After` is `wait_ms` in whole seconds, rounded up.
+pub(crate) fn rate_limited_response(wait_ms: u64, route: &'static str) -> Response {
+    failure_response(
+        Failure {
+            code: ErrorCode::RateLimited,
+            retry_after_secs: Some(retry_after_secs(wait_ms)),
+        },
+        route,
+    )
 }
 
 /// Why a request is refused: the error code and, for `rate_limited`, when to try again.
@@ -609,8 +725,19 @@ fn parse<T: DeserializeOwned>(body: &[u8]) -> Result<T, ErrorCode> {
 }
 
 /// The answer to an auth-domain error: its code and, for a rate limit, its retry time. A
-/// storage or internal failure is logged first.
+/// storage or internal failure is logged first. A security key's possible clone (INV-83) is
+/// logged as a security event: the per-account security event log (threat model R-row, INV-48)
+/// is not built yet, so this log line is where ADR 0058 owner answer 4's signal goes for now.
 fn auth_code(endpoint: Endpoint, e: &AuthError) -> Failure {
+    if let AuthError::PossibleClone { account_id } = e {
+        log::warn(
+            "webauthn_possible_clone",
+            &[
+                Field::Str("route", endpoint.path()),
+                Field::Id("account", account_id),
+            ],
+        );
+    }
     if matches!(e, AuthError::Storage(_) | AuthError::Internal(_)) {
         log::error(
             "auth_failure",
@@ -628,7 +755,13 @@ fn auth_code(endpoint: Endpoint, e: &AuthError) -> Failure {
 
 /// The code of a vault-domain error; a failure other than a refusal is logged first.
 fn vault_code(endpoint: Endpoint, e: &VaultError) -> ErrorCode {
-    if !matches!(e, VaultError::NotFound | VaultError::Invalid) {
+    if !matches!(
+        e,
+        VaultError::NotFound
+            | VaultError::Invalid
+            | VaultError::RecordConflict
+            | VaultError::QuotaExceeded
+    ) {
         log::error(
             "vault_failure",
             &[
@@ -709,8 +842,9 @@ async fn collect(mut body: Body, limit: usize) -> Result<Bytes, BodyError> {
 }
 
 /// Reads the body up to `limit` bytes within [`body_deadline`] (step (e) of the module docs).
-async fn read_body(
-    endpoint: Endpoint,
+/// `route` names the endpoint in the log lines of an aborted or late body.
+pub(crate) async fn read_body(
+    route: &'static str,
     parts: &Parts,
     body: Body,
     limit: usize,
@@ -726,11 +860,11 @@ async fn read_body(
         Ok(Ok(bytes)) => Ok(bytes),
         Ok(Err(BodyError::TooLarge)) => Err(ErrorCode::PayloadTooLarge),
         Ok(Err(BodyError::Aborted)) => {
-            log::info("client_aborted", &[Field::Str("route", endpoint.path())]);
+            log::info("client_aborted", &[Field::Str("route", route)]);
             Err(ErrorCode::InvalidRequest)
         }
         Err(_elapsed) => {
-            log::info("body_read_timeout", &[Field::Str("route", endpoint.path())]);
+            log::info("body_read_timeout", &[Field::Str("route", route)]);
             Err(ErrorCode::InvalidRequest)
         }
     }
@@ -928,7 +1062,7 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
     } else {
         None
     };
-    let body = read_body(endpoint, &parts, body, limit).await?;
+    let body = read_body(endpoint.path(), &parts, body, limit).await?;
     let now = now_ms();
     let session = match &credentials {
         Some(credentials) => {
@@ -1082,6 +1216,52 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
                 .map_err(ae)?;
             Ok(Reply::Empty)
         }
+        Endpoint::WebauthnEnrolStart => json(
+            &auth
+                .webauthn_enrol_start(&mut rng, need()?, now)
+                .await
+                .map_err(ae)?,
+        ),
+        Endpoint::WebauthnEnrolConfirm => {
+            auth.webauthn_enrol_confirm(need()?, &parse(&body)?, now)
+                .await
+                .map_err(ae)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::WebauthnList => json(&auth.webauthn_list(need()?).await.map_err(ae)?),
+        Endpoint::WebauthnRemove => {
+            auth.webauthn_remove(need()?, &parse(&body)?, now)
+                .await
+                .map_err(ae)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::WebauthnLoginChallenge => json(
+            &auth
+                .webauthn_login_challenge(&parse(&body)?, now)
+                .await
+                .map_err(ae)?,
+        ),
+        Endpoint::WebauthnLoginFinish => json(
+            &auth
+                .webauthn_login_finish(&mut rng, &parse(&body)?, &source, session.as_ref(), now)
+                .await
+                .map_err(ae)?,
+        ),
+        Endpoint::SessionsList => json(&auth.list_sessions(need()?, now).await.map_err(ae)?),
+        Endpoint::SessionsCurrentEnd => {
+            auth.end_current_session(need()?, now).await.map_err(ae)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::SessionsEnd => {
+            auth.end_session_request(need()?, &parse(&body)?, now)
+                .await
+                .map_err(ae)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::SessionsOthersEnd => {
+            auth.end_other_sessions(need()?, now).await.map_err(ae)?;
+            Ok(Reply::Empty)
+        }
         Endpoint::Upload => json(
             &api.vault
                 .upload(need()?.account_id, &parse(&body)?, now)
@@ -1125,6 +1305,40 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
             Err(HealingError::Failed(e)) => Err(ve(e)),
             Err(e) => Err(e.code().into()),
         },
+        // ADR 0054 §6: every request fits the 1 MiB default body (`BODY_LIMIT`).
+        Endpoint::AttachmentCreate => {
+            api.vault
+                .attachments_create(need()?.account_id, &parse(&body)?, now)
+                .await
+                .map_err(ve)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::AttachmentGet => json(
+            &api.vault
+                .attachments_get(need()?.account_id, &parse(&body)?)
+                .await
+                .map_err(ve)?,
+        ),
+        Endpoint::AttachmentUploadChunk => {
+            api.vault
+                .attachments_upload_chunk(need()?.account_id, &parse(&body)?)
+                .await
+                .map_err(ve)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::AttachmentDownloadChunk => json(
+            &api.vault
+                .attachments_download_chunk(need()?.account_id, &parse(&body)?)
+                .await
+                .map_err(ve)?,
+        ),
+        Endpoint::AttachmentDelete => {
+            api.vault
+                .attachments_delete(need()?.account_id, &parse(&body)?, now)
+                .await
+                .map_err(ve)?;
+            Ok(Reply::Empty)
+        }
     }
 }
 
@@ -1168,15 +1382,30 @@ mod tests {
             | Endpoint::TotpEnrolStart
             | Endpoint::TotpEnrolConfirm
             | Endpoint::TotpDisable
+            | Endpoint::WebauthnEnrolStart
+            | Endpoint::WebauthnEnrolConfirm
+            | Endpoint::WebauthnList
+            | Endpoint::WebauthnRemove
+            | Endpoint::WebauthnLoginChallenge
+            | Endpoint::WebauthnLoginFinish
+            | Endpoint::SessionsList
+            | Endpoint::SessionsCurrentEnd
+            | Endpoint::SessionsEnd
+            | Endpoint::SessionsOthersEnd
             | Endpoint::Upload
             | Endpoint::Fetch
-            | Endpoint::Heal => true,
+            | Endpoint::Heal
+            | Endpoint::AttachmentCreate
+            | Endpoint::AttachmentGet
+            | Endpoint::AttachmentUploadChunk
+            | Endpoint::AttachmentDownloadChunk
+            | Endpoint::AttachmentDelete => true,
         }
     }
 
     #[test]
     fn all_is_complete_and_paths_unique() {
-        assert_eq!(Endpoint::ALL.len(), 27);
+        assert_eq!(Endpoint::ALL.len(), 42);
         assert!(Endpoint::ALL.iter().all(|e| listed(*e)));
         let unique: HashSet<_> = Endpoint::ALL.iter().copied().map(Endpoint::path).collect();
         assert_eq!(unique.len(), Endpoint::ALL.len());
@@ -1209,6 +1438,7 @@ mod tests {
             (ErrorCode::PrevSeqMismatch, 409),
             (ErrorCode::SetupRetired, 409),
             (ErrorCode::CredentialsStale, 409),
+            (ErrorCode::QuotaExceeded, 409),
             (ErrorCode::ApiVersionGone, 410),
             (ErrorCode::PayloadTooLarge, 413),
             (ErrorCode::RateLimited, 429),
@@ -1367,12 +1597,24 @@ mod tests {
             Endpoint::TotpEnrolStart,
             Endpoint::TotpEnrolConfirm,
             Endpoint::TotpDisable,
+            Endpoint::WebauthnEnrolStart,
+            Endpoint::WebauthnEnrolConfirm,
+            Endpoint::WebauthnList,
+            Endpoint::WebauthnRemove,
+            Endpoint::SessionsList,
+            Endpoint::SessionsEnd,
+            Endpoint::SessionsOthersEnd,
             Endpoint::Upload,
             Endpoint::Fetch,
             Endpoint::Heal,
         ] {
             assert_eq!(e.session(), SessionNeed::NotRecovery, "{e:?}");
         }
+        // Sign-out takes any session, the recovery-only one included (ADR 0075 R2).
+        assert_eq!(
+            Endpoint::SessionsCurrentEnd.session(),
+            SessionNeed::Required
+        );
         // The recovery commit and re-registration take the recovery-only session; the domain
         // applies their rules (CRYPTO.md §11.9 step 5).
         assert_eq!(Endpoint::CommitChange.session(), SessionNeed::Required);
@@ -1388,7 +1630,11 @@ mod tests {
         for e in Endpoint::ALL {
             let expected = match e {
                 Endpoint::Upload | Endpoint::Heal | Endpoint::CommitChange => upload,
-                Endpoint::DeviceGrants | Endpoint::RecoveryCancel | Endpoint::TotpEnrolStart => 0,
+                Endpoint::DeviceGrants
+                | Endpoint::RecoveryCancel
+                | Endpoint::TotpEnrolStart
+                | Endpoint::WebauthnEnrolStart
+                | Endpoint::WebauthnList => 0,
                 _ => BODY_LIMIT,
             };
             assert_eq!(e.body_limit(upload), expected, "{e:?}");
@@ -1424,5 +1670,50 @@ mod tests {
         assert_eq!(body_deadline(BODY_LIMIT), Duration::from_secs(46));
         assert_eq!(MAX_CONCURRENT_LARGE_BODIES, 8);
         assert_eq!(LARGE_BODY_WAIT, Duration::from_secs(10));
+    }
+
+    /// ADR 0075 §11 "HTTP": the module table's rows are the router's endpoints, with their
+    /// methods and session needs ("none", "optional", "… OPAQUE or device …" refuses the
+    /// recovery-only session before the domain, every other row needs a session).
+    #[test]
+    fn the_module_table_is_the_router() {
+        let source = include_str!("api.rs");
+        let mut table: Vec<(String, String, SessionNeed)> = source
+            .lines()
+            .filter_map(|l| l.strip_prefix("//! | `"))
+            .filter_map(|row| {
+                let (route, rest) = row.split_once('`')?;
+                let (method, path) = route.split_once(' ')?;
+                if !path.starts_with("/api/v1/") {
+                    return None;
+                }
+                let session = rest.rsplit('|').nth(1)?.trim();
+                let need = if session == "none" {
+                    SessionNeed::None
+                } else if session.starts_with("optional") {
+                    SessionNeed::Optional
+                } else if session.starts_with("OPAQUE or device")
+                    || session.starts_with("fresh OPAQUE or device")
+                {
+                    SessionNeed::NotRecovery
+                } else {
+                    SessionNeed::Required
+                };
+                Some((method.to_owned(), path.to_owned(), need))
+            })
+            .collect();
+        let mut router: Vec<(String, String, SessionNeed)> = Endpoint::ALL
+            .iter()
+            .map(|e| {
+                let method = match e.method() {
+                    HttpMethod::Get => "GET",
+                    HttpMethod::Post => "POST",
+                };
+                (method.to_owned(), e.path().to_owned(), e.session())
+            })
+            .collect();
+        table.sort_by(|a, b| a.1.cmp(&b.1));
+        router.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(table, router);
     }
 }

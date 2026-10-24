@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The unlock form (ADR 0036 §3, §4). `SecretField` is the one component INV-68 allows to render
 // a secret input; the typed master password is read from the element on submit and the element
 // cleared, never held in React state (same pattern as the web vault's login form).

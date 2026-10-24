@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The passkey consent iframe's own script (ADR 0039 §2; ADR 0014 §2-style framework-free,
 // same reasoning as `inline-menu/main.ts`: a handful of buttons with no state worth a
 // framework). Runs at the extension's own origin, inside an iframe `passkey-relay.ts` injects
@@ -5,6 +7,9 @@
 // not guarantee, and `inline-menu/main.ts`'s own module docs for the general pattern this
 // mirrors (the same ADR 0040 "the privileged document asks the long-lived context directly"
 // rule, applied here to approving/declining a ceremony instead of choosing a fill).
+import "@rizzy-vault/ui/tokens.css";
+import "../surface.css";
+
 import { isPasskeyConsentShowMessage, PASSKEY_CONSENT_DONE, type PasskeyConsentShowMessage } from "./protocol.ts";
 import type { PasskeyCeremonyMessage, PasskeyCeremonyResponse } from "../messaging/contract.ts";
 
@@ -43,21 +48,61 @@ function render(offer: PasskeyConsentShowMessage): void {
   prompt.appendChild(heading);
 
   if (offer.kind === "create") {
-    prompt.appendChild(button(offer.rpName ?? offer.rpId, () => void respond(offer, approvedMessage(offer.ceremonyToken))));
+    // ADR 0081 §A8: a new login's vault, the Personal vault preselected every time.
+    const picker = vaultPicker(offer);
+    prompt.appendChild(
+      button(offer.rpName ?? offer.rpId, () => void respond(offer, approvedMessage(offer, undefined, picker?.value))),
+    );
   } else {
     for (const candidate of offer.candidates ?? []) {
       prompt.appendChild(
         button(`${candidate.itemTitle} (${candidate.userName})`, () =>
-          void respond(offer, approvedMessage(offer.ceremonyToken, candidate.passkeyRef)),
+          void respond(offer, approvedMessage(offer, candidate.passkeyRef)),
         ),
       );
     }
   }
-  prompt.appendChild(button("Not now", () => void respond(offer, { type: "passkey_ceremony_declined", ceremonyToken: offer.ceremonyToken })));
+  prompt.appendChild(
+    button("Not now", () =>
+      void respond(offer, { type: "passkey_ceremony_declined", instanceToken: offer.instanceToken, ceremonyToken: offer.ceremonyToken }),
+    ),
+  );
 }
 
-function approvedMessage(ceremonyToken: string, chosenPasskeyRef?: string): PasskeyCeremonyMessage {
-  return { type: "passkey_ceremony_approved", ceremonyToken, ...(chosenPasskeyRef !== undefined ? { chosenPasskeyRef } : {}) };
+/** The vault picker of a `create` that saves a new login, appended to the prompt, or
+ * `undefined` when the offer has none (one vault, or a passkey added to an existing login). */
+function vaultPicker(offer: PasskeyConsentShowMessage): HTMLSelectElement | undefined {
+  if (prompt === null || offer.vaults === undefined || offer.vaults.length < 2) {
+    return undefined;
+  }
+  const label = document.createElement("label");
+  label.htmlFor = "consent-vault";
+  label.textContent = "Vault";
+  const select = document.createElement("select");
+  select.id = "consent-vault";
+  select.name = "vault";
+  for (const vault of offer.vaults) {
+    const option = document.createElement("option");
+    option.value = vault.id;
+    option.textContent = vault.label;
+    option.selected = vault.id === offer.defaultVaultId;
+    select.appendChild(option);
+  }
+  prompt.append(label, select);
+  return select;
+}
+
+/** Both tokens travel together, each its own check at the background: `instanceToken` (ADR 0043,
+ * "is this the consent iframe the content script built") and `ceremonyToken` (ADR 0039 §2, "is
+ * this the ceremony the background offered"), never one in place of the other (ADR 0043 point 6). */
+function approvedMessage(offer: PasskeyConsentShowMessage, chosenPasskeyRef?: string, vaultId?: string): PasskeyCeremonyMessage {
+  return {
+    type: "passkey_ceremony_approved",
+    instanceToken: offer.instanceToken,
+    ceremonyToken: offer.ceremonyToken,
+    ...(chosenPasskeyRef !== undefined ? { chosenPasskeyRef } : {}),
+    ...(vaultId !== undefined && vaultId !== "" ? { vaultId } : {}),
+  };
 }
 
 function button(label: string, onClick: (event: MouseEvent) => void): HTMLButtonElement {

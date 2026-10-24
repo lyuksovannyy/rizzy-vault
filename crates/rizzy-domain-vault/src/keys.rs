@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Vault rows, vault self-grants and the item-key wrap set (CRYPTO.md §4.2: "`VAULT_KEY_SELF_GRANT`
 //! | Server, `vault` domain"; "`ITEM_KEY_WRAP` | Server, `vault` domain: the current wrap set").
 //!
@@ -56,7 +58,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rizzy_core::envelope::parse::{EnvelopeRef, parse as parse_envelope, parse_for_purpose};
 use rizzy_core::envelope::purpose::{PlaintextRule, Purpose};
 use rizzy_core::ids::{AccountId, DeviceId, ItemId, VaultId};
-use rizzy_proto::limits::MAX_ITEM_KEY_WRAPS;
+use rizzy_proto::limits::{MAX_ITEM_KEY_WRAPS, MAX_OWNED_VAULTS};
 use rizzy_proto::objects::{KeyEnvelope, VaultSelfGrant};
 use rizzy_proto::vault::HealingRequest;
 use rizzy_proto::wire::Id;
@@ -64,22 +66,28 @@ use rizzy_storage::WriteTx;
 
 use crate::authors::{AccountKeyState, AuthorStatus, DeviceDirectory};
 use crate::error::VaultError;
-use crate::repo::{self, SelfGrantRow, WrapRow};
+use crate::repo::{self, SelfGrantRow, VaultKind, WrapRow};
 use crate::rotation::ITEM_KEY_WRAP_ENVELOPE_LEN;
 use crate::store::{Refusal, Session};
 use crate::{VaultDomain, to_sql_time};
 
-/// Creates vault `grant.vault_id` for `account_id` with its first self-grant, in the caller's
-/// write transaction, which has taken the account's lock (signup, CRYPTO.md §11.1).
+/// Creates vault `grant.vault_id` of `kind` for `account_id` with its first self-grant, in the
+/// caller's write transaction, which has taken the account's lock (signup, CRYPTO.md §11.1, with
+/// [`VaultKind::Personal`]; a `vault_create` commit, [ADR 0081] §A3, with [`VaultKind::Owned`]
+/// through [`create_owned_vault`]).
 ///
 /// # Errors
 /// [`VaultError::Invalid`] when the grant's `vault_key_epoch` is not 0; [`VaultError::Storage`]
-/// when the vault exists already or the account row is missing (foreign key), and on any
-/// database failure. The caller drops the transaction then.
+/// when the vault exists already, the account row is missing (foreign key) or a second Personal
+/// vault would exist (the partial unique index of migration 0009), and on any database failure.
+/// The caller drops the transaction then.
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
 pub async fn create_vault(
     tx: &mut WriteTx,
     account_id: AccountId,
     grant: &VaultSelfGrant,
+    kind: VaultKind,
     now_ms: u64,
 ) -> Result<(), VaultError> {
     if grant.vault_key_epoch != 0 {
@@ -87,13 +95,88 @@ pub async fn create_vault(
     }
     let vault_id = VaultId::from_bytes(grant.vault_id.to_bytes());
     let now = to_sql_time(now_ms)?;
-    repo::insert_vault(tx.conn(), vault_id, account_id, 0, now).await?;
+    repo::insert_vault(tx.conn(), vault_id, account_id, 0, kind, now).await?;
     let row = SelfGrantRow {
         account_key_epoch: grant.account_key_epoch,
         vault_key_epoch: 0,
         envelope: grant.envelope.as_slice().to_vec(),
     };
     repo::write_self_grant(tx.conn(), vault_id, &row, false, now).await
+}
+
+/// A `vault_create` commit ([ADR 0081] §A3), in the commit's transaction under the account lock,
+/// after every auth-side check: the new owned vault (kind 2) and its self-grant.
+///
+/// Refuses, changing nothing:
+/// - [`VaultError::Invalid`] when the self-grant is not at vault epoch 0 and the new state's
+///   `account_key_epoch`, or its envelope is not a `VAULT_KEY_SELF_GRANT` symmetric envelope
+///   whose header key id is the signed `account_key_id`; or when the account already owns
+///   [`MAX_OWNED_VAULTS`] vaults;
+/// - [`VaultError::StateConflict`] when a vault with this id exists (any account's).
+///
+/// # Errors
+/// As above, and [`VaultError::Storage`].
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+pub async fn create_owned_vault(
+    tx: &mut WriteTx,
+    account_id: AccountId,
+    grant: &VaultSelfGrant,
+    account_key_epoch: u32,
+    account_key_id: &[u8; 16],
+    now_ms: u64,
+) -> Result<(), VaultError> {
+    let shaped = grant.vault_key_epoch == 0
+        && grant.account_key_epoch == account_key_epoch
+        && symmetric_under(
+            grant.envelope.as_slice(),
+            Purpose::VaultKeySelfGrant,
+            account_key_id,
+        );
+    if !shaped {
+        return Err(VaultError::Invalid);
+    }
+    let vault_id = VaultId::from_bytes(grant.vault_id.to_bytes());
+    if repo::vault(tx.conn(), vault_id).await?.is_some() {
+        return Err(VaultError::StateConflict);
+    }
+    if repo::vault_kinds(tx.conn(), account_id).await?.len() >= MAX_OWNED_VAULTS {
+        return Err(VaultError::Invalid);
+    }
+    create_vault(tx, account_id, grant, VaultKind::Owned, now_ms).await
+}
+
+/// A `vault_delete` commit ([ADR 0081] §A5), in the commit's transaction under the account lock,
+/// after every auth-side check (the fresh session included): deletes the owned vault and,
+/// through `ON DELETE CASCADE`, its self-grant, wraps, ops, snapshots, attachments and their
+/// chunks, and releases the vault's counted bytes from the account's counter (ADR 0048 §2),
+/// computed with the reconciliation's per-row unit. Returns the bytes released.
+///
+/// Refuses, changing nothing: [`VaultError::NotFound`] for a vault that does not exist or
+/// belongs to another account; [`VaultError::Invalid`] for the Personal vault (INV-101).
+///
+/// # Errors
+/// As above, and [`VaultError::Storage`].
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+pub async fn delete_vault(
+    tx: &mut WriteTx,
+    account_id: AccountId,
+    vault_id: VaultId,
+    now_ms: u64,
+) -> Result<u64, VaultError> {
+    let vault = repo::vault(tx.conn(), vault_id)
+        .await?
+        .filter(|v| v.account_id == account_id)
+        .ok_or(VaultError::NotFound)?;
+    if vault.kind == VaultKind::Personal {
+        return Err(VaultError::Invalid);
+    }
+    let freed = crate::usage::vault_counted_bytes(tx.conn(), vault_id).await?;
+    repo::delete_vault(tx.conn(), vault_id).await?;
+    let now = to_sql_time(now_ms)?;
+    crate::usage::charge(tx, account_id, crate::usage::credit(freed), now).await?;
+    Ok(freed)
 }
 
 impl<D: DeviceDirectory> VaultDomain<D> {
@@ -259,7 +342,8 @@ pub(crate) async fn heal_self_grant(
     {
         repo::delete_wrap(tx.conn(), vault_id, stale.item_id, &stale.item_key_id).await?;
     }
-    repo::clear_record_wraps_below(tx.conn(), vault_id, new_epoch).await?;
+    let freed = repo::clear_record_wraps_below(tx.conn(), vault_id, new_epoch).await?;
+    crate::usage::charge(tx, session.account_id, crate::usage::credit(freed), now).await?;
     Ok(Ok(()))
 }
 

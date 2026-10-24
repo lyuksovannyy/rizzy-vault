@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The persistent device state and encrypted local cache ([ADR 0026]): the record codec, the
 //! row model, the schema, the changeset each step returns, the floors that never go backwards,
 //! and the load.
@@ -13,6 +15,7 @@
 //! | [`rows`] | §3 | Schema text, row model, writes, the reference executor |
 //! | [`floors`] | §4 "What never goes backwards" | The check every changeset passes |
 //! | [`load`] | §4 steps 5 and 7, §5 | Opening and loading a cache as untrusted input |
+//! | [`index`] | ADR 0056 | The cleartext `item_index`: recently used and client-side search |
 //!
 //! # What is persisted, and what never is (§1)
 //!
@@ -21,7 +24,10 @@
 //! per vault the self-grant, the wrap set and the last restore generation; every accepted op
 //! statement with the body and carried wrap that matched its signed hashes; the absorbed
 //! snapshot records; own records with the restore generation of their first send; the next
-//! `device_seq` and the HLC. **Never:** a decrypted value, the merge state, an unwrapped key,
+//! `device_seq`, the HLC and the highest global equivalence-list version this device accepted
+//! ([ADR 0051] §1, never synced); the cleartext `item_index` of [ADR 0056] ([`index`]), whose
+//! display-safe decrypted fields are the one exception to the next sentence. **Never:** any other
+//! decrypted value, the merge state, an unwrapped key,
 //! the password, `pw_in`, an unlock key, the recovery code, a bearer token, a session id or a
 //! request counter. No function of this module takes one of those, and the merge state is
 //! rebuilt at each unlock.
@@ -54,11 +60,20 @@
 //! # Not in this build (reported)
 //!
 //! - **`wraps_after_epoch`** is always `NULL`: the driver asks for the whole wrap set.
-//! - **Migrations.** Format 1 is the only format; there is no migration step yet.
+//! - **Migrations.** Format 3 is current ([ADR 0051] §2 added `highest_equivalence_list_version`
+//!   in format 2, [ADR 0056] §3 the `item_index` table in format 3). A host upgrades an older
+//!   cache before [`load::open`]: `SQLite` runs [`rows::MIGRATIONS`], a raw-row host commits
+//!   [`load::migration_writes`]; both add only that row, at `0`, and that table, empty.
+//! - **`item_index` in `IndexedDB`.** The browser extension keeps its M2 item list (ADR 0056
+//!   owner answer 4): `rizzy-wasm` neither stores nor reads `item_index` rows, and never turns
+//!   tracking on ([`index::reconcile`]), so its changesets carry no index writes.
 //!
 //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
+//! [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
+//! [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
 
 pub mod floors;
+pub mod index;
 pub mod load;
 pub mod record;
 pub mod rows;
@@ -73,13 +88,14 @@ use crate::store::rows::{
 };
 
 /// The first changeset of a new cache (a signup or an enrolment): the `cache_meta` rows and the
-/// device-state record. `next_device_seq` starts at 1 (ADR 0012 §2) and the HLC at 0.
+/// device-state record. `next_device_seq` starts at 1 (ADR 0012 §2), the HLC and
+/// `highest_equivalence_list_version` at 0 (ADR 0051 §1).
 ///
 /// # Errors
 /// [`ClientError::Internal`].
 pub fn create_writes(record: &DeviceRecord) -> Result<Changeset, ClientError> {
     let mut changeset = Changeset::new();
-    let meta_rows: [(&'static str, Vec<u8>); 6] = [
+    let meta_rows: [(&'static str, Vec<u8>); 7] = [
         (meta::FORMAT, CACHE_FORMAT.to_be_bytes().to_vec()),
         (
             meta::SERVER_ORIGIN,
@@ -89,6 +105,10 @@ pub fn create_writes(record: &DeviceRecord) -> Result<Changeset, ClientError> {
         (meta::DEVICE_ID, record.device_id().to_bytes().to_vec()),
         (meta::NEXT_DEVICE_SEQ, 1u64.to_be_bytes().to_vec()),
         (meta::HLC, 0u64.to_be_bytes().to_vec()),
+        (
+            meta::HIGHEST_EQUIVALENCE_LIST_VERSION,
+            0u64.to_be_bytes().to_vec(),
+        ),
     ];
     for (key, value) in meta_rows {
         changeset.push(Write::Meta { key, value });

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The device-state record and the encrypted local cache ([ADR 0026] §6) against the fake
 //! server of the parent module:
 //!
@@ -23,7 +25,9 @@ use crate::store::load::{self, Loaded};
 use crate::store::record::{
     DeviceRecord, MAX_DEVICE_STATE_LEN, PendingRecord, RECORD_VERSION, Stage,
 };
-use crate::store::rows::{Alarm, CacheRows, Changeset, ObjectRow, OpRow, Write, kind, meta, own};
+use crate::store::rows::{
+    Alarm, CACHE_FORMAT, CacheRows, Changeset, ObjectRow, OpRow, Write, kind, meta, own,
+};
 use crate::store::{self};
 use crate::unlock::apply_device_grants;
 
@@ -41,6 +45,9 @@ fn copy_rows(rows: &CacheRows) -> CacheRows {
         wraps: rows.wraps.clone(),
         ops: rows.ops.clone(),
         snapshots: rows.snapshots.clone(),
+        item_index: rows.item_index.clone(),
+        item_index_unreadable: rows.item_index_unreadable,
+        pending_moves: rows.pending_moves.clone(),
     }
 }
 
@@ -117,7 +124,7 @@ impl Dev {
         let mut cache = Cache::new();
         cache.commit(pending.store_writes(COMMIT_JSON).unwrap());
         // The file of a crash here: stage 2, with the commit to resend.
-        let record = load::open(&cache.rows).unwrap();
+        let record = load::open(&cache.rows, false).unwrap();
         assert_eq!(record.stage(), Stage::SignupPending);
         assert_eq!(
             record.unlock(PASSWORD).unwrap_err(),
@@ -305,7 +312,7 @@ impl Dev {
 
 /// Opens and loads `rows` with the keys `unlocked` holds.
 fn load_rows(rows: &CacheRows, unlocked: &UnlockedDevice) -> Result<Loaded, ClientError> {
-    let record = load::open(rows)?;
+    let record = load::open(rows, false)?;
     load::load(rows, &record, unlocked, T0 + 100)
 }
 
@@ -417,6 +424,8 @@ fn vector_record(stage: Stage, has_local: bool, pending: bool) -> DeviceRecord {
             },
             device_keys_wrap: None,
         }),
+        keystore_wrap: None,
+        forward: Vec::new(),
     }
 }
 
@@ -428,14 +437,20 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
-/// The vector bytes, written out field by field from ADR 0026 §2.
+/// The version-2 vector bytes without `E_ks` or forward envelopes (ADR 0057 §2).
 fn vector_bytes(stage: u8, has_local: bool, pending: bool) -> Vec<u8> {
+    vector_bytes_of(2, stage, has_local, pending)
+}
+
+/// The vector bytes, written out field by field from ADR 0026 §2 (`version` 1) or ADR 0057
+/// §2 (`version` 2: `has_ks = 0`, `forward_count = 0`).
+fn vector_bytes_of(version: u8, stage: u8, has_local: bool, pending: bool) -> Vec<u8> {
     let bytes_of = |out: &mut Vec<u8>, x: &[u8]| {
         out.extend_from_slice(&u32::try_from(x.len()).unwrap().to_be_bytes());
         out.extend_from_slice(x);
     };
     let mut out = Vec::new();
-    out.extend_from_slice(&[0x00, 0x01, stage]);
+    out.extend_from_slice(&[0x00, version, stage]);
     bytes_of(&mut out, b"https://vault.example.com");
     out.extend_from_slice(&[0xa1; 16]);
     out.extend_from_slice(&[0xd2; 16]);
@@ -450,6 +465,9 @@ fn vector_bytes(stage: u8, has_local: bool, pending: bool) -> Vec<u8> {
         bytes_of(&mut out, &envelope(0x44));
     } else {
         out.push(0);
+    }
+    if version == 2 {
+        out.extend_from_slice(&[0, 0]);
     }
     if pending {
         out.push(1);
@@ -479,7 +497,7 @@ fn device_record_vectors() {
         let encoded = record.encode().unwrap();
         let expected = vector_bytes(stage_byte, has_local, pending);
         assert_eq!(hex(&encoded), hex(&expected), "{stage:?}");
-        let parsed = DeviceRecord::parse(&encoded).unwrap();
+        let parsed = DeviceRecord::parse(&encoded, false).unwrap();
         assert_eq!(parsed.stage(), stage);
         assert_eq!(parsed.has_local(), has_local);
         assert_eq!(parsed.has_pending(), pending);
@@ -492,14 +510,15 @@ fn device_record_vectors() {
         .unwrap();
     assert_eq!(
         committed.len(),
-        3 + 29 + 16 + 16 + 1 + 16 + 16 + 2 + 94 + 1 + 8 + 94 + 1
+        3 + 29 + 16 + 16 + 1 + 16 + 16 + 2 + 94 + 1 + 8 + 94 + 1 + 1 + 1
     );
     assert_eq!(
         hex(&committed[..36]),
-        "000101000000196874747073 3a2f2f7661756c742e6578616d706c652e636f6da1a1a1a1"
+        "000201000000196874747073 3a2f2f7661756c742e6578616d706c652e636f6da1a1a1a1"
             .replace(' ', "")
     );
-    assert_eq!(hex(&committed[committed.len() - 3..]), "444400");
+    // `E_local`'s last byte, `has_ks = 0`, `forward_count = 0`, `pending = 0`.
+    assert_eq!(hex(&committed[committed.len() - 4..]), "44000000");
 }
 
 /// The parser's refusals (ADR 0026 §2 "Parsing"). None panics.
@@ -509,18 +528,18 @@ fn device_record_refusals() {
         .encode()
         .unwrap()
         .to_vec();
-    assert!(DeviceRecord::parse(&good).is_ok());
+    assert!(DeviceRecord::parse(&good, false).is_ok());
     // A newer record version is "update required"; version 0 and everything else is corrupt.
     let mut newer = good.clone();
-    newer[1] = 2;
+    newer[1] = 3;
     assert_eq!(
-        DeviceRecord::parse(&newer).unwrap_err(),
+        DeviceRecord::parse(&newer, false).unwrap_err(),
         ClientError::CacheUpdateRequired
     );
-    assert_eq!(RECORD_VERSION, 1);
+    assert_eq!(RECORD_VERSION, 2);
     let corrupt = |bytes: &[u8]| {
         assert_eq!(
-            DeviceRecord::parse(bytes).unwrap_err(),
+            DeviceRecord::parse(bytes, false).unwrap_err(),
             ClientError::CacheCorrupt
         );
     };
@@ -632,7 +651,7 @@ mod record_properties {
                 record.stage = Stage::SignupPending;
             }
             let encoded = record.encode().unwrap();
-            let parsed = DeviceRecord::parse(&encoded).unwrap();
+            let parsed = DeviceRecord::parse(&encoded, false).unwrap();
             prop_assert_eq!(parsed.encode().unwrap().to_vec(), encoded.to_vec());
             prop_assert_eq!(parsed.has_local(), has_local);
             prop_assert_eq!(parsed.has_pending(), pending);
@@ -643,8 +662,8 @@ mod record_properties {
         fn arbitrary_bytes_parse_canonically_or_not_at_all(
             bytes in proptest::collection::vec(any::<u8>(), 0..600),
         ) {
-            if let Ok(record) = DeviceRecord::parse(&bytes) {
-                prop_assert_eq!(record.encode().unwrap().to_vec(), bytes.clone());
+            if let Ok(record) = DeviceRecord::parse(&bytes, false) {
+                prop_assert!(canonical_or_upgraded(&bytes, &record.encode().unwrap()));
             }
         }
 
@@ -654,9 +673,25 @@ mod record_properties {
             let mut bytes = vector_record(Stage::Committed, true, true).encode().unwrap().to_vec();
             let at = at % bytes.len();
             bytes[at] ^= flip;
-            if let Ok(record) = DeviceRecord::parse(&bytes) {
-                prop_assert_eq!(record.encode().unwrap().to_vec(), bytes.clone());
+            if let Ok(record) = DeviceRecord::parse(&bytes, false) {
+                prop_assert!(canonical_or_upgraded(&bytes, &record.encode().unwrap()));
             }
+        }
+    }
+
+    /// A parsed version-2 record encodes back to its input; a version-1 record to its
+    /// version-2 form (two bytes longer: `has_ks = 0`, `forward_count = 0`, ADR 0057 §3), which
+    /// is canonical in turn.
+    fn canonical_or_upgraded(input: &[u8], encoded: &[u8]) -> bool {
+        match input.get(..2) {
+            Some([0, 2]) => encoded == input,
+            Some([0, 1]) => {
+                encoded.len() == input.len() + 2
+                    && encoded.get(..2) == Some(&[0, 2][..])
+                    && DeviceRecord::parse(encoded, false)
+                        .is_ok_and(|again| again.encode().is_ok_and(|e| e.as_slice() == encoded))
+            }
+            _ => false,
         }
     }
 }
@@ -684,7 +719,7 @@ fn assert_crash_safe(history: &[CacheRows], unlocked: &[&UnlockedDevice]) {
     let mut previous: Option<&CacheRows> = None;
     let mut last_state_seq = 0;
     for rows in history {
-        let record = load::open(rows).unwrap();
+        let record = load::open(rows, false).unwrap();
         assert_eq!(meta_u64(rows, meta::NEXT_DEVICE_SEQ), max_own_seq(rows) + 1);
         if record.stage() == Stage::Committed {
             // The keys of one of the unlocks open this file (an own rotation changes them).
@@ -743,6 +778,104 @@ fn assert_crash_safe(history: &[CacheRows], unlocked: &[&UnlockedDevice]) {
         }
         previous = Some(rows);
     }
+}
+
+/// ADR 0050 §2 and open question 1 with the cache: a held cover is not persisted (no new ADR
+/// 0026 row), so a restart in the middle of the response sequence drops it and the loaded
+/// device starts the next sequence from before the held headers; once the retry takes the
+/// cover it is journaled as any absorbed one, and the cache loads to the live state.
+/// ADR 0057 §3, §5: a cache whose record is version 1 (as a pre-M3 build wrote it) loads and
+/// unlocks unchanged, and the next write of the record stores it as version 2 with
+/// `has_ks = 0` and no forward envelopes, in one transaction. Crash injection: the file before
+/// that write and the file after it each open, unlock and load, as valid v1 or valid v2; there
+/// is no file in between.
+#[test]
+fn a_v1_record_is_upgraded_on_its_next_write() {
+    let mut rng = ChaCha20Rng::seed_from_u64(57);
+    let mut server = Server::new(58);
+    let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    let v2 = a.cache.rows.device_state.clone().unwrap();
+    assert_eq!(v2[..2], [0, 2]);
+    // The v1 form of the same state: version 1, and no `has_ks` or `forward_count` byte in front
+    // of the final `pending = 0`.
+    let tail = v2.len() - 3;
+    assert_eq!(v2[tail..], [0, 0, 0]);
+    let mut v1 = v2.to_vec();
+    v1[1] = 1;
+    v1.drain(tail..tail + 2);
+    a.cache.rows.device_state = Some(zeroize::Zeroizing::new(v1.clone()));
+    let before = copy_rows(&a.cache.rows);
+    let history_len = a.cache.history.len();
+
+    // The host's next write of the record: here the unchanged state, through the floors.
+    let record = load::open(&before, false).unwrap();
+    assert!(!record.has_keystore());
+    let unlocked = record.unlock(PASSWORD).unwrap();
+    let mut changeset = Changeset::new();
+    changeset.push(store::record_write(&a.state.record(Stage::Committed).unwrap()).unwrap());
+    a.cache.commit(changeset);
+    assert_eq!(a.cache.history.len(), history_len + 1);
+    let after = copy_rows(&a.cache.rows);
+    let stored = after.device_state.as_ref().unwrap();
+    assert_eq!(stored.as_slice(), v2.as_slice());
+
+    for (rows, version) in [(&before, 1u8), (&after, 2)] {
+        assert_eq!(rows.device_state.as_ref().unwrap()[..2], [0, version]);
+        let record = load::open(rows, false).unwrap();
+        assert!(!record.has_keystore());
+        assert_eq!(record.forward_count(), 0);
+        let keys = record.unlock(PASSWORD).unwrap();
+        load::load(rows, &record, &keys, T0 + 100).unwrap();
+        load::load(rows, &record, &unlocked, T0 + 100).unwrap();
+    }
+}
+
+#[test]
+fn a_held_cover_is_not_persisted_and_a_taken_one_is() {
+    let mut rng = ChaCha20Rng::seed_from_u64(72);
+    let mut server = Server::new(73);
+    let (mut a, sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    let item = a.create(&mut rng, "doomed");
+    a.vault
+        .trash_item(&mut rng, &a.unlocked, item, T0 + 10)
+        .unwrap();
+    a.vault
+        .purge_item(&mut rng, &a.unlocked, item, T0 + 11)
+        .unwrap();
+    a.flush();
+    a.upload(&mut server, &mut rng);
+    let writer = a.unlocked.device_id;
+    // The writer's chain is create, trash, purge; a compacted server pages two ops at a time.
+    server.compact = true;
+    server.page_len = 2;
+    let mut c = Dev::enrolled(&mut server, &mut rng, &sk);
+    let outcome = c.fetch(&server);
+    assert_eq!(outcome.held_covers, 1, "{outcome:?}");
+    assert_eq!(c.vault.cursor_of(writer), 2);
+    // A restart now loses the hold: the loaded device's cursor is before the held headers.
+    let restarted = c.reload();
+    assert_eq!(restarted.vaults[0].cursor_of(writer), 0);
+    assert_eq!(
+        restarted.vaults[0].item_lifecycle(item),
+        ItemLifecycle::Absent
+    );
+    // The live device goes on: the purge with its body, and the retry takes the cover.
+    server.compact = false;
+    let outcome = c.fetch(&server);
+    assert_eq!(
+        (outcome.absorbed, outcome.refused_covers),
+        (1, 0),
+        "{outcome:?}"
+    );
+    assert!(outcome.reports.is_empty(), "{outcome:?}");
+    assert_eq!(c.vault.item_lifecycle(item), ItemLifecycle::Purged);
+    assert!(c.cache.rows.snapshots.iter().any(|s| s.own == own::SERVED));
+    c.assert_loads();
+    assert_eq!(
+        c.reload().vaults[0].item_lifecycle(item),
+        ItemLifecycle::Purged
+    );
 }
 
 /// ADR 0026 §4 and §6 end to end: a device that persists every step, a second device, a
@@ -876,6 +1009,55 @@ fn a_persisted_device_reloads_after_every_step() {
     }
 }
 
+/// A purge of an item another device edited, by this device, reloads after its upload (found
+/// by `rv`'s move tests, ADR 0081 §A6: a move purges the source, often edited elsewhere).
+/// The other device's op is covered only by this device's acknowledged tombstone snapshot,
+/// which the load cannot take before the own chain puts the Purge back; its body used to be
+/// pruned, and the load then refused the own Trash and Purge ops (`CacheCorrupt`). Also with an
+/// own snapshot from before the purge (op count) that covers the op: the load takes that one.
+#[test]
+fn a_purge_of_an_item_another_device_edited_reloads() {
+    let mut rng = ChaCha20Rng::seed_from_u64(7070);
+    let mut server = Server::new(7071);
+    let (mut a, sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    let right_after = a.create(&mut rng, "purged right after the other edit");
+    let later = a.create(&mut rng, "purged after an own snapshot");
+    a.upload(&mut server, &mut rng);
+    let mut b = Dev::enrolled(&mut server, &mut rng, &sk);
+    b.fetch(&server);
+    b.edit(&mut rng, right_after, "from b");
+    b.edit(&mut rng, later, "from b");
+    b.upload(&mut server, &mut rng);
+    a.refresh(&server);
+    a.fetch(&server);
+    a.assert_loads();
+    // More own ops than `SNAPSHOT_AFTER_OPS` on one item: an own snapshot covers B's op.
+    for i in 0..40 {
+        a.edit(&mut rng, later, &format!("from a {i}"));
+    }
+    a.upload(&mut server, &mut rng);
+    a.fetch(&server);
+    a.assert_loads();
+    for (n, item) in [right_after, later].into_iter().enumerate() {
+        let at = T0 + 30 + 10 * n as u64;
+        a.vault.trash_item(&mut rng, &a.unlocked, item, at).unwrap();
+        a.vault
+            .purge_item(&mut rng, &a.unlocked, item, at + 1)
+            .unwrap();
+        a.flush();
+        a.assert_loads();
+        a.upload(&mut server, &mut rng);
+        a.assert_loads();
+        a.fetch(&server);
+        a.assert_loads();
+        assert_eq!(
+            a.reload().vaults[0].item_lifecycle(item),
+            ItemLifecycle::Purged
+        );
+    }
+}
+
 /// A signup interrupted between the pending write and the acknowledgement: the file holds
 /// stage 2 and the commit; the restart resends the same bytes and finalises (ADR 0026 §2).
 #[test]
@@ -912,7 +1094,7 @@ fn an_interrupted_signup_resends_the_stored_commit() {
     drop(pending);
 
     // Restart: only the file. Stage 2, nothing unlocks, the commit is there to resend.
-    let record = load::open(&cache.rows).unwrap();
+    let record = load::open(&cache.rows, false).unwrap();
     assert_eq!(record.stage(), Stage::SignupPending);
     assert_eq!(
         record.unlock(PASSWORD).unwrap_err(),
@@ -921,7 +1103,7 @@ fn an_interrupted_signup_resends_the_stored_commit() {
     assert_eq!(cache.rows.pending_commit.as_deref(), Some(COMMIT_JSON));
     // (The host sends `pending_commit` again; the server answers success for the same bytes.)
     cache.commit(store::finalize_writes(&record.committed()).unwrap());
-    let record = load::open(&cache.rows).unwrap();
+    let record = load::open(&cache.rows, false).unwrap();
     assert_eq!(record.stage(), Stage::Committed);
     assert!(cache.rows.pending_commit.is_none());
     let unlocked = record.unlock(PASSWORD).unwrap();
@@ -936,7 +1118,10 @@ fn an_interrupted_signup_resends_the_stored_commit() {
     // The file with the stage-2 record and no stored commit is no state this client writes.
     let mut broken = copy_rows(&cache.history[0]);
     broken.pending_commit = None;
-    assert_eq!(load::open(&broken).unwrap_err(), ClientError::CacheCorrupt);
+    assert_eq!(
+        load::open(&broken, false).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
 }
 
 impl Server {
@@ -1020,7 +1205,7 @@ fn a_rotation_is_persisted_and_followed() {
 
     // A crash here: the file still unlocks to the old keys and loads the old state, and it
     // holds the pending record whose keys open once the commit is applied.
-    let crashed = load::open(&a.cache.rows).unwrap();
+    let crashed = load::open(&a.cache.rows, false).unwrap();
     assert!(crashed.has_pending());
     let old = crashed.unlock(PASSWORD).unwrap();
     assert_eq!(old.account_key.epoch(), 0);
@@ -1036,7 +1221,10 @@ fn a_rotation_is_persisted_and_followed() {
     // A pending record without its commit, or a commit without a pending record, is corrupt.
     let mut broken = copy_rows(&a.cache.rows);
     broken.pending_commit = None;
-    assert_eq!(load::open(&broken).unwrap_err(), ClientError::CacheCorrupt);
+    assert_eq!(
+        load::open(&broken, false).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
 
     // The commit lands; the finalising transaction.
     server.commit_for_store(pending.commit_request()).unwrap();
@@ -1058,7 +1246,7 @@ fn a_rotation_is_persisted_and_followed() {
     changeset.append(a.vault.take_writes());
     a.cache.commit(changeset);
     // The finalised record is the pending one, byte for byte.
-    let finalised = load::open(&a.cache.rows).unwrap();
+    let finalised = load::open(&a.cache.rows, false).unwrap();
     assert!(!finalised.has_pending());
     assert_eq!(
         finalised.encode().unwrap().as_slice(),
@@ -1140,12 +1328,73 @@ fn a_rotation_is_persisted_and_followed() {
         Value::text("after").unwrap().expose_secret()
     );
     // A crash before that transaction left the old file, which still loads with the old keys.
-    let old_record = load::open(&before_follow).unwrap();
+    let old_record = load::open(&before_follow, false).unwrap();
     let old_unlocked = old_record.unlock(PASSWORD).unwrap();
     assert!(load::load(&before_follow, &old_record, &old_unlocked, T0).is_ok());
 
     assert_crash_safe(&a.cache.history, &[&old, &a.unlocked]);
     assert_crash_safe(&b.cache.history, &[&old_unlocked, &b.unlocked]);
+}
+
+/// ADR 0048 §3: an op refused `quota_exceeded` is reported to the host, changes no row and stays
+/// unacknowledged, so the next upload sends the same bytes again (after the operator raised the
+/// quota, the server stores them).
+#[test]
+fn a_quota_refusal_keeps_the_op_and_resends_it() {
+    let mut rng = ChaCha20Rng::seed_from_u64(81);
+    let mut server = Server::new(82);
+    let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    a.create(&mut rng, "over quota");
+    let up = a
+        .vault
+        .upload_request(&mut rng, &a.unlocked)
+        .unwrap()
+        .unwrap();
+    a.flush();
+    let sent_row = a
+        .cache
+        .rows
+        .ops
+        .iter()
+        .find(|o| o.own == own::SENT)
+        .unwrap()
+        .clone();
+    let refused = UploadResponse {
+        restore_generation: Fixed::from_bytes(server.generation),
+        results: List::new(
+            up.records
+                .as_slice()
+                .iter()
+                .map(|_| UploadResult::Rejected {
+                    error: ErrorCode::QuotaExceeded,
+                })
+                .collect(),
+        )
+        .unwrap(),
+    };
+    let outcome = a.vault.apply_upload_response(&refused).unwrap();
+    a.flush();
+    assert_eq!(
+        outcome.rejected,
+        vec![ErrorCode::QuotaExceeded; up.records.len()]
+    );
+    assert!(!outcome.own_conflict);
+    let after = a
+        .cache
+        .rows
+        .ops
+        .iter()
+        .find(|o| o.own == own::SENT)
+        .unwrap();
+    assert_eq!(*after, sent_row, "a quota refusal changes no row");
+    assert_eq!(a.vault.unacknowledged().0, 1);
+    let again = a
+        .vault
+        .upload_request(&mut rng, &a.unlocked)
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.records.as_slice()[0], up.records.as_slice()[0]);
 }
 
 /// ADR 0026 §4 step 6: a stale answer changes no row; the re-issue replaces the row under the
@@ -1322,9 +1571,11 @@ fn a_stale_answer_reissues_and_an_older_file_raises_the_alarm() {
         .history
         .iter()
         .rev()
-        .find(|rows| max_own_seq(rows) == 0 && load::open(rows).is_ok_and(|r| !r.has_pending()))
+        .find(|rows| {
+            max_own_seq(rows) == 0 && load::open(rows, false).is_ok_and(|r| !r.has_pending())
+        })
         .expect("a file from before B's first op");
-    let old_record = load::open(old_rows).unwrap();
+    let old_record = load::open(old_rows, false).unwrap();
     let Ok(old_unlocked) = old_record.unlock(PASSWORD) else {
         panic!("the old file unlocks");
     };
@@ -1410,11 +1661,36 @@ fn the_floors_refuse_what_must_never_be_written() {
             },
         );
     }
+    for format in [CACHE_FORMAT - 1, CACHE_FORMAT + 1] {
+        refused(
+            floors,
+            Write::Meta {
+                key: meta::FORMAT,
+                value: format.to_be_bytes().to_vec(),
+            },
+        );
+    }
+    // ADR 0051 §1: the equivalence-list floor never goes down and never leaves `u32`.
+    let floor_write = |version: u64| Write::Meta {
+        key: meta::HIGHEST_EQUIVALENCE_LIST_VERSION,
+        value: version.to_be_bytes().to_vec(),
+    };
+    let mut raised = floors.clone();
+    raised
+        .admit(&[floor_write(5)].into_iter().collect())
+        .unwrap();
+    assert_eq!(raised.highest_equivalence_list_version(), 5);
+    raised
+        .admit(&[floor_write(5)].into_iter().collect())
+        .unwrap();
+    refused(&raised, floor_write(4));
+    refused(&raised, floor_write(0));
+    refused(floors, floor_write(u64::from(u32::MAX) + 1));
     refused(
         floors,
         Write::Meta {
-            key: meta::FORMAT,
-            value: 2u16.to_be_bytes().to_vec(),
+            key: meta::HIGHEST_EQUIVALENCE_LIST_VERSION,
+            value: 5u32.to_be_bytes().to_vec(),
         },
     );
     // Another body at the pinned `state_seq` (a fork), and a lower `state_seq` (a rollback).
@@ -1594,6 +1870,170 @@ fn the_floors_refuse_what_must_never_be_written() {
     a.assert_loads();
 }
 
+/// ADR 0051: the highest accepted equivalence-list version is a cache row that survives a
+/// restart, is rehydrated into the floors (so a rollback is refused after the restart, not
+/// only within one process), starts at 0, and is never written while no newer list verifies.
+#[test]
+fn the_equivalence_list_floor_survives_a_restart_and_never_goes_back() {
+    let mut rng = ChaCha20Rng::seed_from_u64(84);
+    let mut server = Server::new(85);
+    let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    // A new cache holds the row, at 0 (ADR 0051 §1, `create_writes`).
+    assert_eq!(
+        meta_u64(&a.cache.rows, meta::HIGHEST_EQUIVALENCE_LIST_VERSION),
+        0
+    );
+    assert_eq!(a.cache.floors.highest_equivalence_list_version(), 0);
+    assert_eq!(a.reload().floors.highest_equivalence_list_version(), 0);
+
+    // The startup step with no list compiled in writes nothing (ADR 0051 §3).
+    let (groups, writes) = crate::matching::startup_equivalence_groups(&a.reload().floors);
+    assert!(groups.is_empty() && writes.is_empty());
+
+    // A host persists a raised floor (what `startup_equivalence_groups` returns once a newer
+    // list verifies): committed through the floors like any other changeset.
+    let raise = |version: u32| -> Changeset {
+        [Write::Meta {
+            key: meta::HIGHEST_EQUIVALENCE_LIST_VERSION,
+            value: u64::from(version).to_be_bytes().to_vec(),
+        }]
+        .into_iter()
+        .collect()
+    };
+    a.cache.commit(raise(3));
+    // Restart: the stored value is read back into the floors, not reset to 0.
+    let restarted = a.reload();
+    assert_eq!(restarted.floors.highest_equivalence_list_version(), 3);
+    // Rolled back to an older build: lowering is refused against the *restarted* floors.
+    let mut probe = restarted.floors.clone();
+    assert_eq!(probe.admit(&raise(2)).unwrap_err(), ClientError::Internal);
+    assert_eq!(probe.admit(&raise(0)).unwrap_err(), ClientError::Internal);
+    assert_eq!(probe.highest_equivalence_list_version(), 3);
+    // Equal is an idempotent no-op; higher is admitted.
+    probe.admit(&raise(3)).unwrap();
+    probe.admit(&raise(u32::MAX)).unwrap();
+    assert_eq!(probe.highest_equivalence_list_version(), u32::MAX);
+    a.assert_loads();
+}
+
+/// ADR 0080 §6 with INV-75, over a real cache and a list signed by a test key (the
+/// known-answer list, `list_version` 1): the first start accepts the list and persists floor
+/// 1; every later start re-verifies the same list at that floor, keeps its groups and writes
+/// nothing; after a newer list raised the floor, the older list is refused and the floor never
+/// goes back.
+#[test]
+fn the_same_list_at_the_persisted_floor_keeps_its_groups_across_restarts() {
+    let mut rng = ChaCha20Rng::seed_from_u64(88);
+    let mut server = Server::new(89);
+    let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    let list_v1 = crate::matching::tests::known_answer_list;
+
+    // First start on a fresh cache (floor 0): the list is accepted and floor 1 is written.
+    let (first_groups, writes) =
+        crate::matching::startup_equivalence_groups_with(&a.reload().floors, list_v1);
+    assert_eq!(first_groups.len(), 1);
+    assert_eq!(writes.writes().len(), 1);
+    let mut floors = a.reload().floors;
+    floors.admit(&writes).unwrap();
+    a.cache.commit(writes);
+    assert_eq!(a.reload().floors.highest_equivalence_list_version(), 1);
+
+    // Every later start (here three): the same list at floor = version keeps its groups and
+    // writes nothing (before ADR 0080 §6 it was refused and the device ran with no groups).
+    for _ in 0..3 {
+        let (groups, writes) =
+            crate::matching::startup_equivalence_groups_with(&a.reload().floors, list_v1);
+        assert_eq!(groups, first_groups);
+        assert!(writes.is_empty(), "an equal version never writes the floor");
+        assert_eq!(a.reload().floors.highest_equivalence_list_version(), 1);
+    }
+
+    // A newer list raised the floor to 3; a rolled-back build's list 1 is refused (INV-75),
+    // with no groups and no write, and the floor stays at 3 after a restart.
+    a.cache.commit(
+        [Write::Meta {
+            key: meta::HIGHEST_EQUIVALENCE_LIST_VERSION,
+            value: 3_u64.to_be_bytes().to_vec(),
+        }]
+        .into_iter()
+        .collect(),
+    );
+    let (groups, writes) =
+        crate::matching::startup_equivalence_groups_with(&a.reload().floors, list_v1);
+    assert!(groups.is_empty() && writes.is_empty());
+    assert_eq!(a.reload().floors.highest_equivalence_list_version(), 3);
+    a.assert_loads();
+}
+
+/// ADR 0051 §2: a format-1 cache (no `highest_equivalence_list_version` row) is migrated to
+/// format 2 by adding only that row at 0, then opens and loads unchanged; every other format
+/// is handled without a write.
+#[test]
+fn a_format_1_cache_migrates_to_format_2() {
+    let mut rng = ChaCha20Rng::seed_from_u64(86);
+    let mut server = Server::new(87);
+    let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    a.create(&mut rng, "kept");
+    a.flush();
+    // The current format needs no migration.
+    assert!(load::migration_writes(&a.cache.rows).unwrap().is_empty());
+
+    // The same cache as format 1 wrote it.
+    let mut v1 = copy_rows(&a.cache.rows);
+    v1.meta.remove(meta::HIGHEST_EQUIVALENCE_LIST_VERSION);
+    v1.meta
+        .insert(meta::FORMAT.to_owned(), 1u16.to_be_bytes().to_vec());
+    assert_eq!(
+        load::open(&v1, false).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
+    let migration = load::migration_writes(&v1).unwrap();
+    assert_eq!(migration.writes().len(), 2);
+    v1.apply(&migration);
+    assert_eq!(
+        v1.meta.get(meta::FORMAT).map(Vec::as_slice),
+        Some(CACHE_FORMAT.to_be_bytes().as_slice())
+    );
+    assert_eq!(meta_u64(&v1, meta::HIGHEST_EQUIVALENCE_LIST_VERSION), 0);
+    // Every other row is byte-identical, and the migrated cache loads like the original.
+    let mut original = copy_rows(&a.cache.rows);
+    assert_eq!(original.meta, v1.meta);
+    let loaded = load_rows(&v1, &a.unlocked).unwrap();
+    assert_same_vault(&a.vault, &loaded.vaults[0]);
+    assert_eq!(loaded.floors.highest_equivalence_list_version(), 0);
+    // Migrating again is a no-op.
+    assert!(load::migration_writes(&v1).unwrap().is_empty());
+
+    // A format-1 cache that already holds the format-2 key is not a format-1 cache.
+    let mut odd = copy_rows(&a.cache.rows);
+    odd.meta
+        .insert(meta::FORMAT.to_owned(), 1u16.to_be_bytes().to_vec());
+    assert_eq!(
+        load::migration_writes(&odd).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
+    // A newer format asks for an update; format 0, a short or a missing format is corrupt.
+    for (value, error) in [
+        (
+            (CACHE_FORMAT + 1).to_be_bytes().to_vec(),
+            ClientError::CacheUpdateRequired,
+        ),
+        (0u16.to_be_bytes().to_vec(), ClientError::CacheCorrupt),
+        (vec![1], ClientError::CacheCorrupt),
+    ] {
+        original.meta.insert(meta::FORMAT.to_owned(), value);
+        assert_eq!(load::migration_writes(&original).unwrap_err(), error);
+    }
+    original.meta.remove(meta::FORMAT);
+    assert_eq!(
+        load::migration_writes(&original).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
+}
+
 /// The load refuses what a tampered file holds (ADR 0026 §3 "Columns are indexes, never
 /// facts", §5): (d) fails the load as a whole; (e) a damaged body or wrap under a verified
 /// statement is missing data, and the load stands.
@@ -1650,16 +2090,46 @@ fn the_load_refuses_tampered_rows() {
 
     // (a) The format and the meta rows.
     let mut t = rows();
-    t.meta
-        .insert(meta::FORMAT.to_owned(), 2u16.to_be_bytes().to_vec());
+    t.meta.insert(
+        meta::FORMAT.to_owned(),
+        (CACHE_FORMAT + 1).to_be_bytes().to_vec(),
+    );
     assert_eq!(
-        load::open(&t).unwrap_err(),
+        load::open(&t, false).unwrap_err(),
         ClientError::CacheUpdateRequired
     );
+    // An older format is never opened as it is: the host migrates it first.
+    let mut t = rows();
+    t.meta.insert(
+        meta::FORMAT.to_owned(),
+        (CACHE_FORMAT - 1).to_be_bytes().to_vec(),
+    );
+    assert_eq!(
+        load::open(&t, false).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
+    // ADR 0051 §1: a stored equivalence-list floor above `u32::MAX`, or not 8 bytes.
+    for value in [
+        (u64::from(u32::MAX) + 1).to_be_bytes().to_vec(),
+        u64::MAX.to_be_bytes().to_vec(),
+        1u32.to_be_bytes().to_vec(),
+    ] {
+        let mut t = rows();
+        t.meta
+            .insert(meta::HIGHEST_EQUIVALENCE_LIST_VERSION.to_owned(), value);
+        assert_eq!(
+            load::open(&t, false).unwrap_err(),
+            ClientError::CacheCorrupt
+        );
+        corrupt(&t);
+    }
     for key in meta::ALL {
         let mut t = rows();
         t.meta.remove(key);
-        assert_eq!(load::open(&t).unwrap_err(), ClientError::CacheCorrupt);
+        assert_eq!(
+            load::open(&t, false).unwrap_err(),
+            ClientError::CacheCorrupt
+        );
     }
     let mut t = rows();
     t.meta.insert("extra".to_owned(), vec![1]);
@@ -1810,7 +2280,7 @@ fn the_load_refuses_tampered_rows() {
     assert_eq!(
         load::load(
             &a.cache.rows,
-            &load::open(&a.cache.rows).unwrap(),
+            &load::open(&a.cache.rows, false).unwrap(),
             &b.unlocked,
             T0
         )
@@ -2075,4 +2545,50 @@ fn a_heal_acknowledges_the_own_ops_the_restored_server_holds() {
     b.upload(&mut server, &mut rng);
     b.assert_loads();
     assert_crash_safe(&b.cache.history, &[&b.unlocked]);
+}
+
+/// ADR 0056 §4, §6: the `item_index` writes of every step pass the floors and commit with the
+/// step; the load never reads the table, so a corrupt one (a bad UTF-8 row, or a table the host
+/// could not read) leaves every other table's load unaffected, and only that table is rebuilt.
+#[test]
+fn a_corrupt_item_index_never_fails_the_load() {
+    use crate::store::index;
+
+    let mut rng = ChaCha20Rng::seed_from_u64(5640);
+    let mut server = Server::new(5641);
+    let (mut dev, _, _) = Dev::signed_up(&mut server, &mut rng);
+    index::track_new(&mut dev.vault);
+    dev.fetch(&server);
+    let item = dev.create(&mut rng, "x");
+    dev.upload(&mut server, &mut rng);
+    assert_eq!(dev.cache.rows.item_index.len(), 1);
+    assert_eq!(dev.cache.rows.item_index[0].item_id, item.to_bytes());
+    dev.assert_loads();
+
+    // A reload of an intact table reconciles to nothing.
+    let mut loaded = dev.reload();
+    assert!(index::reconcile(&dev.cache.rows, &mut loaded.vaults).is_empty());
+
+    for unreadable in [false, true] {
+        let mut rows = copy_rows(&dev.cache.rows);
+        if unreadable {
+            rows.item_index.clear();
+            rows.item_index_unreadable = true;
+        } else {
+            rows.item_index[0].display_name = Zeroizing::new(vec![0xFF]);
+        }
+        let mut loaded = load_rows(&rows, &dev.unlocked).unwrap();
+        assert_same_vault(&dev.vault, &loaded.vaults[0]);
+        let writes = index::reconcile(&rows, &mut loaded.vaults);
+        assert!(matches!(writes.writes()[0], Write::IndexReset));
+        loaded.floors.admit(&writes).unwrap();
+        let before = copy_rows(&rows);
+        rows.apply(&writes);
+        assert_eq!(rows.item_index.len(), 1);
+        assert!(!rows.item_index_unreadable);
+        // Nothing but the index changed.
+        assert_eq!(rows.ops.len(), before.ops.len());
+        assert_eq!(rows.meta, before.meta);
+        assert_eq!(rows.objects.len(), before.objects.len());
+    }
 }

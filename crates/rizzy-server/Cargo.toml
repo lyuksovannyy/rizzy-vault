@@ -33,6 +33,9 @@ rizzy-domain-vault.workspace = true
 rizzy-storage.workspace = true
 # `CompactionQueued` wakes the worker (ADR 0021 §3).
 rizzy-bus.workspace = true
+# The `icons` role's egress (ADR 0016 §3, R5; ADR 0052 point 1; ADR 0053): the allow-list, the
+# pinned TLS connector, the shared cache, the per-source limit and the breach check.
+rizzy-icon-proxy.workspace = true
 # HTTP for the `api` and `web` roles (ADR 0010 §1). Default features off; see the workspace entry.
 axum.workspace = true
 # The HTTP/1 connection with a header-read timeout, under the server's own accept loop
@@ -71,6 +74,12 @@ rizzy-client.workspace = true
 # `ServiceExt::oneshot`: drives the router in-process in `tests/http`. Already in the graph
 # through axum.
 tower.workspace = true
+# The deterministic/fresh-seed case generator of the bulk attack harness
+# (`tests/http/attack.rs`), following `rizzy-sync`'s `convergence/generate.rs` pattern
+# (`Seeds::Fixed` for the PR budget, `Seeds::Fresh` for nightly). Already a workspace
+# dev-dependency of `rizzy-client`, `rizzy-core`, `rizzy-import`, `rizzy-match` and `rizzy-sync`;
+# no new crate.
+proptest.workspace = true
 # The seeded ChaCha20Rng of the test clients (ADR 0009 test RNG). Test-only.
 chacha20.workspace = true
 

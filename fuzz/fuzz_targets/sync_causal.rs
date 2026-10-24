@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-sync`'s per-device-chain layer (`causal`: ADR 0012 §4 steps 1–2, §6, §7;
 //! ADR 0021 §4, §9), which a client runs on what an untrusted server serves: any sequence of
 //! verified headers, covers and body verdicts may arrive, in any order, with any links, contexts

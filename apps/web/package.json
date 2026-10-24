@@ -13,18 +13,20 @@
   },
   "dependencies": {
     "@rizzy-vault/core": "workspace:*",
+    "@rizzy-vault/i18n": "workspace:*",
     "@rizzy-vault/ui": "workspace:*",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
     "@playwright/test": "1.60.0",
     "@types/node": "24.19.0",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "eslint": "10.11.0",
     "typescript": "6.0.3",
-    "vite": "8.3.1",
-    "vitest": "4.1.11"
+    "vite": "8.3.5",
+    "vitest": "4.1.12"
   }
 }

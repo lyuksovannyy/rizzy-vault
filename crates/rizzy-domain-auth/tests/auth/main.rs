@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Integration tests of `rizzy-domain-auth` against real SQLite files, with `rizzy-core`'s
 //! client-side functions playing the client.
 //!
@@ -13,9 +15,11 @@
 //! | `lag` | the lag rule and the credentials that need the user after a restore: `credentials_stale` after KE3, `reregister`, the startup fill, the recovery repair, `E_id` and settings in healing step 2 (ADR 0032 §3–§4) |
 //! | `restore` | the reconciliation epoch after a restore: its end, its limit, the device-set check (INV-59) |
 //! | `single_use` | login states and challenges used once on every path; no login across a credential change (§5.10, §5.11, INV-59) |
+//! | `sessions` | listing and ending sessions: the caller and target rules, device sessions left alone, the race with a password change, INV-7 (ADR 0075) |
 //! | `secrets` | the startup checks and what the database never holds (INV-8, INV-50) |
 //! | `setups` | retiring old OPAQUE setups: the `reregister` flag, the echoed `setup_id`, the two steps of `retire-setups`, the startup refusal, an account left on a retired setup (ADR 0031) |
 //! | `data_key` | after a data-key rotation: TOTP rows re-sealed under the account lock, the old key dropped once no row names it (§5.11 "Rotation") |
+//! | `webauthn` | security keys: enrolment, login, single use and TTL of the ceremony state, RP ID and origin, UV, INV-83 against the counter of record, attestation, ES256 only, rate limits, the 0.5.5 fixture rows (ADR 0058, ADR 0077) |
 //! | `window` | the replay window at its edges, through the database: the first counter, `max − 63`, `max − 64`, jumps, forged requests, a restart, the highest recordable counter (ADR 0028 item 5) |
 
 #![expect(
@@ -36,7 +40,10 @@ mod restore;
 mod revocation;
 mod second_factor;
 mod secrets;
+mod sessions;
 mod setups;
 mod single_use;
 mod state;
+mod vaults;
+mod webauthn;
 mod window;

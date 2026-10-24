@@ -1,0 +1,14 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!doctype html>
+<!-- ADR 0076 §1.3–§1.4 fixture: captcha, coupon, promo, gift-card, referral and invite codes -->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>captcha, coupon, promo, gift-card, referral and invite codes</title></head>
+  <body>
+    <form id="c1" action="/a"><input id="captcha" name="captcha_otp" type="text" maxlength="6" inputmode="numeric" /></form>
+    <form id="c2" action="/b"><input id="coupon" name="coupon" type="text" maxlength="6" inputmode="numeric" placeholder="one-time coupon" /></form>
+    <form id="c3" action="/c"><input id="promo" name="promo" type="text" maxlength="6" inputmode="numeric" placeholder="2fa promo" /></form>
+    <form id="c4" action="/d"><input id="gift" name="gift" type="text" maxlength="8" inputmode="numeric" placeholder="gift card one-time code" /></form>
+    <form id="c5" action="/e"><input id="ref" name="referral_otp" type="text" maxlength="6" inputmode="numeric" /></form>
+    <form id="c6" action="/f"><input id="inv" name="invite_otp" type="text" maxlength="6" inputmode="numeric" /></form>
+  </body>
+</html>

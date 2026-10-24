@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // ESLint for the web-platform UI code (ADR 0014 §2: "ESLint enforces these in CI from M1").
 // Run from the repository root: `pnpm run lint`. `apps/web/test/lint-rules.test.ts` checks that
 // each rule below fires on a sample of what it bans.

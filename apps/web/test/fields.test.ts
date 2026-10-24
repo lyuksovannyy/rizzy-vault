@@ -1,18 +1,34 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Edits write only the keys the user changed (ADR 0018 §11); concealed fields are never
 // cleared by an empty input; grouping and search.
 import type { FieldView } from "@rizzy-vault/core";
 import { describe, expect, it } from "vitest";
 
 import {
+  CREATABLE_TYPES,
   FIXED_FIELDS,
+  SSH_DEFAULT_PORT,
+  UNSUPPORTED_ITEM,
+  canEditFields,
+  compareFavoriteFirst,
+  controlOf,
+  countryName,
+  displayValue,
+  formatIsoDate,
+  isIsoDate,
+  sexLabel,
   fixedChanges,
   group,
+  isMultiline,
   labelOf,
   MATCH_MODE_OPTIONS,
   MATCH_MODE_REGEX,
   matchModeLabel,
   matches,
+  orderFixed,
   tagCounts,
+  typeLabel,
 } from "../src/fields.ts";
 
 /** A field view with defaults. */
@@ -30,6 +46,114 @@ function f(key: string, more: Partial<FieldView> = {}): FieldView {
     ...more,
   };
 }
+
+// ADR 0055 §1: the fixed keys of each M3 type, and the six the core conceals (§4; ADR 0078 §7
+// retired the Bank account type and its two). The web vault's `secret` flag picks the input a
+// new value is typed in; it must match the core's list.
+const M3_KEYS: Readonly<Record<string, readonly (readonly [string, boolean])[]>> = {
+  "ssh-key": [
+    ["ssh.host", false],
+    ["ssh.port", false],
+    ["ssh.username", false],
+    ["ssh.private_key", true],
+    ["ssh.public_key", false],
+    ["ssh.passphrase", true],
+  ],
+  "api-credential": [
+    ["api.name", false],
+    ["api.key", true],
+    ["api.secret", true],
+    ["api.endpoint", false],
+  ],
+  "software-license": [
+    ["license.name", false],
+    ["license.key", true],
+    ["license.seats", false],
+    ["license.expires", false],
+  ],
+  wifi: [
+    ["wifi.ssid", false],
+    ["wifi.password", true],
+    ["wifi.security_type", false],
+  ],
+};
+
+describe("the M3 item types (ADR 0055)", () => {
+  it("are creatable, each with its own keys and the six concealed ones typed as secrets", () => {
+    expect(CREATABLE_TYPES.map((t) => t.type)).toEqual([
+      "login",
+      "note",
+      "card",
+      "identity",
+      "ssh-key",
+      "api-credential",
+      "software-license",
+      "wifi",
+    ]);
+    let secrets = 0;
+    for (const [type, keys] of Object.entries(M3_KEYS)) {
+      const fields = FIXED_FIELDS[type as keyof typeof FIXED_FIELDS] ?? [];
+      expect(fields.map((x) => x.key)).toEqual(["item.name", ...keys.map(([k]) => k), "item.notes"]);
+      for (const [key, secret] of keys) {
+        expect(fields.find((x) => x.key === key)?.secret === true, key).toBe(secret);
+        secrets += secret ? 1 : 0;
+      }
+    }
+    expect(secrets).toBe(6);
+    // Labels are unique within a type, so each input has its own accessible name.
+    for (const fields of Object.values(FIXED_FIELDS)) {
+      const labels = (fields ?? []).map((x) => x.label);
+      expect(new Set(labels).size).toBe(labels.length);
+    }
+  });
+
+  it("type an SSH private key in a multi-line field, and show port 22 when none is set", () => {
+    expect(isMultiline("ssh.private_key")).toBe(true);
+    expect(isMultiline("item.notes")).toBe(true);
+    expect(isMultiline("ssh.public_key")).toBe(false);
+    expect(isMultiline("login.password")).toBe(false);
+    expect(SSH_DEFAULT_PORT).toBe("22");
+    expect(FIXED_FIELDS["ssh-key"]?.find((x) => x.key === "ssh.port")?.placeholder).toBe("22");
+  });
+
+  it("show a type this build does not know generically, with no field edits (ADR 0018 §8, §11)", () => {
+    expect(typeLabel("wifi")).toBe("Wi-Fi");
+    expect(typeLabel("unknown")).toBe(UNSUPPORTED_ITEM);
+    // `passkey` is a name the core reserves but no type this build creates.
+    expect(typeLabel("passkey")).toBe(UNSUPPORTED_ITEM);
+    expect(canEditFields("ssh-key")).toBe(true);
+    expect(canEditFields("unknown")).toBe(false);
+    expect(canEditFields("passkey")).toBe(false);
+  });
+
+  it("no longer create or edit the Bank account type ADR 0078 retired", () => {
+    // The wasm names a `0x0009` item `unknown` (ADR 0078 §5), so it shows as unsupported.
+    expect(CREATABLE_TYPES.some((t) => (t.type as string) === "bank-account")).toBe(false);
+    expect(Object.keys(FIXED_FIELDS)).not.toContain("bank-account");
+    const keys = Object.values(FIXED_FIELDS).flatMap((fields) => (fields ?? []).map((x) => x.key));
+    expect(keys.filter((k) => k.startsWith("bank."))).toEqual([]);
+    expect(typeLabel("unknown")).toBe("Unsupported item, update rizzy-vault");
+    expect(canEditFields("unknown")).toBe(false);
+  });
+
+  it("order an item's fixed fields as the editor does, unknown keys last", () => {
+    const fixed = [
+      f("ssh.username"),
+      f("newer.key"),
+      f("ssh.private_key"),
+      f("item.name"),
+      f("ssh.host"),
+    ];
+    expect(orderFixed("ssh-key", fixed).map((x) => x.key)).toEqual([
+      "item.name",
+      "ssh.host",
+      "ssh.username",
+      "ssh.private_key",
+      "newer.key",
+    ]);
+    expect(orderFixed("unknown", fixed).map((x) => x.key)).toEqual(fixed.map((x) => x.key));
+  });
+});
 
 describe("fixedChanges", () => {
   it("writes only what changed", () => {
@@ -96,7 +220,7 @@ describe("layout", () => {
   it("names fields and marks the concealed ones the schema conceals", () => {
     expect(labelOf("login.password")).toBe("Password");
     expect(labelOf("x.unknown")).toBe("x.unknown");
-    // ADR 0018 §7's concealed list, for the types this vault creates.
+    // ADR 0018 §7's concealed list, extended by ADR 0055 §4, for the types this vault creates.
     const secret = Object.values(FIXED_FIELDS)
       .flatMap((fields) => fields ?? [])
       .filter((x) => x.secret === true)
@@ -111,6 +235,12 @@ describe("layout", () => {
         "identity.ssn",
         "login.password",
         "login.totp",
+        "ssh.private_key",
+        "ssh.passphrase",
+        "api.key",
+        "api.secret",
+        "license.key",
+        "wifi.password",
       ].sort(),
     );
   });
@@ -136,6 +266,37 @@ describe("layout", () => {
     expect(matches(item, "finance")).toBe(true);
     expect(matches(item, "personal")).toBe(false);
     expect(matches({ title: "x", username: undefined }, "y")).toBe(false);
+  });
+});
+
+// The item list's and the command palette's shared ordering (ItemsPane.tsx, CommandPalette.tsx;
+// ROADMAP §4.2/§4.5 "favorites first").
+describe("compareFavoriteFirst", () => {
+  it("puts every favorite before every non-favorite, regardless of input order", () => {
+    const items = [
+      { favorite: false, title: "Bravo" },
+      { favorite: true, title: "Zulu" },
+      { favorite: false, title: "Alpha" },
+      { favorite: true, title: "Yankee" },
+    ];
+    expect(items.sort(compareFavoriteFirst).map((i) => i.title)).toEqual([
+      "Yankee",
+      "Zulu",
+      "Alpha",
+      "Bravo",
+    ]);
+  });
+
+  it("breaks ties within a group by title, case-insensitively", () => {
+    const items = [{ favorite: false, title: "bravo" }, { favorite: false, title: "Alpha" }];
+    expect(items.sort(compareFavoriteFirst).map((i) => i.title)).toEqual(["Alpha", "bravo"]);
+  });
+
+  it("is a no-op on an already-sorted single-item or empty list", () => {
+    expect([].sort(compareFavoriteFirst)).toEqual([]);
+    expect([{ favorite: true, title: "Solo" }].sort(compareFavoriteFirst)).toEqual([
+      { favorite: true, title: "Solo" },
+    ]);
   });
 });
 
@@ -188,3 +349,64 @@ describe("MATCH_MODE_OPTIONS / matchModeLabel", () => {
     expect(matchModeLabel("not a number")).toContain("Unknown");
   });
 });
+
+describe("Sex and Birthday (ADR 0079 §1, §10)", () => {
+  const fields = FIXED_FIELDS.identity ?? [];
+  const sex = fields.find((f) => f.key === "identity.sex");
+  const birthday = fields.find((f) => f.key === "identity.birthday");
+
+  it("sit right after the name fields", () => {
+    const keys = fields.map((f) => f.key);
+    expect(keys.indexOf("identity.sex")).toBe(keys.indexOf("identity.last_name") + 1);
+    expect(keys.indexOf("identity.birthday")).toBe(keys.indexOf("identity.sex") + 1);
+    expect(labelOf("identity.sex")).toBe("Sex");
+    expect(labelOf("identity.birthday")).toBe("Birthday");
+  });
+
+  it("show the picked values localized and any other text as entered", () => {
+    expect(sexLabel("male")).toBe("Male");
+    expect(sexLabel("female")).toBe("Female");
+    expect(sexLabel("nonbinary")).toBe("nonbinary");
+    expect(sexLabel("Male")).toBe("Male");
+    expect(displayValue("identity.sex", "x")).toBe("x");
+    expect(displayValue("identity.birthday", "1998-04-17")).toBe(formatIsoDate("1998-04-17"));
+    expect(formatIsoDate("1998-04-17", "en-US")).toBe("April 17, 1998");
+    expect(displayValue("identity.birthday", "04/17/1998")).toBe("04/17/1998");
+    expect(displayValue("identity.city", "male")).toBe("male");
+  });
+
+  it("show a two-letter country code with its name next to it, in any case (ADR 0079 §1)", () => {
+    expect(countryName("de", "en")).toBe("Germany");
+    expect(countryName("US", "en")).toBe("United States");
+    expect(countryName("Germany", "en")).toBeUndefined();
+    expect(countryName("D1", "en")).toBeUndefined();
+    expect(countryName("", "en")).toBeUndefined();
+    const name = countryName("DE");
+    expect(displayValue("identity.country", "DE")).toBe(`DE (${name ?? ""})`);
+    expect(displayValue("identity.country", "Deutschland")).toBe("Deutschland");
+  });
+
+  it("read a date as a civil day: no time zone shift, real days only", () => {
+    expect(isIsoDate("2024-02-29")).toBe(true);
+    expect(isIsoDate("2023-02-29")).toBe(false);
+    expect(isIsoDate("1998-13-01")).toBe(false);
+    expect(isIsoDate("1998-4-17")).toBe(false);
+    expect(isIsoDate("1998-04-31")).toBe(false);
+    expect(formatIsoDate("2000-01-01", "en-US")).toBe("January 1, 2000");
+  });
+
+  it("offer the select or date input only for a value they show unchanged", () => {
+    expect(sex !== undefined && birthday !== undefined).toBe(true);
+    if (sex === undefined || birthday === undefined) {
+      return;
+    }
+    expect(controlOf(sex, "male")).toBe("sex");
+    expect(controlOf(sex, "")).toBe("sex");
+    expect(controlOf(sex, "Other text")).toBe("text");
+    expect(controlOf(birthday, "1998-04-17")).toBe("date");
+    expect(controlOf(birthday, "")).toBe("date");
+    expect(controlOf(birthday, "04/17/1998")).toBe("text");
+    expect(controlOf({ key: "identity.city", label: "City" }, "1998-04-17")).toBe("text");
+  });
+});
+

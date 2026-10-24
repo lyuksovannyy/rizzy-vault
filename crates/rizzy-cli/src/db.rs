@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `SQLite` executor of the local cache ([ADR 0026] §3–§5; ADR 0019 §5: "sqlx sits in …
 //! `rizzy-cli` from M1"; owner decision on ADR 0026 open question 1: the sqlx code lives in the
 //! leaf for M1).
@@ -13,10 +15,18 @@
 //!   the changeset through the store's floors first; the SQL checks the rules it can check a
 //!   second time (a counter that would go down, another statement at a held dot, an `own`
 //!   that would go back) and fails the whole transaction instead of writing.
+//! - [`Db::open`] upgrades a cache of an older format first: each of `rizzy-client`'s
+//!   [`MIGRATIONS`] steps from the stored format on runs as one `BEGIN IMMEDIATE` transaction,
+//!   its schema statements first, then its row statements, each of which must change exactly
+//!   one row (ADR 0026 §5; ADR 0051 §2; ADR 0056 §3).
 //! - [`Db::read`] reads every table back into the store's row model, which then verifies every
 //!   row ([`rizzy_client::store::load`]). Before any blob is read its length is checked in SQL
 //!   against the `rizzy-proto` limit of its column, so a hostile file cannot make `rv`
 //!   allocate in proportion to a length the file chooses.
+//! - `item_index` (ADR 0056) is read last, under its own failure rule: a table that is missing,
+//!   of another shape or with a column over its cap is reported as unreadable instead of
+//!   failing the read, and `rizzy-client` rebuilds it alone ([`index::reconcile`]).
+//!   [`Db::search`] and [`Db::recent`] run `rizzy-client`'s queries over it.
 //!
 //! Connection settings are ADR 0026 §3's: `journal_mode=DELETE`, `synchronous=FULL`,
 //! `secure_delete=ON` (best-effort hygiene only), `foreign_keys=ON`, `busy_timeout` 5 s.
@@ -32,16 +42,19 @@ use std::path::Path;
 use std::time::Duration;
 
 use rizzy_client::ClientError;
+use rizzy_client::items::ItemId;
+use rizzy_client::rizzy_core::ids::VaultId;
 use rizzy_client::rizzy_proto::limits::{
     MAX_ACCOUNT_STATEMENT_LEN, MAX_ENVELOPE_LEN, MAX_KEY_ENVELOPE_LEN, MAX_OP_STATEMENT_LEN,
     MAX_SNAPSHOT_STATEMENT_LEN, MAX_UPLOAD_BODY_LEN,
 };
 use rizzy_client::rizzy_proto::objects::VaultSelfGrant;
+use rizzy_client::store::index::{self, IndexRow, MAX_DISPLAY_NAME_LEN, MAX_SEARCH_TEXT_LEN};
 use rizzy_client::store::record::MAX_DEVICE_STATE_LEN;
 use rizzy_client::store::rows::limits::{MAX_KEY_COLUMN_LEN, MAX_SELF_GRANT_JSON_LEN};
 use rizzy_client::store::rows::{
-    CacheRows, Changeset, ObjectRow, OpRow, PRAGMAS, SCHEMA, SnapshotRow, VaultRow, WrapRow, Write,
-    kind, meta, own,
+    CACHE_FORMAT, CacheRows, Changeset, INDEX_RESET, MIGRATIONS, ObjectRow, OpRow, PRAGMAS,
+    PendingMoveRow, SCHEMA, SnapshotRow, VaultRow, WrapRow, Write, kind, meta, own,
 };
 use sqlx_client as sqlx;
 use sqlx_client::sqlite::{
@@ -138,6 +151,8 @@ const DELETE_SNAPSHOT: &str =
 const SELECT_META: &str = "SELECT k, v FROM cache_meta WHERE length(k) <= 64 AND length(v) <= 1024";
 /// How many `cache_meta` rows there are.
 const COUNT_META: &str = "SELECT COUNT(*) FROM cache_meta";
+/// The stored format, for the migration steps (`v` length-capped like every meta read).
+const SELECT_FORMAT: &str = "SELECT v FROM cache_meta WHERE k = 'format' AND length(v) <= 1024";
 /// The device-state record, if its length is within the cap.
 const SELECT_DEVICE_STATE: &str = "SELECT record FROM device_state WHERE length(record) <= ?1";
 /// How many device-state rows there are.
@@ -184,6 +199,57 @@ const OVERSIZE_SNAPSHOTS: &str = "SELECT COUNT(*) FROM snapshots WHERE length(va
 const SELECT_SNAPSHOTS: &str = "SELECT vault_id, snapshot_id, item_id, statement, envelope, \
      key_wrap, own, sent_generation FROM snapshots ORDER BY vault_id, snapshot_id";
 
+/// The `item_index` rows over a column cap (ADR 0056 §3), in bytes whatever the stored type.
+const OVERSIZE_INDEX: &str = "SELECT COUNT(*) FROM item_index \
+     WHERE length(CAST(item_id AS BLOB)) > ?1 OR length(CAST(vault_id AS BLOB)) > ?1 \
+     OR length(CAST(display_name AS BLOB)) > ?2 OR length(CAST(search_text AS BLOB)) > ?3 \
+     OR length(CAST(last_used_ms AS BLOB)) > ?1";
+/// Every `item_index` row; the text columns as their bytes, so a row that is not UTF-8 is
+/// `rizzy-client`'s to refuse, not the driver's.
+const SELECT_INDEX: &str = "SELECT item_id, vault_id, item_type, CAST(display_name AS BLOB), \
+     CAST(search_text AS BLOB), last_used_ms, use_count FROM item_index \
+     ORDER BY vault_id, item_id";
+/// Inserts an `item_index` row, or replaces every column but the key and the counters (ADR
+/// 0056 §4; keyed by `(vault_id, item_id)`, ADR 0081 §A7).
+const PUT_INDEX: &str = "INSERT INTO item_index(item_id, vault_id, item_type, display_name, \
+     search_text) VALUES(?1, ?2, ?3, ?4, ?5) ON CONFLICT(vault_id, item_id) DO UPDATE SET \
+     item_type = excluded.item_type, \
+     display_name = excluded.display_name, search_text = excluded.search_text";
+/// Deletes an `item_index` row.
+const DELETE_INDEX: &str = "DELETE FROM item_index WHERE vault_id = ?1 AND item_id = ?2";
+/// Records one use (ADR 0056 §2); the count saturates, as the reference's does.
+const USE_INDEX: &str = "UPDATE item_index SET last_used_ms = ?3, use_count = \
+     CASE WHEN use_count < 9223372036854775807 THEN use_count + 1 ELSE use_count END \
+     WHERE vault_id = ?1 AND item_id = ?2";
+/// Copies one row's counters to another's (ADR 0081 §A6 step 1); nothing without both rows.
+const COPY_INDEX_USAGE: &str = "UPDATE item_index SET \
+     last_used_ms = (SELECT f.last_used_ms FROM item_index f WHERE f.vault_id = ?1 AND f.item_id = ?2), \
+     use_count = (SELECT f.use_count FROM item_index f WHERE f.vault_id = ?1 AND f.item_id = ?2) \
+     WHERE vault_id = ?3 AND item_id = ?4 \
+     AND EXISTS (SELECT 1 FROM item_index f WHERE f.vault_id = ?1 AND f.item_id = ?2)";
+/// The `pending_move` rows over the key-column cap (ADR 0081 §A7).
+const OVERSIZE_PENDING_MOVES: &str = "SELECT COUNT(*) FROM pending_move \
+     WHERE length(source_vault_id) > ?1 OR length(source_item_id) > ?1 \
+     OR length(target_vault_id) > ?1 OR length(target_item_id) > ?1";
+/// Every `pending_move` row (ADR 0081 §A7).
+const SELECT_PENDING_MOVES: &str = "SELECT source_vault_id, source_item_id, target_vault_id, \
+     target_item_id FROM pending_move ORDER BY source_vault_id, source_item_id";
+/// Inserts a `pending_move` row, or replaces the row of its source.
+const PUT_PENDING_MOVE: &str = "INSERT OR REPLACE INTO pending_move(source_vault_id, \
+     source_item_id, target_vault_id, target_item_id) VALUES(?1, ?2, ?3, ?4)";
+/// Deletes the `pending_move` row of a source item.
+const DELETE_PENDING_MOVE: &str =
+    "DELETE FROM pending_move WHERE source_vault_id = ?1 AND source_item_id = ?2";
+/// The statements of [`Write::DropVault`] (ADR 0081 §A5), each bound to the vault id.
+const DROP_VAULT: &[&str] = &[
+    "DELETE FROM wraps WHERE vault_id = ?1",
+    "DELETE FROM ops WHERE vault_id = ?1",
+    "DELETE FROM snapshots WHERE vault_id = ?1",
+    "DELETE FROM item_index WHERE vault_id = ?1",
+    "DELETE FROM pending_move WHERE source_vault_id = ?1 OR target_vault_id = ?1",
+    "DELETE FROM vaults WHERE vault_id = ?1",
+];
+
 /// A length as a bound `SQLite` integer.
 fn cap(len: usize) -> i64 {
     i64::try_from(len).unwrap_or(i64::MAX)
@@ -196,6 +262,17 @@ fn one_row(changed: u64) -> Result<(), sqlx::Error> {
     } else {
         Err(sqlx::Error::RowNotFound)
     }
+}
+
+/// Removes the file of a failed [`Db::create`] and its rollback journal, if one is left
+/// (`journal_mode=DELETE`). Nothing was committed: the file holds no enrolment, and leaving it
+/// would make the next signup or login fail as "already enrolled". The caller's error is the one
+/// reported; a file that cannot be removed is reported by that next attempt.
+fn discard(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let mut journal = path.as_os_str().to_owned();
+    journal.push("-journal");
+    let _ = std::fs::remove_file(journal);
 }
 
 /// An open cache file. One connection, used by one task.
@@ -239,17 +316,41 @@ fn options(path: &Path) -> SqliteConnectOptions {
 impl Db {
     /// Connects to an existing file and applies the settings.
     async fn connect(path: &Path) -> Result<Self, CliError> {
-        let mut conn = SqliteConnection::connect_with(&options(path))
+        let conn = SqliteConnection::connect_with(&options(path))
             .await
             .map_err(|e| db_error(&e))?;
+        let mut db = Self { conn };
         // The settings as the store's text states them, whatever the driver's defaults are.
         for pragma in PRAGMAS {
-            sqlx::query(*pragma)
-                .fetch_all(&mut conn)
+            if let Err(e) = sqlx::query(*pragma).fetch_all(&mut db.conn).await {
+                let error = db_error(&e);
+                // Closed, not dropped: sqlx closes a dropped connection later on its worker
+                // thread, and until then the file cannot be removed on Windows.
+                db.close().await;
+                return Err(error);
+            }
+        }
+        Ok(db)
+    }
+
+    /// Writes the schema and the first changeset as one `BEGIN IMMEDIATE` transaction. On an
+    /// error the transaction is dropped, which rolls it back.
+    async fn initialise(&mut self, first: &Changeset) -> Result<(), CliError> {
+        let mut tx = self
+            .conn
+            .begin_with(BEGIN_IMMEDIATE)
+            .await
+            .map_err(|e| db_error(&e))?;
+        for statement in SCHEMA {
+            sqlx::query(*statement)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| db_error(&e))?;
         }
-        Ok(Self { conn })
+        for write in first.writes() {
+            apply(&mut tx, write).await.map_err(|e| db_error(&e))?;
+        }
+        tx.commit().await.map_err(|e| db_error(&e))
     }
 
     /// Creates the cache of a new enrolment at `path` with its first changeset (module docs).
@@ -262,32 +363,24 @@ impl Db {
             CliError::FileExists => CliError::AlreadyEnrolled,
             other => other,
         })?);
-        let created = async {
-            let mut db = Self::connect(path).await?;
-            let mut tx = db
-                .conn
-                .begin_with(BEGIN_IMMEDIATE)
-                .await
-                .map_err(|e| db_error(&e))?;
-            for statement in SCHEMA {
-                sqlx::query(*statement)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| db_error(&e))?;
+        let mut db = match Self::connect(path).await {
+            Ok(db) => db,
+            Err(e) => {
+                discard(path);
+                return Err(e);
             }
-            for write in first.writes() {
-                apply(&mut tx, write).await.map_err(|e| db_error(&e))?;
+        };
+        match db.initialise(first).await {
+            Ok(()) => Ok(db),
+            Err(e) => {
+                // The connection is closed before the file is removed: on Windows a file with
+                // an open handle cannot be deleted, and sqlx closes a dropped connection only
+                // later, on its worker thread.
+                db.close().await;
+                discard(path);
+                Err(e)
             }
-            tx.commit().await.map_err(|e| db_error(&e))?;
-            Ok(db)
         }
-        .await;
-        if created.is_err() {
-            // Nothing was committed: the file holds no enrolment, and leaving it would make the
-            // next signup or login fail as "already enrolled".
-            let _ = std::fs::remove_file(path);
-        }
-        created
     }
 
     /// Opens an existing cache.
@@ -299,7 +392,55 @@ impl Db {
         if !path.is_file() {
             return Err(CliError::NotEnrolled);
         }
-        Self::connect(path).await
+        let mut db = Self::connect(path).await?;
+        if let Err(error) = db.migrate().await {
+            db.close().await;
+            return Err(error);
+        }
+        Ok(db)
+    }
+
+    /// Runs every migration step from the stored format on (module docs), each in its own
+    /// transaction. A file without a readable format, or of a format no step starts from, is
+    /// left as it is: [`rizzy_client::store::load::open`] reports it.
+    async fn migrate(&mut self) -> Result<(), CliError> {
+        loop {
+            let format: Option<Vec<u8>> = sqlx::query_scalar(SELECT_FORMAT)
+                .fetch_optional(&mut self.conn)
+                .await
+                .map_err(|e| db_error(&e))?;
+            let Some(format) = format
+                .and_then(|v| <[u8; 2]>::try_from(v.as_slice()).ok())
+                .map(u16::from_be_bytes)
+            else {
+                return Ok(());
+            };
+            if format >= CACHE_FORMAT {
+                return Ok(());
+            }
+            let Some(step) = MIGRATIONS.iter().find(|step| step.from == format) else {
+                return Ok(());
+            };
+            let mut tx = self
+                .conn
+                .begin_with(BEGIN_IMMEDIATE)
+                .await
+                .map_err(|e| db_error(&e))?;
+            for statement in step.schema {
+                sqlx::query(*statement)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| db_error(&e))?;
+            }
+            for statement in step.rows {
+                let done = sqlx::query(*statement)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| db_error(&e))?;
+                one_row(done.rows_affected()).map_err(|e| db_error(&e))?;
+            }
+            tx.commit().await.map_err(|e| db_error(&e))?;
+        }
     }
 
     /// Runs `changeset` as one `BEGIN IMMEDIATE` transaction. An empty changeset does nothing.
@@ -344,6 +485,40 @@ impl Db {
             .map_err(|_| CliError::Client(ClientError::CacheCorrupt))
     }
 
+    /// The items whose `item_index` row matches `query` (ADR 0056 §5: a lower-cased substring
+    /// match, the query lower-cased in Rust), most recently used first, at most `limit`. The
+    /// empty query lists every row in that order.
+    ///
+    /// # Errors
+    /// [`CliError::Database`] for a table that cannot be read.
+    pub async fn search(
+        &mut self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(VaultId, ItemId)>, CliError> {
+        let pattern = index::like_pattern(query);
+        let rows = sqlx::query(index::SEARCH)
+            .bind(pattern.as_str())
+            .bind(cap(limit))
+            .fetch_all(&mut self.conn)
+            .await
+            .map_err(|e| db_error(&e))?;
+        item_ids(&rows)
+    }
+
+    /// The items used on this device, most recent first, at most `limit` (ADR 0056 §2, §5).
+    ///
+    /// # Errors
+    /// [`CliError::Database`] for a table that cannot be read.
+    pub async fn recent(&mut self, limit: usize) -> Result<Vec<(VaultId, ItemId)>, CliError> {
+        let rows = sqlx::query(index::RECENT)
+            .bind(cap(limit))
+            .fetch_all(&mut self.conn)
+            .await
+            .map_err(|e| db_error(&e))?;
+        item_ids(&rows)
+    }
+
     /// The keys of the alarm rows (`account_objects` kind 7), each cut to its first two bytes:
     /// one byte is an alarm kind, anything else is an alarm this build does not know.
     ///
@@ -371,6 +546,44 @@ impl Db {
         // A failed close loses nothing: every write was committed in its own transaction.
         let _ = self.conn.close().await;
     }
+}
+
+/// The `(vault_id, item_id)` of a search's rows (INV-103); a row whose ids are not 16 bytes is
+/// skipped (the table is rebuilt at the next load).
+fn item_ids(rows: &[sqlx::sqlite::SqliteRow]) -> Result<Vec<(VaultId, ItemId)>, CliError> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let vault: Vec<u8> = row.try_get(0).map_err(|e| db_error(&e))?;
+        let item: Vec<u8> = row.try_get(1).map_err(|e| db_error(&e))?;
+        if let (Ok(vault), Ok(item)) = (VaultId::from_slice(&vault), ItemId::from_slice(&item)) {
+            out.push((vault, item));
+        }
+    }
+    Ok(out)
+}
+
+/// The `item_index` rows (ADR 0056 §4): any error means the table is unreadable, which the
+/// caller reports instead of failing the read.
+async fn read_index(conn: &mut SqliteConnection) -> Result<Vec<IndexRow>, sqlx::Error> {
+    no_oversize(
+        conn,
+        OVERSIZE_INDEX,
+        &[cap(16), cap(MAX_DISPLAY_NAME_LEN), cap(MAX_SEARCH_TEXT_LEN)],
+    )
+    .await?;
+    let mut out = Vec::new();
+    for row in sqlx::query(SELECT_INDEX).fetch_all(&mut *conn).await? {
+        out.push(IndexRow {
+            item_id: row.try_get(0)?,
+            vault_id: row.try_get(1)?,
+            item_type: row.try_get(2)?,
+            display_name: Zeroizing::new(row.try_get(3)?),
+            search_text: Zeroizing::new(row.try_get(4)?),
+            last_used_ms: row.try_get(5)?,
+            use_count: row.try_get(6)?,
+        });
+    }
+    Ok(out)
 }
 
 /// A row count from a `COUNT(*)` query with caps bound in order.
@@ -536,6 +749,30 @@ async fn read_rows(conn: &mut SqliteConnection) -> Result<CacheRows, sqlx::Error
             sent_generation: row.try_get(7)?,
         });
     }
+
+    // ADR 0081 §A7: ids only, each a key column under its cap.
+    no_oversize(conn, OVERSIZE_PENDING_MOVES, &[key_cap]).await?;
+    for row in sqlx::query(SELECT_PENDING_MOVES)
+        .fetch_all(&mut *conn)
+        .await?
+    {
+        let id = |i: usize| -> Result<[u8; 16], sqlx::Error> {
+            let bytes: Vec<u8> = row.try_get(i)?;
+            <[u8; 16]>::try_from(bytes.as_slice())
+                .map_err(|_| sqlx::Error::Decode("a pending_move id is not 16 bytes".into()))
+        };
+        rows.pending_moves.push(PendingMoveRow {
+            source_vault_id: id(0)?,
+            source_item_id: id(1)?,
+            target_vault_id: id(2)?,
+            target_item_id: id(3)?,
+        });
+    }
+
+    match read_index(conn).await {
+        Ok(index) => rows.item_index = index,
+        Err(_) => rows.item_index_unreadable = true,
+    }
     Ok(rows)
 }
 
@@ -548,7 +785,10 @@ async fn read_rows(conn: &mut SqliteConnection) -> Result<CacheRows, sqlx::Error
 async fn apply(conn: &mut SqliteConnection, write: &Write) -> Result<(), sqlx::Error> {
     match write {
         Write::Meta { key, value } => {
-            let sql = if matches!(*key, meta::NEXT_DEVICE_SEQ | meta::HLC) {
+            let sql = if matches!(
+                *key,
+                meta::NEXT_DEVICE_SEQ | meta::HLC | meta::HIGHEST_EQUIVALENCE_LIST_VERSION
+            ) {
                 META_COUNTER
             } else {
                 META_FIXED
@@ -777,6 +1017,85 @@ async fn apply(conn: &mut SqliteConnection, write: &Write) -> Result<(), sqlx::E
                 .await?;
             Ok(())
         }
+        Write::IndexPut(entry) => {
+            let done = sqlx::query(PUT_INDEX)
+                .bind(entry.item_id.as_slice())
+                .bind(entry.vault_id.as_slice())
+                .bind(i64::from(entry.item_type))
+                .bind(entry.display_name.as_str())
+                .bind(entry.search_text.as_str())
+                .execute(&mut *conn)
+                .await?;
+            one_row(done.rows_affected())
+        }
+        Write::IndexDelete { vault_id, item_id } => {
+            sqlx::query(DELETE_INDEX)
+                .bind(vault_id.as_slice())
+                .bind(item_id.as_slice())
+                .execute(&mut *conn)
+                .await?;
+            Ok(())
+        }
+        Write::IndexUse {
+            vault_id,
+            item_id,
+            at_ms,
+        } => {
+            let at = at_ms.to_be_bytes();
+            sqlx::query(USE_INDEX)
+                .bind(vault_id.as_slice())
+                .bind(item_id.as_slice())
+                .bind(at.as_slice())
+                .execute(&mut *conn)
+                .await?;
+            Ok(())
+        }
+        Write::IndexCopyUsage { from, to } => {
+            sqlx::query(COPY_INDEX_USAGE)
+                .bind(from.0.as_slice())
+                .bind(from.1.as_slice())
+                .bind(to.0.as_slice())
+                .bind(to.1.as_slice())
+                .execute(&mut *conn)
+                .await?;
+            Ok(())
+        }
+        Write::IndexReset => {
+            for statement in INDEX_RESET {
+                sqlx::query(*statement).execute(&mut *conn).await?;
+            }
+            Ok(())
+        }
+        Write::PendingMovePut(row) => {
+            let done = sqlx::query(PUT_PENDING_MOVE)
+                .bind(row.source_vault_id.as_slice())
+                .bind(row.source_item_id.as_slice())
+                .bind(row.target_vault_id.as_slice())
+                .bind(row.target_item_id.as_slice())
+                .execute(&mut *conn)
+                .await?;
+            one_row(done.rows_affected())
+        }
+        Write::PendingMoveDelete {
+            source_vault_id,
+            source_item_id,
+        } => {
+            sqlx::query(DELETE_PENDING_MOVE)
+                .bind(source_vault_id.as_slice())
+                .bind(source_item_id.as_slice())
+                .execute(&mut *conn)
+                .await?;
+            Ok(())
+        }
+        Write::DropVault { vault_id } => {
+            for statement in DROP_VAULT {
+                sqlx::query(*statement)
+                    .bind(vault_id.as_slice())
+                    .execute(&mut *conn)
+                    .await?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -790,6 +1109,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use rizzy_client::rizzy_proto::wire::{Bytes, Id};
+    use rizzy_client::store::index::IndexEntry;
     use rizzy_client::store::rows::limits::{MAX_CACHE_META_KEY_LEN, MAX_CACHE_META_VALUE_LEN};
     use rizzy_client::store::rows::{Alarm, CACHE_FORMAT};
 
@@ -904,6 +1224,7 @@ mod tests {
             },
             counter(meta::NEXT_DEVICE_SEQ, 1),
             counter(meta::HLC, 0),
+            counter(meta::HIGHEST_EQUIVALENCE_LIST_VERSION, 0),
             Write::DeviceState(Zeroizing::new(vec![1, 2, 3])),
         ]
         .into_iter()
@@ -1050,6 +1371,38 @@ mod tests {
                 device_id: OTHER,
                 device_seq: 1,
             }],
+            // ADR 0056 §4: the index rows, kept with their counters, used, replaced, deleted.
+            vec![
+                Write::IndexPut(entry(1, "почта", "ivan\nпётр")),
+                Write::IndexPut(entry(2, "bank", "")),
+                Write::IndexUse {
+                    vault_id: VAULT,
+                    item_id: id(1),
+                    at_ms: 7,
+                },
+                Write::IndexUse {
+                    vault_id: VAULT,
+                    item_id: id(1),
+                    at_ms: 9,
+                },
+                Write::IndexUse {
+                    vault_id: VAULT,
+                    item_id: id(3),
+                    at_ms: 9,
+                },
+            ],
+            vec![
+                Write::IndexPut(entry(1, "почта 2", "")),
+                Write::IndexDelete {
+                    vault_id: VAULT,
+                    item_id: id(2),
+                },
+                Write::IndexDelete {
+                    vault_id: VAULT,
+                    item_id: id(3),
+                },
+            ],
+            vec![Write::IndexReset, Write::IndexPut(entry(4, "new", "x"))],
         ];
         sets.into_iter()
             .map(|writes| writes.into_iter().collect())
@@ -1067,6 +1420,7 @@ mod tests {
             rows.vaults,
             rows.wraps,
             (rows.ops, rows.snapshots),
+            (rows.item_index, rows.item_index_unreadable),
         )
     }
 
@@ -1114,6 +1468,143 @@ mod tests {
         });
     }
 
+    /// An item id ending in `n`.
+    fn id(n: u8) -> [u8; 16] {
+        let mut id = [0u8; 16];
+        id[15] = n;
+        id
+    }
+
+    /// An `item_index` entry of item `n`.
+    fn entry(n: u8, name: &str, search: &str) -> IndexEntry {
+        IndexEntry {
+            item_id: id(n),
+            vault_id: VAULT,
+            item_type: 1,
+            display_name: Zeroizing::new(name.to_owned()),
+            search_text: Zeroizing::new(search.to_owned()),
+        }
+    }
+
+    /// ADR 0056 §5, §6: the SQL search is the reference search — the Cyrillic vector (a query
+    /// matches whatever its case, lower-cased in Rust: `SQLite`'s own `LIKE` and `lower()` fold
+    /// ASCII only), `LIKE` wildcards taken literally, the recently-used order and the limit.
+    #[test]
+    fn the_sql_search_is_the_reference_search() {
+        block_on(async {
+            let path = temp_file("search");
+            let mut db = Db::create(&path, &first()).await.unwrap();
+            let mut reference = CacheRows::default();
+            let rows = [
+                entry(1, "почта иван", "ivan@example.com"),
+                entry(2, "банк", "пётр\n100% sure"),
+                entry(3, "ascii name", "x_y"),
+                entry(4, "ёлка", ""),
+            ];
+            let mut writes: Changeset = rows.iter().cloned().map(Write::IndexPut).collect();
+            writes.push(Write::IndexUse {
+                vault_id: VAULT,
+                item_id: id(2),
+                at_ms: 50,
+            });
+            writes.push(Write::IndexUse {
+                vault_id: VAULT,
+                item_id: id(4),
+                at_ms: 70,
+            });
+            db.write(&writes).await.unwrap();
+            reference.apply(&writes);
+            for query in [
+                "иван", "ИВАН", "Иван", "ПЁТР", "пётр", "петр", "Ёлка", "NAME", "name", "%", "_",
+                "x%y", "\\", "", " ", "@EXAMPLE", "\n",
+            ] {
+                assert_eq!(
+                    db.search(query, 10).await.unwrap(),
+                    index::search(&reference, query, 10),
+                    "{query:?}"
+                );
+            }
+            assert_eq!(db.search("ИВАН", 10).await.unwrap().len(), 1);
+            assert_eq!(db.search("ПЁТР", 10).await.unwrap().len(), 1);
+            assert!(db.search("петр", 10).await.unwrap().is_empty());
+            assert_eq!(
+                db.search("", 2).await.unwrap(),
+                index::search(&reference, "", 2)
+            );
+            assert_eq!(db.recent(10).await.unwrap(), index::recent(&reference, 10));
+            assert_eq!(db.recent(10).await.unwrap().len(), 2);
+        });
+    }
+
+    /// ADR 0056 §4: a table of another shape, or a row over its cap, is reported unreadable and
+    /// leaves every other table's read as it was; `IndexReset` makes it whole again.
+    #[test]
+    fn an_unreadable_index_is_reported_not_failed() {
+        block_on(async {
+            let path = temp_file("index-shape");
+            let mut db = Db::create(&path, &first()).await.unwrap();
+            let mut reference = CacheRows::default();
+            reference.apply(&first());
+            for bad in [
+                &[
+                    "DROP TABLE item_index",
+                    "CREATE TABLE item_index(item_id TEXT)",
+                ][..],
+                &["DROP TABLE item_index"][..],
+                &[
+                    "INSERT INTO item_index(item_id, vault_id, item_type, display_name, \
+                     search_text) VALUES(zeroblob(17), zeroblob(16), 1, '', '')",
+                ][..],
+                &[
+                    "INSERT INTO item_index(item_id, vault_id, item_type, display_name, \
+                     search_text) VALUES(zeroblob(16), zeroblob(16), 'one', '', '')",
+                ][..],
+            ] {
+                for statement in bad {
+                    sqlx::query(*statement).execute(&mut db.conn).await.unwrap();
+                }
+                let rows = db.read().await.unwrap();
+                assert!(rows.item_index_unreadable);
+                let mut expected = copy(&reference);
+                expected.item_index_unreadable = true;
+                assert_eq!(parts(rows), parts(expected));
+                let reset: Changeset = [Write::IndexReset].into_iter().collect();
+                db.write(&reset).await.unwrap();
+                assert_eq!(parts(db.read().await.unwrap()), parts(copy(&reference)));
+            }
+        });
+    }
+
+    /// ADR 0056 §3, §6: `Db::open` migrates a format-2 file to format 3 as the reference does:
+    /// the empty table created, the format bumped, nothing else touched.
+    #[test]
+    fn a_format_2_file_gets_an_empty_index() {
+        block_on(async {
+            let path = temp_file("migrate-2");
+            let mut db = Db::create(&path, &first()).await.unwrap();
+            // What a format-2 build left: no table, format 2.
+            for statement in [
+                "DROP TABLE item_index",
+                "UPDATE cache_meta SET v = X'0002' WHERE k = 'format'",
+            ] {
+                sqlx::query(statement).execute(&mut db.conn).await.unwrap();
+            }
+            let mut v2 = CacheRows::default();
+            v2.apply(&first());
+            v2.meta
+                .insert(meta::FORMAT.to_owned(), 2u16.to_be_bytes().to_vec());
+            db.close().await;
+            let mut db = Db::open(&path).await.unwrap();
+            let migrated = db.read().await.unwrap();
+            let migration = rizzy_client::store::load::migration_writes(&v2).unwrap();
+            assert_eq!(migration.writes().len(), 1);
+            v2.apply(&migration);
+            assert_eq!(parts(migrated), parts(v2));
+            let empty: Vec<(VaultId, ItemId)> = Vec::new();
+            assert_eq!(db.search("", 10).await.unwrap(), empty);
+        });
+    }
+
     fn copy(rows: &CacheRows) -> CacheRows {
         CacheRows {
             meta: rows.meta.clone(),
@@ -1124,7 +1615,78 @@ mod tests {
             wraps: rows.wraps.clone(),
             ops: rows.ops.clone(),
             snapshots: rows.snapshots.clone(),
+            item_index: rows.item_index.clone(),
+            item_index_unreadable: rows.item_index_unreadable,
+            pending_moves: rows.pending_moves.clone(),
         }
+    }
+
+    /// ADR 0051 §2: `Db::open` migrates a format-1 file to format 2 exactly as the reference
+    /// `load::migration_writes` does (one row added at 0, the format bumped, nothing else),
+    /// once; the floor is a counter the SQL never lowers, and it survives a reopen.
+    #[test]
+    fn a_format_1_file_is_migrated_and_the_floor_persists() {
+        block_on(async {
+            let path = temp_file("migrate");
+            // What a format-1 `create_writes` wrote: no floor row, format 1.
+            let v1: Changeset = [
+                Write::Meta {
+                    key: meta::FORMAT,
+                    value: 1u16.to_be_bytes().to_vec(),
+                },
+                Write::Meta {
+                    key: meta::SERVER_ORIGIN,
+                    value: b"https://vault.example.com".to_vec(),
+                },
+                Write::Meta {
+                    key: meta::ACCOUNT_ID,
+                    value: vec![0xa1; 16],
+                },
+                Write::Meta {
+                    key: meta::DEVICE_ID,
+                    value: DEVICE.to_vec(),
+                },
+                counter(meta::NEXT_DEVICE_SEQ, 1),
+                counter(meta::HLC, 0),
+                Write::DeviceState(Zeroizing::new(vec![1, 2, 3])),
+            ]
+            .into_iter()
+            .collect();
+            Db::create(&path, &v1).await.unwrap().close().await;
+
+            let mut db = Db::open(&path).await.unwrap();
+            let migrated = db.read().await.unwrap();
+            let mut reference = CacheRows::default();
+            reference.apply(&v1);
+            let migration = rizzy_client::store::load::migration_writes(&reference).unwrap();
+            assert_eq!(migration.writes().len(), 2);
+            reference.apply(&migration);
+            assert_eq!(parts(migrated), parts(reference));
+            // Raised, then a lower value is refused by the SQL guard too.
+            let floor = |v: u64| -> Changeset {
+                [counter(meta::HIGHEST_EQUIVALENCE_LIST_VERSION, v)]
+                    .into_iter()
+                    .collect()
+            };
+            db.write(&floor(4)).await.unwrap();
+            assert!(db.write(&floor(3)).await.is_err());
+            db.close().await;
+            // Reopened: no second migration, the stored floor kept.
+            let mut db = Db::open(&path).await.unwrap();
+            let rows = db.read().await.unwrap();
+            assert_eq!(
+                rows.meta.get(meta::FORMAT).map(Vec::as_slice),
+                Some(CACHE_FORMAT.to_be_bytes().as_slice())
+            );
+            assert_eq!(
+                rows.meta
+                    .get(meta::HIGHEST_EQUIVALENCE_LIST_VERSION)
+                    .map(Vec::as_slice),
+                Some(4u64.to_be_bytes().as_slice())
+            );
+            db.close().await;
+            discard(&path);
+        });
     }
 
     /// ADR 0026 §4, §6: a crash after any write of a step leaves the file as it was before the
@@ -1289,6 +1851,12 @@ mod tests {
             let other = path.with_file_name("bad.sqlite3");
             assert!(Db::create(&other, &bad).await.is_err());
             assert!(!other.exists());
+            let mut journal = other.as_os_str().to_owned();
+            journal.push("-journal");
+            assert!(!Path::new(&journal).exists());
+            // And the next attempt at the same path is not refused as "already enrolled".
+            let retried = Db::create(&other, &first()).await.unwrap();
+            retried.close().await;
             // Not SQLite at all.
             let garbage = path.with_file_name("garbage.sqlite3");
             std::fs::write(&garbage, b"this is not a database, not even nearly one").unwrap();

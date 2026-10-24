@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `clientDataJSON` and `authenticatorData` assembly (`WebAuthn` L3 §5.8.1, §6.1; ADR 0039 §2,
 //! §4, §5).
 //!

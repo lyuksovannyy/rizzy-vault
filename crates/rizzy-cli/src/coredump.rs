@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Core dumps off at process start (threat model INV-60; [ADR 0024]).
 //!
 //! Release builds use `panic = "abort"`, so a panic raises `SIGABRT`; a core dump would write
@@ -54,13 +56,6 @@ pub(crate) enum Step {
 /// Core dumps could not be disabled, or are not disabled on read-back. The process must not
 /// start (module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(unix),
-    expect(
-        dead_code,
-        reason = "nothing can fail where core dumps are not handled (module docs)"
-    )
-)]
 pub(crate) struct CoreDumpError {
     /// The failing step.
     pub(crate) step: Step,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Response security headers (threat model INV-49, §7.7, §7.14; INV-52).
 //!
 //! **Every response** gets, unless the handler set its own:
@@ -9,7 +11,10 @@
 //! - `Referrer-Policy: no-referrer` (§7.7 "I").
 //! - `X-Frame-Options: DENY`, for browsers that predate `frame-ancestors`.
 //! - `Content-Security-Policy`: [`API_CSP`], which allows nothing to load, unless the handler
-//!   set the web vault's [`WEB_CSP`].
+//!   set the web vault's [`WEB_CSP`]: every answer of the web role's route table sets it, the
+//!   page, an embedded asset and the table's own `404` and `405` (ADR 0049, which replaces ADR
+//!   0028 item 10's page-only exception); or the admin listener's [`ADMIN_CSP`], which every
+//!   answer of that listener sets (ADR 0060 §1).
 //!
 //! **API responses** also get `Cache-Control: no-store`: they carry session tokens and
 //! ciphertext, which no cache between the client and the server should keep.
@@ -20,6 +25,19 @@
 //! and Trusted Types for script sinks where the browser supports them (§7.1 "T": "Trusted Types
 //! where supported"). Inline styles are refused too. The M1 step 5 web vault is built to this
 //! policy; a change to it is a security change.
+//!
+//! `img-src` is `'self' blob:`: item icons ([ADR 0052] point 6) reach the page as PNG bytes
+//! the page itself turns into a same-origin `blob:` URL, and `'self'` does not match a
+//! `blob:` URL (tested 2026-10-22 in Chromium 148: refused under `img-src 'self'`, loaded
+//! under `img-src 'self' blob:`), so ADR 0052 owner answer 7 adds that one token. `data:` stays
+//! out, and `blob:` stays out of every other directive.
+//!
+//! [ADR 0052]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0052-icon-proxy-role.md
+//!
+//! **The admin panel's CSP** ([`ADMIN_CSP`], ADR 0060 §1, threat model §7.19, INV-69): the
+//! panel is server-rendered HTML with native form posts, so it allows no script at all, styles
+//! and images from its own origin only, forms posting only to its own origin, and no framing;
+//! no `'wasm-unsafe-eval'` and no `connect-src`. A change to it is a security change.
 
 use axum::http::header::{
     CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, STRICT_TRANSPORT_SECURITY,
@@ -29,9 +47,13 @@ use axum::http::{HeaderMap, HeaderValue};
 
 /// The web vault's Content Security Policy (module docs, INV-49).
 pub const WEB_CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; \
-style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; manifest-src 'self'; \
+style-src 'self'; img-src 'self' blob:; font-src 'self'; connect-src 'self'; manifest-src 'self'; \
 worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; \
 frame-ancestors 'none'; require-trusted-types-for 'script'";
+
+/// The admin listener's Content Security Policy (module docs, ADR 0060 §1).
+pub const ADMIN_CSP: &str = "default-src 'none'; script-src 'none'; style-src 'self'; \
+img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
 
 /// The policy of every other response: nothing may load, nothing may frame it.
 pub const API_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
@@ -60,9 +82,15 @@ pub fn add_web_csp(headers: &mut HeaderMap) {
     headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static(WEB_CSP));
 }
 
+/// Sets the admin listener's CSP (ADR 0060 §1).
+pub fn add_admin_csp(headers: &mut HeaderMap) {
+    headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static(ADMIN_CSP));
+}
+
 #[cfg(test)]
 mod tests {
-    //! The web CSP says what INV-49 requires, and no more is allowed.
+    //! The web CSP says what INV-49 requires, and no more is allowed; the admin CSP is ADR 0060
+    //! §1's, directive for directive.
 
     use super::*;
 
@@ -77,5 +105,39 @@ mod tests {
         assert!(!WEB_CSP.contains("http"));
         assert!(!WEB_CSP.contains('*'));
         assert!(HeaderValue::from_str(WEB_CSP).is_ok());
+        // ADR 0052 owner answer 7: `blob:` in `img-src` only, and never `data:`.
+        assert!(directives.contains(&"img-src 'self' blob:"));
+        assert_eq!(WEB_CSP.matches("blob:").count(), 1);
+        assert!(!WEB_CSP.contains("data:"));
+    }
+
+    #[test]
+    fn admin_csp_is_adr_0060s() {
+        let directives: Vec<&str> = ADMIN_CSP.split(';').map(str::trim).collect();
+        assert_eq!(
+            directives,
+            [
+                "default-src 'none'",
+                "script-src 'none'",
+                "style-src 'self'",
+                "img-src 'self'",
+                "form-action 'self'",
+                "frame-ancestors 'none'",
+                "base-uri 'none'",
+                "object-src 'none'",
+            ]
+        );
+        assert!(!ADMIN_CSP.contains("wasm-unsafe-eval"));
+        assert!(!ADMIN_CSP.contains("connect-src"));
+        assert!(!ADMIN_CSP.contains("unsafe"));
+        assert!(!ADMIN_CSP.contains("http"));
+        assert!(!ADMIN_CSP.contains('*'));
+        let mut headers = HeaderMap::new();
+        add_admin_csp(&mut headers);
+        add_common(&mut headers);
+        assert_eq!(
+            headers.get(CONTENT_SECURITY_POLICY),
+            Some(&HeaderValue::from_static(ADMIN_CSP))
+        );
     }
 }

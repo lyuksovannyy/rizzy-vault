@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Startup, serving and graceful shutdown of `rizzy-vault` ([ADR 0010] §1, §2, §4; [ADR 0011]
 //! point 9; CRYPTO.md §5.8, §5.11; [ADR 0021] §2).
 //!
@@ -22,10 +24,20 @@
 //! 6. **Build the domains**: the auth domain with the configured origin and signup mode, the
 //!    vault domain with the in-process event bus ([`rizzy_bus`]). The auth domain first fills
 //!    the `account_key_epoch` of every credential and recovery row that has none from the
-//!    account's current signed state (ADR 0032 §4; migration 0005 cannot read the state).
+//!    account's current signed state (ADR 0032 §4; migration 0005 cannot read the state). Then
+//!    the storage counter of every account that owns a vault and has none yet is seeded from
+//!    the vault domain's rows ([ADR 0048] §4, [`crate::usage::backfill`]; migration 0006 cannot
+//!    read a `vault_` table), and the vault domain gets the configured quota, with the upload
+//!    limit as its headroom (§3).
 //!
 //! Then the `worker` task starts ([`crate::worker`]) and, for `api` or `web`, the listener.
 //! A `web`-only process opens no database and reads no secrets.
+//!
+//! **The admin listener** ([ADR 0060] §2). Whenever the `api` role runs, a second listener
+//! binds `RIZZY_ADMIN_LISTEN` (default `127.0.0.1:8081`) and serves
+//! [`crate::http::admin_panel::router`], concurrently with the public one and under the same
+//! limits and shutdown. A start whose admin address cannot be bound fails
+//! ([`ServeError::AdminListener`]); a process without `api` binds no admin listener.
 //!
 //! **One active `worker` per database** ([ADR 0010] §2). With `PostgreSQL` the worker takes a
 //! session-level advisory lock on a dedicated connection outside the pool, through
@@ -51,13 +63,20 @@
 //! be lost while the database is open, so no watchdog runs. A `web`-only process opens no
 //! database and holds nothing.
 //!
+//! For the `icons` role, which runs alone ([ADR 0010] §2; ADR 0052; [ADR 0053]): no database,
+//! no secrets. [`check_icons_isolation`] refuses to start when the secrets file or the `SQLite`
+//! database is visible to the process (a database URL was already refused by the
+//! configuration), then the cache directory is created if missing and [`serve_icons`] serves
+//! [`http::icons_router`] on the listener: the favicon fetch always, the breach check when
+//! `RIZZY_BREACH_CHECK=on`.
+//!
 //! **Core dumps** (threat model INV-60) are already off when this runs: [`crate::cli::main`]
 //! disables them first and refuses to start otherwise ([`crate::coredump`], ADR 0024). The
 //! release profile keeps `panic = "abort"`.
 //!
 //! # Shutdown
 //!
-//! On `SIGINT` or `SIGTERM` the listener stops accepting, in-flight requests finish, the
+//! On `SIGINT` or `SIGTERM` the listeners stop accepting, in-flight requests finish, the
 //! worker finishes its current step, releases its leader lock and stops, and the database pools
 //! close (which also releases the `SQLite` writer lock). The wait for in-flight requests is
 //! bounded ([`ServeLimits::shutdown_grace`], 30 s): connections still open then are dropped, so
@@ -75,6 +94,9 @@
 //! [ADR 0016]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0016-workspace-layout.md
 //! [ADR 0021]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0021-server-compaction.md
 //! [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
+//! [ADR 0048]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0048-per-account-storage-quota.md
+//! [ADR 0060]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0060-admin-panel-stack-boundary.md
+//! [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
 
 use core::fmt;
 use std::future::Future;
@@ -91,7 +113,7 @@ use rand_core::Rng as _;
 use rizzy_bus::Bus;
 use rizzy_domain_auth::secrets::StartupCheckError;
 use rizzy_domain_auth::{AuthConfig, AuthError, AuthService, ConfigError, SignupPolicy};
-use rizzy_domain_vault::VaultDomain;
+use rizzy_domain_vault::{Quota, VaultDomain};
 use rizzy_storage::meta::ensure_restore_generation;
 use rizzy_storage::{
     Database, Engine, InstanceLock, InstanceLockMode, PostgresOptions, RestoreGeneration,
@@ -108,6 +130,7 @@ use crate::http::{self, api::Api};
 use crate::log::{self, Field};
 use crate::secrets_file::{self, SecretsFileError};
 use crate::sys::{now_ms, os_rng};
+use crate::usage::{self, UsageError};
 use crate::worker;
 
 /// How often a server process on `PostgreSQL` checks that it still holds the instance lock
@@ -138,8 +161,12 @@ pub enum ServeError {
     AuthConfig(ConfigError),
     /// The auth domain failed during the startup checks.
     Auth(AuthError),
+    /// The storage counter's first-startup backfill failed (ADR 0048 §4).
+    Usage(UsageError),
     /// The listener could not be bound, or serving failed.
     Listener(std::io::ErrorKind),
+    /// The admin listener (`RIZZY_ADMIN_LISTEN`, ADR 0060 §2) could not be bound.
+    AdminListener(std::io::ErrorKind),
     /// The `PostgreSQL` instance lock was refused in this mode ([ADR 0023] §5 step 1): a server
     /// found an admin command holding it exclusively, or an admin command found a server
     /// process (or another admin command) holding it.
@@ -151,6 +178,13 @@ pub enum ServeError {
     /// The instance lock is no longer held (its dedicated connection dropped): a running
     /// server exits (module docs), and an admin command stops before it writes.
     InstanceLockLost,
+    /// The `icons` role can see something ADR 0010 §2 keeps from it: `"the secrets file"` or
+    /// `"the database"`.
+    IconsIsolation(&'static str),
+    /// The `icons` role's cache directory cannot be created.
+    IconsCache(std::io::ErrorKind),
+    /// The `icons` role's TLS client configuration cannot be built.
+    IconsTls,
 }
 
 impl fmt::Display for ServeError {
@@ -169,7 +203,9 @@ impl fmt::Display for ServeError {
             Self::SecretsMismatch(e) => write!(f, "the secrets do not fit the database: {e}"),
             Self::AuthConfig(e) => write!(f, "auth configuration: {e}"),
             Self::Auth(e) => write!(f, "startup check: {e}"),
+            Self::Usage(e) => write!(f, "startup backfill: {e}"),
             Self::Listener(kind) => write!(f, "listener: {kind}"),
+            Self::AdminListener(kind) => write!(f, "admin listener (RIZZY_ADMIN_LISTEN): {kind}"),
             Self::InstanceLockRefused(InstanceLockMode::Shared) => f.write_str(
                 "the database's instance lock is held exclusively: an admin command (restore, \
                  migrate, secrets rotate or secrets retire-setups) is running against it; start \
@@ -185,6 +221,13 @@ impl fmt::Display for ServeError {
             Self::InstanceLockLost => f.write_str(
                 "the database's instance lock was lost (its connection dropped); stopping",
             ),
+            Self::IconsIsolation(what) => write!(
+                f,
+                "the icons role must not see {what} (ADR 0010 §2); run it in its own container \
+                 without the data and secrets volumes"
+            ),
+            Self::IconsCache(kind) => write!(f, "the icons cache directory: {kind}"),
+            Self::IconsTls => f.write_str("the icons TLS client configuration failed"),
         }
     }
 }
@@ -377,6 +420,7 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
         SignupMode::Open => SignupPolicy::Open,
     };
     auth_config.recovery_wait_ms = config.recovery_wait_ms;
+    auth_config.account_quota_bytes = config.account_quota_bytes;
     if config.recovery_wait_ms == 0 {
         // ADR 0008 decision 5 allows 0; the threat model keeps it for single-account
         // instances (Q-15). Nothing enforces that here, so the operator is told.
@@ -399,8 +443,25 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
             )],
         );
     }
+    // ADR 0048 §4: every account that owns a vault and has no storage counter yet (after
+    // migration 0006, every existing one) is seeded from its rows before anything is served.
+    let seeded = usage::backfill(&db, i64::try_from(now_ms()).unwrap_or(i64::MAX))
+        .await
+        .map_err(ServeError::Usage)?;
+    if seeded > 0 {
+        log::info(
+            "storage_usage_seeded",
+            &[Field::U64(
+                "accounts",
+                u64::try_from(seeded).unwrap_or(u64::MAX),
+            )],
+        );
+    }
     let bus = Bus::default();
-    let vault = VaultDomain::new(db.clone(), AuthDirectory, bus.clone());
+    let vault = VaultDomain::new(db.clone(), AuthDirectory, bus.clone()).with_quota(Quota {
+        quota_bytes: config.account_quota_bytes,
+        headroom_bytes: u64::try_from(config.max_upload_bytes).unwrap_or(u64::MAX),
+    });
     Ok(Services {
         api: Arc::new(Api::new(
             auth,
@@ -413,6 +474,47 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
         bus,
         self_check_passed: Instant::now(),
     })
+}
+
+/// Binds the public listener and, when the `api` role runs, the admin listener (module docs),
+/// logging each port.
+async fn bind_listeners(config: &Config) -> Result<(TcpListener, Option<TcpListener>), ServeError> {
+    let listener = TcpListener::bind(config.listen)
+        .await
+        .map_err(|e| ServeError::Listener(e.kind()))?;
+    let port = listener.local_addr().map_or(0, |a| a.port());
+    log::info("listening", &[Field::U64("port", u64::from(port))]);
+    if !config.roles.api {
+        return Ok((listener, None));
+    }
+    let admin = TcpListener::bind(config.admin_listen)
+        .await
+        .map_err(|e| ServeError::AdminListener(e.kind()))?;
+    let port = admin.local_addr().map_or(0, |a| a.port());
+    log::info("admin_listening", &[Field::U64("port", u64::from(port))]);
+    Ok((listener, Some(admin)))
+}
+
+/// Serves `app` on `listener` and the admin router on `admin`, if any, until one shutdown signal
+/// stops both.
+async fn serve_listeners(listener: TcpListener, app: Router, admin: Option<TcpListener>) {
+    let (signal_tx, signal_rx) = watch::channel(false);
+    let public = serve_http(listener, app, signalled(signal_rx.clone()));
+    let admin = async move {
+        if let Some(admin) = admin {
+            serve_http(admin, http::admin_panel::router(), signalled(signal_rx)).await;
+        }
+    };
+    let signal = async move {
+        shutdown_signal().await;
+        let _receivers_gone = signal_tx.send(true);
+    };
+    tokio::join!(public, admin, signal);
+}
+
+/// Resolves once `signal` holds `true`, or its sender is gone.
+async fn signalled(mut signal: watch::Receiver<bool>) {
+    let _closed = signal.wait_for(|stop| *stop).await;
 }
 
 /// Resolves on `SIGINT` (Ctrl-C) or, on Unix, `SIGTERM`.
@@ -467,6 +569,73 @@ impl Default for ServeLimits {
             shutdown_grace: Duration::from_secs(30),
         }
     }
+}
+
+/// ADR 0010 §2's startup check of the `icons` role: it must not see the secrets file or the
+/// `SQLite` database. A path the process cannot stat counts as not visible. (A database URL is
+/// refused earlier, by [`Config::from_sources`].)
+///
+/// # Errors
+/// [`ServeError::IconsIsolation`] naming what it can see.
+pub fn check_icons_isolation(config: &Config) -> Result<(), ServeError> {
+    let visible = |path: &std::path::Path| matches!(path.try_exists(), Ok(true));
+    if visible(&config.secrets_file) {
+        return Err(ServeError::IconsIsolation("the secrets file"));
+    }
+    if let DatabaseConfig::Sqlite(path) = &config.database
+        && visible(path)
+    {
+        return Err(ServeError::IconsIsolation("the database"));
+    }
+    Ok(())
+}
+
+/// Builds the `icons` router state from `config`: the favicon fetch (ADR 0052; the role is its
+/// switch) and the breach check when it is on, both with the production connector
+/// ([`rizzy_icon_proxy::connect::PinnedTls`]) and the one shared cache in
+/// `RIZZY_ICON_CACHE_DIR`, which is created if missing.
+///
+/// # Errors
+/// [`ServeError::IconsCache`], [`ServeError::IconsTls`].
+pub fn icons_state(config: &Config) -> Result<http::icons::Icons, ServeError> {
+    std::fs::create_dir_all(&config.icon_cache_dir)
+        .map_err(|e| ServeError::IconsCache(e.kind()))?;
+    let cache = rizzy_icon_proxy::cache::Cache::new(
+        config.icon_cache_dir.clone(),
+        config.icon_cache_ttl,
+        config.icon_cache_max_bytes,
+    );
+    let connector =
+        Arc::new(rizzy_icon_proxy::connect::PinnedTls::new().map_err(|_| ServeError::IconsTls)?);
+    let breach = config
+        .breach_check
+        .then(|| rizzy_icon_proxy::breach::BreachService::new(connector.clone(), cache.clone()));
+    let favicon = rizzy_icon_proxy::favicon::FaviconService::new(connector, cache);
+    Ok(http::icons::Icons::new(breach, config.trusted_proxies.clone()).with_favicon(favicon))
+}
+
+/// Runs the `icons` role alone until a shutdown signal (module docs).
+///
+/// # Errors
+/// [`ServeError`].
+pub async fn serve_icons(config: &Config) -> Result<(), ServeError> {
+    check_icons_isolation(config)?;
+    let state = icons_state(config)?;
+    let app = http::icons_router(Arc::new(state));
+    let listener = tokio::net::TcpListener::bind(config.listen)
+        .await
+        .map_err(|e| ServeError::Listener(e.kind()))?;
+    let port = listener.local_addr().map_or(0, |a| a.port());
+    log::info(
+        "listening",
+        &[
+            Field::Str("role", "icons"),
+            Field::U64("port", u64::from(port)),
+        ],
+    );
+    serve_http(listener, app, shutdown_signal()).await;
+    log::info("stopped", &[]);
+    Ok(())
 }
 
 /// Whether an accept error concerns only the one connection (the next accept can succeed at
@@ -585,6 +754,9 @@ pub async fn serve(config: Config) -> Result<(), ServeError> {
             Field::Str("version", env!("CARGO_PKG_VERSION")),
         ],
     );
+    if config.roles.icons {
+        return serve_icons(&config).await;
+    }
     let mut services = if config.roles.need_database() {
         Some(open_services(&config).await?)
     } else {
@@ -632,17 +804,13 @@ pub async fn serve(config: Config) -> Result<(), ServeError> {
             None
         };
         let app = http::router(api, config.roles.web);
-        match tokio::net::TcpListener::bind(config.listen).await {
-            Ok(listener) => {
-                let port = listener.local_addr().map_or(0, |a| a.port());
-                log::info("listening", &[Field::U64("port", u64::from(port))]);
-                tokio::select! {
-                    () = serve_http(listener, app, shutdown_signal()) => Ok(()),
-                    // Dropping the serving future drops the listener and every connection.
-                    () = &mut lost => Err(ServeError::InstanceLockLost),
-                }
-            }
-            Err(e) => Err(ServeError::Listener(e.kind())),
+        match bind_listeners(&config).await {
+            Ok((listener, admin)) => tokio::select! {
+                () = serve_listeners(listener, app, admin) => Ok(()),
+                // Dropping the serving future drops the listeners and every connection.
+                () = &mut lost => Err(ServeError::InstanceLockLost),
+            },
+            Err(e) => Err(e),
         }
     } else {
         tokio::select! {
@@ -749,6 +917,78 @@ mod tests {
         assert!(lost.await.is_err());
 
         db.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// ADR 0010 §2: the `icons` role refuses to start when it can see the secrets file or the
+    /// `SQLite` database; a missing cache directory is created; the favicon fetch is always on
+    /// and the breach check is off unless switched on.
+    #[test]
+    fn icons_isolation_and_state() {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "rizzy-icons-iso-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = |extra: &[(&'static str, String)]| {
+            let mut pairs: Vec<(&'static str, String)> = vec![
+                (crate::config::ROLES, "icons".to_owned()),
+                (
+                    crate::config::DATA_DIR,
+                    dir.join("data").display().to_string(),
+                ),
+                (
+                    crate::config::SECRETS_FILE,
+                    dir.join("secrets.json").display().to_string(),
+                ),
+                (
+                    crate::config::ICON_CACHE_DIR,
+                    dir.join("cache").display().to_string(),
+                ),
+            ];
+            pairs.extend_from_slice(extra);
+            let env = move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| std::ffi::OsString::from(v))
+            };
+            Config::from_sources(&crate::config::Sources {
+                file: crate::config::Settings::new(),
+                env: &env,
+                roles_flag: None,
+            })
+            .unwrap()
+        };
+        // Nothing visible: accepted; favicons on, the breach check off; the cache directory
+        // is created.
+        let off = config(&[]);
+        assert!(check_icons_isolation(&off).is_ok());
+        assert!(!dir.join("cache").exists());
+        let state = icons_state(&off).unwrap();
+        assert!(!state.breach_check_on());
+        assert!(state.favicons_on());
+        assert!(dir.join("cache").is_dir());
+        // Breach check on.
+        let on = config(&[(crate::config::BREACH_CHECK, "on".to_owned())]);
+        let state = icons_state(&on).unwrap();
+        assert!(state.breach_check_on() && state.favicons_on());
+        // A visible SQLite database, then a visible secrets file, refuse the start.
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::write(dir.join("data").join(crate::config::SQLITE_FILE_NAME), b"").unwrap();
+        assert!(matches!(
+            check_icons_isolation(&off),
+            Err(ServeError::IconsIsolation("the database"))
+        ));
+        std::fs::write(dir.join("secrets.json"), b"{}").unwrap();
+        let refused = check_icons_isolation(&off).unwrap_err();
+        assert!(matches!(
+            refused,
+            ServeError::IconsIsolation("the secrets file")
+        ));
+        assert!(refused.to_string().contains("ADR 0010 §2"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

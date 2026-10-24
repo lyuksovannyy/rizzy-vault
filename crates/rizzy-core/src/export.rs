@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Encrypted export (CRYPTO.md §11.14; §4.3 "Export file key"; §8.4 `EXPORT_FILE`; §9.6
 //! "Files").
 //!
@@ -87,6 +89,16 @@ use crate::secret::{Key32, SecretBytes};
 /// The `format` value of an export file.
 pub const FORMAT: &str = "rizzy-vault-export";
 
+/// The `format` value of a CXF passkey export file ([ADR 0074] §2): the sibling of [`FORMAT`]
+/// with the same fields, key derivation and `EXPORT_FILE` envelope, whose plaintext is a CXF
+/// document (`payload_version` 2) instead of the item-list payload (`payload_version` 1). The
+/// tag is cleartext and outside the envelope context; it only lets a reader name the file before
+/// asking for its password. The authenticated discriminator is the in-envelope
+/// `payload_version`, which the reader of each tag checks.
+///
+/// [ADR 0074]: ../../../docs/adr/0074-passkey-cxf-import-export.md
+pub const CXF_FORMAT: &str = "rizzy-vault-cxf-export";
+
 /// The `version` value of an export file.
 pub const VERSION: u64 = 1;
 
@@ -127,7 +139,7 @@ const fn b64url_len(n: usize) -> usize {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ExportError {
-    /// `format` is not [`FORMAT`] or `version` is not [`VERSION`].
+    /// `format` is neither [`FORMAT`] nor [`CXF_FORMAT`], or `version` is not [`VERSION`].
     UnsupportedFormat,
     /// `export_salt` or `export_id` is not base64url of exactly 16 bytes (22 characters).
     InvalidField,
@@ -172,7 +184,9 @@ pub struct ExportHeader {
 }
 
 impl ExportHeader {
-    /// Builds a header from the JSON fields of an export file.
+    /// Builds a header from the JSON fields of an export file, of either format ([`FORMAT`],
+    /// [`CXF_FORMAT`]): both have the same header and key derivation, and the format is not part
+    /// of the header (it is outside the envelope context).
     ///
     /// `export_salt` and `export_id` must be exactly 22 characters of strict base64url; a field
     /// of any other length is refused before it is decoded.
@@ -189,7 +203,7 @@ impl ExportHeader {
         export_id: &str,
         created_at: u64,
     ) -> Result<Self, ExportError> {
-        if format != FORMAT || version != VERSION {
+        if (format != FORMAT && format != CXF_FORMAT) || version != VERSION {
             return Err(ExportError::UnsupportedFormat);
         }
         let kdf_id = u16::try_from(kdf_id)
@@ -542,12 +556,19 @@ mod tests {
         let ctx = h.ctx();
         assert_eq!(ctx.export_id, h.export_id);
         assert_eq!(ctx.created_at_ms, 5);
+        // The CXF sibling (ADR 0074 §2) has the same header: the format is not part of it.
+        assert_eq!(
+            ExportHeader::from_json_fields(CXF_FORMAT, 1, 1, &salt, &id, 5).unwrap(),
+            h
+        );
 
         let (s, i) = (salt.as_str(), id.as_str());
         let (id_long, salt_padded) = (format!("{id}A"), format!("{salt}="));
         for (format, version, kdf, s, i, err) in [
             ("rizzy-vault-backup", 1, 1, s, i, E::UnsupportedFormat),
             (FORMAT, 2, 1, s, i, E::UnsupportedFormat),
+            (CXF_FORMAT, 2, 1, s, i, E::UnsupportedFormat),
+            ("rizzy-vault-cxf", 1, 1, s, i, E::UnsupportedFormat),
             (
                 FORMAT,
                 1,

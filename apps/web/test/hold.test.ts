@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The hold after the plaintext-export warning (owner decision 2026-10-05): a 10-second
 // countdown, the confirm button disabled until it ends, and a new count when the dialog is
 // shown again.

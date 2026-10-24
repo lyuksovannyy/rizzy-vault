@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-sync`'s per-item merge (ADR 0012 §4–§5, ADR 0018 §3, §10) with records a
 //! faulty or hostile author can sign: ops and snapshots that pass every ADR 0018 §5 parse rule
 //! but carry any header context, HLC, claim, value, tombstone or `item_key_id`, delivered in
@@ -328,12 +330,20 @@ fuzz_target!(|data: &[u8]| {
                     })
                     .collect();
                 let take = usize::from(input.byte()) % (with.len() + 1);
+                // No real causal layer here: this target fuzzes `ItemMerge` alone. But
+                // `absorb_snapshot`'s second, bound-capped cut (ADR 0012 §7) only ever runs
+                // when a caller passes `Some`, so an input-derived `bound`, independent of any
+                // real `CoverPlan`, exercises that path (including the tombstone-above-bound
+                // `Refusal::PurgeAboveCut` a device-chain gap on another item triggers in
+                // production) the same way `None` already exercises the unbounded one.
+                let bound = (input.byte() & 1 == 0).then(|| input.vv());
                 let _ = m.absorb_snapshot(
                     SnapshotInput {
                         header: &header,
                         data: &parsed,
                     },
                     with.get(..take).unwrap_or_default(),
+                    bound.as_ref(),
                 );
             }
             5 => {

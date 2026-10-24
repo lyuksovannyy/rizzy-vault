@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The error type of `rizzy-domain-auth`.
 //!
 //! **What an error may say.** A variant names a kind of failure, never a value: no login
@@ -75,6 +77,15 @@ pub enum AuthError {
         /// ends.
         retry_after_ms: u64,
     },
+    /// A security key chose another signature algorithm than ES256 at enrolment (ADR 0077 §6).
+    /// On the wire `invalid_request`: ADR 0028 item 3's code table has no closer code.
+    KeyAlgorithm,
+    /// A security key's sign counter did not advance (INV-83, ADR 0058 point 5): a possible
+    /// clone. On the wire `unauthorized`; the server records it as a security event.
+    PossibleClone {
+        /// The account whose key it is (not a secret; for the security event).
+        account_id: [u8; 16],
+    },
     /// The storage layer failed. Carries no bound value.
     Storage(rizzy_storage::Error),
     /// The server is misconfigured or its stored state is inconsistent: a data key the secrets
@@ -92,8 +103,10 @@ impl AuthError {
     #[must_use]
     pub const fn code(&self) -> ErrorCode {
         match self {
-            Self::InvalidRequest | Self::Conflict => ErrorCode::InvalidRequest,
-            Self::Unauthorized | Self::SignupRefused => ErrorCode::Unauthorized,
+            Self::InvalidRequest | Self::Conflict | Self::KeyAlgorithm => ErrorCode::InvalidRequest,
+            Self::Unauthorized | Self::SignupRefused | Self::PossibleClone { .. } => {
+                ErrorCode::Unauthorized
+            }
             Self::SecondFactorRequired => ErrorCode::SecondFactorRequired,
             Self::FreshSessionRequired => ErrorCode::FreshSessionRequired,
             Self::RateLimited { .. } | Self::RecoveryWaiting { .. } => ErrorCode::RateLimited,
@@ -135,6 +148,8 @@ impl fmt::Display for AuthError {
             Self::SignupRefused => f.write_str("signup refused"),
             Self::SetupRetired => f.write_str("OPAQUE setup retired or unknown"),
             Self::CredentialsStale => f.write_str("OPAQUE record lags the signed state"),
+            Self::KeyAlgorithm => f.write_str("security key chose an unsupported algorithm"),
+            Self::PossibleClone { .. } => f.write_str("security key counter did not advance"),
             Self::RecoveryWaiting { .. } => f.write_str("recovery waiting period not over"),
             Self::Storage(e) => write!(f, "storage: {e}"),
             Self::Internal(what) => write!(f, "internal: {what}"),

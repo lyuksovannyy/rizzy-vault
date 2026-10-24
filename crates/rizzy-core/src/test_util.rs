@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Test helpers. Compiled only for `cfg(test)`.
 //!
 //! - [`seeded_rng`]: the deterministic RNG of CRYPTO.md §12.1 and §15 item 1, so every test

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `GET /api/meta` and the `Rizzy-Client` request header (ADR 0002 point 3; [ADR 0028] item 14).
 //!
 //! `/api/meta` is the one unversioned endpoint. ADR 0002 point 3 lists what it returns; ADR

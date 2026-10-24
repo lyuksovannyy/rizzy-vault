@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Randomness (CRYPTO.md §5.1, §12.1; ADR 0009 "RNG rules").
 //!
 //! `rizzy-core` never reaches a randomness source itself. Every function that needs

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Healing step 3b (ADR 0032 §2–§3): a lagging self-grant and the wrap set at its epoch, sent
 //! in a healing request without records, on real SQLite (or PostgreSQL, `common::Slot`) with real
 //! envelopes from `rizzy-core`. One test per refusal of §3, the repair's writes, the repeat
@@ -153,8 +155,10 @@ fn a_lagging_self_grant_is_repaired_with_its_wrap_set() {
             &[new_row],
             "the carried row replaced, the other row below the epoch deleted"
         );
-        // The record wraps below the new epoch are gone; the signed hashes stay.
+        // The record wraps below the new epoch are gone; the signed hashes stay. Their bytes are
+        // credited, so the counter is still the rows' sum (ADR 0048 §2).
         assert!(ops_of(&pages).iter().all(|op| op.key_wrap.is_none()));
+        env.counted().await;
         // The stale-epoch reference is the healed epoch again.
         let stale = sign_op(&a, VAULT, &OpSpec::new(item(1), 3, 2));
         assert_eq!(
@@ -286,19 +290,6 @@ fn each_check_of_the_lag_rule_refuses() {
             heal(step_3b(keys.grant(), vec![wrong_wrap_epoch])).await,
             ErrorCode::InvalidRequest
         );
-        // Without a held state the `auth` domain reports no account key.
-        let env_without = Env::new(3).await;
-        env_without.enrol(&[&a]);
-        let request = step_3b(keys.grant(), Vec::new());
-        assert_eq!(
-            refused(
-                env_without
-                    .domain
-                    .heal(ACCOUNT, Some(a.id), &request, NOW)
-                    .await
-            ),
-            ErrorCode::InvalidRequest
-        );
         assert_eq!(
             env.domain
                 .self_grant(ACCOUNT, VAULT)
@@ -306,6 +297,25 @@ fn each_check_of_the_lag_rule_refuses() {
                 .unwrap()
                 .account_key_epoch,
             0
+        );
+    });
+}
+
+/// Without a held account-key state the `auth` domain reports no account key, so a step-3b
+/// request is refused. Its own test, not part of `each_check_of_the_lag_rule_refuses`: an
+/// [`Env`] holds the one PostgreSQL slot (`common::Slot`), so a second `Env` in the same test
+/// would wait forever for the first (and would share, and wipe, its database).
+#[test]
+fn a_heal_without_a_held_account_key_is_refused() {
+    block_on(async {
+        let mut keys = Keys::new(33, 1);
+        let a = Device::new(1);
+        let env = Env::new(3).await;
+        env.enrol(&[&a]);
+        let request = step_3b(keys.grant(), Vec::new());
+        assert_eq!(
+            refused(env.domain.heal(ACCOUNT, Some(a.id), &request, NOW).await),
+            ErrorCode::InvalidRequest
         );
     });
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The unlocked vault: the header (account, sync state, lock), and the sections.
 //
 // Writes go to the core's memory first; the vault syncs right after each write, every five
@@ -12,7 +14,8 @@
 // It locks itself after `IDLE_LOCK_MS` without input (`autolock.ts`). When changes are still
 // unsent then, it first tries one sync, bounded by `FINAL_SYNC_MS`, and locks in any case;
 // changes that still did not reach the server are counted in the lock notice.
-import type { ItemType } from "@rizzy-vault/core";
+import type { DeviceView, ItemType, Notice, VaultAlarm, VaultInfo } from "@rizzy-vault/core";
+import { t } from "@rizzy-vault/i18n";
 import {
   ConfirmDialog,
   IconAccount,
@@ -22,9 +25,11 @@ import {
   IconLock,
   IconMenu,
   IconSettings,
+  IconShield,
   IconStarFilled,
   IconTag,
   IconTransfer,
+  IconLoader,
   IconTrash,
   TypeIcon,
   isAnyModalOpen,
@@ -37,13 +42,22 @@ import { type CoreClient, codeOf } from "../core-client.ts";
 import { useDismissableMenu } from "../dismissable-menu.ts";
 import { CREATABLE_TYPES, tagCounts } from "../fields.ts";
 import { type GeneratorMemory, useGeneratorMemory } from "../generator-memory.ts";
+import { type IdentityMemory, useIdentityMemory } from "../identity-memory.ts";
+import { messageFor } from "../messages.ts";
+import { mergeNotices, noticeKey } from "../notices.ts";
 import type { SessionInfo } from "../protocol.ts";
 import { shortcutFor } from "../shortcuts.ts";
+import { CommandPalette, type PaletteNavCommand } from "./CommandPalette.tsx";
 import { GeneratorPane } from "./GeneratorPane.tsx";
 import { ItemsPane, type Scope } from "./ItemsPane.tsx";
+import { NoticesPanel } from "./NoticesPanel.tsx";
+import { OnboardingView } from "./OnboardingView.tsx";
+import { PasswordHealthPane } from "./PasswordHealth.tsx";
 import { SettingsView } from "./SettingsView.tsx";
 import { ShortcutsHelp } from "./ShortcutsHelp.tsx";
 import { TransferPane } from "./TransferPane.tsx";
+import { VaultAlarms, VaultsPane } from "./VaultsPane.tsx";
+import { vaultLabel, vaultStatusText } from "../vaults.ts";
 import { ErrorText } from "./common.tsx";
 
 /** How often the vault syncs on its own. */
@@ -72,10 +86,13 @@ const ITEM_FILTERS: readonly { readonly scope: Scope; readonly label: string; re
  * view, alongside Appearance. */
 const OTHER_SECTIONS = [
   { id: "generator", label: "Generator", icon: <IconGenerator /> },
+  { id: "health", label: "Password health", icon: <IconShield /> },
   { id: "transfer", label: "Export and import", icon: <IconTransfer /> },
 ] as const;
 
-type Section = "items" | "trash" | "settings" | (typeof OTHER_SECTIONS)[number]["id"];
+/** "guide" is the getting-started guide (`OnboardingView.tsx`): opened after signup and from
+ * Settings, with no sidebar entry of its own. */
+type Section = "items" | "trash" | "settings" | "guide" | "vaults" | (typeof OTHER_SECTIONS)[number]["id"];
 
 /** What the views below the header use. */
 export interface VaultContext {
@@ -88,6 +105,17 @@ export interface VaultContext {
   readonly revision: number;
   /** The generator's in-memory, session-only state (generator-memory.ts module docs). */
   readonly generator: GeneratorMemory;
+  /** The identity generator's session-only memory (identity-memory.ts module docs). */
+  readonly identity: IdentityMemory;
+  /** Item icons from the server's `icons` role, for this unlocked session (packages/ui
+   * `itemIcons.ts`). */
+  readonly icons: IconLoader | undefined;
+  /** Every vault of the account, Personal first (ADR 0081 §A2, §A8). */
+  readonly vaults: readonly VaultInfo[];
+  /** The Personal vault, which every picker preselects (§A8). */
+  readonly personalVaultId: string | undefined;
+  /** The vault completeness check's alarms (INV-102). */
+  readonly vaultAlarms: readonly VaultAlarm[];
 }
 
 /** The vault (module docs). */
@@ -96,22 +124,47 @@ export function VaultView(props: {
   readonly loginName: string;
   readonly initialSession: SessionInfo;
   readonly onLocked: (notice?: string) => void;
+  /** Opens the getting-started guide first: true right after signup only (`onboarding.ts`). */
+  readonly startWithGuide?: boolean;
 }) {
   const { client, onLocked } = props;
   const [session, setSession] = useState(props.initialSession);
-  const [section, setSection] = useState<Section>("items");
+  const [section, setSection] = useState<Section>(props.startWithGuide === true ? "guide" : "items");
   const [scope, setScope] = useState<Scope>(ALL_SCOPE);
+  /** The vault switcher (ADR 0081 §A8): `undefined` is "All vaults". */
+  const [vaultFilter, setVaultFilter] = useState<string | undefined>(undefined);
+  const [vaults, setVaults] = useState<readonly VaultInfo[]>([]);
+  const [personalVaultId, setPersonalVaultId] = useState<string | undefined>(undefined);
+  const [vaultAlarms, setVaultAlarms] = useState<readonly VaultAlarm[]>([]);
+  /** Unsent changes discarded with vaults deleted elsewhere (reported once, §A5). */
+  const [discarded, setDiscarded] = useState(0);
   /** Narrow screens: the sidebar is a slide-over, closed by default (item 1, module docs). */
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | undefined>();
   const [revision, setRevision] = useState(0);
+  /** The late-edit and trash notices the syncs handed over (gap 02), until dismissed, and the
+   * device list that names their devices. React state only: gone on a lock or a reload, like
+   * the Worker's own "handed over" marks (`notices.ts` module docs). */
+  const [notices, setNotices] = useState<readonly Notice[]>([]);
+  const [noticeDevices, setNoticeDevices] = useState<readonly DeviceView[]>([]);
   /** Tag names and counts over the active (non-trash) items, for the sidebar's Tags group
    * (item 6). Loaded here, separately from `ItemsPane`'s own list, because the sidebar needs
    * it whichever section is showing, not only while the item list itself is on screen. */
   const [tags, setTags] = useState<readonly { readonly tag: string; readonly count: number }[]>([]);
   const clipboard = useMemo(() => new ClipboardGuard(browserClipboard), []);
   const generator = useGeneratorMemory();
+  const identity = useIdentityMemory();
+  // One loader per unlocked session: the vault view unmounts on lock, which revokes every icon
+  // URL and stops the queue (packages/ui `itemIcons.ts`).
+  const [icons, setIcons] = useState<IconLoader | undefined>(undefined);
+  useEffect(() => {
+    // Made in the effect, so that a cleared loader (an unmount, or React's development-mode
+    // remount) is never reused.
+    const loader = new IconLoader((host) => client.call("itemIcon", host));
+    setIcons(loader);
+    return () => loader.clear();
+  }, [client]);
   const lockedRef = useRef(false);
   /** The latest session state, for the auto-lock (which runs outside a render). */
   const sessionRef = useRef(props.initialSession);
@@ -130,6 +183,12 @@ export function VaultView(props: {
     [client, clipboard, onLocked],
   );
 
+  // ADR 0075 §6: the Worker locked a session the server ended; drop the vault as a lock does.
+  useEffect(() => {
+    client.setSessionEndedHandler(() => lock(messageFor("session_ended")));
+    return () => client.setSessionEndedHandler(undefined);
+  }, [client, lock]);
+
   /** Records a new session state. */
   const update = useCallback((next: SessionInfo) => {
     sessionRef.current = next;
@@ -141,6 +200,13 @@ export function VaultView(props: {
     try {
       update(await client.call("sync"));
       setSyncError(undefined);
+      // Each notice is handed over once per session, so it is held before anything else can
+      // fail; the device list only names their devices ("device <id>" without it).
+      const fresh = await client.call("takeNotices");
+      if (fresh.length > 0) {
+        setNotices((held) => mergeNotices(held, fresh));
+        client.call("devices").then(setNoticeDevices, () => undefined);
+      }
     } catch (e) {
       const code = codeOf(e);
       setSyncError(code);
@@ -206,6 +272,36 @@ export function VaultView(props: {
     };
   }, [client, revision]);
 
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const [list, personal, alarms, lost] = await Promise.all([
+          client.call("vaults"),
+          client.call("personalVaultId"),
+          client.call("vaultAlarms"),
+          client.call("takeDiscardedChanges"),
+        ]);
+        if (!live) {
+          return;
+        }
+        setVaults(list);
+        setPersonalVaultId(personal);
+        setVaultAlarms(alarms);
+        if (lost > 0) {
+          setDiscarded((n) => n + lost);
+        }
+        // A vault deleted (here or elsewhere) is no longer a filter.
+        setVaultFilter((current) => (current !== undefined && !list.some((v) => v.id === current) ? undefined : current));
+      } catch {
+        // The vault list stays as it was; the sync error is shown by the header.
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, revision]);
+
   /** Lock-with-unsaved-changes now confirms through the accessible dialog (redesign slice 2,
    * item 2), not `window.confirm`. */
   const [confirmLock, setConfirmLock] = useState(false);
@@ -222,12 +318,30 @@ export function VaultView(props: {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [newItemSignal, setNewItemSignal] = useState(0);
+  /** The command palette (Ctrl/Cmd+K; `CommandPalette.tsx`, ROADMAP §4.2/§4.5), and the
+   * one-shot "open this item" signal (mirroring `newItemSignal`'s shape) it sends `ItemsPane`
+   * when the user runs its "Open" command for an item the pane's own scope or search might not
+   * currently show (`ItemsPane.tsx`'s `openItemId`/`openItemNonce` module docs). */
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [openItemId, setOpenItemId] = useState<string | undefined>();
+  const [openItemNonce, setOpenItemNonce] = useState(0);
   const accountMenuAnchorRef = useRef<HTMLSpanElement>(null);
   const accountMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const closeAccountMenu = useCallback(() => setAccountMenuOpen(false), []);
   // Outside-click dismissal (Escape is already handled by the global shortcut switch below,
   // which also returns focus — this hook only adds the outside-click half for this menu).
   useDismissableMenu(accountMenuOpen, closeAccountMenu, accountMenuAnchorRef, accountMenuTriggerRef, false);
+
+  /** Switches to the item list and asks it to show `id`'s detail view, resetting the scope to
+   * "all" first so the palette can always open a match the pane's current filter would
+   * otherwise hide. Passed to `CommandPalette`'s "Open" command. */
+  const openItemFromPalette = useCallback((id: string) => {
+    setScope(ALL_SCOPE);
+    setSection("items");
+    setSidebarOpen(false);
+    setOpenItemId(id);
+    setOpenItemNonce((n) => n + 1);
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -236,8 +350,11 @@ export function VaultView(props: {
       // none of which this view can see directly. While one is open, global shortcuts must stay
       // silent: `N` must not mount a new-item editor behind it, `?` must not open the shortcuts
       // dialog on top of it, and plain navigation shortcuts must not steal focus away from it.
-      // The dialog handles its own Escape and focus trap.
-      if (isAnyModalOpen()) {
+      // The dialog handles its own Escape and focus trap. The command palette is this view's
+      // own `paletteOpen` state, checked the same way: it has its own Escape handling
+      // (`CommandPalette.tsx`, like `ShortcutsHelp`), so nothing here needs to close it, but
+      // `N`/`?`/Ctrl+K-again must not fire behind it either.
+      if (isAnyModalOpen() || paletteOpen) {
         return;
       }
       const target = e.target;
@@ -266,6 +383,10 @@ export function VaultView(props: {
             document.querySelector<HTMLInputElement>(".item-list-toolbar input[type='search']")?.focus();
           });
           break;
+        case "command-palette":
+          e.preventDefault();
+          setPaletteOpen(true);
+          break;
         case "new-item":
           if (section === "items" && !session.readOnly) {
             e.preventDefault();
@@ -289,9 +410,30 @@ export function VaultView(props: {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [section, session.readOnly, shortcutsOpen, accountMenuOpen, sidebarOpen]);
+  }, [section, session.readOnly, shortcutsOpen, accountMenuOpen, sidebarOpen, paletteOpen]);
 
-  const ctx: VaultContext = { client, clipboard, session, afterWrite: sync, revision, generator };
+  const ctx: VaultContext = {
+    client,
+    clipboard,
+    session,
+    afterWrite: sync,
+    revision,
+    generator,
+    identity,
+    icons,
+    vaults,
+    personalVaultId,
+    vaultAlarms,
+  };
+
+  /** Chooses a vault in the switcher ("All vaults" is `undefined`) and shows its items. */
+  const chooseVault = (next: string | undefined) => {
+    setVaultFilter(next);
+    if (section !== "trash") {
+      setSection("items");
+    }
+    setSidebarOpen(false);
+  };
 
   /** Chooses an item filter and switches to the item list. */
   const chooseScope = (next: Scope) => {
@@ -304,6 +446,23 @@ export function VaultView(props: {
     setSection(next);
     setSidebarOpen(false);
   };
+
+  /** The command palette's "jump to a view" commands (module docs above `CommandPalette`
+   * import): built from this same `ITEM_FILTERS`/`OTHER_SECTIONS` the sidebar renders, plus
+   * Trash and Settings, so the palette never lists a view the sidebar does not also offer, and
+   * never drifts from it. Recomputed each render (cheap: a dozen entries) rather than memoized,
+   * since `chooseScope`/`chooseSection` above are plain closures, not `useCallback`s. */
+  const paletteNavCommands: readonly PaletteNavCommand[] = [
+    ...ITEM_FILTERS.map((f) => ({
+      id: `scope-${f.label}`,
+      label: f.label,
+      icon: f.icon === "all" ? <IconAllItems /> : f.icon === "favorites" ? <IconStarFilled /> : <TypeIcon type={f.icon} />,
+      run: () => chooseScope(f.scope),
+    })),
+    { id: "section-trash", label: "Trash", icon: <IconTrash />, run: () => chooseSection("trash") },
+    ...OTHER_SECTIONS.map((s) => ({ id: `section-${s.id}`, label: s.label, icon: s.icon, run: () => chooseSection(s.id) })),
+    { id: "section-settings", label: "Settings", icon: <IconSettings />, run: () => chooseSection("settings") },
+  ];
 
   return (
     <div className={sidebarOpen ? "shell sidebar-open" : "shell"}>
@@ -350,6 +509,49 @@ export function VaultView(props: {
             onClick={() => chooseSection("trash")}
           >
             <IconTrash /> Trash
+          </button>
+        </div>
+        <div className="sidebar-group" role="group" aria-labelledby="sidebar-vaults-label">
+          <div className="sidebar-group-label" id="sidebar-vaults-label">
+            {t("vaults.section")}
+          </div>
+          <button
+            type="button"
+            className={vaultFilter === undefined ? "sidebar-item active" : "sidebar-item"}
+            aria-pressed={vaultFilter === undefined}
+            onClick={() => chooseVault(undefined)}
+          >
+            <IconAllItems /> {t("vaults.all")}
+          </button>
+          {vaults.map((v) => {
+            const status = vaultStatusText(v);
+            return (
+              <button
+                key={v.id}
+                type="button"
+                className={vaultFilter === v.id ? "sidebar-item active" : "sidebar-item"}
+                aria-pressed={vaultFilter === v.id}
+                data-vault-id={v.id}
+                title={status}
+                onClick={() => chooseVault(v.id)}
+              >
+                <IconLock /> {vaultLabel(v)}
+                {status !== undefined && <span className="sr-only"> ({status})</span>}
+                {status !== undefined && (
+                  <span className="muted sidebar-item-count" aria-hidden="true">
+                    !
+                  </span>
+                )}
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            className={section === "vaults" ? "sidebar-item active" : "sidebar-item"}
+            aria-current={section === "vaults" ? "page" : undefined}
+            onClick={() => chooseSection("vaults")}
+          >
+            <IconSettings /> {t("vaults.manage")}
           </button>
         </div>
         {tags.length > 0 && (
@@ -450,14 +652,50 @@ export function VaultView(props: {
           </div>
         </header>
         <ErrorText code={syncError} />
+        <VaultAlarms alarms={vaultAlarms} />
+        {discarded > 0 && (
+          <p className="status" role="status">
+            {t("vaults.discarded", { count: String(discarded) })}{" "}
+            <button type="button" className="secondary small" onClick={() => setDiscarded(0)}>
+              {t("vaults.dismiss")}
+            </button>
+          </p>
+        )}
+        <NoticesPanel
+          ctx={ctx}
+          notices={notices}
+          devices={noticeDevices}
+          onDismiss={(gone) => setNotices((held) => held.filter((n) => noticeKey(n) !== noticeKey(gone)))}
+        />
         <section className="vault-body">
-          {section === "items" && (
-            <ItemsPane ctx={ctx} trash={false} scope={scope} newItemSignal={newItemSignal} />
+          {/* The item list has no visible title of its own (the sidebar marks the current
+              filter), so a screen-reader user gets the page's one level-one heading here; every
+              other section's view starts with its own visible h1. */}
+          {(section === "items" || section === "trash") && (
+            <h1 className="sr-only">{section === "trash" ? "Trash" : scopeTitle(scope)}</h1>
           )}
-          {section === "trash" && <ItemsPane ctx={ctx} trash scope={ALL_SCOPE} newItemSignal={0} />}
+          {section === "items" && (
+            <ItemsPane
+              ctx={ctx}
+              trash={false}
+              scope={scope}
+              vaultFilter={vaultFilter}
+              newItemSignal={newItemSignal}
+              openItemId={openItemId}
+              openItemNonce={openItemNonce}
+            />
+          )}
+          {section === "trash" && (
+            <ItemsPane ctx={ctx} trash scope={ALL_SCOPE} vaultFilter={vaultFilter} newItemSignal={0} />
+          )}
+          {section === "vaults" && <VaultsPane ctx={ctx} />}
           {section === "generator" && <GeneratorPane ctx={ctx} />}
+          {section === "health" && <PasswordHealthPane ctx={ctx} onOpenItem={openItemFromPalette} />}
           {section === "transfer" && <TransferPane ctx={ctx} />}
-          {section === "settings" && <SettingsView ctx={ctx} />}
+          {section === "settings" && <SettingsView ctx={ctx} onOpenGuide={() => chooseSection("guide")} />}
+          {section === "guide" && (
+            <OnboardingView ctx={ctx} loginName={props.loginName} onClose={() => chooseSection("items")} />
+          )}
         </section>
       </div>
       <ConfirmDialog
@@ -474,8 +712,23 @@ export function VaultView(props: {
         onCancel={() => setConfirmLock(false)}
       />
       <ShortcutsHelp open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        ctx={ctx}
+        navCommands={paletteNavCommands}
+        onOpenItem={openItemFromPalette}
+      />
     </div>
   );
+}
+
+/** The item list's heading for `scope`: the sidebar label of the same filter. */
+function scopeTitle(scope: Scope): string {
+  if (scope.kind === "tag") {
+    return `Tag: ${scope.tag}`;
+  }
+  return ITEM_FILTERS.find((f) => scopeEquals(f.scope, scope))?.label ?? "Items";
 }
 
 /** Whether two item-list scopes are the same filter (module docs above `Scope`). */

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Password and passphrase generator (CRYPTO.md §12.1 "Password generator (M1)", §12.3).
 //!
 //! Two modes. [`generate_password`] draws `length` characters from the alphabet that the
@@ -687,6 +689,22 @@ fn uniform_index<R: CryptoRng + ?Sized>(rng: &mut R, n: u32) -> Result<u32, Gene
         }
     }
     Err(GeneratorError::RngExhausted)
+}
+
+/// The uniform index in `0..n` that the password generator draws (CRYPTO.md §12.1), for other
+/// generators of non-secret output ([ADR 0079] §2: the identity generator).
+///
+/// It is the private `uniform_index` unchanged: masked rejection sampling over the caller's RNG. A caller
+/// that indexes with the result does so in plain (not constant) time, which is only right when
+/// the selected value is not a secret.
+///
+/// # Errors
+/// [`GeneratorError::NoClasses`] for `n = 0`, [`GeneratorError::RngExhausted`] after 128
+/// rejections in a row.
+///
+/// [ADR 0079]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0079-identity-generator.md
+pub fn uniform<R: CryptoRng + ?Sized>(rng: &mut R, n: u32) -> Result<u32, GeneratorError> {
+    uniform_index(rng, n)
 }
 
 /// `set[index]`, read by scanning every element and selecting in constant time.

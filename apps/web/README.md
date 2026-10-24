@@ -31,11 +31,38 @@ TypeScript ([ADR 0014](../../docs/adr/0014-ui-stack.md)), served by the `web` ro
   policy (`src/trusted-types.ts`), which admits only that URL.
 - **Fixed output names** (`assets.ts`): the server embeds exactly these files; the build fails
   on any other.
+- **User-facing text** comes from the typed English catalogue of `@rizzy-vault/i18n`
+  ([its README](../../packages/i18n/README.md): how to add a key, how a locale would be added).
+  So far that is every error code's wording (`src/messages.ts` looks up `errors.<code>`), the
+  login and unlock screen (`LoginView.tsx`) and the two-factor prompt (`TotpDialog.tsx`); the
+  other views still hold literal English, and move over view by view.
 
 ## The item editor
 
-`src/views/ItemEditor.tsx` creates and edits every M1 item type, with a full editor of its
+`src/views/ItemEditor.tsx` creates and edits every M1 item type and the four M3 types of ADR 0055
+(SSH key, API credential, Software license, Wi-Fi), with a full editor of its
 websites (URIs), custom fields (text, hidden, boolean) and tags, not only its fixed fields.
+
+- **The M3 types** (`src/fields.ts`): each type's keys in ADR 0055 §1's order; the six keys
+  the core conceals (§4) are typed in the secret-field component, and an SSH private key in its
+  multi-line form (a textarea, since an input would strip the key's line breaks). An SSH key
+  without a port shows "22 (default)", never stored. An item of a type this build does not
+  know shows "Unsupported item, update rizzy-vault" and offers no Edit (ADR 0018 §8). So does
+  a Bank account an older build wrote: ADR 0078 retired that type (`0x0009`), so it is no
+  longer created, and its `bank.` fields stay concealed, revealable and copyable, so the data
+  can be moved out by hand; trash, restore and purge work.
+
+- **The identity generator** (ADR 0079 §10; `src/views/IdentityGenerator.tsx`,
+  `src/identity-form.ts`): "New identity" opens already filled by the core's draw, with a
+  generator bar above the fields (Sex, Country, Age with its presets, "Custom range" and "Exact
+  age", Email style, Regenerate all, Start blank) and a Regenerate button on each generated
+  field. A field the user typed in is only replaced by its own Regenerate button. The core's
+  draft stays in the Worker under a handle (`src/identity-drafts.ts`). The defaults and the
+  email domain are set in Settings → Identity generator (`src/views/IdentityDefaultsPane.tsx`,
+  synced in the account settings); the last-used age range of the session is kept in memory
+  only (`src/identity-memory.ts`). The edit form has no generator. Sex (a Male/Female select)
+  and Birthday (a date input) are identity fields everywhere; other stored text in them is
+  shown and edited as entered.
 
 - **Idempotent save.** Adding a website or custom field mints its element id on the client
   (`newElementId` of `@rizzy-vault/core`) the moment the row is added to the form, not when
@@ -68,6 +95,32 @@ websites (URIs), custom fields (text, hidden, boolean) and tags, not only its fi
   core: a normal option reaches the right call, an impossible combination is refused with
   exactly the core's own message, and the editor's fill is a pure DOM write.
 
+## Conflicts: keep both / pick one
+
+When two devices edit the same field before either has seen the other's edit, the sync engine
+keeps both values ([ADR 0012](../../docs/adr/0012-sync-engine.md) §4, ADR 0018 §6) and the item
+view marks the field "conflict" ([ROADMAP](../../docs/ROADMAP.md) §4.5). Its "Resolve
+conflict" button opens `src/views/ConflictChooser.tsx` (wording and rules in
+`src/conflicts.ts`, tested by `test/conflicts.test.ts`):
+
+- **What it shows.** "Edited on X and Y at the same time", then each distinct value with the
+  device and date that wrote it, the value shown now first. A concealed value (a password, a
+  hidden field) stays masked until the user reveals that one value; the listing never carries
+  it (ADR 0013 §3 rule 3). A value cleared on one device shows as "(cleared)".
+- **Pick one.** "Use this value" writes that value back to the field ("Keep it cleared" for a
+  cleared one). **Keep both** (text fields only) leaves the shown value in the field and moves
+  every other value into a new custom field labelled "<field> (from <device>)", hidden when the
+  field is concealed, or, for a website, into a new website.
+- **How it syncs.** A resolution is an ordinary edit (`rizzy-client`'s `conflicts` module): it
+  goes out with the next sync and ends the conflict on every device. If two devices resolve the
+  same conflict at once with different choices, the field conflicts again, visibly; nothing is
+  dropped. A resolution names the value by its listed position and id, so a sync between the
+  listing and the click is refused ("This conflict has changed…") instead of resolving to a
+  value the user did not see.
+- **End to end:** `e2e/conflict.spec.ts` races two browser contexts of one account offline on
+  the same password, resolves the first conflict by "pick one" and the second by "keep both",
+  and checks that each resolution reaches the other session.
+
 ## Export and import
 
 `src/views/TransferPane.tsx`, with its steps in `src/export-flow.ts` and the countdown in
@@ -84,10 +137,19 @@ and shows them.
   CSV addition), counts down 10 seconds with the confirm button disabled, and needs the typed
   `EXPORT PLAINTEXT`. Closing and opening the dialog starts the count over, in the view and in
   the core (`plaintext_export_hold` before it ends).
+- **Passkey export (CXF)** ([ADR 0074](../../docs/adr/0074-passkey-cxf-import-export.md) §2):
+  every passkey as a FIDO Credential Exchange Format document inside a file sealed like the
+  encrypted export. Its dialog shows the CXF export's own warning (`cxfExportWarning`), counts
+  down the same 10 seconds, and needs the file's password twice and the typed `EXPORT
+  PLAINTEXT` (`export-flow.ts`'s `cxfExport`). There is no unencrypted CXF export (the ADR's
+  open question 4 waits for a ROADMAP edit). Its words are in `@rizzy-vault/i18n`
+  (`transfer.*`).
 - **Import** recognises the file's format from its bytes (`detectImportFormat` of
-  `@rizzy-vault/core`): our encrypted export then asks for that file's password; our plaintext
-  JSON and other products' files need nothing more; our CSV export and unknown files are
-  refused with a message. The format can still be chosen by hand.
+  `@rizzy-vault/core`): our encrypted export and our CXF passkey export then ask for that
+  file's password; our plaintext JSON, a CXF passkey file of another product (one new Login per
+  passkey, other credential types counted and skipped) and other products' files need nothing
+  more; our CSV export and unknown files are refused with a message. The format can still be
+  chosen by hand.
 
 ## The shell and item views (redesign, in progress)
 
@@ -138,10 +200,13 @@ still remains.
   the *safe* action (never the destructive one), Escape and a labelled backdrop button both
   cancel. Replaces `window.confirm` for: moving an item to trash, deleting it for good
   (`ItemView.tsx`), locking with unsaved changes (`VaultView.tsx`), and turning two-factor
-  authentication off (`TwoFactorPane.tsx`). The trap's cyclic arithmetic, `nextFocusIndex`, is
+  authentication off (`TwoFactorPane.tsx`). The trap is `packages/ui/src/focusTrap.ts`'s
+  `trapTab`, shared with every other modal dialog (shortcuts help, large type, the second-factor
+  prompt, the plaintext-export dialog). Its cyclic arithmetic, `nextFocusIndex`, is
   unit-tested directly (`packages/ui/test/confirm-dialog.test.ts`); there is no jsdom dependency
   in this workspace, so the trap/Escape/backdrop behaviour itself is covered by Playwright
-  instead (`e2e/vault.spec.ts`'s trash confirmation).
+  instead (`e2e/vault.spec.ts`'s trash confirmation, `e2e/a11y.spec.ts`'s trap check on every
+  dialog).
 
 ### Keyboard shortcuts (`src/shortcuts.ts`)
 
@@ -176,7 +241,60 @@ detail side by side, unchanged. Covered by `e2e/phone.spec.ts` at 375×812.
   action — every M1 session is an OPAQUE login with no durable session to sign out of beyond
   locking (module docs above).
 - **Settings** (`SettingsView.tsx`): one sidebar entry grouping Two-factor (`TwoFactorPane.tsx`,
-  unchanged), Devices (`DevicesPane.tsx`, unchanged) and a new Appearance group (below).
+  unchanged), Devices (`DevicesPane.tsx`, unchanged), Website matching (below), a new
+  Appearance group (below), "What the server stores" (below) and "Getting started", which
+  re-opens the guide below.
+
+### Website matching (ADR 0037 §6–§7, ADR 0042)
+
+`src/views/MatchingPane.tsx`, helpers in `src/match-settings.ts`: the account-level match default
+(the mode every website whose own match is "Account default" uses), the account's own
+equivalence groups (add: two or more domains, each a site's own registrable domain — a public
+suffix such as `co.uk` or a subdomain such as `www.example.com` is refused with
+`equivalence_domain_rejected`; remove), the signed global list's groups with a Turn off / Turn on
+switch each (none today: no signed list ships yet, and the pane says so), and "Check a website",
+which asks the core what autofill would offer on an address under these settings. All of it is
+the account's encrypted `ACCOUNT_SETTINGS`, committed with a new signed account state; the core
+reads, checks and writes it (`VaultSession.changeMatchSettings`). The server takes a settings
+change only within five minutes of the login (a fresh OPAQUE session, CRYPTO.md §11 "Replacing
+credentials"); later, the change fails with "Log in again to do this." Covered by
+`e2e/match-settings.spec.ts` and `test/match-settings.test.ts`.
+
+### What the server stores (transparency, ROADMAP §4.5)
+
+`src/views/TransparencyPane.tsx`, worded in `src/transparency.ts`: what the server holds for the
+account and how (THREAT_MODEL §3.4, only the rows this server holds today: no shares, aliases,
+mail or `icons` yet), how long it is kept (the 30-day Trash, tombstones and signed change
+headers for the life of the vault, logs and backups: ADR 0012 §5 and §7, ADR 0021 §6, AR-11),
+and the item, Trash and enrolled-device counts this browser already has from the vault it
+fetched. The counts are labelled as the browser's own, not a server report. There are no
+byte sizes and no server call of its own: no Accepted ADR defines a transparency endpoint
+(ADR 0028 item 1 lists `GET /api/v1/devices/grants` as the only `GET`, and item 14's
+`/api/meta` holds nothing about any account), and ADR 0048's `bytes_used` is Proposed.
+
+### The getting-started guide (onboarding, ROADMAP §4.5)
+
+`src/views/OnboardingView.tsx`, with its steps in `src/onboarding.ts`. It opens right after
+signup, in place of the item list, and Settings' "Getting started" group opens it again. Three
+steps, each with "Skip this step", and "Close the guide" at any step:
+
+1. **Keep your Emergency Kit safe.** A confirmation only: the kit is shown once, at signup (ADR
+   0008 point 1, CRYPTO.md §7), and the core refuses a second showing (`already_shown`), so the
+   guide never displays the Secret Key or the recovery code. It says plainly that without a copy
+   the account cannot be opened once the session ends. "Continue" waits for the box to be ticked.
+2. **Import from another password manager.** The import form of "Export and import"
+   (`TransferPane.tsx` `ImportForm`, unchanged), with the list of formats it reads.
+3. **Install the browser extension.** Static instructions (load the unpacked Chromium build, or
+   the Firefox build as a temporary add-on; the extension is not in the stores yet) and the
+   values its "Set up this device" form asks for, with this server's origin and the login name
+   filled in. No link, no request.
+
+Then a summary of how each step ended. Each new step moves the focus to its heading, and the
+step list marks the current step with `aria-current="step"`. The guide adds no endpoint, wire
+field or stored value: CRYPTO.md §11.4 lets the web vault keep only the opted-in Secret Key and
+the theme choice in browser storage, so "the guide is done" is remembered nowhere. The guide
+shows after signup only, never after a login. Covered by `test/onboarding.test.ts` and
+`e2e/onboarding.spec.ts`.
 
 ### Appearance (theme)
 
@@ -234,18 +352,126 @@ was not built; see "Not yet done".
 
 ### Colour contrast (item 7 of the redesign brief)
 
-The token pairs declared in `packages/ui/src/tokens.css` (WCAG 2.1 contrast ratio, computed
-from the sRGB hex values; AA requires 4.5:1 for normal text and 3:1 for large text/UI, which
-every pair here clears with margin to spare):
+The token pairs declared in `packages/ui/tokens/tokens.json` for the M3 design refresh
+([docs/design/README.md](../../docs/design/README.md) §2) (WCAG 2.x contrast ratio, computed from
+the sRGB hex values; AA requires 4.5:1 for normal text and 3:1 for UI components and the focus
+indicator, the floor each pair declares):
 
-| Pair | Light | Dark |
-| --- | --- | --- |
-| `--color-text` on `--color-bg` | 16.57:1 | 15.77:1 |
-| `--color-text` on `--color-surface` | 17.74:1 | 14.27:1 |
-| `--color-text-muted` on `--color-bg` | 7.50:1 | 9.20:1 |
-| `--color-on-accent` on `--color-accent` | 6.54:1 | 8.02:1 |
-| `--color-on-danger` on `--color-danger` | 6.54:1 | 10.09:1 |
-| `--color-warning-text` on `--color-warning-bg` | 10.64:1 | 10.57:1 |
+| Pair | AA floor | Light | Dark |
+| --- | --- | --- | --- |
+| `--color-text` on `--color-bg` | 4.5:1 | 16.60:1 | 16.40:1 |
+| `--color-text` on `--color-surface` | 4.5:1 | 18.10:1 | 15.15:1 |
+| `--color-text` on `--color-surface-raised` | 4.5:1 | 18.10:1 | 13.72:1 |
+| `--color-text` on `--color-surface-hover` | 4.5:1 | 15.59:1 | 12.71:1 |
+| `--color-text` on `--color-accent-subtle` | 4.5:1 | 15.30:1 | 11.77:1 |
+| `--color-text-muted` on `--color-bg` | 4.5:1 | 6.54:1 | 8.56:1 |
+| `--color-text-muted` on `--color-surface` | 4.5:1 | 7.13:1 | 7.90:1 |
+| `--color-text-muted` on `--color-surface-raised` | 4.5:1 | 7.13:1 | 7.16:1 |
+| `--color-text-muted` on `--color-surface-hover` | 4.5:1 | 6.14:1 | 6.63:1 |
+| `--color-text-muted` on `--color-accent-subtle` | 4.5:1 | 6.03:1 | 6.14:1 |
+| `--color-on-accent` on `--color-accent` | 4.5:1 | 6.20:1 | 7.28:1 |
+| `--color-on-accent` on `--color-accent-hover` | 4.5:1 | 7.80:1 | 9.30:1 |
+| `--color-accent` on `--color-surface` | 4.5:1 | 6.20:1 | 6.88:1 |
+| `--color-accent` on `--color-bg` | 4.5:1 | 5.69:1 | 7.45:1 |
+| `--color-accent` on `--color-accent-subtle` | 4.5:1 | 5.24:1 | 5.35:1 |
+| `--color-on-danger` on `--color-danger` | 4.5:1 | 5.92:1 | 8.78:1 |
+| `--color-danger` on `--color-bg` | 4.5:1 | 5.43:1 | 9.58:1 |
+| `--color-danger` on `--color-surface` | 4.5:1 | 5.92:1 | 8.85:1 |
+| `--color-danger` on `--color-surface-raised` | 4.5:1 | 5.92:1 | 8.01:1 |
+| `--color-on-success` on `--color-success` | 4.5:1 | 5.37:1 | 7.64:1 |
+| `--color-success` on `--color-surface` | 4.5:1 | 5.37:1 | 9.64:1 |
+| `--color-success` on `--color-bg` | 4.5:1 | 4.92:1 | 10.44:1 |
+| `--color-warning-text` on `--color-warning-bg` | 4.5:1 | 10.55:1 | 10.57:1 |
+| `--color-focus` on `--color-bg` | 3:1 | 5.69:1 | 7.45:1 |
+| `--color-focus` on `--color-surface` | 3:1 | 6.20:1 | 6.88:1 |
+| `--color-focus` on `--color-surface-raised` | 3:1 | 6.20:1 | 6.23:1 |
+| `--color-focus` on `--color-accent-subtle` | 3:1 | 5.24:1 | 5.35:1 |
+| `--color-focus` on `--color-surface-hover` | 3:1 | 5.34:1 | 5.77:1 |
+| `--color-border-strong` on `--color-bg` | 3:1 | 3.13:1 | 4.18:1 |
+| `--color-border-strong` on `--color-surface` | 3:1 | 3.41:1 | 3.86:1 |
+| `--color-border-strong` on `--color-surface-raised` | 3:1 | 3.41:1 | 3.50:1 |
+
+These pairs are checked by `cargo xtask
+generate-tokens --check` in CI, which fails below AA. The rendered pages are checked too (next
+section).
+
+### Markdown in Secure Notes (ADR 0062, INV-88)
+
+A Secure Note's notes show rendered from their Markdown in the item view (`src/markdown.ts`
+parses, `src/views/NoteMarkdown.tsx` renders). Only Secure Notes: a Login's, Card's or
+Identity's notes stay plain text (ADR 0062 §2), and so do the CLI, the extension and the
+native clients. The editor keeps the plain textarea, and Copy and export always give the stored
+source unchanged (§12).
+
+- **What renders** (§5, a deliberate subset, not CommonMark): `#` to `######` headings; paragraphs,
+  where a single newline is a line break; `**bold**` or `__bold__`, `*italic*` or `_italic_`,
+  `~~struck~~` and ``code`` within one line; fenced code blocks (the language hint is dropped; no
+  highlighting); `>` quotes and `-`/`*`/`+` or `1.` lists, one level each; and `---` rules. A
+  backslash makes the next punctuation character literal; `_` inside a word (`snake_case`) stays as
+  typed.
+- **What does not.** Links (`[text](url)`, `<url>`, bare URLs), images, raw HTML, HTML entities,
+  tables, footnotes and task boxes are shown as the literal text typed (§5–§7; owner answers 2
+  and 7). A note never holds a clickable link, so nothing in it is focusable and `SafeLink` is
+  not involved.
+- **How it stays safe.** The parser outputs a closed AST with no HTML, link, image, style or
+  attribute variant; the renderer maps each variant to one fixed element with one fixed class,
+  through `switch`es with no default branch (a new variant is a compile error), and never builds
+  an HTML string or uses a raw-HTML sink (§3, §6–§9). The tokenizer is linear with no
+  backtracking pattern (§10); a note over the 64 KiB stored-value limit, or any parser
+  exception, shows the plain stored text (§11). The CSP is unchanged and only a backstop (§13).
+- **Tests.** `test/markdown.test.ts` (every construct, the deviations, literal fallbacks,
+  fail-closed, pathological 64 KiB inputs), `test/note-markdown.test.ts` (exact markup, a hostile
+  corpus, and a seeded property test that rendered markup stays inside the allow-list of
+  `e2e/attack/markdown-allow-list.ts`), `test/markdown-fuzz.test.ts` (a seeded mutation fuzzer: the
+  parser is TypeScript, so cargo-fuzz under `fuzz/` cannot reach it), and
+  `e2e/markdown-note.spec.ts` (INV-88 in the browser: a hostile note runs nothing, holds no sink
+  and nothing outside the allow-list, its URLs go nowhere; Copy returns the source; other types
+  stay plain). `RIZZY_NIGHTLY=1` widens the property and fuzz budgets with a fresh seed
+  (`RIZZY_NIGHTLY_SEED` replays one).
+
+### Accessibility checks (ROADMAP §4.5, ADR 0014 §5)
+
+`e2e/a11y.ts` holds the checks; [CONTRIBUTING.md](../../CONTRIBUTING.md#what-the-accessibility-checks-cover)
+says how they fit with the token check and the extension's audit.
+
+- **What is audited.** `e2e/a11y.spec.ts`: login, signup, the getting-started guide's steps,
+  the vault list, the new-item menu, the editor (new and edit) and its generator popover, the
+  item view (and a revealed password), large type, the trash confirmation, the command palette
+  with results, the shortcuts help, the account menu, the generator, export and import with the
+  plaintext-export dialog, Settings (two-factor, devices, appearance, "What the server stores",
+  getting started), the trash, unlock, two-factor setup and the login's code prompt; then the
+  dark theme, forced colours (light and dark) and phone width; and a Secure Note rendered from
+  its Markdown, in each of those modes. `e2e/conflict.spec.ts` audits a conflicted item and the
+  open conflict chooser.
+- **What each audit checks.** axe-core (`@axe-core/playwright`, a dev dependency) runs every
+  WCAG 2.0/2.1/2.2 A and AA rule and its best-practice rules: every control named, form fields
+  labelled, text alternatives, one main landmark, an h1 and no skipped heading levels, document
+  language and title, no duplicate ids that ARIA references, nothing focusable hidden from the
+  accessibility tree, named dialogs, valid ARIA, target size, colour contrast of the rendered
+  text. Any violation fails; `REQUIRED_RULES` fails a run in which axe did not evaluate one of
+  the rules this list relies on. Then Chromium's own accessibility tree (CDP): every visible,
+  focusable element is exposed and has a name. Every modal dialog must keep Tab and Shift+Tab
+  inside it. Under forced colours, axe's contrast rule is replaced by "nothing opts out with
+  `forced-color-adjust: none`" (Chromium reports the author's text colour there, not the
+  painted system colour; see `a11y.ts`).
+- **Keyboard only.** `e2e/keyboard-nav.spec.ts` walks the same screens with Tab, Enter, Space,
+  Escape, the arrow keys and typing; `tabTo` fails when a control is not reached within its
+  bound.
+- **Security keys** (ADR 0058). `e2e/security-key.spec.ts` runs against a server on `localhost`
+  (a browser refuses an IP address as the WebAuthn relying party) with Chromium's CDP virtual
+  authenticator: enrolment in Settings → Two-factor authentication (`SecurityKeysSection.tsx`),
+  the login's security-key prompt (`SecurityKeyDialog.tsx`), cancel and removal, the axe audit of
+  the section, the prompt and the removal dialog, and the keyboard-only walk through them. The
+  browser's `navigator.credentials` calls run on the UI thread (`webauthn.ts`), never in the
+  Worker. The server's options reach the browser unaltered: security keys are touch-only (ADR
+  0082), and a virtual key with user verification that never succeeds still enrols and logs in,
+  with the options read as served (UV `"discouraged"`, no credProtect).
+- **What is not covered.** Real screen readers (NVDA, JAWS, VoiceOver, Orca): the rules catch
+  missing names, labels and structure, not whether the result reads well, so a UI change still
+  needs a manual pass with one. Firefox and Safari (Chromium only). Contrast of colours the token
+  file does not declare as a pair, outside what axe measures on the audited screens. The native
+  clients' toolkits: their checks live in their own repositories (ADR 0019 §6); this repository
+  only keeps their generated token files in sync (`cargo xtask generate-tokens --check`).
 
 ### Not yet done
 
@@ -271,6 +497,7 @@ pnpm run build          # packages/core, then apps/web → apps/web/dist
 pnpm run lint           # the ADR 0014 §2 rules (eslint.config.mjs)
 pnpm run test           # Vitest, every package
 pnpm run e2e            # builds rizzy-vault with embed-web, then Playwright (Chromium) against it
+pnpm --filter @rizzy-vault/web run e2e e2e/a11y.spec.ts   # only the accessibility audit
 ```
 
 Playwright needs its Chromium build: `pnpm --filter @rizzy-vault/web exec playwright install chromium`.

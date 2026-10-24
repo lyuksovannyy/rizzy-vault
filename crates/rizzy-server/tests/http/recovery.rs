@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Recovery with the Emergency Kit end to end over HTTP (CRYPTO.md §11.9), with the client flow
 //! of `rizzy-client` (`recovery`) against the real auth and vault domains: `recovery/start`,
 //! `recovery/complete`, the re-registration over the recovery-only session, and the recovery

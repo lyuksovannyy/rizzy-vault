@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The UI thread's end of the core Worker (ADR 0013 §4): typed calls over `postMessage`.
 //
 // The UI imports no wasm and holds no key. `call` sends one call and resolves with its value,
@@ -5,12 +7,15 @@
 // import files) are transferred, so the UI keeps no copy of them.
 // Only types come from packages/core here: the UI thread loads no wasm (`eslint.config.js`).
 
+import type { SecurityKeyAnswer, SecurityKeyRequest } from "@rizzy-vault/core";
+
 import {
   type CoreApi,
   type FromWorker,
   type Method,
   type ToWorker,
   BAD_MESSAGE,
+  SESSION_ENDED,
   isFromWorker,
   transferables,
 } from "./protocol.ts";
@@ -23,6 +28,11 @@ export interface WorkerPort {
 
 /** Asks the user for the second factor; `null` when they cancel. */
 export type TotpPrompt = () => Promise<string | null>;
+
+/** Runs a login's security-key prompt on the UI thread (ADR 0058); `null` when the user cancels. */
+export type SecurityKeyPrompt = (
+  request: SecurityKeyRequest,
+) => Promise<SecurityKeyAnswer | null>;
 
 /** A failed call: the core's stable code (packages/core `CoreError`), or one of `protocol.ts`. */
 export class CallError extends Error {
@@ -49,6 +59,8 @@ export class CoreClient {
   #next = 1;
   #dead: string | undefined;
   #prompt: TotpPrompt = () => Promise.resolve(null);
+  #keyPrompt: SecurityKeyPrompt = () => Promise.resolve(null);
+  #onSessionEnded: (() => void) | undefined;
 
   constructor(port: WorkerPort) {
     this.#port = port;
@@ -58,6 +70,19 @@ export class CoreClient {
   /** Sets who answers the Worker's second-factor prompts. */
   setTotpPrompt(prompt: TotpPrompt): void {
     this.#prompt = prompt;
+  }
+
+  /** Sets who runs the Worker's security-key prompts. */
+  setSecurityKeyPrompt(prompt: SecurityKeyPrompt): void {
+    this.#keyPrompt = prompt;
+  }
+
+  /**
+   * Sets who hears that the server ended the session (ADR 0075 §6): the Worker has locked it
+   * and answered a call `session_ended`. `undefined` clears it.
+   */
+  setSessionEndedHandler(handler: (() => void) | undefined): void {
+    this.#onSessionEnded = handler;
   }
 
   /**
@@ -91,6 +116,14 @@ export class CoreClient {
       return;
     }
     const m: FromWorker = data;
+    if (m.kind === "ask-security-key") {
+      const request = { options: m.options, totpAllowed: m.totpAllowed };
+      void this.#keyPrompt(request).then(
+        (answer) => this.#port.postMessage({ kind: "security-key", id: m.id, answer }, []),
+        () => this.#port.postMessage({ kind: "security-key", id: m.id, answer: null }, []),
+      );
+      return;
+    }
     if (m.kind === "ask-totp") {
       void this.#prompt().then(
         (code) => this.#port.postMessage({ kind: "totp", id: m.id, code }, []),
@@ -107,6 +140,9 @@ export class CoreClient {
       waiter.resolve(m.value);
     } else {
       waiter.reject(new CallError(m.code === "" ? BAD_MESSAGE : m.code));
+      if (m.code === SESSION_ENDED) {
+        this.#onSessionEnded?.();
+      }
     }
   }
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The symmetric wrapped-key objects of M1 (CRYPTO.md §4.2, §8.4, §8.5).
 //!
 //! Every wrap checks, before sealing, that the context describes the keys being wrapped (the
@@ -48,14 +50,14 @@ use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 use super::{
-    AccountKey, DeviceKeys, IdentityKeys, ItemKey, LocalUnlockKey, RecoveryWrapKey,
-    RetiredSecretKey, ServerUnlockKey, VaultKey,
+    AccountKey, DeviceKeys, IdentityKeys, ItemKey, KeystoreUnlockSecret, LocalUnlockKey,
+    RecoveryWrapKey, RetiredSecretKey, ServerUnlockKey, VaultKey,
 };
 use crate::encoding::Reader;
 use crate::envelope::purpose::{
-    AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx, AccountKeyServerWrapCtx,
-    DeviceSecretKeysCtx, IdentitySecretKeysCtx, ItemKeyWrapCtx, RetiredSecretKeyCtx,
-    VaultKeySelfGrantCtx,
+    AccountKeyForwardCtx, AccountKeyKeystoreWrapCtx, AccountKeyLocalWrapCtx,
+    AccountKeyRecoveryWrapCtx, AccountKeyServerWrapCtx, DeviceSecretKeysCtx, IdentitySecretKeysCtx,
+    ItemKeyWrapCtx, RetiredSecretKeyCtx, VaultKeySelfGrantCtx,
 };
 use crate::envelope::{open, seal};
 use crate::error::{DecryptError, EncryptError};
@@ -210,6 +212,47 @@ impl LocalUnlockKey {
     }
 }
 
+impl KeystoreUnlockSecret {
+    /// Builds `E_ks`: the account key under the keystore unlock secret
+    /// (`ACCOUNT_KEY_KEYSTORE_WRAP`, ctx `account_id ‖ device_id ‖ u32 account_key_epoch`, §8.4).
+    /// Device-local only; never uploaded (§4.2).
+    ///
+    /// # Errors
+    /// [`EncryptError::ContextMismatch`] if `ctx` names another account or device than this
+    /// secret was made for, or another account-key epoch than the key's.
+    pub fn wrap_account_key<R: CryptoRng + ?Sized>(
+        &self,
+        rng: &mut R,
+        ctx: &AccountKeyKeystoreWrapCtx,
+        account_key: &AccountKey,
+    ) -> Result<Vec<u8>, EncryptError> {
+        if ctx.account_id != self.account_id
+            || ctx.device_id != self.device_id
+            || ctx.account_key_epoch != account_key.epoch()
+        {
+            return Err(EncryptError::ContextMismatch);
+        }
+        seal(rng, &self.key, ctx, account_key.key().expose_secret())
+    }
+
+    /// Opens `E_ks` (§5.6 step 3, a keystore unlock), with the ctx rebuilt from the epoch stored
+    /// next to it. The account key gets the epoch `ctx` names.
+    ///
+    /// # Errors
+    /// [`DecryptError`], including for a context of another account or device.
+    pub fn unwrap_account_key(
+        &self,
+        ctx: &AccountKeyKeystoreWrapCtx,
+        envelope: &[u8],
+    ) -> Result<AccountKey, DecryptError> {
+        if ctx.account_id != self.account_id || ctx.device_id != self.device_id {
+            return Err(DecryptError);
+        }
+        let plaintext = open(&self.key, ctx, envelope)?;
+        account_key_from(plaintext.expose_secret(), ctx.account_key_epoch)
+    }
+}
+
 impl RecoveryWrapKey {
     /// Builds `E_rec`: the account key under the recovery wrap key
     /// (`ACCOUNT_KEY_RECOVERY_WRAP`, ctx `account_id ‖ u32 account_key_epoch ‖ u32
@@ -255,6 +298,48 @@ impl RecoveryWrapKey {
 }
 
 impl AccountKey {
+    /// Builds an `ACCOUNT_KEY_FORWARD` envelope: `new_key` under this (previous) account key,
+    /// ctx `account_id ‖ device_id ‖ u32 from_account_key_epoch ‖ u32 to_account_key_epoch`
+    /// (§8.4). Written after a keystore unlock that crossed a rotation (§11.3 step 4.3);
+    /// device-local only, never uploaded (§4.2).
+    ///
+    /// # Errors
+    /// [`EncryptError::ContextMismatch`] if `from_account_key_epoch` is not this key's epoch,
+    /// `to_account_key_epoch` is not `new_key`'s, or `new_key` is not newer than this key.
+    pub fn wrap_forward<R: CryptoRng + ?Sized>(
+        &self,
+        rng: &mut R,
+        ctx: &AccountKeyForwardCtx,
+        new_key: &AccountKey,
+    ) -> Result<Vec<u8>, EncryptError> {
+        if ctx.from_account_key_epoch != self.epoch
+            || ctx.to_account_key_epoch != new_key.epoch()
+            || new_key.epoch() <= self.epoch
+        {
+            return Err(EncryptError::ContextMismatch);
+        }
+        seal(rng, &self.key, ctx, new_key.key().expose_secret())
+    }
+
+    /// Opens an `ACCOUNT_KEY_FORWARD` envelope under this (older) account key. The newer key
+    /// gets `to_account_key_epoch`. The caller follows the chain to the key whose id equals
+    /// `state.account_key_id` (§11.3 step 4.3).
+    ///
+    /// # Errors
+    /// [`DecryptError`], including for a context whose `from_account_key_epoch` is not this
+    /// key's or whose `to_account_key_epoch` is not above it.
+    pub fn unwrap_forward(
+        &self,
+        ctx: &AccountKeyForwardCtx,
+        envelope: &[u8],
+    ) -> Result<Self, DecryptError> {
+        if ctx.from_account_key_epoch != self.epoch || ctx.to_account_key_epoch <= self.epoch {
+            return Err(DecryptError);
+        }
+        let plaintext = open(&self.key, ctx, envelope)?;
+        account_key_from(plaintext.expose_secret(), ctx.to_account_key_epoch)
+    }
+
     /// Builds `E_id`: `ed25519_seed ‖ x25519_sk` under the account key
     /// (`IDENTITY_SECRET_KEYS`, ctx `account_id ‖ u32 identity_epoch`).
     ///

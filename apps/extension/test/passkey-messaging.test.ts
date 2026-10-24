@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Passkey messages at the real extension-messaging boundary (ADR 0039 §2, INV-40):
 // `parseFromContentScript` for the two new content-script-originated request types, and the
 // privileged-sender-only validators `core-host/listener.ts` uses directly, mirroring
@@ -10,6 +12,9 @@ import {
   isRelayPasskeyResultMessage,
 } from "../src/messaging/contract.ts";
 import { MessageRejected, parseFromContentScript } from "../src/messaging/validate.ts";
+
+/** An ADR 0043 instance token: a canonical v4 UUID. */
+const TOKEN = "3b241101-e2bb-4255-8caf-4136c566a962";
 
 const createRequest = {
   type: "passkey_create_request",
@@ -87,21 +92,31 @@ describe("parseFromContentScript: passkey_ceremony_approved is not a content-scr
 
 describe("isPasskeyCeremonyMessage", () => {
   it("accepts a well-formed approval with no chosenPasskeyRef (a create ceremony)", () => {
-    expect(isPasskeyCeremonyMessage({ type: "passkey_ceremony_approved", ceremonyToken: "tok-1" })).toBe(true);
+    expect(isPasskeyCeremonyMessage({ type: "passkey_ceremony_approved", instanceToken: TOKEN, ceremonyToken: "tok-1" })).toBe(true);
   });
 
   it("accepts a well-formed approval with a chosenPasskeyRef (a get ceremony)", () => {
-    expect(isPasskeyCeremonyMessage({ type: "passkey_ceremony_approved", ceremonyToken: "tok-1", chosenPasskeyRef: "item-1:el-1" })).toBe(
+    expect(
+      isPasskeyCeremonyMessage({ type: "passkey_ceremony_approved", instanceToken: TOKEN, ceremonyToken: "tok-1", chosenPasskeyRef: "item-1:el-1" }),
+    ).toBe(
       true,
     );
   });
 
   it("accepts a well-formed decline", () => {
-    expect(isPasskeyCeremonyMessage({ type: "passkey_ceremony_declined", ceremonyToken: "tok-1" })).toBe(true);
+    expect(isPasskeyCeremonyMessage({ type: "passkey_ceremony_declined", instanceToken: TOKEN, ceremonyToken: "tok-1" })).toBe(true);
   });
 
   it("rejects a missing ceremonyToken", () => {
-    expect(isPasskeyCeremonyMessage({ type: "passkey_ceremony_approved" })).toBe(false);
+    expect(isPasskeyCeremonyMessage({ type: "passkey_ceremony_approved", instanceToken: TOKEN })).toBe(false);
+  });
+
+  // ADR 0043 point 3: the consent iframe's own instance token is required too, beside (never in
+  // place of) the ceremony token (point 6).
+  it("rejects a missing or malformed instanceToken, for an approval and a decline alike", () => {
+    expect(isPasskeyCeremonyMessage({ type: "passkey_ceremony_approved", ceremonyToken: "tok-1" })).toBe(false);
+    expect(isPasskeyCeremonyMessage({ type: "passkey_ceremony_declined", ceremonyToken: "tok-1" })).toBe(false);
+    expect(isPasskeyCeremonyMessage({ type: "passkey_ceremony_declined", instanceToken: "tok-1", ceremonyToken: "tok-1" })).toBe(false);
   });
 
   it("rejects an unknown type", () => {

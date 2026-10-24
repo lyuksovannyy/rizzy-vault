@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The embedded passphrase wordlist (CRYPTO.md §12.1): the EFF large wordlist.
 //!
 //! - **Source.** "EFF's Long Wordlist", `eff_large_wordlist.txt`, published by the Electronic
@@ -70,6 +72,19 @@ pub(super) fn select_word(index: u32, slot: &mut [u8; SLOT]) {
             }
         }
     }
+}
+
+/// The word at `index` (`0..WORD_COUNT`), read by plain indexing; `None` past the end.
+///
+/// For non-secret uses only ([ADR 0079] §4 step 9: an identity's nickname, shown to the user
+/// at once). The passphrase generator never calls this: it copies words with the constant-time
+/// scan of `select_word` because its chosen word is the secret (CRYPTO.md §12.3).
+///
+/// [ADR 0079]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0079-identity-generator.md
+#[must_use]
+pub fn word(index: u32) -> Option<&'static str> {
+    let line = lines().nth(usize::try_from(index).ok()?)?;
+    core::str::from_utf8(line.get(DICE_PREFIX..)?).ok()
 }
 
 /// Whether `raw` is exactly `WORD_COUNT` lines of five dice digits (1–6), a tab, and a word of
@@ -154,6 +169,17 @@ mod tests {
     fn embedded_file_is_the_published_list() {
         assert_eq!(Sha256::digest(RAW).to_vec(), hex(EFF_LARGE_WORDLIST_SHA256));
         assert!(validate(RAW));
+    }
+
+    /// ADR 0079 §2: the plain accessor reads the same word as the constant-time scan.
+    #[test]
+    fn plain_accessor_reads_the_named_word() {
+        let words = words();
+        for n in [0, 1, 2, 777, 3888, WORD_COUNT - 2, WORD_COUNT - 1] {
+            assert_eq!(word(u32::try_from(n).unwrap()), Some(words[n]), "{n}");
+        }
+        assert_eq!(word(u32::try_from(WORD_COUNT).unwrap()), None);
+        assert_eq!(word(u32::MAX), None);
     }
 
     #[test]

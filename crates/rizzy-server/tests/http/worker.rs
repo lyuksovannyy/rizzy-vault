@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The worker on `SQLite` (ADR 0010 §2): the writer lock the database holds makes this process
 //! the only writer, so the worker leads at once, stays leading across runs, and runs every step.
 //!

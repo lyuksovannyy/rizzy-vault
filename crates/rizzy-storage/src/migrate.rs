@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Embedded, forward-only migrations, one ordered sequence per engine (ADR 0011 points 8-10).
 //!
 //! The SQL lives in `migrations/sqlite/` and `migrations/postgres/`, one file per version in
@@ -85,6 +87,42 @@ pub const MIGRATIONS: &[MigrationFile] = &[
         description: "auth_credential_epochs",
         sqlite: include_str!("../migrations/sqlite/0005_auth_credential_epochs.sql"),
         postgres: include_str!("../migrations/postgres/0005_auth_credential_epochs.sql"),
+    },
+    // ADR 0048 §4 ("raises the backup `schema_version` to 6"). Its file name `0007` assumed
+    // the sibling ADR 0047 took `0006` first; 0047 is still Proposed, so this one takes the next
+    // free number: a backup's `schema_version` must name the shape of its dump, which a later
+    // lower version slotted in under it would break.
+    MigrationFile {
+        version: 6,
+        description: "storage_account_usage",
+        sqlite: include_str!("../migrations/sqlite/0006_storage_account_usage.sql"),
+        postgres: include_str!("../migrations/postgres/0006_storage_account_usage.sql"),
+    },
+    // ADR 0054 §5: the attachment tables. Raises the backup `schema_version` to 7 (ADR 0023:
+    // a dump is stamped with the last applied migration, and restored only by the release that
+    // wrote it).
+    MigrationFile {
+        version: 7,
+        description: "vault_attachments",
+        sqlite: include_str!("../migrations/sqlite/0007_vault_attachments.sql"),
+        postgres: include_str!("../migrations/postgres/0007_vault_attachments.sql"),
+    },
+    // ADR 0058 as amended by ADR 0077 §§2, 4: WebAuthn security-key credentials, the
+    // second-factor-pending rows and the ceremony state. Raises the backup `schema_version` to 8.
+    MigrationFile {
+        version: 8,
+        description: "auth_webauthn",
+        sqlite: include_str!("../migrations/sqlite/0008_auth_webauthn.sql"),
+        postgres: include_str!("../migrations/postgres/0008_auth_webauthn.sql"),
+    },
+    // ADR 0081 §A10: the vault kind and the one-Personal-vault-per-account index. Its ADR names
+    // it `0008`, which the WebAuthn tables took first, so it is the next free number. Raises the
+    // backup `schema_version` to 9.
+    MigrationFile {
+        version: 9,
+        description: "vault_kinds",
+        sqlite: include_str!("../migrations/sqlite/0009_vault_kinds.sql"),
+        postgres: include_str!("../migrations/postgres/0009_vault_kinds.sql"),
     },
 ];
 

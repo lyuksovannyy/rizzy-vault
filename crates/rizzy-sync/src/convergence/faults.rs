@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Dishonest snapshots of the `faulty` family: ADR 0021 §8 "snapshots that claim unheld dots,
 //! up to `u64::MAX`", and the ADR 0018 §3 "Snapshots are claims" lies of the merge spike's
 //! fault kinds (`spikes/merge-model/src/replica.rs` `Fault`: `ClaimNext`, `OmitValue`,
@@ -135,8 +137,9 @@ pub(super) struct Known<'a> {
     /// The server's heads when the snapshot is written (the faulty device's view of the
     /// server, for the claims).
     pub(super) heads: &'a VersionVector,
-    /// The item key the tombstone lie records.
-    pub(super) item_key: SymmetricKeyId,
+    /// The `key_id` of the op at a dot, from the author's envelopes: what a tombstone lie
+    /// records as the purge's item key.
+    pub(super) key_of: &'a dyn Fn(Dot) -> Option<SymmetricKeyId>,
     /// The verified causal context of the op at a dot, from the author's kept headers.
     pub(super) causal_context: &'a dyn Fn(Dot) -> Option<VersionVector>,
 }
@@ -217,7 +220,7 @@ pub(super) fn apply(
                 purge_dot,
                 purge_hlc,
                 c,
-                cx.item_key,
+                (cx.key_of)(purge_dot)?,
                 late_regs,
             ));
             encode_snapshot(&covered, &fake)

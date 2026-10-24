@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The first-party `unsafe` token scan of ADR 0019 §4.1, run by `cargo xtask check-deps`.
 //!
 //! `unsafe_code = "forbid"` (ADR 0016 R7) does not see everything: rustc drops an `unsafe_code`
@@ -412,6 +414,7 @@ mod tests {
             include_str!("js.rs"),
             include_str!("manifest.rs"),
             include_str!("metadata.rs"),
+            include_str!("spdx.rs"),
             include_str!("../tests/cli.rs"),
         ] {
             assert_eq!(unsafe_tokens(source), Ok(vec![]));

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Flow tests that need no server: the order of the steps, the requests built, the answers
 //! refused. The flows against a real `rizzy-vault` run in `packages/core`'s end-to-end test,
 //! through the built wasm module (this crate may not depend on `rizzy-server`, ADR 0016 R6).
@@ -202,4 +204,50 @@ fn import_files_are_recognised_by_kind_only() {
     );
     assert_eq!(detect_import_format(b"hello\n"), "unknown");
     assert_eq!(detect_import_format(b""), "unknown");
+    // CXF (ADR 0074): our sealed passkey export, and a bare CXF document.
+    assert_eq!(
+        detect_import_format(br#"{"format":"rizzy-vault-cxf-export","version":1}"#),
+        "rizzy-cxf-encrypted"
+    );
+    assert_eq!(
+        detect_import_format(br#"{"version":{"major":1,"minor":0},"timestamp":1,"accounts":[]}"#),
+        "cxf-json"
+    );
+    assert!(crate::session::cxf_export_warning().starts_with("Once decrypted"));
+}
+
+#[test]
+fn the_ended_session_rule_and_the_notices() {
+    use crate::session::{
+        ends_session_on_unauthorized, others_ended_notice, session_ended_by_you_notice,
+        session_ended_notice,
+    };
+
+    // ADR 0075 §6: a 401 ends the session except on login/*, recovery/* and the sign-out.
+    for path in [
+        "/api/v1/vault/fetch",
+        "/api/v1/account/state",
+        "/api/v1/sessions/list",
+        "/api/v1/sessions/end",
+        "/api/v1/sessions/others/end",
+    ] {
+        assert!(ends_session_on_unauthorized(path), "{path}");
+    }
+    for path in [
+        "/api/v1/login/start",
+        "/api/v1/login/finish",
+        "/api/v1/recovery/cancel",
+        "/api/v1/sessions/current/end",
+        "/api/meta",
+    ] {
+        assert!(!ends_session_on_unauthorized(path), "{path}");
+    }
+    assert_eq!(
+        session_ended_notice(),
+        "This session has ended. Log in again."
+    );
+    // §8: the confirmations point to a password change.
+    for notice in [others_ended_notice(), session_ended_by_you_notice()] {
+        assert!(notice.contains("change your password"), "{notice}");
+    }
 }

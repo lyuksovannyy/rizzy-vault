@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The label registry (CRYPTO.md §2, §4.3 "Label registry rule").
 //!
 //! `LABEL(x)` is the ASCII string `"rizzy-vault/v1/" + x`. Every HKDF `info`, signed message
@@ -193,6 +195,10 @@ registry! {
     /// Server-secrets backup key: `HKDF(b, salt = empty, LABEL ‖ 0x00 ‖ backup_id, 32)`, where
     /// `b` is Argon2id of the operator passphrase with the file's `backup_salt`.
     SERVER_SECRETS_BACKUP = "server/secrets-backup";
+    /// Server DB-backup subkey for `SERVER_DB_BACKUP` (M8, ADR 0071, CRYPTO.md §9.8):
+    /// `HKDF(backup_keys[backup_key_id].key, salt = empty, LABEL ‖ 0x00 ‖ u32(backup_key_id),
+    /// 32)`, from its own secrets-file key, never `server_data_key`.
+    SERVER_DB_BACKUP = "server/db-backup";
 
     // --- HPKE (§4.3, §9.2, §10.1) ---
     /// HPKE `info = LABEL ‖ 0x00 ‖ u16(purpose)`.
@@ -351,6 +357,7 @@ mod tests {
             "server/totp-secret",
             "server/login-state",
             "server/secrets-backup",
+            "server/db-backup",
             "hpke",
             "hpke-psk/device-grant",
             "hpke-psk/password-verifier",

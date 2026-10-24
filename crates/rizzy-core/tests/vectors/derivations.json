@@ -430,6 +430,19 @@
       "outputs": {
         "settings_hash": "b4fd269950a5d555d9b02e5a37965ed78f39f4311aaed496a390025992231452"
       }
+    },
+    {
+      "id": "derivation/server/db-backup/0",
+      "inputs": {
+        "backup_key": "2453144adb8d8c9574164f8f0c400c466d036bd2a1ec4060ccce26edfda26cf0",
+        "backup_key_id": 2
+      },
+      "kind": "derivation",
+      "name": "server/db-backup",
+      "outputs": {
+        "key": "6b99edd0ec42a433db982f7326838f735e7a9232922e6daeecf6a9b860dc9a95",
+        "key_id": "bde043860a44764ae3cebe434350e0db"
+      }
     }
   ]
 }

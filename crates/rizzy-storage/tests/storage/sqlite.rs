@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-storage` on real SQLite files.
 
 use std::path::Path;
@@ -36,6 +38,18 @@ async fn open(dir: &TempDir, name: &str) -> Database {
         .await
         .unwrap();
     db
+}
+
+/// The `vault_device_cursors` rows of `dump`.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a test helper: a failure fails the test, which CLAUDE.md allows in test code"
+)]
+fn cursors(dump: &mut rizzy_storage::Dump) -> &mut rizzy_storage::TableDump {
+    dump.tables
+        .iter_mut()
+        .find(|t| t.table == "vault_device_cursors")
+        .unwrap()
 }
 
 /// A PRAGMA's value, read on the writer.
@@ -591,7 +605,7 @@ fn restore_refuses_bad_input_and_writes_nothing() {
         ));
 
         let mut bad = fixture();
-        bad.tables.last_mut().unwrap().rows[0][2] = Value::Text("not a blob".into());
+        cursors(&mut bad).rows[0][2] = Value::Text("not a blob".into());
         assert!(matches!(
             db.restore(&bad, g, 0).await,
             Err(Error::Restore(RestoreError::Row {
@@ -603,7 +617,7 @@ fn restore_refuses_bad_input_and_writes_nothing() {
         // A row that violates a CHECK constraint (a 15-byte id) fails in the database, and the
         // whole restore rolls back.
         let mut broken = fixture();
-        broken.tables.last_mut().unwrap().rows[0][1] = Value::Blob(vec![0; 15]);
+        cursors(&mut broken).rows[0][1] = Value::Blob(vec![0; 15]);
         assert!(matches!(
             db.restore(&broken, g, 0).await,
             Err(Error::Database(_))
@@ -622,6 +636,32 @@ fn restore_refuses_bad_input_and_writes_nothing() {
 
         // The good fixture still restores afterwards.
         db.restore(&fixture(), g, 0).await.unwrap();
+    });
+}
+
+/// ADR 0048 §3–§4: the per-account counter, backed up and restored with its rows, removed with
+/// its account.
+#[test]
+fn account_usage_counter() {
+    block_on(async {
+        let dir = TempDir::new();
+        let db = open(&dir, "db.sqlite").await;
+        db.restore(&fixture(), RestoreGeneration([3; 16]), 0)
+            .await
+            .unwrap();
+        crate::common::exercise_quota(&db).await;
+        exec(
+            &db,
+            "DELETE FROM auth_accounts WHERE id = x'a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2'",
+        )
+        .await;
+        let mut r = db.begin_read().await.unwrap();
+        assert_eq!(
+            rizzy_storage::quota::accounts(r.conn()).await.unwrap(),
+            vec![id(ACCOUNT_1)],
+            "the row goes with its account (ON DELETE CASCADE)"
+        );
+        r.finish().await.unwrap();
     });
 }
 
@@ -679,10 +719,10 @@ fn pre_migration_copy() {
         let last = MIGRATIONS.last().unwrap().version;
         let mut w = db.begin_write().await.unwrap();
         on_engine!(w.conn(), |c| {
-            // Undo the last migration (0005: one column in each of two tables).
+            // Undo the last migration (0009: the vault kind and its index).
             for undo in [
-                "ALTER TABLE auth_credentials DROP COLUMN account_key_epoch",
-                "ALTER TABLE auth_recovery DROP COLUMN account_key_epoch",
+                "DROP INDEX vault_vaults_personal",
+                "ALTER TABLE vault_vaults DROP COLUMN kind",
             ] {
                 sqlx::query(undo).execute(&mut *c).await.unwrap();
             }
@@ -704,14 +744,38 @@ fn pre_migration_copy() {
         let before = Database::open_sqlite_read_only(&SqliteOptions::new(&pre))
             .await
             .unwrap();
+        let previous = MIGRATIONS.iter().rev().nth(1).unwrap().version;
         assert_eq!(
             before.applied_migrations().await.unwrap().last(),
-            Some(&(last - 1))
+            Some(&previous)
         );
         before.close().await;
         remove_pre_migration_copy(&pre).unwrap();
         assert!(!pre.exists());
         remove_pre_migration_copy(&pre).unwrap();
+    });
+}
+
+/// Migration 0009's vault kinds (ADR 0081 §A10) on SQLite; the PostgreSQL suite runs the same
+/// helper, so the partial unique index is checked on both engines.
+#[test]
+fn vault_kinds_keep_one_personal_vault_per_account() {
+    block_on(async {
+        let dir = TempDir::new();
+        let db = open(&dir, "db.sqlite").await;
+        db.restore(&fixture(), RestoreGeneration([6; 16]), 0)
+            .await
+            .unwrap();
+        crate::common::exercise_vault_kinds(&db).await;
+        db.close().await;
+        drop(db);
+        let path = dir.join("db.sqlite");
+        let lock = WriterLock::acquire(&path).unwrap();
+        let db = Database::open_sqlite(&SqliteOptions::new(&path), lock)
+            .await
+            .unwrap();
+        crate::common::finish_vault_kinds(&db).await;
+        db.close().await;
     });
 }
 
@@ -744,16 +808,8 @@ fn schema_must_match_this_release() {
         db.restore(&fixture(), RestoreGeneration([5; 16]), 0)
             .await
             .unwrap();
-        exec(
-            &db,
-            "ALTER TABLE auth_credentials DROP COLUMN account_key_epoch",
-        )
-        .await;
-        exec(
-            &db,
-            "ALTER TABLE auth_recovery DROP COLUMN account_key_epoch",
-        )
-        .await;
+        exec(&db, "DROP INDEX vault_vaults_personal").await;
+        exec(&db, "ALTER TABLE vault_vaults DROP COLUMN kind").await;
         exec(
             &db,
             "DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM \

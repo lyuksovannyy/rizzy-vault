@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The durable-device (ADR 0036) and matching (ADR 0037) wrappers, without a server: bad input,
 // cache-corrupt refusals, and the matcher's pure decisions. The full cycle against a real
 // server (enrol, authenticate, reopen) is e2e.test.ts's job.
@@ -6,7 +8,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   type CacheRow,
   type CacheStore,
+  type Clock,
   CoreError,
+  DurableSession,
   MatchMode,
   type Transport,
   cacheStoreNames,
@@ -110,6 +114,65 @@ describe("unlockDurableDevice", () => {
     await expect(unlockDurableDevice(unreachable, bad, "pw")).rejects.toMatchObject({
       code: "cache_corrupt",
     });
+  });
+});
+
+// `DurableSession`'s own class docs: "Every mutating call ... drains the core's cache writes
+// ... and persists them ... before it resolves" (ADR 0026 §4's write order). `sync()`'s
+// auto-purge step is the one place that promise was broken (rizzy-cli's matching
+// `Device::auto_purge` fix, same commit): a failing `autoPurge` used to skip the drain that
+// follows it, so whatever the pass had already journaled before failing stayed in the wasm
+// instance instead of reaching the `CacheStore` — lost if the session does not survive to the
+// next successful `sync()` (a lock, a reload, the offscreen document closing). The fake
+// `WasmDeviceSession` below needs no real wasm module: `sync()`'s drain-before-propagate
+// ordering is pure orchestration over whatever `#inner` returns, so a double-cast stub drives
+// it exactly as a real failing auto-purge would, with no server and no cache mocking beyond
+// `memoryCacheStore`.
+describe("DurableSession.sync", () => {
+  const clock: Clock = () => 1_000;
+
+  /** A `CacheDelta`-shaped object `drainCacheWrites` can return: no rows, freed once. */
+  function emptyDelta(): { puts: never[]; deletes: never[]; free: () => void } {
+    return { puts: [], deletes: [], free: () => {} };
+  }
+
+  it("drains cache writes before rethrowing a failed auto-purge", async () => {
+    let drains = 0;
+    const inner = {
+      syncStart: () => {},
+      syncRequest: () => undefined,
+      autoPurge: () => {
+        throw new Error("auto-purge failed partway");
+      },
+      drainCacheWrites: () => {
+        drains += 1;
+        return emptyDelta();
+      },
+    } as unknown as ConstructorParameters<typeof DurableSession>[0];
+    const session = new DurableSession(inner, unreachable, memoryCacheStore(), clock);
+
+    await expect(session.sync()).rejects.toThrow("auto-purge failed partway");
+
+    // One drain for the fetch/upload driver settling, a second for whatever auto-purge wrote
+    // before it failed — the second drain must run even though the call goes on to reject.
+    expect(drains).toBe(2);
+  });
+
+  it("still drains and resolves when auto-purge succeeds", async () => {
+    let drains = 0;
+    const inner = {
+      syncStart: () => {},
+      syncRequest: () => undefined,
+      autoPurge: () => {},
+      drainCacheWrites: () => {
+        drains += 1;
+        return emptyDelta();
+      },
+    } as unknown as ConstructorParameters<typeof DurableSession>[0];
+    const session = new DurableSession(inner, unreachable, memoryCacheStore(), clock);
+
+    await expect(session.sync()).resolves.toBeUndefined();
+    expect(drains).toBe(2);
   });
 });
 

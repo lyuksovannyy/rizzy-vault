@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Runtime validation of every message the background receives from a content script
 // (ADR 0036 §4, INV-40: "the background treats every content-script message as untrusted").
 // `parseFromContentScript` is the one entry point the service worker calls; it never trusts the
@@ -10,6 +12,7 @@
 // type and fit its own length budget. A message that fails any check is refused whole: this
 // module never repairs or truncates a bad message.
 import {
+  type CapturedCustomField,
   type CheckSavePromptMessage,
   type CredentialsSubmittedMessage,
   type FieldDescriptor,
@@ -17,9 +20,13 @@ import {
   type FromContentScript,
   type PasskeyCreateRequestMessage,
   type PasskeyGetRequestMessage,
+  type RegisterIframeInstanceMessage,
+  type RevokeIframeInstanceMessage,
   type SavePromptResolvedMessage,
+  isInstanceToken,
   MAX_ALGS,
   MAX_ALLOW_CREDENTIALS,
+  MAX_CAPTURED_FIELDS,
   MAX_FIELDS_PER_REPORT,
   MAX_FIELD_VALUE_LEN,
   MAX_MESSAGE_BYTES,
@@ -29,6 +36,7 @@ import {
   MAX_URL_LEN,
   MAX_USER_NAME_LEN,
 } from "./contract.ts";
+import { isCustomToken } from "./autocomplete.ts";
 
 export class MessageRejected extends Error {
   constructor(reason: string) {
@@ -126,12 +134,40 @@ function parseCredentialsSubmitted(body: Record<string, unknown>): CredentialsSu
   if (body["passwordValue"] !== undefined && !isBoundedString(body["passwordValue"], MAX_FIELD_VALUE_LEN)) {
     throw new MessageRejected("credentials_submitted: passwordValue");
   }
+  const customFields = parseCapturedCustomFields(body["customFields"]);
   const out: CredentialsSubmittedMessage = { type: "credentials_submitted", pageUrl: body["pageUrl"] };
   return {
     ...out,
     ...(body["usernameValue"] !== undefined ? { usernameValue: body["usernameValue"] as string } : {}),
     ...(body["passwordValue"] !== undefined ? { passwordValue: body["passwordValue"] as string } : {}),
+    ...(customFields !== undefined ? { customFields } : {}),
   };
+}
+
+/** ADR 0076 §5.1: at most 8 entries, each a valid unreserved custom token (distinct), a
+ * non-empty value of at most 4096 code units, and a boolean `masked`; nothing else. */
+function parseCapturedCustomFields(value: unknown): readonly CapturedCustomField[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.length > MAX_CAPTURED_FIELDS) {
+    throw new MessageRejected("credentials_submitted: customFields");
+  }
+  const out: CapturedCustomField[] = [];
+  for (const entry of value as unknown[]) {
+    if (!isPlainObject(entry) || Object.keys(entry).some((k) => k !== "token" && k !== "value" && k !== "masked")) {
+      throw new MessageRejected("credentials_submitted: customFields entry");
+    }
+    const { token, value: v, masked } = entry;
+    if (!isCustomToken(token) || typeof masked !== "boolean" || !isBoundedString(v, MAX_FIELD_VALUE_LEN) || v === "") {
+      throw new MessageRejected("credentials_submitted: customFields entry");
+    }
+    if (out.some((o) => o.token === token)) {
+      throw new MessageRejected("credentials_submitted: duplicate custom token");
+    }
+    out.push({ token, value: v, masked });
+  }
+  return out;
 }
 
 function parseCheckSavePrompt(body: Record<string, unknown>): CheckSavePromptMessage {
@@ -207,6 +243,18 @@ function parsePasskeyGetRequest(body: Record<string, unknown>): PasskeyGetReques
   };
 }
 
+/** ADR 0043 point 2: the one field either iframe-instance message carries, a canonical v4 UUID
+ * ({@link isInstanceToken}), nothing else. */
+function parseIframeInstance(
+  type: "register_iframe_instance" | "revoke_iframe_instance",
+  body: Record<string, unknown>,
+): RegisterIframeInstanceMessage | RevokeIframeInstanceMessage {
+  if (!isInstanceToken(body["instanceToken"])) {
+    throw new MessageRejected(`${type}: instanceToken`);
+  }
+  return { type, instanceToken: body["instanceToken"] };
+}
+
 /**
  * Validates and narrows a raw message claimed to come from a content script. Throws
  * {@link MessageRejected} for anything that does not exactly match one known shape within its
@@ -233,6 +281,10 @@ export function parseFromContentScript(raw: unknown): FromContentScript {
       return parsePasskeyCreateRequest(raw);
     case "passkey_get_request":
       return parsePasskeyGetRequest(raw);
+    case "register_iframe_instance":
+      return parseIframeInstance("register_iframe_instance", raw);
+    case "revoke_iframe_instance":
+      return parseIframeInstance("revoke_iframe_instance", raw);
     default:
       throw new MessageRejected(`unknown type: ${String(raw["type"])}`);
   }

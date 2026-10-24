@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The save-prompt race fix (`apps/extension/README.md`'s residual note;
 // `core-host/save-prompt-location.ts`): a login form whose submit *really* navigates — unlike
 // `autofill-and-save.spec.ts`'s own `loginPageHtml`, which deliberately stays on one document
@@ -11,16 +13,14 @@
 //
 // Headless (`headless: true, channel: "chromium"`): see `autofill-and-save.spec.ts`'s own note
 // on why the default headless *shell* cannot load extensions.
-import { mkdtempSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { type BrowserContext, chromium, test as base, expect } from "@playwright/test";
 
 import { TEST_ACCOUNT_PASSWORD, signUp } from "./account.ts";
 import { type RunningServer, startServer } from "./server.ts";
+import { withProfileDir } from "./profile.ts";
 
 const EXTENSION_PATH = fileURLToPath(new URL("../dist/chromium", import.meta.url));
 
@@ -74,14 +74,18 @@ const test = base.extend<{ server: RunningServer; context: BrowserContext; exten
     server.stop();
   },
   context: async ({}, use) => {
-    const userDataDir = mkdtempSync(join(tmpdir(), "rizzy-ext-e2e-save-race-"));
-    const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: true,
-      channel: "chromium",
-      args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+    await withProfileDir("rizzy-ext-e2e-save-race-", async (userDataDir) => {
+      const context = await chromium.launchPersistentContext(userDataDir, {
+        headless: true,
+        channel: "chromium",
+        args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+      });
+      try {
+        await use(context);
+      } finally {
+        await context.close();
+      }
     });
-    await use(context);
-    await context.close();
   },
   extensionId: async ({ context }, use) => {
     let [worker] = context.serviceWorkers();

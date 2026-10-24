@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! OPAQUE (RFC 9807) integration (CRYPTO.md §5; ADR 0003, ADR 0004).
 //!
 //! **This module is the one wrapper through which every opaque-ke call goes** (§5.1, ADR 0009

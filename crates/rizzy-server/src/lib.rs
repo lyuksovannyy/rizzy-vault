@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-server` — the `rizzy-vault` server binary and the library it runs (roadmap M1 step
 //! 3; [ADR 0010], [ADR 0002] point 3, [ADR 0011], [ADR 0021]; ADR 0016 §3 notes: the leaf that
 //! wires the domain crates).
@@ -11,6 +13,8 @@
 //! - **`web`**: the web vault with its CSP ([`http::web`], [`http::security`]; INV-49): with
 //!   the `embed-web` feature, the `apps/web` build embedded in the binary; without it (the
 //!   default), ADR 0010 §4's fixed page;
+//! - **`icons`** (M3, alone, no database, no secrets; [`http::icons`], `rizzy-icon-proxy`): the
+//!   breach-check range query of ADR 0053, behind its own off-by-default switch;
 //! - **`worker`**: expired auth state, re-sealing 2FA secrets after a data-key rotation, stale
 //!   reconciliation epochs, compaction, `SQLite` space and the pre-migration copy ([`worker`]).
 //!
@@ -30,6 +34,7 @@
 //! | [`bridge`] | ADR 0016 R4 | The two cross-domain traits, wired |
 //! | [`secrets_file`] | CRYPTO.md §5.11; ADR 0010 §4 | The secrets file's reader and writer |
 //! | [`secrets_backup`] | ADR 0011 owner decision 3; CRYPTO.md §5.11 | The encrypted secrets backup file |
+//! | [`db_backup`] | ADR 0071; CRYPTO.md §9.8 | The encrypted database backup, format version 2 |
 //! | [`admin`] | ADR 0010 §2, §4; ADR 0011; CRYPTO.md §5.8, §5.11 | The admin subcommands |
 //! | [`log`] | INV-48 | Allow-listed structured log lines |
 //! | [`fsutil`] | ADR 0010 §4 | Bounded reads, 0600 files, atomic replace, the inside-the-data-directory check |
@@ -47,7 +52,8 @@
 //!   `rizzy-proto`'s bounded types), request headers ([`http::headers`]), the configuration
 //!   file, the secrets file and the database backup file. Fuzz targets: `server_headers`,
 //!   `server_config`, `server_secrets_file`; the request bodies are `rizzy-proto`'s
-//!   `proto_json`; the backup file is `rizzy-storage`'s `db_backup_parse`.
+//!   `proto_json`; the backup file is `rizzy-storage`'s `db_backup_parse`, and its encrypted
+//!   container `db_backup_container`.
 //! - **Crate wiring** (ADR 0016 §3 notes, R2, R5): internal dependencies are the domain crates,
 //!   `rizzy-storage` and `rizzy-bus`; the `rizzy-core` and `rizzy-proto` items the auth
 //!   domain's API is written in come through its `types` module, which names them one by one
@@ -74,16 +80,15 @@
 //! | 12 configuration | [`config`], [`cli`] |
 //! | 13 secrets file | [`secrets_file`], [`secrets_backup`] |
 //! | 14 `GET /api/meta`, `Rizzy-Client` | [`http::api::meta`], [`http::headers::client_refused`] |
-//! | 15 web role paths | [`http::web`] |
+//! | 15 web role paths, as [ADR 0049] supersedes it (the route table) | [`http::web`] |
 //!
 //! The constants clients share (paths, header names, body limits, platform names) are
 //! `rizzy-proto`'s. **This crate's readings where the ADR is silent**, each documented where it
 //! is applied and reported to the owner: a `429` that comes from no bucket carries a fixed
 //! `Retry-After` ([`http::api::RETRY_AFTER_FALLBACK_SECS`]); the `Rizzy-Client` and
-//! `X-Forwarded-For` checks run on the 27 `/api/v1` endpoints, before the session check, and
+//! `X-Forwarded-For` checks run on the 31 `/api/v1` endpoints, before the session check, and
 //! not on `GET /api/meta`; a repeated `Authorization`, signing or `Content-Length` field line
-//! is refused; another method on a path the web role serves is a plain `405`; with
-//! `embed-web`, the web vault's fixed asset paths besides item 15's two (reported); a
+//! is refused; a
 //! `request_counter` above `i64::MAX` is refused (`rizzy-domain-auth`); the setting
 //! `RIZZY_RECOVERY_WAIT_HOURS` (ADR 0008 decision 5), which item 12's list does not name
 //! ([`config`]).
@@ -98,7 +103,8 @@
 //! - Recording a change of the recovery waiting period in the users' security event log
 //!   (threat model §7.19, INV-69): that log is M3's.
 //! - The admin listener and API (M3),
-//!   `notify`, `icons` (M3) and `smtp` (M6).
+//!   `notify` (M3) and `smtp` (M6); of `icons`, the favicon fetch (ADR 0052): the role runs
+//!   only the breach check (ADR 0053).
 //! - A setting for the minimum client versions: the list is built in and empty
 //!   ([`http::api::MIN_CLIENT_VERSIONS`]), so no client is refused yet.
 //!
@@ -127,6 +133,7 @@
 //!
 //! [ADR 0002]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0002-own-protocol.md
 //! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
+//! [ADR 0049]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0049-web-role-route-table.md
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 //! [ADR 0011]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0011-storage.md
 //! [ADR 0021]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0021-server-compaction.md
@@ -141,6 +148,7 @@ pub mod bridge;
 pub mod cli;
 pub mod config;
 pub mod coredump;
+pub mod db_backup;
 pub mod fsutil;
 pub mod http;
 pub mod log;
@@ -148,4 +156,5 @@ pub mod secrets_backup;
 pub mod secrets_file;
 pub mod server;
 pub mod sys;
+pub mod usage;
 pub mod worker;

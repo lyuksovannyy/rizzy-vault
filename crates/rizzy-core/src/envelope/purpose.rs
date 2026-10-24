@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The purpose registry (CRYPTO.md §8.4, §5.11, §9.5) and the typed contexts.
 //!
 //! Every purpose in §8.4 is registered here with its `u16` id, its one encrypt algorithm, its
@@ -7,8 +9,10 @@
 //! server's allow-list table, never in a client's.
 //!
 //! A context (`ctx`) is the ordered list of fields that says where a ciphertext belongs. Each
-//! M1 purpose has a context type implementing [`Context`]; the type fixes the purpose, so a
-//! caller cannot pair a context with the wrong purpose id. Purposes of later milestones, and
+//! M1 purpose, each M3 attachment purpose (ADR 0054), and M8's `SERVER_DB_BACKUP` (ADR 0071),
+//! has a context type implementing
+//! [`Context`]; the type fixes the purpose, so a caller cannot pair a context with the wrong
+//! purpose id. Purposes of later milestones, and
 //! the parked ones, are registered (their ids are reserved) but have no context type yet, so
 //! nothing can seal or open them until their milestone, or the ADR that revives On-device
 //! mode, defines and reviews the layout.
@@ -45,8 +49,8 @@ use sha2::{Digest as _, Sha256};
 
 use super::AlgId;
 use crate::ids::{
-    AccountId, BackupId, DeviceId, ExportId, ItemId, KeyType, LoginId, OpId, PublicKeyId,
-    SnapshotId, VaultId,
+    AccountId, AttachmentId, BackupId, DeviceId, ExportId, ItemId, KeyType, LoginId, OpId,
+    PublicKeyId, SnapshotId, VaultId,
 };
 use crate::kdf::KdfId;
 
@@ -131,9 +135,6 @@ pub struct PurposeSpec {
 
 /// Decrypt allow-list of every symmetric purpose: `{0x01}` (§9.5 rule 2).
 const SYMMETRIC: &[AlgId] = &[AlgId::XChaCha20Poly1305Committed];
-/// Decrypt allow-list of `ATTACHMENT_CHUNK`: `{0x03}`, reserved for M3. No layout exists yet,
-/// so the parser rejects every envelope against it.
-const CHUNKED: &[AlgId] = &[AlgId::ChunkedXChaCha20Poly1305];
 /// Decrypt allow-list of the HPKE Base-mode purposes: `{0x10}`.
 const HPKE_BASE: &[AlgId] = &[AlgId::HpkeBaseX25519];
 /// Decrypt allow-list of the HPKE PSK-mode purposes: `{0x12}`.
@@ -221,11 +222,14 @@ pub enum Purpose {
     ServerLoginState = 0x0101,
     /// The server-secrets backup (server only).
     ServerSecretsBackup = 0x0102,
+    /// One chunk of an encrypted database backup, format version 2 (server only, M8;
+    /// CRYPTO.md §9.8, ADR 0071).
+    ServerDbBackup = 0x0105,
 }
 
 impl Purpose {
     /// Every purpose, in id order.
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 32] = [
         Self::AccountKeyServerWrap,
         Self::AccountKeyLocalWrap,
         Self::AccountKeyRecoveryWrap,
@@ -257,6 +261,7 @@ impl Purpose {
         Self::ServerTotpSecret,
         Self::ServerLoginState,
         Self::ServerSecretsBackup,
+        Self::ServerDbBackup,
     ];
 
     /// The registry row: CRYPTO.md §8.4 with the allow-lists of §9.5 and the plaintext rules
@@ -292,7 +297,9 @@ impl Purpose {
             Self::ItemKeyWrap => ("ITEM_KEY_WRAP", SYM, SYMMETRIC, Fixed(37), M::M1),
             Self::ItemOp => ("ITEM_OP", SYM, SYMMETRIC, Padded, M::M1),
             Self::ItemSnapshot => ("ITEM_SNAPSHOT", SYM, SYMMETRIC, Padded, M::M1),
-            Self::AttachmentChunk => ("ATTACHMENT_CHUNK", CHUNK, CHUNKED, Unspecified, M::M3),
+            // An ordinary `0x01` envelope per chunk, unpadded (ADR 0054 §1; §8.5's framed list
+            // omits it).
+            Self::AttachmentChunk => ("ATTACHMENT_CHUNK", SYM, SYMMETRIC, Unpadded, M::M3),
             Self::AttachmentKeyWrap => ("ATTACHMENT_KEY_WRAP", SYM, SYMMETRIC, Fixed(32), M::M3),
             Self::RelayBatch => ("RELAY_BATCH", SYM, SYMMETRIC, Padded, M::Parked),
             Self::PairingTransfer => ("PAIRING_TRANSFER", SYM, SYMMETRIC, Unpadded, M::Parked),
@@ -306,6 +313,7 @@ impl Purpose {
             Self::ServerTotpSecret => ("SERVER_TOTP_SECRET", SYM, SYMMETRIC, Unpadded, M::M1),
             Self::ServerLoginState => ("SERVER_LOGIN_STATE", SYM, SYMMETRIC, Unpadded, M::M1),
             Self::ServerSecretsBackup => ("SERVER_SECRETS_BACKUP", SYM, SYMMETRIC, Unpadded, M::M1),
+            Self::ServerDbBackup => ("SERVER_DB_BACKUP", SYM, SYMMETRIC, Unpadded, M::M8),
         };
         PurposeSpec {
             id: self as u16,
@@ -410,8 +418,6 @@ impl Purpose {
 // Short names for the registry rows above.
 /// Encrypt algorithm `0x01`, for the registry rows.
 const SYM: AlgId = AlgId::XChaCha20Poly1305Committed;
-/// Encrypt algorithm `0x03` (reserved, M3), for the registry rows.
-const CHUNK: AlgId = AlgId::ChunkedXChaCha20Poly1305;
 /// Encrypt algorithm `0x10`, for the registry rows.
 const BASE: AlgId = AlgId::HpkeBaseX25519;
 /// Encrypt algorithm `0x12`, for the registry rows.
@@ -557,7 +563,16 @@ macro_rules! id_ctx_fields {
 }
 
 id_ctx_fields!(
-    AccountId, DeviceId, VaultId, ItemId, OpId, SnapshotId, ExportId, BackupId, LoginId
+    AccountId,
+    DeviceId,
+    VaultId,
+    ItemId,
+    OpId,
+    SnapshotId,
+    ExportId,
+    BackupId,
+    LoginId,
+    AttachmentId
 );
 
 /// Defines one context type: its fields in §8.4 order, its purpose and its marker traits.
@@ -641,6 +656,37 @@ context! {
         account_key_epoch: u32,
         /// Epoch of the recovery code.
         recovery_epoch: u32,
+    }
+}
+
+context! {
+    /// `ACCOUNT_KEY_KEYSTORE_WRAP` (`E_ks`, M3/M7):
+    /// `account_id ‖ device_id ‖ u32 account_key_epoch`. No `password_epoch` and no `kdf_id`:
+    /// the keystore unlock secret is random, not password-derived (ADR 0057 §2).
+    AccountKeyKeystoreWrapCtx: AccountKeyKeystoreWrap, SymmetricContext {
+        /// The account.
+        account_id: AccountId,
+        /// The device whose OS keystore holds the secret.
+        device_id: DeviceId,
+        /// Epoch of the wrapped account key.
+        account_key_epoch: u32,
+    }
+}
+
+context! {
+    /// `ACCOUNT_KEY_FORWARD` (M3/M7, device-local only):
+    /// `account_id ‖ device_id ‖ u32 from_account_key_epoch ‖ u32 to_account_key_epoch`. The
+    /// plaintext is the account key of `to_account_key_epoch`, sealed under the one of
+    /// `from_account_key_epoch` (CRYPTO.md §11.3 step 4.3).
+    AccountKeyForwardCtx: AccountKeyForward, SymmetricContext {
+        /// The account.
+        account_id: AccountId,
+        /// The device that wrote the envelope; it never leaves that device.
+        device_id: DeviceId,
+        /// Epoch of the wrapping (previous) account key.
+        from_account_key_epoch: u32,
+        /// Epoch of the wrapped (newer) account key.
+        to_account_key_epoch: u32,
     }
 }
 
@@ -817,6 +863,41 @@ context! {
 }
 
 context! {
+    /// `ATTACHMENT_CHUNK` (M3, ADR 0054 §1):
+    /// `vault_id ‖ item_id ‖ attachment_id ‖ u32 chunk_index ‖ u32 chunk_count`.
+    ///
+    /// `chunk_count` is never read from the server: the reader derives it from the item's
+    /// `attachment/<id>/size` field ([`crate::attachment::AttachmentLayout`]), so a chunk
+    /// opened at another index, for another attachment or against another declared size fails
+    /// the commitment (INV-78).
+    AttachmentChunkCtx: AttachmentChunk, SymmetricContext {
+        /// The vault holding the item.
+        vault_id: VaultId,
+        /// The item the attachment belongs to.
+        item_id: ItemId,
+        /// The attachment.
+        attachment_id: AttachmentId,
+        /// Zero-based position of this chunk.
+        chunk_index: u32,
+        /// Number of chunks, `ceil(size / CHUNK_SIZE)`.
+        chunk_count: u32,
+    }
+}
+
+context! {
+    /// `ATTACHMENT_KEY_WRAP` (M3): `vault_id ‖ item_id ‖ attachment_id`. Never re-wrapped
+    /// when the item key rotates (ADR 0054 §3).
+    AttachmentKeyWrapCtx: AttachmentKeyWrap, SymmetricContext {
+        /// The vault holding the item.
+        vault_id: VaultId,
+        /// The item the attachment belongs to.
+        item_id: ItemId,
+        /// The attachment.
+        attachment_id: AttachmentId,
+    }
+}
+
+context! {
     /// `EXPORT_FILE`: `export_id ‖ u64 created_at_ms ‖ u16 kdf_id ‖ export_salt`.
     ExportFileCtx: ExportFile, SymmetricContext {
         /// The export.
@@ -865,6 +946,27 @@ context! {
         kdf_id: KdfId,
         /// The 16-byte random Argon2id salt.
         backup_salt: [u8; 16],
+    }
+}
+
+context! {
+    /// `SERVER_DB_BACKUP` (server only, M8; CRYPTO.md §9.8, ADR 0071):
+    /// `backup_id ‖ u64 created_at_ms ‖ u32 backup_key_id ‖ u32 chunk_index ‖ u32 chunk_count`.
+    ///
+    /// `chunk_index` and `chunk_count` bind each chunk's position and the chunk count of its
+    /// backup, so a reordered, duplicated or dropped chunk, an edited clear `chunk_count`, or
+    /// a chunk from another backup fails the commitment of the chunks it lands next to.
+    ServerDbBackupCtx: ServerDbBackup, ServerContext {
+        /// The backup: 16 random bytes per run.
+        backup_id: BackupId,
+        /// Creation time, milliseconds since the Unix epoch.
+        created_at_ms: u64,
+        /// The `backup_key_id` of the secrets-file backup key the chunk is sealed under.
+        backup_key_id: u32,
+        /// The chunk's 0-based position in the container.
+        chunk_index: u32,
+        /// The container's chunk count.
+        chunk_count: u32,
     }
 }
 

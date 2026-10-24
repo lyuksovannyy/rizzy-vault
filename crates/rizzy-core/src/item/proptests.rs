@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Property tests of the item schema (ADR 0018 §12, the schema-layer round trips): the value
 //! decoder and the key grammar never panic and are canonical (decode then encode, and parse
 //! then rebuild, are the identity); every key the grammar generates parses, and the parser
@@ -12,8 +14,9 @@ use proptest::prelude::*;
 use super::display::{Candidate, resolve_field, resolve_lifecycle};
 use super::key::{FieldKey, FieldKeyRef, KeyKind, MAX_KEY_LEN};
 use super::order::{evenly_spaced, sort_key_between};
-use super::schema::classify;
+use super::schema::{KeyClass, ReservedFor, classify};
 use super::tag::{tag_key, tag_name};
+use super::types::{ItemType, ItemTypeClass};
 use super::value::{MAX_SORT_KEY_LEN, SortKey, Value, ValueRef, is_sort_key};
 use crate::ids::DeviceId;
 
@@ -342,6 +345,30 @@ proptest! {
         ],
     ) {
         prop_assert_eq!(FieldKeyRef::parse(&key).is_ok(), abnf_oracle(&key));
+    }
+}
+
+proptest! {
+    /// ADR 0078 §1: of every `u16`, exactly `0x0009` is the retired type, and it is never
+    /// supported.
+    #[test]
+    fn only_0x0009_is_retired(id in any::<u16>()) {
+        let t = ItemType::from_id(id);
+        prop_assert_eq!(t.class() == ItemTypeClass::Retired, id == 0x0009);
+        if id == 0x0009 {
+            prop_assert!(t.supported().is_none());
+        }
+    }
+
+    /// ADR 0078 §2: every grammar-valid key under `bank.` is `Reserved(Retired)`, never
+    /// `Known`.
+    #[test]
+    fn every_bank_key_is_retired(parts in proptest::collection::vec(name(), 1..=3)) {
+        let text = format!("bank.{}", parts.join("."));
+        let key = FieldKeyRef::parse(text.as_bytes()).unwrap();
+        let class = classify(key);
+        prop_assert_eq!(class, KeyClass::Reserved(ReservedFor::Retired));
+        prop_assert!(!matches!(class, KeyClass::Known(_)));
     }
 }
 

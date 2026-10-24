@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Account recovery with the Emergency Kit (CRYPTO.md §11.9; ADR 0008 decisions 3–6, owner
 //! decisions 2–3; INV-59).
 //!
@@ -305,7 +307,15 @@ impl<V: VaultPort> AuthService<V> {
             crate::config::RECOVERY_SESSION_TTL_MS,
         )
         .await?;
-        let view = view::build(&self.vault, tx.conn(), &trust, &devices, ViewScope::Chain).await?;
+        let view = view::build(
+            &self.vault,
+            tx.conn(),
+            &trust,
+            &devices,
+            ViewScope::Chain,
+            self.config.account_quota_bytes,
+        )
+        .await?;
         let vaults = self.vault.recovery_vaults(tx.conn(), account).await?;
         tx.commit().await?;
         Ok(RecoveryRelease {

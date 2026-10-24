@@ -1,10 +1,13 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The server secrets' startup checks (CRYPTO.md §5.8, §5.11) and what the database never
 //! holds (INV-8, INV-50).
 
 use chacha20::ChaCha20Rng;
 use chacha20::rand_core::SeedableRng as _;
 use rizzy_core::opaque::{EnumKey, ServerSetup};
-use rizzy_core::server_seal::ServerDataKey;
+use rizzy_core::server_seal::{ServerDataKey, ServerDbBackupKey};
+use rizzy_domain_auth::secrets::SecretsError;
 use rizzy_domain_auth::{ServerSecrets, StartupCheckError};
 use rizzy_storage::Value;
 use sha2::{Digest as _, Sha256};
@@ -56,6 +59,83 @@ fn startup_checks() {
         let debug = format!("{:?}", env.secrets);
         assert!(!debug.contains(&format!("{:?}", env.secrets.bootstrap_token())));
     });
+}
+
+/// The backup keys of ADR 0071: `rotate_backup_key` adds a new current key from the CSPRNG,
+/// `with_backup_keys` loads them with one current, and a key equal to a data key or the
+/// `enum_key` is refused (threat model INV-98).
+#[test]
+fn backup_keys() {
+    let mut rng = ChaCha20Rng::seed_from_u64(40);
+    let mut secrets = ServerSecrets::generate(&mut rng);
+    assert_eq!(secrets.current_backup_key_id(), None);
+    assert!(secrets.current_backup_key().is_none());
+    assert_eq!(secrets.backup_keys().count(), 0);
+
+    assert_eq!(secrets.rotate_backup_key(&mut rng), Ok(1));
+    assert_eq!(secrets.rotate_backup_key(&mut rng), Ok(2));
+    assert_eq!(secrets.current_backup_key_id(), Some(2));
+    assert_eq!(secrets.current_backup_key().unwrap().backup_key_id(), 2);
+    // The old key stays, so backups sealed under it remain restorable.
+    assert_eq!(secrets.backup_key(1).unwrap().backup_key_id(), 1);
+    assert!(secrets.backup_key(3).is_none());
+    let first = *secrets.backup_key(1).unwrap().expose_secret();
+    let second = *secrets.backup_key(2).unwrap().expose_secret();
+    assert_ne!(first, second);
+    for data_key in secrets.data_keys() {
+        assert_ne!(&first, data_key.expose_secret());
+    }
+    assert_ne!(&first, secrets.enum_key().expose_secret());
+    let debug = format!("{secrets:?}");
+    assert!(debug.contains("backup_key_ids: [1, 2]"), "{debug}");
+    assert!(!debug.contains(&format!("{first:?}")));
+
+    // Loading: the parts plus the backup keys.
+    let parts = || {
+        let (_, setup) = secrets.setups().next().unwrap();
+        let setup = ServerSetup::from_bytes(setup.to_bytes().expose_secret()).unwrap();
+        let enum_key = EnumKey::from_slice(secrets.enum_key().expose_secret()).unwrap();
+        let data_key = secrets.data_keys().next().unwrap();
+        let data_key =
+            ServerDataKey::from_slice(data_key.expose_secret(), data_key.data_key_id()).unwrap();
+        ServerSecrets::from_parts(1, vec![(1, setup)], enum_key, vec![data_key], 1, None).unwrap()
+    };
+    let key = |bytes: &[u8; 32], id| ServerDbBackupKey::from_slice(bytes, id).unwrap();
+    let loaded = parts()
+        .with_backup_keys(vec![key(&first, 1), key(&second, 2)], 1)
+        .unwrap();
+    assert_eq!(loaded.current_backup_key_id(), Some(1));
+    assert_eq!(loaded.backup_keys().count(), 2);
+    assert_eq!(
+        parts()
+            .with_backup_keys(vec![key(&first, 1), key(&second, 1)], 1)
+            .unwrap_err(),
+        SecretsError::DuplicateId
+    );
+    assert_eq!(
+        parts()
+            .with_backup_keys(vec![key(&first, 1)], 2)
+            .unwrap_err(),
+        SecretsError::NoCurrentBackupKey
+    );
+    assert_eq!(
+        parts().with_backup_keys(vec![], 1).unwrap_err(),
+        SecretsError::NoCurrentBackupKey
+    );
+    let data_key_bytes = *secrets.data_keys().next().unwrap().expose_secret();
+    assert_eq!(
+        parts()
+            .with_backup_keys(vec![key(&data_key_bytes, 1)], 1)
+            .unwrap_err(),
+        SecretsError::BackupKeyReused
+    );
+    let enum_bytes = *secrets.enum_key().expose_secret();
+    assert_eq!(
+        parts()
+            .with_backup_keys(vec![key(&enum_bytes, 1)], 1)
+            .unwrap_err(),
+        SecretsError::BackupKeyReused
+    );
 }
 
 /// The same checks on a logical backup, before `rizzy-vault restore` loads it (ADR 0023 §5

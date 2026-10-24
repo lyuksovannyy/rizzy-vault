@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The simulated server of the harness: ADR 0012 §7 "Upload" and "Fetch" as ADR 0021 §4 and §9
 //! replace them, `worker` through [`crate::compaction`], backups and restores, and a
 //! withholding mode for property 7.
@@ -28,14 +30,29 @@
 //!
 //! **What is modelled of ADR 0021 §9.** "Already stored" (checked first, byte-identical by
 //! statement and body), a conflict at a stored dot, the `vault_prev_seq` check, revocation
-//! cut-offs for ops and snapshots ("Revoked and kind-4 authors"; no kind-4 certificates), the
-//! snapshot acceptance checks, and the healing request, atomic, with bodiless headers only
-//! behind the request's snapshots. Not modelled: epochs and wraps (one epoch, one item key per
-//! item, so no stale-epoch answer), the signed `account-state`, and certificates.
+//! cut-offs for ops and snapshots, a kind-4 author's expiry ("Revoked and kind-4 authors":
+//! uploads from an expired certificate refused, its new snapshots refused, retained ones kept
+//! as covers), the snapshot acceptance checks, the healing request, atomic, with bodiless
+//! headers only behind the request's snapshots, and "Stale epoch": an op or snapshot whose
+//! `vault_key_epoch` is below the vault's is refused ([`OpAnswer::StaleEpoch`]), except a
+//! bodiless header or any record of a healing request (the server cannot tell a record
+//! re-published verbatim from a fresh one, so the client keeps that rule:
+//! [`crate::causal::VaultLog::stale_plan`]) and a revoked device's op at or below its
+//! cut-off.
+//!
+//! **Epochs and wraps.** The vault's epoch and its wrap-set rows, one per (`item_id`, item
+//! `key_id`), each an `ITEM_KEY_WRAP` under the vault key of its epoch, are part of the
+//! database a restore rolls back. A record that carries a wrap adds its row when it is stored.
+//! A rotation ([`Server::rotate`], ADR 0025 §3) is checked and applied atomically with the
+//! revocation it may carry: a higher epoch, the rotator's cursor equal to every head
+//! ("Rotation cut-off"), and every stored row either re-wrapped at the new epoch or dropped.
+//! The ADR 0032 §3 self-grant lag repair after a restore is [`Server::heal_epoch`]. Not
+//! modelled: the signed `account-state`, self-grants, device grants and certificates (the
+//! world hands vault keys to the devices a rotation keeps).
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rizzy_core::ids::{DeviceId, ItemId};
+use rizzy_core::ids::{DeviceId, ItemId, SymmetricKeyId};
 use rizzy_core::sign::{OpStatement, SnapshotStatement, Verified};
 
 use super::{checker, crypto};
@@ -47,6 +64,31 @@ use crate::compaction::{
 use crate::dot::Dot;
 use crate::header::{OpHeader, SnapshotHeader};
 use crate::vv::{VersionVector, VvOrdering};
+
+/// An `ITEM_KEY_WRAP` envelope and the vault epoch of the key it is sealed under (CRYPTO.md
+/// §4.4, §11.6). Server-visible: the epoch and the envelope bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Wrap {
+    /// The `vault_key_epoch` of the wrapping vault key.
+    pub(super) epoch: u32,
+    /// The sealed `ITEM_KEY_WRAP`.
+    pub(super) envelope: Vec<u8>,
+}
+
+/// One wrap-set row: the item, the id of the item key it wraps (the `key_id` of the envelopes
+/// sealed under it), and the wrap (CRYPTO.md §4.2, ADR 0025 §3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WrapRow {
+    /// The item.
+    pub(super) item: ItemId,
+    /// The item key's id.
+    pub(super) key: SymmetricKeyId,
+    /// The wrap.
+    pub(super) wrap: Wrap,
+}
+
+/// The wrap-set rows by `(item, key id bytes)`.
+type Rows = BTreeMap<(ItemId, [u8; 16]), Wrap>;
 
 /// An op record as it travels: the statement its author signed, its parsed header (the server
 /// parses the canonical header before storing, ADR 0012 §7), and its body when one goes with it.
@@ -60,6 +102,10 @@ pub(super) struct OpRecord {
     pub(super) header: OpHeader,
     /// The body, the sealed `ITEM_OP` envelope, or `None` for a bodiless header.
     pub(super) body: Option<Vec<u8>>,
+    /// The `ITEM_KEY_WRAP` of the item key the body is sealed under, when its author created
+    /// that key (CRYPTO.md §11.6 writer rule): it travels beside the record, unsigned (see
+    /// [`super::crypto`] "What is not modelled"), and the server keeps it as a wrap-set row.
+    pub(super) wrap: Option<Wrap>,
 }
 
 impl OpRecord {
@@ -83,6 +129,8 @@ pub(super) struct SnapRecord {
     pub(super) header: SnapshotHeader,
     /// The snapshot `data`, sealed: the `ITEM_SNAPSHOT` envelope.
     pub(super) data: Vec<u8>,
+    /// The wrap of the item key `data` is sealed under, as [`OpRecord::wrap`].
+    pub(super) wrap: Option<Wrap>,
     /// The simulation's ground truth, never sent and never read by the server or a device's
     /// sync code: whether the snapshot may lie, because a faulty device wrote it dishonestly
     /// or its author had absorbed such a snapshot before writing it (the merge spike's
@@ -150,6 +198,17 @@ struct Db {
     /// For the checker: the items with a snapshot whose covered VV is not at least that of the
     /// one stored before it (property 5 does not apply to them).
     nonlinear: BTreeSet<ItemId>,
+    /// The vault's current `vault_key_epoch` (CRYPTO.md §4.4).
+    epoch: u32,
+    /// The wrap set.
+    rows: Rows,
+    /// For the stale-epoch check of the world: each op stored outside a healing request, with
+    /// the vault epoch at the moment it was stored.
+    stored_epoch: BTreeMap<Dot, u32>,
+    /// For the world's writer-rule check: every op body and snapshot envelope stored through a
+    /// healing request (ADR 0021 §9 "Healing request" exempts it from the stale-epoch check,
+    /// so it may carry a key from before a rotation the request's author missed).
+    healed_envelopes: BTreeSet<Vec<u8>>,
 }
 
 impl Db {
@@ -166,22 +225,40 @@ impl Db {
         self.chains.get(&dot.device_id())?.get(&dot.seq())
     }
 
+    /// Adds the row of the wrap `record` carries, if any and if the vault has no row for that
+    /// item key yet. A wrap below the vault's epoch adds nothing: its key's row, if the key was
+    /// ever stored, was re-wrapped by the rotation that raised the epoch.
+    fn add_row(&mut self, item: ItemId, envelope: Option<&[u8]>, wrap: Option<&Wrap>) {
+        let (Some(envelope), Some(wrap)) = (envelope, wrap) else {
+            return;
+        };
+        let Some(key) = crypto::envelope_key(envelope) else {
+            return;
+        };
+        if wrap.epoch >= self.epoch {
+            self.rows
+                .entry((item, *key.as_bytes()))
+                .or_insert_with(|| wrap.clone());
+        }
+    }
+
     /// Stores a snapshot after the §9 checks against `heads`.
     fn store_snapshot(
         &mut self,
         record: &SnapRecord,
         heads: &VersionVector,
+        expiry: CertificateExpiry,
     ) -> Result<(), SnapshotRefusal> {
         let chains = VaultChains {
             heads,
             cutoffs: &self.cutoffs,
         };
-        check_snapshot(
-            record.header.author,
-            &record.header.covered,
-            chains,
-            CertificateExpiry::Unexpired,
-        )?;
+        check_snapshot(record.header.author, &record.header.covered, chains, expiry)?;
+        self.add_row(
+            record.header.item_id,
+            Some(&record.data),
+            record.wrap.as_ref(),
+        );
         self.store_seq += 1;
         let stored = Stored {
             record: record.clone(),
@@ -288,6 +365,11 @@ pub(super) enum OpAnswer {
     NotLinked,
     /// Past its author's revocation cut-off.
     Revoked,
+    /// Its `vault_key_epoch` is below the vault's (ADR 0021 §9 "Stale epoch").
+    StaleEpoch,
+    /// The uploading session's certificate expired (CRYPTO.md §10.2: "The server refuses
+    /// uploads from an expired certificate").
+    Expired,
     /// The body does not match the signed envelope hash.
     BadBody,
     /// The statement's signature does not verify under its author's key, or the statement
@@ -304,6 +386,8 @@ pub(super) enum SnapAnswer {
     AlreadyStored,
     /// Refused under ADR 0021 §9.
     Refused(SnapshotRefusal),
+    /// Its `vault_key_epoch` is below the vault's: the client only discards and rewrites it.
+    StaleEpoch,
     /// The data does not match the signed envelope hash.
     BadData,
     /// The statement's signature does not verify under its author's key, or the statement
@@ -328,6 +412,9 @@ pub(super) enum HealRefusal {
 /// their bodies, then snapshots.
 #[derive(Clone, Debug, Default)]
 pub(super) struct HealingRequest {
+    /// Every item-key wrap the server lacks, first ("every item-key wrap the server lacks,
+    /// then per chain ..."), wrapped at the healer's epoch.
+    pub(super) wraps: Vec<WrapRow>,
     /// The op records, per chain in chain order.
     pub(super) ops: Vec<OpRecord>,
     /// The fresh snapshots and the held ones sent verbatim.
@@ -342,10 +429,6 @@ pub(super) struct Page {
     pub(super) ops: Vec<OpRecord>,
     /// The covers.
     pub(super) covers: Vec<SnapRecord>,
-    /// Whether a later page of the same response follows: the page is a strict prefix of the
-    /// response (metadata of the delivery, which the device reads to tell the paging finding of
-    /// [`super::world::World::drain`] from any other refusal).
-    pub(super) partial: bool,
 }
 
 /// A Fetch response.
@@ -357,6 +440,38 @@ pub(super) struct Response {
     pub(super) cutoffs: BTreeMap<DeviceId, u64>,
     /// The restore generation.
     pub(super) generation: RestoreGeneration,
+    /// The vault's wrap-set rows.
+    pub(super) wraps: Vec<WrapRow>,
+    /// The `expires_at_ms` of every expiring certificate (kind 4), standing in for the
+    /// certificates a response carries.
+    pub(super) expiries: BTreeMap<DeviceId, u64>,
+}
+
+/// Why the server refused a rotation (ADR 0025 §3); nothing of it is stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RotationRefusal {
+    /// The new epoch is not above the stored one (check 2).
+    Epoch,
+    /// A wrap is not at the new epoch, or the re-wrapped and dropped rows are not exactly the
+    /// stored ones (check 3).
+    Wraps,
+    /// The rotator's cursor is not every head (check 4, the rotation cut-off).
+    Cursor,
+}
+
+/// A rotation upload's vault half (ADR 0025 §1), with the revocation it carries, if any.
+#[derive(Clone, Debug)]
+pub(super) struct Rotation {
+    /// The new `vault_key_epoch`.
+    pub(super) epoch: u32,
+    /// The rotator's fetch cursor.
+    pub(super) cursor: VersionVector,
+    /// Every stored row the rotator could open, re-wrapped at the new epoch.
+    pub(super) rewrapped: Vec<WrapRow>,
+    /// The stored rows it could not open.
+    pub(super) dropped: Vec<(ItemId, SymmetricKeyId)>,
+    /// The device the rotation revokes, if any (CRYPTO.md §11.8: one atomic request).
+    pub(super) revoke: Option<DeviceId>,
 }
 
 /// A withholding fault (property 7): Fetch responses to `victim` leave out the op at `dot`.
@@ -394,6 +509,22 @@ pub(super) struct ServerStats {
     pub(super) worker_checks: checker::WorkerChecks,
     /// Pages checked for property 3 and the §4 selection with at least one bodiless header.
     pub(super) pages_checked: u64,
+    /// Ops refused as stale.
+    pub(super) stale_ops: u64,
+    /// Snapshots refused as stale.
+    pub(super) stale_snapshots: u64,
+    /// Rotations stored.
+    pub(super) rotations: u64,
+    /// Rotations refused.
+    pub(super) rotations_refused: u64,
+    /// Uploads refused because the session's certificate expired.
+    pub(super) expired_uploads: u64,
+    /// Snapshots refused because their author's certificate expired.
+    pub(super) expired_snapshots: u64,
+    /// Covers served by an author whose certificate expired: retained ones keep counting.
+    pub(super) expired_covers: u64,
+    /// Lag repairs of the vault epoch stored (ADR 0032 §3).
+    pub(super) epoch_heals: u64,
 }
 
 /// The simulated server of one vault.
@@ -407,6 +538,11 @@ pub(super) struct Server {
     generations: u8,
     /// The withholding fault, if on.
     pub(super) withhold: Option<Withhold>,
+    /// The kind-4 devices whose certificate has expired at the server's clock. Time, not
+    /// data: a restore does not bring a certificate back.
+    pub(super) expired: BTreeSet<DeviceId>,
+    /// The `expires_at_ms` of every expiring certificate the server holds (kind 4).
+    pub(super) certificates: BTreeMap<DeviceId, u64>,
     /// Integrity errors: a bodiless header served without a cover (§4), which an honest server
     /// never produces (§8 property 1).
     pub(super) integrity_errors: Vec<Dot>,
@@ -434,10 +570,16 @@ impl Server {
                 healed: BTreeSet::new(),
                 last_covered: BTreeMap::new(),
                 nonlinear: BTreeSet::new(),
+                epoch: 0,
+                rows: Rows::new(),
+                stored_epoch: BTreeMap::new(),
+                healed_envelopes: BTreeSet::new(),
             },
             backup: None,
             generations: 0,
             withhold: None,
+            expired: BTreeSet::new(),
+            certificates: BTreeMap::new(),
             integrity_errors: Vec::new(),
             input_errors: 0,
             violations: Vec::new(),
@@ -453,6 +595,58 @@ impl Server {
     /// The restore generation.
     pub(super) fn generation(&self) -> RestoreGeneration {
         self.db.generation
+    }
+
+    /// The vault's current `vault_key_epoch`.
+    pub(super) fn epoch(&self) -> u32 {
+        self.db.epoch
+    }
+
+    /// The wrap-set rows.
+    pub(super) fn rows(&self) -> Vec<WrapRow> {
+        self.db
+            .rows
+            .iter()
+            .map(|(&(item, key), wrap)| WrapRow {
+                item,
+                key: SymmetricKeyId::from_bytes(key),
+                wrap: wrap.clone(),
+            })
+            .collect()
+    }
+
+    /// Every op stored outside a healing request, with the vault epoch when it was stored, for
+    /// the world's stale-epoch check.
+    pub(super) fn stored_epochs(&self) -> impl Iterator<Item = (&OpHeader, u32)> + '_ {
+        self.db
+            .stored_epoch
+            .iter()
+            .filter_map(|(&dot, &epoch)| self.db.record(dot).map(|r| (&r.header, epoch)))
+    }
+
+    /// Every op body and snapshot envelope stored through a healing request: for the world's
+    /// writer-rule check, which excuses these (ADR 0021 §9 "Healing request" exempts them from
+    /// the stale-epoch check, so one may carry a key from before a rotation its author missed).
+    pub(super) fn healed_envelopes(&self) -> &BTreeSet<Vec<u8>> {
+        &self.db.healed_envelopes
+    }
+
+    /// The revocation cut-offs.
+    pub(super) fn cutoffs(&self) -> &BTreeMap<DeviceId, u64> {
+        &self.db.cutoffs
+    }
+
+    /// Every op body and snapshot envelope the server holds, with its header: what property 6
+    /// reads.
+    pub(super) fn envelopes(&self) -> (Vec<(&OpHeader, &[u8])>, Vec<&SnapRecord>) {
+        let ops = self
+            .db
+            .chains
+            .values()
+            .flat_map(BTreeMap::values)
+            .filter_map(|r| r.body.as_deref().map(|b| (&r.header, b)))
+            .collect();
+        (ops, self.snapshot_records().collect())
     }
 
     /// A fingerprint of the database for the drain's fixed point: every record's dot and body
@@ -472,13 +666,18 @@ impl Server {
             .flatten()
             .map(|s| s.store_seq)
             .collect();
-        (ops, snaps, self.db.cutoffs.len())
+        (
+            ops,
+            snaps,
+            self.db.cutoffs.len() + self.db.rows.len() + self.db.epoch as usize,
+        )
     }
 
     /// Checks one op record for storing into `db` (the upload checks of ADR 0012 §7 and
     /// ADR 0021 §9, in order: "already stored" first, then conflict, the signature,
-    /// revocation, link, body).
-    fn check_op(db: &Db, record: &OpRecord, bodiless_ok: bool) -> Result<bool, OpAnswer> {
+    /// revocation, the stale epoch, link, body). `healing` is a healing request's record, which
+    /// may be bodiless and is exempt from the stale-epoch check.
+    fn check_op(db: &Db, record: &OpRecord, healing: bool) -> Result<bool, OpAnswer> {
         let dot = record.header.dot;
         if let Some(stored) = db.record(dot) {
             // "Byte-identical to the record the server stores": the signed statement, and the
@@ -497,27 +696,43 @@ impl Server {
         let Some(statement) = record.verify() else {
             return Err(OpAnswer::BadSignature);
         };
-        if db
-            .cutoffs
-            .get(&dot.device_id())
-            .is_some_and(|&cutoff| dot.seq() > cutoff)
-        {
+        let cutoff = db.cutoffs.get(&dot.device_id()).copied();
+        if cutoff.is_some_and(|cutoff| dot.seq() > cutoff) {
             return Err(OpAnswer::Revoked);
+        }
+        // "Stale epoch": a bodiless header, a healing request's record, and a revoked device's
+        // op at or below its cut-off are exempt.
+        let exempt = healing || record.body.is_none() || cutoff.is_some();
+        if !exempt && record.header.vault_key_epoch < db.epoch {
+            return Err(OpAnswer::StaleEpoch);
         }
         if record.header.vault_prev_seq != db.heads().get(dot.device_id()) {
             return Err(OpAnswer::NotLinked);
         }
         match &record.body {
             Some(body) if !statement.matches_envelope(body) => Err(OpAnswer::BadBody),
-            None if !bodiless_ok => Err(OpAnswer::NotLinked),
+            None if !healing => Err(OpAnswer::NotLinked),
             _ => Ok(true),
         }
     }
 
-    /// Stores `record` into `db` (after [`Server::check_op`] said it is new).
-    fn insert_op(db: &mut Db, record: &OpRecord) {
+    /// Stores `record` into `db` (after [`Server::check_op`] said it is new), with the row of
+    /// the wrap it carries.
+    fn insert_op(db: &mut Db, record: &OpRecord, healing: bool) {
         db.stored_at.insert(record.header.dot, db.store_seq);
-        if record.body.is_none() {
+        if !healing {
+            db.stored_epoch.insert(record.header.dot, db.epoch);
+        }
+        db.add_row(
+            record.header.item_id,
+            record.body.as_deref(),
+            record.wrap.as_ref(),
+        );
+        if let Some(body) = &record.body {
+            if healing {
+                db.healed_envelopes.insert(body.clone());
+            }
+        } else {
             db.healed.insert(record.header.dot);
         }
         db.chains
@@ -526,25 +741,46 @@ impl Server {
             .insert(record.header.dot.seq(), record.clone());
     }
 
-    /// An op upload through the normal path (a body is required).
+    /// Whether `author`'s certificate has expired at the server's clock.
+    fn expiry(&self, author: DeviceId) -> CertificateExpiry {
+        if self.expired.contains(&author) {
+            CertificateExpiry::Expired
+        } else {
+            CertificateExpiry::Unexpired
+        }
+    }
+
+    /// An op upload through the normal path (a body is required), in the session of the op's
+    /// author.
     pub(super) fn upload_op(&mut self, record: &OpRecord) -> OpAnswer {
+        if self.expired.contains(&record.header.dot.device_id()) {
+            self.stats.expired_uploads += 1;
+            return OpAnswer::Expired;
+        }
         if record.body.is_none() {
             return OpAnswer::NotLinked;
         }
         match Self::check_op(&self.db, record, false) {
             Ok(true) => {
-                Self::insert_op(&mut self.db, record);
+                Self::insert_op(&mut self.db, record, false);
                 OpAnswer::Stored
             }
             Ok(false) => {
                 self.stats.already_stored += 1;
                 OpAnswer::AlreadyStored
             }
-            Err(answer) => answer,
+            Err(answer) => {
+                if answer == OpAnswer::StaleEpoch {
+                    self.stats.stale_ops += 1;
+                }
+                answer
+            }
         }
     }
 
-    /// A snapshot upload through the normal path.
+    /// A snapshot upload through the normal path, in the session of its author: "already
+    /// stored", the signature and data, the stale epoch (unless the author is revoked, which
+    /// [`check_snapshot`] refuses), then the §9 acceptance checks with the author's expiry.
     pub(super) fn upload_snapshot(&mut self, record: &SnapRecord) -> SnapAnswer {
         if self.db.holds_snapshot(record) {
             self.stats.already_stored += 1;
@@ -558,13 +794,24 @@ impl Server {
             self.stats.snapshots_refused += 1;
             return SnapAnswer::BadData;
         }
+        let author = record.header.author;
+        if record.header.vault_key_epoch < self.db.epoch
+            && !self.db.cutoffs.contains_key(&author)
+            && !self.expired.contains(&author)
+        {
+            self.stats.stale_snapshots += 1;
+            return SnapAnswer::StaleEpoch;
+        }
         let heads = self.db.heads();
-        match self.db.store_snapshot(record, &heads) {
+        let expiry = self.expiry(author);
+        match self.db.store_snapshot(record, &heads, expiry) {
             Ok(()) => SnapAnswer::Stored,
             Err(refusal) => {
                 self.stats.snapshots_refused += 1;
-                if refusal == SnapshotRefusal::AuthorRevoked {
-                    self.stats.revoked_refused += 1;
+                match refusal {
+                    SnapshotRefusal::AuthorRevoked => self.stats.revoked_refused += 1,
+                    SnapshotRefusal::AuthorExpired => self.stats.expired_snapshots += 1,
+                    _ => {}
                 }
                 SnapAnswer::Refused(refusal)
             }
@@ -576,6 +823,13 @@ impl Server {
     /// bodiless headers it stored. Any refusal rolls the whole request back.
     pub(super) fn heal(&mut self, request: &HealingRequest) -> Result<(), HealRefusal> {
         let mut db = self.db.clone();
+        for row in &request.wraps {
+            if row.wrap.epoch >= db.epoch {
+                db.rows
+                    .entry((row.item, *row.key.as_bytes()))
+                    .or_insert_with(|| row.wrap.clone());
+            }
+        }
         let mut ops: Vec<&OpRecord> = request.ops.iter().collect();
         ops.sort_by_key(|r| r.header.dot);
         let mut stored_bodiless: BTreeMap<ItemId, Vec<Dot>> = BTreeMap::new();
@@ -583,7 +837,7 @@ impl Server {
             let dot = record.header.dot;
             match Self::check_op(&db, record, true) {
                 Ok(true) => {
-                    Self::insert_op(&mut db, record);
+                    Self::insert_op(&mut db, record, true);
                     if record.body.is_none() {
                         stored_bodiless
                             .entry(record.header.item_id)
@@ -604,6 +858,8 @@ impl Server {
                     {
                         stored.body = Some(body.clone());
                         db.healed.remove(&dot);
+                        db.healed_envelopes.insert(body.clone());
+                        db.add_row(record.header.item_id, Some(body), record.wrap.as_ref());
                     }
                 }
                 Err(answer) => {
@@ -621,10 +877,11 @@ impl Server {
                 self.stats.heals_refused += 1;
                 return Err(HealRefusal::BadSnapshot);
             }
-            if let Err(refusal) = db.store_snapshot(snap, &heads) {
+            if let Err(refusal) = db.store_snapshot(snap, &heads, self.expiry(snap.header.author)) {
                 self.stats.heals_refused += 1;
                 return Err(HealRefusal::Snapshot(refusal));
             }
+            db.healed_envelopes.insert(snap.data.clone());
         }
         for (item, dots) in &stored_bodiless {
             let rows: Vec<RetainedSnapshot> = db
@@ -644,10 +901,99 @@ impl Server {
 
     /// Records a revocation: `last_accepted_device_seq` is the server's head for the device, so
     /// every op of it the server holds stays accepted (ADR 0012 §6).
-    pub(super) fn revoke(&mut self, device: DeviceId) -> u64 {
-        let cutoff = self.db.heads().get(device);
-        self.db.cutoffs.entry(device).or_insert(cutoff);
-        self.db.cutoffs.get(&device).copied().unwrap_or(cutoff)
+    fn revoke(db: &mut Db, device: DeviceId) -> u64 {
+        let cutoff = db.heads().get(device);
+        db.cutoffs.entry(device).or_insert(cutoff);
+        db.cutoffs.get(&device).copied().unwrap_or(cutoff)
+    }
+
+    /// A rotation's vault half (ADR 0025 §3), with the revocation it carries, checked and
+    /// applied in one transaction: check 2, the new epoch above the stored one; check 4, the
+    /// rotator's cursor equal to every head h(V, d), a missing entry being 0 ("Rotation
+    /// cut-off"); check 3, every wrap at the new epoch and the re-wrapped and dropped rows
+    /// exactly the stored ones. Then the epoch is set, each re-wrapped row overwritten and each
+    /// dropped row deleted. Returns the revocation's cut-off, if one was carried.
+    ///
+    /// # Errors
+    /// The first failing check; nothing is stored.
+    pub(super) fn rotate(&mut self, rotation: &Rotation) -> Result<Option<u64>, RotationRefusal> {
+        let refuse = |stats: &mut ServerStats, refusal| {
+            stats.rotations_refused += 1;
+            Err(refusal)
+        };
+        if rotation.epoch <= self.db.epoch {
+            return refuse(&mut self.stats, RotationRefusal::Epoch);
+        }
+        let heads = self.db.heads();
+        let devices: BTreeSet<DeviceId> = heads
+            .entries()
+            .chain(rotation.cursor.entries())
+            .map(Dot::device_id)
+            .collect();
+        if devices
+            .iter()
+            .any(|&d| heads.get(d) != rotation.cursor.get(d))
+        {
+            return refuse(&mut self.stats, RotationRefusal::Cursor);
+        }
+        let mut named: BTreeSet<(ItemId, [u8; 16])> = BTreeSet::new();
+        for row in &rotation.rewrapped {
+            if row.wrap.epoch != rotation.epoch || !named.insert((row.item, *row.key.as_bytes())) {
+                return refuse(&mut self.stats, RotationRefusal::Wraps);
+            }
+        }
+        for (item, key) in &rotation.dropped {
+            if !named.insert((*item, *key.as_bytes())) {
+                return refuse(&mut self.stats, RotationRefusal::Wraps);
+            }
+        }
+        if named != self.db.rows.keys().copied().collect() {
+            return refuse(&mut self.stats, RotationRefusal::Wraps);
+        }
+        let cutoff = rotation.revoke.map(|d| Self::revoke(&mut self.db, d));
+        self.db.epoch = rotation.epoch;
+        for (item, key) in &rotation.dropped {
+            self.db.rows.remove(&(*item, *key.as_bytes()));
+        }
+        for row in &rotation.rewrapped {
+            self.db
+                .rows
+                .insert((row.item, *row.key.as_bytes()), row.wrap.clone());
+        }
+        self.stats.rotations += 1;
+        Ok(cutoff)
+    }
+
+    /// The ADR 0032 §3 lag repair of the vault epoch after a restore (step 3b: the self-grant
+    /// and the wrap-set rows the healer holds at its epoch). Stored only when the new epoch is
+    /// above the stored one and no stored row or op record names an epoch above it; then the
+    /// epoch is set, each sent row (at the new epoch) replaces the row of the same item key,
+    /// and every stored row below the new epoch that the request does not replace is deleted.
+    /// Returns whether it was stored.
+    pub(super) fn heal_epoch(&mut self, epoch: u32, rows: &[WrapRow]) -> bool {
+        let above = self.db.rows.values().any(|w| w.epoch > epoch)
+            || self
+                .db
+                .chains
+                .values()
+                .flat_map(BTreeMap::values)
+                .any(|r| r.header.vault_key_epoch > epoch);
+        if epoch <= self.db.epoch || above || rows.iter().any(|r| r.wrap.epoch != epoch) {
+            return false;
+        }
+        self.db.epoch = epoch;
+        let sent: BTreeSet<(ItemId, [u8; 16])> =
+            rows.iter().map(|r| (r.item, *r.key.as_bytes())).collect();
+        self.db
+            .rows
+            .retain(|k, w| w.epoch >= epoch || sent.contains(k));
+        for row in rows {
+            self.db
+                .rows
+                .insert((row.item, *row.key.as_bytes()), row.wrap.clone());
+        }
+        self.stats.epoch_heals += 1;
+        true
     }
 
     /// `worker`: R1 then R3 on every item (ADR 0021 §3), through [`plan_worker`], then the
@@ -742,13 +1088,11 @@ impl Server {
             page_len
         };
         let chunks: Vec<&[OpRecord]> = records.chunks(size).collect();
-        let last = chunks.len().saturating_sub(1);
         let mut pages = Vec::new();
-        for (at, chunk) in chunks.into_iter().enumerate() {
+        for chunk in chunks {
             let mut page = Page {
                 ops: chunk.to_vec(),
                 covers: Vec::new(),
-                partial: at < last,
             };
             let mut bodiless: BTreeMap<ItemId, Vec<Dot>> = BTreeMap::new();
             for r in chunk.iter().filter(|r| r.body.is_none()) {
@@ -767,6 +1111,9 @@ impl Server {
                             .extend(selection.uncovered.iter().copied());
                         for seq in selection.covers {
                             if let Some(s) = stored.iter().find(|s| s.store_seq == seq) {
+                                if self.expired.contains(&s.record.header.author) {
+                                    self.stats.expired_covers += 1;
+                                }
                                 page.covers.push(s.record.clone());
                                 served.push(seq);
                                 self.stats.covers_served += 1;
@@ -788,6 +1135,8 @@ impl Server {
             pages,
             cutoffs: self.db.cutoffs.clone(),
             generation: self.db.generation,
+            wraps: self.rows(),
+            expiries: self.certificates.clone(),
         }
     }
 

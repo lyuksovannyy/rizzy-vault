@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Retiring old OPAQUE setups (ADR 0031): the `reregister` flag, only after KE3 or the device
 //! signature and only for a record on a non-current setup (point 2); the echoed `setup_id`,
 //! accepted and stored as echoed for a loaded non-current setup, refused with `setup_retired`
@@ -181,6 +183,8 @@ fn reregistration_change(
         device_revocations: List::empty(),
         device_grants: List::empty(),
         vault_rotation: None,
+        vault_create: None,
+        vault_delete: None,
     };
     (change, next)
 }
@@ -435,7 +439,10 @@ fn retirement_steps_and_the_account_left_behind() {
             .await
             .unwrap();
         assert_eq!(file.remove_retired_setups(&env.db).await.unwrap(), vec![1]);
-        assert_eq!(file.remove_retired_setups(&env.db).await.unwrap(), vec![]);
+        assert_eq!(
+            file.remove_retired_setups(&env.db).await.unwrap(),
+            Vec::<u32>::new()
+        );
         assert_eq!(file.setups().map(|(id, _)| id).collect::<Vec<_>>(), vec![2]);
         assert_eq!(
             setup_rows(&env).await,

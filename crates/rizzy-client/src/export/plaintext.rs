@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Plaintext export: JSON and CSV, behind the warning and the typed acknowledgement
 //! ([ADR 0027] §3–§5; ROADMAP §4.2 "plaintext JSON/CSV with scary warning").
 //!
@@ -141,10 +143,12 @@ pub fn csv_export_warning(items_losing_data: usize) -> String {
     format!("{CSV_EXPORT_WARNING_BEFORE_COUNT}{items_losing_data}{CSV_EXPORT_WARNING_AFTER_COUNT}")
 }
 
-/// The user's acknowledgement of [`PLAINTEXT_EXPORT_WARNING`]: proof that the phrase was
-/// typed. It has one constructor and is consumed by the export it allows (module docs).
+/// The user's acknowledgement of [`PLAINTEXT_EXPORT_WARNING`] (or, for a CXF export, of
+/// [`CXF_EXPORT_WARNING`](super::cxf::CXF_EXPORT_WARNING), ADR 0074 §2 and owner answer 3: the
+/// same phrase): proof that the phrase was typed. It has one constructor and is consumed by the
+/// export it allows (module docs).
 #[derive(Debug)]
-pub struct PlaintextExportAck(());
+pub struct PlaintextExportAck(pub(super) ());
 
 impl PlaintextExportAck {
     /// The acknowledgement, if `typed` is exactly [`PLAINTEXT_EXPORT_PHRASE`]. The host shows
@@ -210,20 +214,21 @@ pub fn csv_columns() -> Vec<&'static str> {
 }
 
 /// A writer that either measures a document or writes it into a buffer of the measured size.
-struct Sink {
+/// Shared with the CXF writer ([`super::cxf`]).
+pub(super) struct Sink {
     /// The output; `None` while measuring.
     out: Option<Zeroizing<Vec<u8>>>,
     /// Bytes put so far.
-    len: usize,
+    pub(super) len: usize,
     /// JSON values put so far, as the reader counts them (`rizzy_import::json`).
-    nodes: usize,
+    pub(super) nodes: usize,
     /// Whether a write did not fit the buffer, or an encoding step failed.
     failed: bool,
 }
 
 impl Sink {
     /// A sink that only measures.
-    const fn measuring() -> Self {
+    pub(super) const fn measuring() -> Self {
         Self {
             out: None,
             len: 0,
@@ -233,7 +238,7 @@ impl Sink {
     }
 
     /// A sink that writes into one zeroizing buffer of `len` bytes.
-    fn writing(len: usize) -> Self {
+    pub(super) fn writing(len: usize) -> Self {
         Self {
             out: Some(Zeroizing::new(Vec::with_capacity(len))),
             len: 0,
@@ -244,7 +249,7 @@ impl Sink {
 
     /// Appends `bytes`. Never grows the buffer: a write past its capacity is recorded as a
     /// failure instead, so no reallocation can leave a copy of the plaintext behind.
-    fn put(&mut self, bytes: &[u8]) {
+    pub(super) fn put(&mut self, bytes: &[u8]) {
         self.len = self.len.saturating_add(bytes.len());
         if let Some(out) = &mut self.out {
             if out.capacity().saturating_sub(out.len()) < bytes.len() {
@@ -256,7 +261,7 @@ impl Sink {
     }
 
     /// The written document, if it is exactly `expected` bytes.
-    fn finish(self, expected: usize) -> Result<SecretBytes, ClientError> {
+    pub(super) fn finish(self, expected: usize) -> Result<SecretBytes, ClientError> {
         match self.out {
             Some(out) if !self.failed && out.len() == expected => {
                 Ok(SecretBytes::from_zeroizing(out))
@@ -297,14 +302,14 @@ impl Sink {
     }
 
     /// A JSON number (one value).
-    fn json_number(&mut self, value: u64) {
+    pub(super) fn json_number(&mut self, value: u64) {
         self.nodes = self.nodes.saturating_add(1);
         self.decimal(value);
     }
 
     /// A JSON string (one value): `"`, `\` and the control characters below U+0020 escaped,
     /// everything else as its UTF-8.
-    fn json_string(&mut self, text: &str) {
+    pub(super) fn json_string(&mut self, text: &str) {
         self.nodes = self.nodes.saturating_add(1);
         self.put(b"\"");
         let bytes = text.as_bytes();
@@ -338,7 +343,7 @@ impl Sink {
     }
 
     /// A JSON string holding `bytes` as base64url (one value).
-    fn json_base64(&mut self, bytes: &[u8]) {
+    pub(super) fn json_base64(&mut self, bytes: &[u8]) {
         self.nodes = self.nodes.saturating_add(1);
         self.put(b"\"");
         self.base64(bytes);
@@ -570,7 +575,7 @@ struct UriParts<'a> {
 }
 
 /// The CSV row of one item; `None` for an item CSV leaves out (trashed, or of a type other
-/// than Login, Secure Note, Card and Identity).
+/// than Login, Secure Note, Card and Identity, an unsupported or retired one included).
 fn csv_row<'a>(live: &LiveSnapshot<'a>, keys: &[&'static str]) -> Option<CsvRow<'a>> {
     if state::trashed(live) != Some(false) {
         return None;
@@ -580,7 +585,14 @@ fn csv_row<'a>(live: &LiveSnapshot<'a>, keys: &[&'static str]) -> Option<CsvRow<
         SupportedType::SecureNote => "note",
         SupportedType::Card => "card",
         SupportedType::Identity => "identity",
-        SupportedType::VaultSettings => return None,
+        // ADR 0027 §4: "other types are left out of CSV"; the M3 types of ADR 0055 are such
+        // types (the JSON form carries them whole), and so is every unsupported type, the
+        // retired `0x0009` included (ADR 0078 §3), through the `?` above.
+        SupportedType::SshKey
+        | SupportedType::ApiCredential
+        | SupportedType::SoftwareLicense
+        | SupportedType::Wifi
+        | SupportedType::VaultSettings => return None,
     };
     let mut row = CsvRow {
         kind,
@@ -702,7 +714,7 @@ impl VaultSync {
     /// # Errors
     /// [`ClientError::ExportOversizeItems`] while an item cannot be encoded
     /// ([`VaultSync::export_blockers`]); [`ClientError::Internal`].
-    fn exported_states(&self) -> Result<Vec<(ItemId, LiveSnapshot<'_>)>, ClientError> {
+    pub(super) fn exported_states(&self) -> Result<Vec<(ItemId, LiveSnapshot<'_>)>, ClientError> {
         if !self.export_blockers().is_empty() {
             return Err(ClientError::ExportOversizeItems);
         }

@@ -42,12 +42,18 @@ ARG RUNTIME_IMAGE=gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c8918
 # ---- wasm: the core as WebAssembly, and its JavaScript glue -------------------------------------
 FROM ${RUST_IMAGE} AS wasm
 
-# The C compiler and musl headers for the bundled SQLite and ring. Rust itself comes from
-# rust-toolchain.toml: rustup downloads from static.rust-lang.org the pinned channel if the
+# The C compiler and musl headers for the bundled SQLite and ring, and OpenSSL for webauthn-rs
+# (ADR 0077 §8): its headers, its static archives and pkgconf, so that openssl-sys links
+# libssl.a/libcrypto.a into the static musl binary (OPENSSL_STATIC below). The runtime image holds
+# no OpenSSL, and TLS stays rustls-only. The installed OpenSSL version is printed for the image's
+# record (ADR 0077 §9 entry 2): an OpenSSL security release is a rebuild trigger.
+# Rust itself comes from rust-toolchain.toml: rustup downloads from static.rust-lang.org the pinned channel if the
 # image's differs, and the file's components (rustfmt, clippy) and wasm32 target, which the
 # image's minimal profile lacks. The build therefore needs that host as well as crates.io
 # (docs/self-hosting.md §2).
-RUN apk add --no-cache gcc musl-dev
+RUN apk add --no-cache gcc musl-dev openssl-dev openssl-libs-static pkgconf \
+ && apk info -v 2>/dev/null | grep '^openssl'
+ENV OPENSSL_STATIC=1
 
 # The bindings generator, before the sources, so that this layer is cached across source
 # changes. Its version must equal wasm-bindgen's in Cargo.lock: `cargo xtask build-wasm`
@@ -89,6 +95,10 @@ COPY --from=web /src/apps/web/dist apps/web/dist
 # No `RUN --mount` cache: the classic Docker builder has no BuildKit mounts, and one
 # Containerfile must build under Docker (with or without BuildKit), Podman and Buildah.
 RUN cargo build --locked --release -p rizzy-server --bin rizzy-vault --features embed-web \
+ && readelf -d target/release/rizzy-vault > /tmp/dynamic.txt \
+ && if grep -q NEEDED /tmp/dynamic.txt; then \
+      echo "rizzy-vault links a shared library; it must be static (ADR 0077 §8)" >&2; exit 1; \
+    fi \
  && install -D -m 0755 target/release/rizzy-vault /out/rizzy-vault \
  && install -d -m 0700 /out/data /out/rizzy-secrets
 

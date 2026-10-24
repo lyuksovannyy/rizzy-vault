@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Envelope tests: registries, context layouts, round trips for every M1 symmetric purpose,
 //! known answers, and the negative tests of CRYPTO.md §15 item 4.
 
@@ -8,10 +10,11 @@ use rand_core::Rng as _;
 
 use super::parse::{self, MAX_SYMMETRIC_ENVELOPE_LEN, parse_for_purpose};
 use super::purpose::{
-    AccountKeyDeviceGrantCtx, AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx,
-    AccountKeyServerWrapCtx, AccountSettingsCtx, DeviceSecretKeysCtx, ExportFileCtx,
-    IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx, ItemSnapshotCtx, RetiredSecretKeyCtx,
-    ServerLoginStateCtx, ServerSecretsBackupCtx, ServerTotpSecretCtx, Side, VaultKeySelfGrantCtx,
+    AccountKeyDeviceGrantCtx, AccountKeyForwardCtx, AccountKeyKeystoreWrapCtx,
+    AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx, AccountKeyServerWrapCtx, AccountSettingsCtx,
+    DeviceSecretKeysCtx, ExportFileCtx, IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx,
+    ItemSnapshotCtx, RetiredSecretKeyCtx, ServerDbBackupCtx, ServerLoginStateCtx,
+    ServerSecretsBackupCtx, ServerTotpSecretCtx, Side, VaultKeySelfGrantCtx,
 };
 use super::symmetric::{self, MAX_PLAINTEXT_LEN, OVERHEAD, server_open, server_seal, test_hooks};
 use super::*;
@@ -74,7 +77,7 @@ fn aead_opens_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
 // ---------------------------------------------------------------------------------------------
 
 /// The §8.4 table: every purpose with its id.
-const CRYPTO_MD_PURPOSES: [(&str, u16); 31] = [
+const CRYPTO_MD_PURPOSES: [(&str, u16); 32] = [
     ("ACCOUNT_KEY_SERVER_WRAP", 0x0001),
     ("ACCOUNT_KEY_LOCAL_WRAP", 0x0002),
     ("ACCOUNT_KEY_RECOVERY_WRAP", 0x0003),
@@ -106,6 +109,7 @@ const CRYPTO_MD_PURPOSES: [(&str, u16); 31] = [
     ("SERVER_TOTP_SECRET", 0x0100),
     ("SERVER_LOGIN_STATE", 0x0101),
     ("SERVER_SECRETS_BACKUP", 0x0102),
+    ("SERVER_DB_BACKUP", 0x0105),
 ];
 
 #[test]
@@ -118,6 +122,7 @@ fn purpose_registry_matches_crypto_md_8_4() {
     }
     assert_eq!(Purpose::from_id(0x0000), None);
     assert_eq!(Purpose::from_id(0x0103), None);
+    assert_eq!(Purpose::from_id(0x0106), None);
 }
 
 #[test]
@@ -155,8 +160,6 @@ fn m1_allow_lists_match_crypto_md_9_5() {
             &[AlgId::HpkePskX25519]
         } else if base.contains(&p) {
             &[AlgId::HpkeBaseX25519]
-        } else if p == Purpose::AttachmentChunk {
-            &[AlgId::ChunkedXChaCha20Poly1305]
         } else {
             &[AlgId::XChaCha20Poly1305Committed]
         };
@@ -176,7 +179,8 @@ fn server_only_purposes_are_in_no_client_allow_list() {
         [
             Purpose::ServerTotpSecret,
             Purpose::ServerLoginState,
-            Purpose::ServerSecretsBackup
+            Purpose::ServerSecretsBackup,
+            Purpose::ServerDbBackup
         ]
     );
     for p in Purpose::ALL {
@@ -248,7 +252,8 @@ fn algorithm_registry_matches_crypto_md_9_4() {
     let registered: Vec<u8> = (0..=u8::MAX)
         .filter(|v| AlgId::from_u8(*v).is_some())
         .collect();
-    assert_eq!(registered, [0x01, 0x02, 0x03, 0x10, 0x11, 0x12, 0x13]);
+    // `0x03` is reserved and undefined (ADR 0054, "What this ADR supersedes"): no value.
+    assert_eq!(registered, [0x01, 0x02, 0x10, 0x11, 0x12, 0x13]);
     for alg in AlgId::ALL {
         assert_eq!(AlgId::from_u8(alg.to_u8()), Some(alg));
     }
@@ -328,6 +333,25 @@ fn m1_context_layouts_account_key_wraps() {
         recovery_epoch: 6,
     };
     check(&c, &cat(&[a.as_bytes(), &[0, 0, 0, 5], &[0, 0, 0, 6]]));
+
+    // ADR 0057 / §8.4: E_ks has no password epoch and no kdf_id.
+    let c = AccountKeyKeystoreWrapCtx {
+        account_id: a,
+        device_id: d,
+        account_key_epoch: 9,
+    };
+    check(&c, &cat(&[a.as_bytes(), d.as_bytes(), &[0, 0, 0, 9]]));
+
+    let c = AccountKeyForwardCtx {
+        account_id: a,
+        device_id: d,
+        from_account_key_epoch: 2,
+        to_account_key_epoch: 0x0102_0304,
+    };
+    check(
+        &c,
+        &cat(&[a.as_bytes(), d.as_bytes(), &[0, 0, 0, 2], &[1, 2, 3, 4]]),
+    );
 
     let other = DeviceId::from_bytes([0x33; 16]);
     let c = AccountKeyDeviceGrantCtx {
@@ -481,6 +505,24 @@ fn m1_context_layouts_files_and_server_objects() {
     check(
         &c,
         &cat(&[&[0xbb; 16], &7u64.to_be_bytes(), &[0, 1], &[0x55; 16]]),
+    );
+
+    let c = ServerDbBackupCtx {
+        backup_id: BackupId::from_bytes([0xcc; 16]),
+        created_at_ms: 9,
+        backup_key_id: 3,
+        chunk_index: 1,
+        chunk_count: 2,
+    };
+    check(
+        &c,
+        &cat(&[
+            &[0xcc; 16],
+            &9u64.to_be_bytes(),
+            &3u32.to_be_bytes(),
+            &1u32.to_be_bytes(),
+            &2u32.to_be_bytes(),
+        ]),
     );
 
     assert_eq!(ItemOpCtx::header_hash(b"abc").len(), 32);
@@ -797,6 +839,19 @@ fn server_purposes_round_trip_through_the_server_table_only() {
     assert_eq!(
         server_open(&k, &backup, &env).unwrap().expose_secret(),
         b"secrets"
+    );
+
+    let chunk = ServerDbBackupCtx {
+        backup_id: BackupId::generate(&mut rng),
+        created_at_ms: 1,
+        backup_key_id: 1,
+        chunk_index: 0,
+        chunk_count: 1,
+    };
+    let env = server_seal(&mut rng, &k, &chunk, b"db chunk").unwrap();
+    assert_eq!(
+        server_open(&k, &chunk, &env).unwrap().expose_secret(),
+        b"db chunk"
     );
 
     // The same ctx bytes under a client purpose (IDENTITY_SECRET_KEYS: account_id ‖ u32) do not
@@ -1358,6 +1413,9 @@ fn truncation_and_extension_at_every_length_never_panic() {
     assert_eq!(open(&k, &ctx, &shifted).map(|_| ()), Err(DecryptError));
 }
 
+/// A server that relabels an envelope with a version or algorithm outside the allow-list.
+///
+/// ETH class: 4 (threat model §5.2, envelope and algorithm downgrade).
 #[test]
 fn version_and_algorithm_outside_the_allow_list_are_rejected_before_crypto() {
     let (k, env) = sealed_op();
@@ -1427,9 +1485,15 @@ fn check_order_is_length_version_allow_list() {
         parse_for_purpose(&ok, Purpose::ServerTotpSecret.client_decrypt_allow_list()),
         Err(DecryptError)
     );
-    // Reserved algorithm purposes cannot be parsed for decryption yet.
+    // ATTACHMENT_CHUNK is an ordinary `{0x01}` purpose (ADR 0054 §1), and `0x03` is undefined.
+    assert!(parse_for_purpose(&ok, Purpose::AttachmentChunk.client_decrypt_allow_list()).is_ok());
+    let mut undefined = ok.clone();
+    undefined[1] = 0x03;
     assert_eq!(
-        parse_for_purpose(&ok, Purpose::AttachmentChunk.client_decrypt_allow_list()),
+        parse_for_purpose(
+            &undefined,
+            Purpose::AttachmentChunk.client_decrypt_allow_list()
+        ),
         Err(DecryptError)
     );
 }

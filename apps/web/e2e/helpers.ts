@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Shared Playwright helpers for the web vault's end-to-end specs (signup/login/lock, the
 // secret-field INV-68 check): kept in one module so `vault.spec.ts`, `keyboard-nav.spec.ts` and
 // `phone.spec.ts` exercise login/signup/lock the same way, rather than three copies drifting.
@@ -5,11 +7,16 @@ import { type Locator, type Page, expect } from "@playwright/test";
 
 export const PASSWORD = "correct horse battery staple";
 
+/** The `icons` role's favicon endpoint (ADR 0052 point 6). */
+export const ICONS_FETCH_PATH = "/api/v1/icons/fetch";
+
 /** Collects console errors and page errors of a page. */
 export function watch(page: Page): { problems: string[] } {
   const problems: string[] = [];
   page.on("console", (m) => {
-    if (m.type() === "error") {
+    // The e2e server runs no `icons` role, so an item with a website gets `404` from
+    // `/api/v1/icons/fetch` (ADR 0052): the expected "no icon" answer, which the browser logs.
+    if (m.type() === "error" && !(/\b404\b/.test(m.text()) && m.location().url.endsWith(ICONS_FETCH_PATH))) {
       problems.push(`console: ${m.text()}`);
     }
   });
@@ -45,8 +52,26 @@ export async function logIn(page: Page, loginName: string | undefined, secretKey
   await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
 }
 
-/** Signs up `name` and confirms the Emergency Kit; returns the Secret Key. */
+/** Signs up `name`, confirms the Emergency Kit and closes the getting-started guide that opens
+ * after signup; returns the Secret Key. */
 export async function signUp(page: Page, origin: string, name: string): Promise<string> {
+  const secretKey = await signUpToGuide(page, origin, name);
+  await closeGuide(page);
+  return secretKey;
+}
+
+/** Leaves the getting-started guide (`src/views/OnboardingView.tsx`) through its "Close the
+ * guide" button. */
+export async function closeGuide(page: Page): Promise<void> {
+  const guide = page.getByRole("region", { name: "Get started" });
+  await expect(guide).toBeVisible();
+  await guide.getByRole("button", { name: "Close the guide" }).click();
+  await expect(guide).toHaveCount(0);
+}
+
+/** Signs up `name` and confirms the Emergency Kit, leaving the getting-started guide open;
+ * returns the Secret Key. */
+export async function signUpToGuide(page: Page, origin: string, name: string): Promise<string> {
   await page.goto(origin);
   await page.getByRole("button", { name: "Create an account" }).click();
   await page.getByLabel("Login name").fill(name);
@@ -68,7 +93,55 @@ export async function newItem(page: Page, typeLabel: string): Promise<void> {
 }
 
 /** Locks the vault through the account menu (redesign slice 2, item 5). */
+/** Closes every toast that is showing, tolerating one that times out on its own meanwhile
+ * (`TOAST_DURATION_MS`), and waits until none is left. */
+export async function dismissToasts(page: Page): Promise<void> {
+  const dismiss = page.locator("button.toast-dismiss");
+  for (let i = 0; i < 10 && (await dismiss.count()) > 0; i += 1) {
+    await dismiss
+      .first()
+      .click({ timeout: 2_000 })
+      .catch(() => undefined);
+  }
+  await expect(dismiss).toHaveCount(0);
+}
+
 export async function lockVault(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Account menu" }).click();
   await page.getByRole("menuitem", { name: "Lock" }).click();
 }
+
+/** A Secure Note using every construct ADR 0062 §5 renders, with its headings in order (so the
+ * note's own outline is valid), for the accessibility audit and the keyboard walk of the
+ * rendered note (`a11y.spec.ts`, `keyboard-nav.spec.ts`). */
+export const MARKDOWN_NOTE = [
+  "# Wi-Fi and alarm",
+  "",
+  "Network **home-5g**, *guest* network ~~off~~ on, code `0000`.",
+  "Second line of the paragraph.",
+  "",
+  "## Steps",
+  "",
+  "- Hold the button",
+  "- Wait for the light",
+  "",
+  "1. Enter the code",
+  "2. Press arm",
+  "",
+  "> Do not share this note.",
+  "",
+  "---",
+  "",
+  "### Router config",
+  "",
+  "```",
+  "ssid=home-5g",
+  "a long configuration line that wraps rather than scrolls: " + "x".repeat(160),
+  "```",
+  "",
+  "#### Four",
+  "##### Five",
+  "###### Six",
+  "",
+  "Literal: <b>html</b> [link](https://example.com/) https://example.com/",
+].join("\n");

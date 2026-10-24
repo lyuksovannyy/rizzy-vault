@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! ES256 (ECDSA P-256, SHA-256) key generation and signing for `WebAuthn` passkey credentials
 //! (CRYPTO.md §3; [ADR 0039] §2, §3, §5; [ADR 0009] Amendments, 2026-10-09).
 //!
@@ -43,6 +45,24 @@
 //! module only signs, never inspects.
 //!
 //! [INV-64]: ../../../../docs/THREAT_MODEL.md#8-security-invariants
+//!
+//! **`EdDSA` (Ed25519) passkeys** ([ADR 0074] Context, §3). A passkey imported from a CXF file
+//! may be `EdDSA` (`passkey/<id>/alg` = 2, ADR 0039 §1). [`EdDsaSigningKey`] and
+//! [`EdDsaVerifyingKey`] are its seed-based constructor, public-key derivation and raw-message
+//! sign/verify. They are a separate pair from [`crate::sign`]'s role-typed keys on purpose: those
+//! sign only pre-framed statement types (CRYPTO.md §10.2) and are never a general signing oracle,
+//! whereas a passkey must sign the raw `authenticatorData ‖ SHA-256(clientDataJSON)` message
+//! `WebAuthn` defines. Same library and features as `crate::sign` (`ed25519-dalek` 3.0.0,
+//! `fast` and `zeroize`, [ADR 0009]); Ed25519 signing is deterministic (RFC 8032 §5.1.6), so the
+//! RFC 8032 §7.1 vectors reproduce byte for byte. Nothing in this project *creates* an `EdDSA`
+//! passkey (ADR 0039 §2 creates ES256 only); these types only carry imported ones.
+//!
+//! **PKCS#8** ([`pkcs8`], [ADR 0074] §4): the hand-written reader and writer of the two fixed
+//! `PrivateKeyInfo` shapes a CXF `key` holds.
+//!
+//! [ADR 0074]: ../../../../docs/adr/0074-passkey-cxf-import-export.md
+
+pub mod pkcs8;
 
 use p256::ecdsa::signature::{Signer as _, Verifier as _};
 use p256::ecdsa::{Signature, SigningKey as P256SigningKey, VerifyingKey as P256VerifyingKey};
@@ -253,6 +273,140 @@ impl core::fmt::Debug for Es256VerifyingKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "Es256VerifyingKey(")?;
         self.to_uncompressed_sec1()
+            .iter()
+            .try_for_each(|b| write!(f, "{b:02x}"))?;
+        f.write_str(")")
+    }
+}
+
+/// Length of an Ed25519 seed (the private key RFC 8032 §5.1.5 hashes) and of a public key.
+pub const ED25519_KEY_LEN: usize = 32;
+
+/// Length of an Ed25519 signature (RFC 8032 §5.1.6).
+pub const ED25519_SIGNATURE_LEN: usize = 64;
+
+/// An `EdDSA` (Ed25519) passkey signing key, rebuilt from the 32-byte seed stored (decrypted) in
+/// `passkey/<id>/private_key` (module docs, "`EdDSA`").
+///
+/// No `Clone`, no `Copy`; `Debug` prints nothing of the key. The seed is wiped on drop
+/// (`ed25519-dalek`'s `zeroize` feature) and leaves this type only through
+/// [`EdDsaSigningKey::to_bytes`], into a [`SecretArray`].
+pub struct EdDsaSigningKey {
+    /// The `ed25519-dalek` key: the seed and the public key derived from it. Zeroized on drop.
+    inner: ed25519_dalek::SigningKey,
+}
+
+impl EdDsaSigningKey {
+    /// Rebuilds a key from its 32-byte seed (RFC 8032 §5.1.5). Every 32-byte string is a valid
+    /// Ed25519 seed; the public key is derived from it, never taken from anywhere else (ADR 0074
+    /// §3: "a file cannot assert a public key that disagrees with its own private key").
+    ///
+    /// # Errors
+    /// [`ParseError::InvalidLength`] if `seed` is not exactly 32 bytes.
+    pub fn from_seed(seed: &[u8]) -> Result<Self, ParseError> {
+        let seed: &[u8; ED25519_KEY_LEN] =
+            seed.try_into().map_err(|_| ParseError::InvalidLength)?;
+        Ok(Self {
+            inner: ed25519_dalek::SigningKey::from_bytes(seed),
+        })
+    }
+
+    /// The 32-byte seed, copied into a wiping buffer for the caller to encrypt at once under
+    /// the item key, like [`Es256SigningKey::to_bytes`].
+    #[must_use]
+    pub fn to_bytes(&self) -> SecretArray<ED25519_KEY_LEN> {
+        match SecretArray::try_init_with::<core::convert::Infallible>(|buf| {
+            buf.copy_from_slice(self.inner.as_bytes());
+            Ok(())
+        }) {
+            Ok(secret) => secret,
+            Err(never) => match never {},
+        }
+    }
+
+    /// The matching public key, derived from the seed (RFC 8032 §5.1.5).
+    #[must_use]
+    pub fn verifying_key(&self) -> EdDsaVerifyingKey {
+        EdDsaVerifyingKey {
+            inner: self.inner.verifying_key(),
+        }
+    }
+
+    /// Signs the raw `message` (RFC 8032 §5.1.6; deterministic). For a `WebAuthn` assertion the
+    /// caller passes `authenticatorData ‖ SHA-256(clientDataJSON)`; the signature is the raw
+    /// 64-byte `R ‖ S` COSE alg `-8` uses (`WebAuthn` L3 §6.5.6), not DER.
+    ///
+    /// # Errors
+    /// [`SignError::Internal`] if the library reports a failure (it reports none for Ed25519).
+    pub fn sign(&self, message: &[u8]) -> Result<[u8; ED25519_SIGNATURE_LEN], SignError> {
+        use ed25519_dalek::Signer as _;
+        let signature = self
+            .inner
+            .try_sign(message)
+            .map_err(|_| SignError::Internal)?;
+        Ok(signature.to_bytes())
+    }
+}
+
+impl core::fmt::Debug for EdDsaSigningKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EdDsaSigningKey").finish_non_exhaustive()
+    }
+}
+
+/// An `EdDSA` (Ed25519) passkey public key. Public data: `Clone`, `Copy`, `PartialEq`, `Eq`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct EdDsaVerifyingKey {
+    /// The `ed25519-dalek` verifying key.
+    inner: ed25519_dalek::VerifyingKey,
+}
+
+impl EdDsaVerifyingKey {
+    /// Parses a 32-byte compressed Edwards point. A non-canonical encoding or a weak
+    /// (small-order) point is refused, as [`crate::sign::VerifyingKey::from_bytes`] does.
+    ///
+    /// # Errors
+    /// [`ParseError::InvalidLength`] if `bytes` is not 32 bytes; [`ParseError::InvalidValue`]
+    /// if it is not a canonical encoding of a point of large order.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
+        let bytes: &[u8; ED25519_KEY_LEN] =
+            bytes.try_into().map_err(|_| ParseError::InvalidLength)?;
+        let inner =
+            ed25519_dalek::VerifyingKey::from_bytes(bytes).map_err(|_| ParseError::InvalidValue)?;
+        let canonical = inner.to_edwards().compress().to_bytes() == *bytes;
+        if !canonical || inner.is_weak() {
+            return Err(ParseError::InvalidValue);
+        }
+        Ok(Self { inner })
+    }
+
+    /// The 32-byte compressed point: the `x` (`-2`) member of a COSE `OKP` Ed25519 key
+    /// (RFC 9053 §7.2).
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; ED25519_KEY_LEN] {
+        self.inner.to_bytes()
+    }
+
+    /// Verifies a raw 64-byte Ed25519 signature over `message` (`verify_strict`: no malleable
+    /// or small-order cases), the counterpart of [`EdDsaSigningKey::sign`].
+    ///
+    /// # Errors
+    /// [`VerifyError::BadSignature`] if `signature` is not 64 bytes or does not verify.
+    pub fn verify(&self, message: &[u8], signature: &[u8]) -> Result<(), VerifyError> {
+        let signature: &[u8; ED25519_SIGNATURE_LEN] = signature
+            .try_into()
+            .map_err(|_| VerifyError::BadSignature)?;
+        let signature = ed25519_dalek::Signature::from_bytes(signature);
+        self.inner
+            .verify_strict(message, &signature)
+            .map_err(|_| VerifyError::BadSignature)
+    }
+}
+
+impl core::fmt::Debug for EdDsaVerifyingKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "EdDsaVerifyingKey(")?;
+        self.to_bytes()
             .iter()
             .try_for_each(|b| write!(f, "{b:02x}"))?;
         f.write_str(")")

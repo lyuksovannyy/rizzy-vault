@@ -2,7 +2,7 @@
 
 ## Status: pre-alpha. Do not store real secrets in it.
 
-rizzy-vault is at M0 done, M1 in progress. There is no release. The only product code is the `rizzy-core` cryptography (M1 step 1); the sync engine, the server, the clients and the web vault are not written yet (the server and CLI binaries are skeletons). That code and the design documents have had internal review only, and nothing has had an external security audit. Nothing here is fit for real passwords yet. Keep using an established, externally audited password manager until rizzy-vault reaches v1.0 (end of M8). v1.0 requires an external security audit ([ROADMAP §3](docs/ROADMAP.md#3-milestones)).
+rizzy-vault is at M0 done, M1 in progress, with M2 (browser extension and matching) under way too. There is no release. The product code today is the `rizzy-core` cryptography, the `rizzy-sync` engine, the `rizzy-server` binary (`rizzy-vault`), the `rv` command-line client, the wasm bindings and React web vault, and the M2 browser extension (`apps/extension`) — see the [README](README.md#status) and [docs/README.md](docs/README.md) for what each one covers and what is still missing. That code and the design documents have had internal review only, and nothing has had an external security audit. Nothing here is fit for real passwords yet. Keep using an established, externally audited password manager until rizzy-vault reaches v1.0 (end of M8). v1.0 requires an external security audit ([ROADMAP §3](docs/ROADMAP.md#3-milestones)).
 
 ## Supported versions
 

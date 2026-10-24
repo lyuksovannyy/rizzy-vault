@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Tests of the generator (CRYPTO.md §12.1): chi-square bias checks on index draws,
 //! characters, required-class candidates and word choice, entropy values, option validation,
 //! and checks that the constant-time passphrase layout matches plain concatenation byte for
@@ -54,6 +56,16 @@ fn uniform_index_is_unbiased() {
     }
     assert_eq!(uniform_index(&mut rng, 1).unwrap(), 0);
     assert_eq!(uniform_index(&mut rng, 0), Err(GeneratorError::NoClasses));
+}
+
+/// ADR 0079 §2: the public accessor is the same routine, draw for draw.
+#[test]
+fn public_uniform_is_uniform_index() {
+    let (mut a, mut b) = (seeded_rng(9), seeded_rng(9));
+    for n in [1u32, 2, 3, 10, 26, 100, 7776, u32::MAX] {
+        assert_eq!(uniform(&mut a, n), uniform_index(&mut b, n), "{n}");
+    }
+    assert_eq!(uniform(&mut a, 0), Err(GeneratorError::NoClasses));
 }
 
 #[test]

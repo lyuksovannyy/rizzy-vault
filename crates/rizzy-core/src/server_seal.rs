@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Server-side sealing (CRYPTO.md §5.11; audit target 10 in §1).
 //!
 //! These objects are sealed **by the server, for the server**. That protects them from a reader
@@ -9,9 +11,12 @@
 //!   `k = HKDF(ikm = server_data_key, salt = empty, info = LABEL("server/<purpose>") ‖ 0x00 ‖
 //!   u32(data_key_id), 32)`, with `<purpose>` = `totp-secret` or `login-state`. The
 //!   server-secrets backup key is derived like the export file key, from the operator
-//!   passphrase ([`ServerSecretsBackupKey`]).
+//!   passphrase ([`ServerSecretsBackupKey`]). Each backup key of the secrets file (32 random
+//!   bytes per `backup_key_id`, M8, ADR 0071) yields the `SERVER_DB_BACKUP` subkey the same way,
+//!   with `<purpose>` = `db-backup` and `u32(backup_key_id)` ([`ServerDbBackupKey`]).
 //! - **Envelope.** Algorithm `0x01` with the server-only purposes `SERVER_TOTP_SECRET` (0x0100),
-//!   `SERVER_LOGIN_STATE` (0x0101) and `SERVER_SECRETS_BACKUP` (0x0102), sealed and opened only
+//!   `SERVER_LOGIN_STATE` (0x0101), `SERVER_SECRETS_BACKUP` (0x0102) and `SERVER_DB_BACKUP`
+//!   (0x0105, one chunk of a format version 2 database backup, CRYPTO.md §9.8), sealed and opened only
 //!   through [`crate::envelope::symmetric::server_seal`] and `server_open`, which use the
 //!   server's allow-list table. No client allow-list contains these purposes, so a client never
 //!   opens them, and the server functions here accept only these contexts.
@@ -60,7 +65,9 @@ use core::fmt;
 
 use rand_core::CryptoRng;
 
-use crate::envelope::purpose::{ServerLoginStateCtx, ServerSecretsBackupCtx, ServerTotpSecretCtx};
+use crate::envelope::purpose::{
+    ServerDbBackupCtx, ServerLoginStateCtx, ServerSecretsBackupCtx, ServerTotpSecretCtx,
+};
 use crate::envelope::symmetric::{server_open, server_seal};
 use crate::error::{DecryptError, DerivationError, EncryptError, KdfError, ParseError};
 use crate::export::{self, ExportError, SALT_LEN, check_new_file_password, password_file_key};
@@ -429,6 +436,151 @@ impl fmt::Debug for ServerSecretsBackupKey {
     }
 }
 
+/// One backup key from the secrets file, `backup_keys[backup_key_id]` (CRYPTO.md §5.11; M8,
+/// ADR 0071), which seals the chunks of a format version 2 database backup
+/// (`SERVER_DB_BACKUP`, CRYPTO.md §9.8).
+///
+/// Server code only. The key is 32 bytes from the injected CSPRNG, never a passphrase, and
+/// never equal to any `server_data_key` or `enum_key` (threat model INV-98); it lives only in
+/// the secrets file. Each chunk is sealed under the subkey
+/// `k = HKDF(ikm = key, salt = empty, info = LABEL("server/db-backup") ‖ 0x00 ‖
+/// u32(backup_key_id), 32)` (§4.3), the construction every server purpose uses, but from this
+/// key rather than `server_data_key`: an off-site backup leaves the instance and outlives the
+/// data keys' re-sealing cadence. The key is wiped on drop and `Debug` shows only the id.
+///
+/// The chunk framing (container header, chunk length, completeness) belongs to the caller,
+/// `rizzy-server`'s `db_backup` module; this type seals and opens one chunk under its
+/// [`ServerDbBackupCtx`], whose `chunk_index` and `chunk_count` bind its position.
+pub struct ServerDbBackupKey {
+    /// The 32 random key bytes, wiped on drop. Used only as HKDF input for the subkey.
+    key: Key32,
+    /// The id the secrets file and the backup header use for this key; bound into the subkey
+    /// and into every chunk's context.
+    backup_key_id: u32,
+}
+
+impl ServerDbBackupKey {
+    /// Draws a new backup key from the injected CSPRNG (`rizzy-vault secrets rotate
+    /// --backup-key`).
+    ///
+    /// Choosing a `backup_key_id` no other backup key uses, and refusing a key equal to a data
+    /// key or the `enum_key` ([`ServerDbBackupKey::key_equals`]), is the caller's job.
+    #[must_use]
+    pub fn generate<R: CryptoRng + ?Sized>(rng: &mut R, backup_key_id: u32) -> Self {
+        Self {
+            key: Key32::generate(rng),
+            backup_key_id,
+        }
+    }
+
+    /// Loads a backup key read from the secrets file.
+    ///
+    /// # Errors
+    /// [`ParseError`] unless `bytes` is exactly 32 bytes long.
+    pub fn from_slice(bytes: &[u8], backup_key_id: u32) -> Result<Self, ParseError> {
+        Ok(Self {
+            key: Key32::from_slice(bytes)?,
+            backup_key_id,
+        })
+    }
+
+    /// The key's `backup_key_id`.
+    #[must_use]
+    pub const fn backup_key_id(&self) -> u32 {
+        self.backup_key_id
+    }
+
+    /// The raw key bytes, for writing the secrets file. Never log them.
+    #[must_use]
+    pub fn expose_secret(&self) -> &[u8; KEY_LEN] {
+        self.key.expose_secret()
+    }
+
+    /// Whether this key's bytes equal `other`, compared in constant time. The secrets file
+    /// uses it to refuse a backup key equal to a data key or the `enum_key` (INV-98).
+    #[must_use]
+    pub fn key_equals(&self, other: &[u8; KEY_LEN]) -> bool {
+        use subtle::ConstantTimeEq as _;
+        bool::from(self.key.expose_secret().ct_eq(other))
+    }
+
+    /// The `SERVER_DB_BACKUP` subkey (§4.3).
+    fn subkey(&self) -> Result<Key32, DerivationError> {
+        Key32::try_init_with(|out| {
+            kdf::hkdf_sha256(
+                self.key.expose_secret(),
+                None,
+                labels::SERVER_DB_BACKUP,
+                &self.backup_key_id.to_be_bytes(),
+                out,
+            )
+        })
+    }
+
+    /// Seals one chunk of a format version 2 backup as `SERVER_DB_BACKUP`, with a fresh nonce
+    /// from the injected RNG.
+    ///
+    /// # Errors
+    /// [`EncryptError::ContextMismatch`] when `ctx.backup_key_id` is not this key's id or
+    /// `ctx.chunk_index` is not below `ctx.chunk_count`;
+    /// [`EncryptError::InvalidPlaintextLength`] for an empty chunk (no chunk of a container is
+    /// empty); otherwise [`EncryptError`] as for any envelope (a chunk over the 16 MiB
+    /// limit of §9.1, say).
+    pub fn seal_chunk<R: CryptoRng + ?Sized>(
+        &self,
+        rng: &mut R,
+        ctx: &ServerDbBackupCtx,
+        chunk: &[u8],
+    ) -> Result<Vec<u8>, EncryptError> {
+        // Preconditions first, before any key material is touched.
+        if ctx.backup_key_id != self.backup_key_id || ctx.chunk_index >= ctx.chunk_count {
+            return Err(EncryptError::ContextMismatch);
+        }
+        if chunk.is_empty() {
+            return Err(EncryptError::InvalidPlaintextLength);
+        }
+        let key = self.subkey()?;
+        server_seal(rng, &key, ctx, chunk)
+    }
+
+    /// Opens one `SERVER_DB_BACKUP` chunk under `ctx`, the context the reader rebuilt from
+    /// the container header and the chunk's position.
+    ///
+    /// # Errors
+    /// [`DecryptError`] for every failure: a context naming another `backup_key_id` or an
+    /// index not below the count (refused before any crypto), a chunk of another backup or
+    /// position (the commitment), a tampered chunk (the AEAD).
+    pub fn open_chunk(
+        &self,
+        ctx: &ServerDbBackupCtx,
+        envelope: &[u8],
+    ) -> Result<SecretBytes, DecryptError> {
+        if ctx.backup_key_id != self.backup_key_id || ctx.chunk_index >= ctx.chunk_count {
+            return Err(DecryptError);
+        }
+        let key = self.subkey()?;
+        server_open(&key, ctx, envelope)
+    }
+}
+
+#[cfg(test)]
+impl ServerDbBackupKey {
+    /// Test-only: the `SERVER_DB_BACKUP` subkey, for the known-answer vector files
+    /// (CRYPTO.md §15 item 1).
+    pub(crate) fn subkey_for_tests(&self) -> Result<Key32, DerivationError> {
+        self.subkey()
+    }
+}
+
+impl fmt::Debug for ServerDbBackupKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServerDbBackupKey")
+            .field("key", &"[REDACTED]")
+            .field("backup_key_id", &self.backup_key_id)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::indexing_slicing,
@@ -649,6 +801,7 @@ mod tests {
             Purpose::ServerTotpSecret,
             Purpose::ServerLoginState,
             Purpose::ServerSecretsBackup,
+            Purpose::ServerDbBackup,
         ] {
             assert!((0x0100..=0x01ff).contains(&p.id()));
             assert!(p.client_decrypt_allow_list().is_empty(), "{p:?}");
@@ -769,5 +922,156 @@ mod tests {
         assert!(ServerDataKey::from_slice(&[0; 31], 1).is_err());
         assert_eq!(k.expose_secret(), &[0x11; 32]);
         assert_eq!(k.data_key_id(), 7);
+    }
+
+    fn db_backup_key() -> ServerDbBackupKey {
+        ServerDbBackupKey::from_slice(&[0x22; 32], 7).unwrap()
+    }
+
+    fn chunk_ctx(chunk_index: u32, chunk_count: u32) -> ServerDbBackupCtx {
+        ServerDbBackupCtx {
+            backup_id: BackupId::from_bytes([0xb7; 16]),
+            created_at_ms: 1_780_000_000_000,
+            backup_key_id: 7,
+            chunk_index,
+            chunk_count,
+        }
+    }
+
+    #[test]
+    fn db_backup_subkey_known_answer() {
+        // Independent: HKDF-SHA-256 from Python's hmac/hashlib, from CRYPTO.md §4.3 ("Server
+        // DB-backup subkey" and "Symmetric key id"); the same script reproduces the TOTP
+        // subkey's id above. The subkey is private, so its key id (the envelope header) is
+        // compared.
+        let k = db_backup_key();
+        let sub = k.subkey().unwrap();
+        assert_eq!(
+            sub.key_id().unwrap().as_bytes().to_vec(),
+            hex("6d849c07e1c1f787765937f992356360")
+        );
+        // `u32(backup_key_id)` is in the info: the same bytes under id 1 give another subkey.
+        let other = ServerDbBackupKey::from_slice(&[0x22; 32], 1).unwrap();
+        assert_eq!(
+            other
+                .subkey()
+                .unwrap()
+                .key_id()
+                .unwrap()
+                .as_bytes()
+                .to_vec(),
+            hex("f97c8faa7ab1754c4e9942294bcb112d")
+        );
+        // It is not the data subkey of the same bytes and id: another label.
+        let as_data_key = ServerDataKey::from_slice(&[0x22; 32], 7).unwrap();
+        assert_ne!(
+            as_data_key
+                .subkey(labels::SERVER_TOTP_SECRET)
+                .unwrap()
+                .expose_secret(),
+            sub.expose_secret()
+        );
+        let mut rng = seeded_rng(11);
+        let env = k.seal_chunk(&mut rng, &chunk_ctx(0, 1), b"chunk").unwrap();
+        assert_eq!(env[2..18], *sub.key_id().unwrap().as_bytes());
+    }
+
+    #[test]
+    fn db_backup_chunk_round_trip_and_binding() {
+        let mut rng = seeded_rng(12);
+        let k = db_backup_key();
+        let env = k
+            .seal_chunk(&mut rng, &chunk_ctx(1, 3), &[5; 1000])
+            .unwrap();
+        assert_eq!(env.len(), 1000 + 90);
+        assert_eq!(
+            k.open_chunk(&chunk_ctx(1, 3), &env)
+                .unwrap()
+                .expose_secret(),
+            &[5; 1000]
+        );
+
+        // Every context field is bound: position, count, backup, time. Each fails at the
+        // commitment, before the AEAD.
+        let before = aead_opens();
+        for ctx in [
+            chunk_ctx(0, 3),
+            chunk_ctx(2, 3),
+            chunk_ctx(1, 2),
+            chunk_ctx(1, 4),
+            ServerDbBackupCtx {
+                backup_id: BackupId::from_bytes([0xb8; 16]),
+                ..chunk_ctx(1, 3)
+            },
+            ServerDbBackupCtx {
+                created_at_ms: 1_780_000_000_001,
+                ..chunk_ctx(1, 3)
+            },
+        ] {
+            assert!(k.open_chunk(&ctx, &env).is_err(), "{ctx:?}");
+        }
+        assert_eq!(aead_opens(), before);
+
+        // Another backup key (another id, or the same id with other bytes) fails at the key-id
+        // check; a context naming another id is refused before any crypto.
+        let other_id = ServerDbBackupKey::from_slice(&[0x22; 32], 8).unwrap();
+        let other_ctx = ServerDbBackupCtx {
+            backup_key_id: 8,
+            ..chunk_ctx(1, 3)
+        };
+        assert!(other_id.open_chunk(&other_ctx, &env).is_err());
+        let other_bytes = ServerDbBackupKey::from_slice(&[0x23; 32], 7).unwrap();
+        assert!(other_bytes.open_chunk(&chunk_ctx(1, 3), &env).is_err());
+        assert!(k.open_chunk(&other_ctx, &env).is_err());
+        assert_eq!(aead_opens(), before);
+    }
+
+    #[test]
+    fn db_backup_seal_preconditions() {
+        let mut rng = seeded_rng(13);
+        let k = db_backup_key();
+        let wrong_id = ServerDbBackupCtx {
+            backup_key_id: 6,
+            ..chunk_ctx(0, 1)
+        };
+        assert_eq!(
+            k.seal_chunk(&mut rng, &wrong_id, b"x"),
+            Err(EncryptError::ContextMismatch)
+        );
+        assert_eq!(
+            k.seal_chunk(&mut rng, &chunk_ctx(1, 1), b"x"),
+            Err(EncryptError::ContextMismatch)
+        );
+        assert_eq!(
+            k.seal_chunk(&mut rng, &chunk_ctx(0, 0), b"x"),
+            Err(EncryptError::ContextMismatch)
+        );
+        assert_eq!(
+            k.seal_chunk(&mut rng, &chunk_ctx(0, 1), b""),
+            Err(EncryptError::InvalidPlaintextLength)
+        );
+        let env = k.seal_chunk(&mut rng, &chunk_ctx(0, 1), b"x").unwrap();
+        // An index past the count is refused on opening too, before any crypto.
+        let before = aead_opens();
+        assert!(k.open_chunk(&chunk_ctx(1, 1), &env).is_err());
+        assert_eq!(aead_opens(), before);
+    }
+
+    #[test]
+    fn db_backup_key_debug_is_redacted_and_compares_in_constant_time() {
+        let k = db_backup_key();
+        let text = format!("{k:?}");
+        assert!(text.contains("[REDACTED]") && text.contains("backup_key_id: 7"));
+        assert!(!text.contains("34, 34"));
+        assert!(ServerDbBackupKey::from_slice(&[0; 33], 1).is_err());
+        assert_eq!(k.expose_secret(), &[0x22; 32]);
+        assert_eq!(k.backup_key_id(), 7);
+        assert!(k.key_equals(&[0x22; 32]));
+        assert!(!k.key_equals(&[0x21; 32]));
+        let mut rng = seeded_rng(14);
+        let a = ServerDbBackupKey::generate(&mut rng, 1);
+        let b = ServerDbBackupKey::generate(&mut rng, 2);
+        assert!(!a.key_equals(b.expose_secret()));
+        assert_eq!((a.backup_key_id(), b.backup_key_id()), (1, 2));
     }
 }

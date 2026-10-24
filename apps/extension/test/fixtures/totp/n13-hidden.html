@@ -1,0 +1,15 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!doctype html>
+<!-- ADR 0076 §1.3–§1.4 fixture: hidden, off-screen, covered, read-only, disabled fields and an iframe -->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>hidden, off-screen, covered, read-only, disabled fields and an iframe</title></head>
+  <body>
+    <form id="f1" action="/2fa"><input id="h" name="otp" type="text" inputmode="numeric" maxlength="6" style="display:none" /></form>
+    <form id="f2" action="/2fa"><input id="off" name="otp" type="text" inputmode="numeric" maxlength="6" style="position:absolute; left:-9999px" /></form>
+    <form id="f3" action="/2fa"><input id="cov" name="otp" type="text" inputmode="numeric" maxlength="6" data-fixture-covered /></form>
+    <form id="f4" action="/2fa"><input id="ro" name="otp" type="text" inputmode="numeric" maxlength="6" readonly /></form>
+    <form id="f5" action="/2fa"><input id="dis" name="otp" type="text" inputmode="numeric" maxlength="6" disabled /></form>
+    <form id="f6" action="/2fa"><input id="t" name="otp" type="hidden" /></form>
+    <iframe title="frame" srcdoc="&lt;input name=otp inputmode=numeric maxlength=6&gt;"></iframe>
+  </body>
+</html>

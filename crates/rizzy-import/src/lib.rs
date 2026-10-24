@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-import` — importers for other password managers' export files, and for our own
 //! plaintext JSON export (roadmap §4.2, M1; [ADR 0002] point 2; [ADR 0016] §3; [ADR 0027] §6).
 //!
@@ -20,6 +22,7 @@
 //! | [`Format::RizzyPlaintextJson`] | rizzy-vault's own plaintext JSON export (ADR 0027 §3) | [`rizzy_json`] |
 //! | [`Format::AliasVaultCsv`] | `AliasVault`'s CSV export (web and mobile app) | [`aliasvault`] |
 //! | [`Format::AliasVaultAvux`] | `AliasVault`'s `.avux` (unencrypted) export archive | [`aliasvault`] |
+//! | [`Format::CxfJson`] | a FIDO Credential Exchange Format document, passkeys only (ADR 0074) | [`cxf`] |
 //!
 //! Each module's documentation holds its mapping table. **Not imported in M1:** `KeePass` KDBX
 //! databases, Bitwarden's encrypted exports and `AliasVault`'s `.avex` (encrypted) export, which
@@ -51,7 +54,7 @@
 //!   warning an error. One fuzz target per format lives under `fuzz/` (`import_bitwarden`,
 //!   `import_1pux`, `import_keepass_xml`, `import_csv`, `import_chrome_csv`,
 //!   `import_firefox_csv`, `import_rizzy_json`, `import_aliasvault_csv`,
-//!   `import_aliasvault_avux`).
+//!   `import_aliasvault_avux`, `import_cxf`).
 //! - **Secrets** (CRYPTO.md §12.2). An import file is plaintext passwords. Every string the
 //!   readers produce (JSON strings, numbers and names, CSV fields, XML names, attributes and
 //!   text, the decompressed archive member, decoded base64url) is a zeroizing buffer allocated
@@ -87,6 +90,7 @@ pub mod aliasvault;
 pub mod bitwarden;
 pub mod csv;
 pub mod csv_import;
+pub mod cxf;
 pub mod inflate;
 pub mod item;
 pub mod json;
@@ -135,17 +139,25 @@ pub enum Format {
     AliasVaultCsv,
     /// `AliasVault`'s `.avux` (unencrypted) export archive (see [`aliasvault`]).
     AliasVaultAvux,
+    /// A FIDO Credential Exchange Format (CXF) 1.x JSON document, passkey credentials only
+    /// (ADR 0074 §1, §3; see [`cxf`]). Also the decrypted payload of our own CXF export, which
+    /// `rizzy-client` opens first.
+    CxfJson,
 }
 
-/// Totals of what an import of our own plaintext JSON export did not take as it stood
-/// (ADR 0027 §6: "The report counts skipped items, ignored members, collapsed conflicts and
-/// dropped history"). Numbers only; [`Import::warnings`] names the positions (INV-48). All zero
-/// for the other formats, whose losses are warnings.
+/// Totals of what an import of our own plaintext JSON export (ADR 0027 §6: "The report counts
+/// skipped items, ignored members, collapsed conflicts and dropped history") or of a CXF
+/// document (ADR 0074 §1, §3: skipped items and credentials, "counted in the import report")
+/// did not take as it stood. Numbers only; [`Import::warnings`] names the positions (INV-48).
+/// All zero for the other formats, whose losses are warnings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Counts {
     /// Items skipped: a missing or mistyped member, a bad or duplicate key, an oversize value
-    /// or list, or a type the schema refuses.
+    /// or list, or a type the schema refuses; for CXF, an item that yielded no passkey.
     pub skipped_items: usize,
+    /// CXF credentials not imported: of a type other than a passkey, or a passkey that could
+    /// not be read (see [`cxf`]). Zero for the other formats.
+    pub skipped_credentials: usize,
     /// Members the format does not define, in any object the reader looked at, skipped items
     /// included.
     pub ignored_members: usize,
@@ -155,7 +167,8 @@ pub struct Counts {
     /// other than `login.password`, or not a text.
     pub dropped_history: usize,
     /// Fields of imported items left out because the new item may not write them: a key of
-    /// another item type, or one an M1 client never writes (see [`rizzy_json`] "Readings").
+    /// another item type, or one an M1 client never writes (see [`rizzy_json`] "Readings");
+    /// for CXF, a passkey's `fido2Extensions`.
     pub dropped_fields: usize,
 }
 
@@ -168,7 +181,8 @@ pub struct Import {
     /// What was not imported as it stood, per entry; at most
     /// [`limits::MAX_WARNINGS`] and one more.
     pub warnings: Vec<Warning>,
-    /// Totals for [`Format::RizzyPlaintextJson`]; zero for the other formats.
+    /// Totals for [`Format::RizzyPlaintextJson`] and [`Format::CxfJson`]; zero for the other
+    /// formats.
     pub counts: Counts,
 }
 
@@ -195,6 +209,7 @@ pub fn import<R: CryptoRng + ?Sized>(
         Format::RizzyPlaintextJson => rizzy_json::import(input, rng, &mut warnings, &mut counts)?,
         Format::AliasVaultCsv => aliasvault::import_csv(input, rng, &mut warnings)?,
         Format::AliasVaultAvux => aliasvault::import_avux(input, rng, &mut warnings)?,
+        Format::CxfJson => cxf::import(input, rng, &mut warnings, &mut counts)?,
     };
     Ok(Import {
         items,

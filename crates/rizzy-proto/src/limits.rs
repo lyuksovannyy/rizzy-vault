@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Every size limit of the `/api/v1` types, with its source, and the character sets of the
 //! [`Text`](crate::wire::Text) fields.
 //!
@@ -114,9 +116,23 @@ pub const MAX_BUNDLES: usize = 1024;
 /// this is set well above a personal account's device count.
 pub const MAX_DEVICE_STATEMENTS: usize = 4096;
 
-/// Count limit (this crate's choice): vault self-grants in one message. One vault per account
-/// in M1 (ADR 0021 §9), several from M9.
+/// Count limit (this crate's choice): vault self-grants in one message, and vault summaries
+/// in one account answer ([ADR 0081] §A11).
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
 pub const MAX_VAULT_GRANTS: usize = 1024;
+
+/// Count limit ([ADR 0081] §D): the vaults one account owns, its Personal vault included
+/// (directory kinds 1 and 2). The server refuses a `vault_create` beyond it.
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+pub const MAX_OWNED_VAULTS: usize = 64;
+
+/// Count limit ([ADR 0081] §A2, §D): entries of the vault directory (`ACCOUNT_SETTINGS` tag
+/// `0x0002`), owned, joined and unknown kinds together. Enforced by the client parser.
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+pub const MAX_DIRECTORY_ENTRIES: usize = 128;
 
 /// Count limit (this crate's choice): pending device grants in one response or request, one
 /// per rotation the device has not acknowledged (CRYPTO.md §10.1).
@@ -135,9 +151,69 @@ pub const MAX_RECORDS: usize = 4096;
 /// request (CRYPTO.md §4.2), about one per item.
 pub const MAX_ITEM_KEY_WRAPS: usize = 65_536;
 
+/// Count limit: sessions in one `sessions/list` answer ([ADR 0075] §3). The server lists at most
+/// this many, newest first, and sets `truncated` when the account has more live sessions.
+///
+/// [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md
+pub const MAX_SESSIONS_LISTED: usize = 256;
+
+/// Byte limit: a `WebAuthn` credential id. `WebAuthn` Level 3 §5.1 caps `rawId` at 1023 bytes.
+pub const MAX_WEBAUTHN_CREDENTIAL_ID_LEN: usize = 1023;
+
+/// Count limit (this crate's choice): security keys one account may enrol (ADR 0058). It bounds
+/// `excludeCredentials` and `allowCredentials`, and the list an account sees.
+pub const MAX_WEBAUTHN_CREDENTIALS: usize = 32;
+
+/// Byte limit (this crate's choice): a security key's label, UTF-8.
+pub const MAX_WEBAUTHN_LABEL_LEN: usize = 64;
+
+/// Byte limit (this crate's choice): the PNG of one re-encoded icon in an `icons/fetch` answer
+/// ([ADR 0052] point 4). An icon is at most 128×128 RGBA pixels, 64 KiB raw; a PNG of it is at
+/// most that plus its filter bytes, zlib's stored-block overhead and the chunk headers, well
+/// under 96 KiB. As base64url it is at most 128 KiB, inside ADR 0028 item 7's 1 MiB.
+///
+/// [ADR 0052]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0052-icon-proxy-role.md
+pub const MAX_ICON_PNG_LEN: usize = 96 * 1024;
+
+/// Byte limit (this crate's choice): one upstream breach-check range response ([ADR 0053];
+/// CRYPTO.md §11.16), relayed as one JSON string. A range line is at most 58 bytes (35 suffix
+/// characters, a colon, a count of at most 20 digits, CRLF), and the upstream's padded answers
+/// hold 800 to 1,000 lines plus the real ones; 512 KiB leaves a wide margin above the about
+/// 50 KB answers seen in practice (U: the upstream publishes no maximum).
+///
+/// [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
+pub const MAX_BREACH_RANGE_LEN: usize = 512 * 1024;
+
+/// Count limit (this crate's choice): entries in one breach-check range response; 8,192 lines
+/// of the longest form fill about [`MAX_BREACH_RANGE_LEN`].
+pub const MAX_BREACH_RANGE_ENTRIES: usize = 8192;
+
 /// Count limit (this crate's choice): API versions and minimum client versions in
 /// `GET /api/meta` (ADR 0002 point 3).
 pub const MAX_META_ENTRIES: usize = 32;
+
+/// Format limit: plaintext bytes per attachment chunk, 512 KiB ([ADR 0054] §2). Mirrors
+/// `rizzy_core::attachment::CHUNK_SIZE`; the server tests compare the two.
+///
+/// [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
+pub const ATTACHMENT_CHUNK_SIZE: usize = 524_288;
+
+/// Format limit: the largest attachment, 25 MiB of plaintext ([ADR 0054] §2), so at most 50
+/// chunks. The server refuses a larger declared size at `attachments/create` with
+/// `quota_exceeded` (ADR 0054 "Owner answers" 5).
+///
+/// [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
+pub const MAX_ATTACHMENT_LEN: u64 = 26_214_400;
+
+/// Format limit: the longest `ATTACHMENT_CHUNK` envelope, a full chunk under the symmetric
+/// envelope: `CHUNK_SIZE + 90` bytes (ADR 0054 §6), about 699 KiB as base64url, so an upload or
+/// download body stays under [`MAX_BODY_LEN`].
+pub const MAX_ATTACHMENT_CHUNK_ENVELOPE_LEN: usize =
+    ATTACHMENT_CHUNK_SIZE + SYMMETRIC_ENVELOPE_OVERHEAD;
+
+/// Format limit: an `ATTACHMENT_KEY_WRAP` envelope is exactly a 32-byte key under the
+/// symmetric envelope, 122 bytes (CRYPTO.md §8.4, §9.1).
+pub const ATTACHMENT_KEY_WRAP_LEN: usize = 32 + SYMMETRIC_ENVELOPE_OVERHEAD;
 
 /// The body limit of every endpoint except the three below: 1 MiB (ADR 0028 item 7). It bounds
 /// the unauthenticated requests (signup, login, device authentication, recovery) and the account
@@ -238,6 +314,21 @@ impl TextRule for InviteTokenRule {
     const REDACT: bool = true;
     fn allowed(byte: u8) -> bool {
         byte.is_ascii_graphic()
+    }
+}
+
+/// `WebAuthn` options or a browser `PublicKeyCredential`, as JSON text (CRYPTO.md §11.17,
+/// [`crate::webauthn`]): printable ASCII and spaces, at most 64 KiB. Every binary value in it is
+/// base64url, so a well-formed one never needs another byte. Not redacted: it holds challenges,
+/// public keys, credential ids and signatures, no secret.
+#[derive(Debug)]
+pub enum WebauthnJsonRule {}
+
+impl TextRule for WebauthnJsonRule {
+    const MAX: usize = 64 * 1024;
+    const REDACT: bool = false;
+    fn allowed(byte: u8) -> bool {
+        byte == b' ' || byte.is_ascii_graphic()
     }
 }
 

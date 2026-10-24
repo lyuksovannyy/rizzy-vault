@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // @rizzy-vault/core — the only way UI code reaches the Rust core (ADR 0013 §4 "One entry point
 // for UI code"; ADR 0014 §2, §4). This file is the set to review when the boundary changes.
 //
@@ -22,16 +24,23 @@
 // garbage-collected, as do revealed values and plaintext exports.
 
 import initWasm, {
+  BreachCheck,
+  IconFetch,
   CacheDelta,
   CacheKey,
   CoreError as WasmCoreError,
   DeviceSession as WasmDeviceSession,
   EnrolFlow,
+  type EquivalenceGroupView as WasmEquivalenceGroupView,
+  GlobalEquivalence,
   HttpRequest,
   ItemDraft,
   KvRow,
   LoginFlow,
+  type MatchDecision as WasmMatchDecision,
+  type MatchSettingsView as WasmMatchSettingsView,
   PasskeyAssertion as WasmPasskeyAssertion,
+  PasskeyCandidate as WasmPasskeyCandidate,
   Session,
   SignupFlow,
   TwoFactorEnrolment,
@@ -41,12 +50,22 @@ import initWasm, {
   cacheStoreNames as wasmCacheStoreNames,
   createPasskey as wasmCreatePasskey,
   decideMatchCandidates as wasmDecideMatchCandidates,
+  cxfExportWarning as wasmCxfExportWarning,
   detectImportFormat as wasmDetectImportFormat,
+  endsSessionOnUnauthorized,
   expectNoContent,
   generateElementId,
   generatePassphraseWithOptions as wasmGeneratePassphraseWithOptions,
   generatePasswordWithOptions as wasmGeneratePasswordWithOptions,
   generatorLimits as wasmGeneratorLimits,
+  agePresets as wasmAgePresets,
+  checkAgeRange as wasmCheckAgeRange,
+  generateIdentity as wasmGenerateIdentity,
+  identityCountries as wasmIdentityCountries,
+  normalizeEmailDomain as wasmNormalizeEmailDomain,
+  regenerateIdentityField as wasmRegenerateIdentityField,
+  IdentityDraft as WasmIdentityDraft,
+  type IdentityDefaultsView as WasmIdentityDefaultsView,
   initSync,
   metaRequest,
   normalizePageUrl as wasmNormalizePageUrl,
@@ -55,6 +74,9 @@ import initWasm, {
   plaintextExportHoldMs as wasmPlaintextExportHoldMs,
   plaintextExportPhrase as wasmPlaintextExportPhrase,
   plaintextExportWarning as wasmPlaintextExportWarning,
+  othersEndedNotice as wasmOthersEndedNotice,
+  sessionEndedByYouNotice as wasmSessionEndedByYouNotice,
+  sessionEndedNotice as wasmSessionEndedNotice,
   registrableDomainOf as wasmRegistrableDomainOf,
 } from "../generated/rizzy_core.js";
 
@@ -208,6 +230,12 @@ export const MAX_RESPONSE_BYTES = 256 * 1024 * 1024;
 const REQUEST_COUNTER_HEADER = "Rizzy-Request-Counter";
 const REQUEST_SIGNATURE_HEADER = "Rizzy-Request-Signature";
 
+/** The two requests whose `401` may be a wrong TOTP code rather than an ended session. */
+const TOTP_CODE_PATHS: ReadonlySet<string> = new Set([
+  "/api/v1/totp/enrol/confirm",
+  "/api/v1/totp/disable",
+]);
+
 /** Copies a generated request into a plain object and frees it. */
 function takeRequest(request: HttpRequest): CoreRequest {
   try {
@@ -339,6 +367,45 @@ export interface LoginInput {
 export type AskTotp = () => Promise<string>;
 
 /**
+ * What a login needs from a security key (ADR 0058; CRYPTO.md §11.17): the server's request
+ * options for `navigator.credentials.get` (JSON text, binary values as base64url), and whether a
+ * TOTP code would also do.
+ */
+export interface SecurityKeyRequest {
+  readonly options: string;
+  readonly totpAllowed: boolean;
+}
+
+/** The host's answer to a {@link SecurityKeyRequest}. */
+export type SecurityKeyAnswer =
+  /** The browser's assertion, `PublicKeyCredential` JSON. */
+  | { readonly kind: "credential"; readonly credential: string }
+  /** A TOTP code instead (only when `totpAllowed`): the OPAQUE login starts again with it. */
+  | { readonly kind: "totp"; readonly code: string }
+  /** The browser prompt was cancelled or timed out: ask the server for a fresh challenge. */
+  | { readonly kind: "retry" };
+
+/**
+ * Runs the browser's security-key prompt for a login. It must run where
+ * `navigator.credentials` exists: the web vault's UI thread, on the server's own origin.
+ */
+export type AskSecurityKey = (request: SecurityKeyRequest) => Promise<SecurityKeyAnswer>;
+
+/** Every second-factor prompt a host can answer. A bare function is the TOTP prompt alone. */
+export interface SecondFactorPrompts {
+  readonly totp?: AskTotp;
+  readonly securityKey?: AskSecurityKey;
+}
+
+/** The prompts of an `ask` argument. */
+function promptsOf(ask: AskTotp | SecondFactorPrompts | undefined): SecondFactorPrompts {
+  if (typeof ask === "function") {
+    return { totp: ask };
+  }
+  return ask ?? {};
+}
+
+/**
  * The shape every request/response flow of the core shares (module docs, "The shape of every
  * flow"): `LoginFlow` and `EnrolFlow` both satisfy this structurally, so {@link drive} drives
  * either without the core needing to export a common base class (`wasm-bindgen` classes cannot
@@ -349,29 +416,60 @@ interface RequestResponseFlow {
   request(): HttpRequest;
   respond(status: number, body: Uint8Array, now_ms: bigint): void;
   provideTotp(code: string): void;
+  /** `LoginFlow` only: the security-key second factor (ADR 0058). */
+  readonly securityKeyOptions?: string | undefined;
+  readonly securityKeyTotp?: boolean;
+  provideSecurityKey?(credentialJson: string): void;
+  retrySecurityKey?(): void;
 }
 
-/** Drives a login or enrolment flow to `"done"` or `"needs_totp"`. */
+/** Drives a login or enrolment flow to `"done"`, answering its second-factor prompts. */
 async function drive(
   flow: RequestResponseFlow,
   transport: Transport,
   clock: Clock,
-  askTotp: AskTotp | undefined,
+  ask: AskTotp | SecondFactorPrompts | undefined,
 ): Promise<void> {
+  const prompts = promptsOf(ask);
   for (;;) {
     const state = flow.state;
     if (state === "request") {
       const answer = await transport(takeRequest(call(() => flow.request())));
       call(() => flow.respond(answer.status, answer.body, nowOf(clock)));
     } else if (state === "needs_totp") {
-      if (askTotp === undefined) {
+      if (prompts.totp === undefined) {
         throw new CoreError("server_second_factor_required");
       }
-      const code = await askTotp();
+      const code = await prompts.totp();
       call(() => flow.provideTotp(code));
+    } else if (state === "needs_security_key") {
+      await answerSecurityKey(flow, prompts);
     } else {
       return;
     }
+  }
+}
+
+/** One `"needs_security_key"` step of {@link drive}. */
+async function answerSecurityKey(
+  flow: RequestResponseFlow,
+  prompts: SecondFactorPrompts,
+): Promise<void> {
+  const options = flow.securityKeyOptions;
+  const provide = flow.provideSecurityKey?.bind(flow);
+  if (prompts.securityKey === undefined || options === undefined || provide === undefined) {
+    throw new CoreError("security_key_required");
+  }
+  const answer = await prompts.securityKey({
+    options,
+    totpAllowed: flow.securityKeyTotp === true,
+  });
+  if (answer.kind === "credential") {
+    call(() => provide(answer.credential));
+  } else if (answer.kind === "totp") {
+    call(() => flow.provideTotp(answer.code));
+  } else {
+    call(() => flow.retrySecurityKey?.());
   }
 }
 
@@ -382,7 +480,7 @@ async function drive(
 export async function login(
   transport: Transport,
   input: LoginInput,
-  askTotp?: AskTotp,
+  askTotp?: AskTotp | SecondFactorPrompts,
   clock: Clock = Date.now,
 ): Promise<VaultSession> {
   // `ensureReady` inside, so that byte secrets are zeroed even before the module is loaded.
@@ -521,7 +619,7 @@ export class Signup {
   }
 
   /** The first session, after the commit was acknowledged. Consumes the signup. */
-  async login(askTotp?: AskTotp): Promise<VaultSession> {
+  async login(askTotp?: AskTotp | SecondFactorPrompts): Promise<VaultSession> {
     const flow = this.#current();
     this.#flow = undefined;
     const loginFlow = call(() => flow.login());
@@ -578,6 +676,10 @@ export type ItemChange =
       readonly label: string;
       readonly kind: "text" | "hidden" | "boolean";
       readonly value: string;
+      /** The field's autocomplete id (ADR 0076 §2): written as `field/<element>/autocomplete`
+       * in the same op. Lowercase it before passing it; `rizzy-client` refuses, never
+       * normalises, an id that breaks the grammar or is reserved. */
+      readonly autocomplete?: string;
     }
   | { readonly op: "removeElement"; readonly list: string; readonly element: string }
   | {
@@ -616,12 +718,15 @@ export type ItemType =
   | "api-credential"
   | "software-license"
   | "wifi"
-  | "bank-account"
   | "passkey";
 
 /** One row of an item list: no concealed value. */
 export interface ItemSummary {
+  /** The item reference, `<vault hex>:<item hex>` (ADR 0081 §A7, INV-103): what every item
+   * call takes. An item id alone names nothing: it is unique only within its vault. */
   readonly id: string;
+  /** The item's vault, 32 hex digits. */
+  readonly vaultId: string;
   readonly itemType: ItemType | "unknown";
   readonly title: string;
   readonly username: string | undefined;
@@ -632,6 +737,99 @@ export interface ItemSummary {
   readonly tags: readonly string[];
   /** The host of the item's first website, or `undefined`. Never the full URI. */
   readonly websiteHost: string | undefined;
+}
+
+/** What a vault is (ADR 0081 §A1, §A2): the Personal vault, an owned vault, or a kind this
+ * build only lists (`shared`/`joined` are Part B; `unknown` a kind it does not know). */
+export type VaultKind = "personal" | "owned" | "shared" | "joined" | "unknown";
+
+/** Whether a vault is opened here: `withheld` (listed, not served: read-only, an alarm) and
+ * `needs_update` ("This vault needs a newer rizzy-vault", §A12) are not. */
+export type VaultStatus = "open" | "withheld" | "needs_update";
+
+/** One vault of the account (the vault list, the switcher, the pickers). */
+export interface VaultInfo {
+  /** 32 hex digits. */
+  readonly id: string;
+  readonly kind: VaultKind;
+  /** The name of an owned vault; `undefined` for the Personal vault (shown as "Personal",
+   * localised) and for an owned vault without one (shown as "Untitled vault"). */
+  readonly name: string | undefined;
+  readonly status: VaultStatus;
+  /** Whether nothing can be written to it now. */
+  readonly readOnly: boolean;
+  /** Its items, active and trashed. */
+  readonly itemCount: number;
+  /** The server's counted bytes of it, if served. */
+  readonly bytesUsed: number | undefined;
+}
+
+/** One alarm of the vault completeness check (ADR 0081 §A2, INV-102). */
+export interface VaultAlarm {
+  readonly kind: "withheld" | "unlisted" | "no_directory";
+  /** The vault it names; `undefined` for `no_directory`. */
+  readonly vaultId: string | undefined;
+}
+
+/** What one custom field's autocomplete id does (ADR 0076 §2.4–§2.5, §3). */
+export interface CustomFieldAutofill {
+  /** The field's element id. */
+  readonly element: string;
+  /** `none`; `fills`; `invalid` (W1), `reserved` (W2), `wrong_kind` (W4): stored ids that never
+   * fill; `unnamed`: no Display Name; `shadowed`: another field earlier in list order fills it. */
+  readonly state: "none" | "fills" | "invalid" | "reserved" | "wrong_kind" | "unnamed" | "shadowed";
+  /** For `shadowed`: the winner's element id and Display Name. */
+  readonly winner: string | undefined;
+  readonly winnerLabel: string | undefined;
+}
+
+/** One custom field an inline-menu offer discloses (ADR 0076 §4.1). Never a value. */
+export interface CustomOffer {
+  readonly token: string;
+  readonly element: string;
+  readonly label: string;
+  readonly concealed: boolean;
+}
+
+/** One candidate's offer (ADR 0076 §4.1). */
+export interface AutofillOffer {
+  readonly fillsTotp: boolean;
+  readonly custom: readonly CustomOffer[];
+}
+
+/** One fill click's scope, taken from the long-lived context's own offer record (ADR 0076
+ * §4.2). */
+export interface FillPlanRequest {
+  readonly only: "username" | "password" | "totp" | undefined;
+  readonly totp: boolean;
+  readonly custom: readonly { readonly token: string; readonly element: string }[];
+  readonly usernameToken: string | undefined;
+  readonly passwordToken: string | undefined;
+}
+
+/** The values of one fill (ADR 0076 §4.4). */
+export interface FillPlanValues {
+  readonly username?: string;
+  readonly password?: string;
+  readonly totp?: string;
+  readonly custom: readonly { readonly token: string; readonly value: string }[];
+}
+
+/** One custom field a submitted form captured (ADR 0076 §5.1). */
+export interface CapturedCustomField {
+  readonly token: string;
+  readonly value: string;
+  readonly masked: boolean;
+}
+
+/** One save-dialog row (ADR 0076 §5.3). */
+export interface SaveRow {
+  readonly index: number;
+  readonly kind: "add" | "update";
+  readonly element: string | undefined;
+  readonly label: string;
+  readonly concealed: boolean;
+  readonly checked: boolean;
 }
 
 /** One displayed field. `value` is absent while `concealed`; reveal it with `reveal`. */
@@ -645,6 +843,80 @@ export interface FieldView {
   readonly concealed: boolean;
   readonly value: string | undefined;
   readonly conflict: boolean;
+}
+
+/**
+ * One password-history entry, without its value (ADR 0013 §3 rule 3): `merge` is the history
+ * of `login.password` (ADR 0012 §5), `imported` came from another manager (`pwhist`, ADR 0018
+ * §7). `index` is its position within its source, for display only; `changedMs` the date it
+ * stopped being current (`merge`) or the other manager's date (`imported`, when it gave one),
+ * also display only, since two entries can share one date. `id` is the entry's own identity
+ * (never shared, never absent): pass it to {@link VaultSession.revealPasswordHistory}, not
+ * `index` or `changedMs`, to bind a reveal to the exact entry this listing showed.
+ */
+export interface HistoryEntry {
+  readonly source: "merge" | "imported";
+  readonly index: number;
+  readonly changedMs: number | undefined;
+  readonly id: string;
+}
+
+/**
+ * One field's history, without values (ADR 0013 §3 rule 3; ROADMAP §4.2 "Item revision history
+ * (restore old versions)", M3): generalizes {@link HistoryEntry} to every field, not only
+ * `login.password`. `key` is the field's final key ({@link FieldView.key}); `entries` is
+ * newest first, each `source` always `"merge"` (imported `login.password` history stays
+ * {@link VaultSession.passwordHistory}-only and is never part of this listing). Pass an
+ * entry's own `id`, scoped to `key`, to {@link VaultSession.revealFieldHistory} or
+ * {@link VaultSession.restoreFieldHistory}: the same dot can appear in two different fields'
+ * histories when one edit wrote both, so an id from one field's listing is never read or
+ * restored under another field's name.
+ */
+export interface FieldHistory {
+  readonly key: string;
+  readonly entries: readonly HistoryEntry[];
+}
+
+/**
+ * One distinct value of a conflicting field (ROADMAP §4.5 "edited on Phone and Laptop at the
+ * same time — keep both / pick one"; ADR 0012 §4 step 5, ADR 0018 §6), as
+ * {@link VaultSession.fieldConflict} lists them: the displayed value first. `device` wrote it
+ * ("edited on X"; name it from {@link VaultSession.devices}), at `writtenMs` (display only).
+ * `cleared` is "cleared on X". `value` is absent while `concealed` (ADR 0013 §3 rule 3): reveal
+ * it with {@link VaultSession.revealConflictValue}. Pass `index` and `id` back as listed to
+ * reveal or resolve: when a sync has since changed the listing, the core refuses
+ * (`unknown_item`) instead of acting on another value.
+ */
+export interface ConflictValue {
+  readonly index: number;
+  readonly id: string;
+  readonly device: string;
+  readonly writtenMs: number;
+  readonly displayed: boolean;
+  readonly cleared: boolean;
+  readonly kind: FieldView["kind"];
+  readonly concealed: boolean;
+  readonly value: string | undefined;
+}
+
+/**
+ * A notice of {@link VaultSession.takeNotices}: ids only. `late-edit`: "An edit from
+ * `<devices>` arrived for an item you deleted permanently. Restore it as a new item?" (ADR 0018
+ * §3). `concurrent-trash`: "deleted on `devices[0]` while it was being edited on `devices[1]`"
+ * (ADR 0012 §5). Name the devices from {@link VaultSession.devices}. `conflictId` is this one
+ * conflict's own identity for `concurrent-trash` (`undefined` for `late-edit`, which has none):
+ * fold it into a host-side dedup key alongside `item` and `devices`, so a second, genuinely
+ * distinct race between the same two devices on the same item is not dropped as a repeat of
+ * the first. `movedTo`, for `late-edit` only: the vault this session moved the item to before
+ * its source was purged (ADR 0081 §A6 step 2, "the prompt names the target vault when this
+ * device recorded the move"); name it from {@link VaultSession.vaults}. `undefined` otherwise.
+ */
+export interface Notice {
+  readonly kind: "late-edit" | "concurrent-trash";
+  readonly item: string;
+  readonly devices: readonly string[];
+  readonly conflictId: string | undefined;
+  readonly movedTo: string | undefined;
 }
 
 /** A current TOTP code. */
@@ -661,6 +933,12 @@ export interface EncryptedExport {
   readonly unresolved: number;
 }
 
+/** A CXF passkey export (ADR 0074 §2): the sealed file and how many passkeys it holds. */
+export interface CxfExport {
+  readonly file: Uint8Array;
+  readonly passkeys: number;
+}
+
 /** What an import did, as counts. */
 export interface ImportReport {
   readonly imported: number;
@@ -669,6 +947,8 @@ export interface ImportReport {
   readonly collapsedConflicts: number;
   readonly historyNotCarried: number;
   readonly fieldsNotCarried: number;
+  /** CXF credentials not imported: another type than a passkey, or an unreadable passkey. */
+  readonly credentialsSkipped: number;
 }
 
 /** The import formats of other products, and our own plaintext JSON. */
@@ -681,14 +961,21 @@ export type ImportFormat =
   | "firefox-csv"
   | "rizzy-json"
   | "aliasvault-csv"
-  | "aliasvault-avux";
+  | "aliasvault-avux"
+  | "cxf-json";
 
 /**
  * What {@link detectImportFormat} recognised: an {@link ImportFormat}, our encrypted export
- * (`rizzy-encrypted`, opened with the file's own password), our plaintext CSV export
- * (`rizzy-csv`, which cannot be imported), or `unknown` (ask the user to name the format).
+ * (`rizzy-encrypted`, opened with the file's own password), our CXF passkey export
+ * (`rizzy-cxf-encrypted`, likewise; ADR 0074), our plaintext CSV export (`rizzy-csv`, which
+ * cannot be imported), or `unknown` (ask the user to name the format).
  */
-export type DetectedImportFormat = ImportFormat | "rizzy-encrypted" | "rizzy-csv" | "unknown";
+export type DetectedImportFormat =
+  | ImportFormat
+  | "rizzy-encrypted"
+  | "rizzy-cxf-encrypted"
+  | "rizzy-csv"
+  | "unknown";
 
 /** One durable device of the account. */
 export interface DeviceView {
@@ -698,10 +985,80 @@ export interface DeviceView {
   readonly revoked: boolean;
 }
 
+/**
+ * One session of the account, as `sessions/list` reports it (ADR 0075 §9). The server's word,
+ * for display only (AR-9): never proof that nothing else is open.
+ */
+export interface SessionRowView {
+  /** The `session_id`, 32 hex digits: what {@link VaultSession.endSession} takes. */
+  readonly id: string;
+  /**
+   * `password-login` (a web or password login), `password-recheck` (a password re-check on a
+   * device), `device`, `recovery` (an account recovery in progress) or `unknown`.
+   */
+  readonly kind: string;
+  /** The device of a device session or a password re-check, 32 hex digits. */
+  readonly deviceId: string | undefined;
+  readonly createdAtMs: number;
+  readonly expiresAtMs: number;
+  /** This browser's own session. */
+  readonly current: boolean;
+  /** Whether "End" is offered: never on a device row (ADR 0075 §5) or the current one. */
+  readonly endable: boolean;
+}
+
+/** The account's sessions: the rows, newest first, and whether the server cut the list. */
+/**
+ * One attachment an item lists (ADR 0054 §4): its id, file name, declared media type and size
+ * in bytes. Item data, for display.
+ */
+export interface AttachmentInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly mime: string;
+  readonly size: number;
+}
+
+/** The largest attachment, in bytes: 25 MiB (ADR 0054 §2). Checked in the core too. */
+export const MAX_ATTACHMENT_BYTES = 26_214_400;
+
+export interface SessionListView {
+  readonly sessions: readonly SessionRowView[];
+  readonly truncated: boolean;
+}
+
+/** What the web vault shows when its session was ended elsewhere (ADR 0075 §6). */
+export function sessionEndedNotice(): string {
+  return wasmSessionEndedNotice();
+}
+
+/** The confirmation after ending other sessions (ADR 0075 §8). */
+export function othersEndedNotice(): string {
+  return wasmOthersEndedNotice();
+}
+
+/** The confirmation after ending one session (ADR 0075 §8). */
+export function sessionEndedByYouNotice(): string {
+  return wasmSessionEndedByYouNotice();
+}
+
 /** A started 2FA enrolment, to show once. */
 export interface TwoFactorSetup {
   readonly otpauthUri: string;
   readonly secret: string;
+}
+
+/** A started security-key enrolment (ADR 0058): its id and the creation options JSON. */
+export interface SecurityKeyEnrolmentInfo {
+  readonly enrolmentId: string;
+  readonly options: string;
+}
+
+/** One enrolled security key. `credentialId` is base64url, the handle for removal. */
+export interface SecurityKeyInfo {
+  readonly credentialId: string;
+  readonly label: string;
+  readonly createdMs: number;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -734,12 +1091,29 @@ export interface CreatedPasskey {
 export const PASSKEY_ALG_ES256 = 1;
 
 /** One `navigator.credentials.get()` ceremony's result (ADR 0039 §2): everything the page's
- * `PublicKeyCredential` response needs, never the private key that signed it. */
+ * `PublicKeyCredential` response needs, never the private key that signed it. `userHandle` is
+ * empty only when the stored passkey somehow has none (`PasskeyAssertion`'s own doc on why that
+ * should not happen in practice); gap 35(a) in the M2 gap audit added this field — it used to be
+ * missing from every assertion, so a relying party doing username-less discoverable sign-in
+ * could not identify the user from the response alone. */
 export interface PasskeyAssertionResult {
   readonly credentialId: Uint8Array;
+  readonly userHandle: Uint8Array;
   readonly clientDataJson: Uint8Array;
   readonly authenticatorData: Uint8Array;
   readonly signatureDer: Uint8Array;
+}
+
+/** One stored passkey's non-secret metadata (ADR 0039 §1), for the host to list
+ * `navigator.credentials.get()`/`.create()` candidates (gaps 35(a)/(b) in the M2 gap audit) —
+ * never the private key, which stays behind the wasm boundary. */
+export interface PasskeyCandidateResult {
+  readonly elementId: string;
+  readonly rpId: string;
+  readonly userHandle: Uint8Array;
+  readonly credentialId: Uint8Array;
+  readonly alg: number;
+  readonly createdMs: number;
 }
 
 /**
@@ -775,9 +1149,25 @@ export function createPasskey(origin: string, rpId: string, challenge: Uint8Arra
 function mapPasskeyAssertion(assertion: WasmPasskeyAssertion): PasskeyAssertionResult {
   return mapOne(assertion, (a) => ({
     credentialId: a.credentialId,
+    userHandle: a.userHandle,
     clientDataJson: a.clientDataJson,
     authenticatorData: a.authenticatorData,
     signatureDer: a.signatureDer,
+  }));
+}
+
+/** Maps every generated {@link WasmPasskeyCandidate} and frees them — shared by
+ * {@link VaultSession.passkeyCandidates} and {@link DurableSession.passkeyCandidates}.
+ * `createdMs` narrows from the generated `bigint` to `number`, the same convention
+ * `StoredPasskey`/`mapOne`'s other `U64` fields already use for a local-display timestamp. */
+function mapPasskeyCandidates(candidates: WasmPasskeyCandidate[]): PasskeyCandidateResult[] {
+  return mapFree(candidates, (c) => ({
+    elementId: c.elementId,
+    rpId: c.rpId,
+    userHandle: c.userHandle,
+    credentialId: c.credentialId,
+    alg: c.alg,
+    createdMs: Number(c.createdMs),
   }));
 }
 
@@ -805,6 +1195,9 @@ function draftOf(changes: readonly ItemChange[]): ItemDraft {
             break;
           case "addCustomField":
             draft.addCustomField(change.element, change.label, change.kind, change.value);
+            if (change.autocomplete !== undefined) {
+              draft.set(`field/${change.element}/autocomplete`, change.autocomplete);
+            }
             break;
           case "addPasskey":
             draft.addPasskey(
@@ -842,6 +1235,24 @@ function draftOf(changes: readonly ItemChange[]): ItemDraft {
 }
 
 /** Frees each element of a generated array after mapping it. */
+/** Plain objects of the core's vault views, freed at once. */
+function vaultInfos(views: { id: string; kind: string; name: string | undefined; status: string; readOnly: boolean; itemCount: number; bytesUsed: bigint | undefined; free(): void }[]): VaultInfo[] {
+  return mapFree(views, (v) => ({
+    id: v.id,
+    kind: v.kind as VaultKind,
+    name: v.name,
+    status: v.status as VaultStatus,
+    readOnly: v.readOnly,
+    itemCount: v.itemCount,
+    bytesUsed: v.bytesUsed === undefined ? undefined : Number(v.bytesUsed),
+  }));
+}
+
+/** Plain objects of the core's vault alarms, freed at once. */
+function vaultAlarms(views: { kind: string; vaultId: string | undefined; free(): void }[]): VaultAlarm[] {
+  return mapFree(views, (a) => ({ kind: a.kind as VaultAlarm["kind"], vaultId: a.vaultId }));
+}
+
 function mapFree<T extends { free(): void }, U>(items: T[], f: (item: T) => U): U[] {
   try {
     return items.map(f);
@@ -853,6 +1264,17 @@ function mapFree<T extends { free(): void }, U>(items: T[], f: (item: T) => U): 
 }
 
 /** Maps one generated value and frees it. */
+function mapCustomFieldAutofill(
+  views: { element: string; state: string; winner: string | undefined; winnerLabel: string | undefined; free(): void }[],
+): CustomFieldAutofill[] {
+  return mapFree(views, (v) => ({
+    element: v.element,
+    state: v.state as CustomFieldAutofill["state"],
+    winner: v.winner,
+    winnerLabel: v.winnerLabel,
+  }));
+}
+
 function mapOne<T extends { free(): void }, U>(item: T, f: (item: T) => U): U {
   try {
     return f(item);
@@ -862,7 +1284,146 @@ function mapOne<T extends { free(): void }, U>(item: T, f: (item: T) => U): U {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The breach check (ADR 0053; CRYPTO.md §11.16)
+//
+// The core computes SHA-1 over UTF-8(NFC(password)) and builds a request that carries the first
+// five hex characters only: `POST /api/v1/icons/breach-range`, no Authorization header. The
+// `icons` role relays the upstream's range, and the core compares every suffix in constant time.
+// The password never reaches this module as a string from an item (`checkItemBreach`); a typed or
+// generated one crosses as bytes that are zeroed (`checkPasswordBreach`).
+
+/** The outcome of a breach check: advice from the upstream, relayed by a server the threat model
+ * does not trust, so never a security decision. */
+export interface BreachResult {
+  /** Whether the password appeared in the breach corpus. */
+  readonly found: boolean;
+  /** How often it appeared; 0 when not found. */
+  readonly count: number;
+}
+
+/** Whether a breach-check failure means "not available here" (switched off on this server, the
+ * upstream down, a bad answer) rather than "too many checks, wait a moment". */
+export function breachCheckUnavailable(code: string): boolean {
+  return code !== "server_rate_limited";
+}
+
+/** The most range answers a session keeps in memory, by prefix (one per distinct prefix). */
+const MAX_CACHED_RANGES = 512;
+
+/** Runs one check: the cached answer for its prefix, or one request; frees the check. Only a
+ * `200` answer is kept, in memory only, so items that share a prefix send one request. */
+async function runBreachCheck(
+  check: BreachCheck,
+  transport: Transport,
+  ranges: Map<string, CoreResponse> | undefined,
+): Promise<BreachResult> {
+  try {
+    const prefix = check.prefix;
+    let answer = ranges?.get(prefix);
+    if (answer === undefined) {
+      answer = await transport(takeRequest(call(() => check.request())));
+      if (answer.status === 200 && ranges !== undefined) {
+        if (ranges.size >= MAX_CACHED_RANGES) {
+          ranges.clear();
+        }
+        ranges.set(prefix, answer);
+      }
+    }
+    const reply = answer;
+    return mapOne(
+      call(() => check.finish(reply.status, reply.body)),
+      (v) => ({ found: v.found, count: v.count }),
+    );
+  } finally {
+    check.free();
+  }
+}
+
+/**
+ * Checks a password the user typed or generated against the breach corpus (ADR 0053). The
+ * password crosses as bytes, zeroed afterwards (`SecretInput`); only its 5-character hash prefix
+ * is sent. Throws a {@link CoreError}: `server_not_found` when this server has no breach check,
+ * `server_rate_limited`, `server_internal`, `transport_failed`, `invalid_input` (empty).
+ */
+export async function checkPasswordBreach(
+  transport: Transport,
+  password: SecretInput,
+): Promise<BreachResult> {
+  ensureReady();
+  const check = withSecrets([password], (bytes) => call(() => BreachCheck.forPassword(at(bytes, 0))));
+  return runBreachCheck(check, transport, undefined);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Item icons (ADR 0052 point 6)
+//
+// The core normalises the host of an item's website (IDNA A-labels, lowercase, no trailing dot)
+// and builds `POST /api/v1/icons/fetch` with `{"host": …}` as its only field and no
+// Authorization header: the `icons` role learns a hostname, never who asks. The answer is
+// checked (`image/png`, the PNG signature, a bounded length) and returned as bytes for the
+// caller to show as an image: a `blob:` URL, never markup, never a `data:` URL.
+
+/** The hostname an icon request for `websiteHost` would carry (lowercase A-labels), or
+ * `undefined` when nothing would be sent for it (an IP literal in brackets, empty, too long).
+ * Hosts that normalise to the same name share one request and one cache entry. */
+export function iconHost(websiteHost: string): string | undefined {
+  ensureReady();
+  const fetch = startIconFetch(websiteHost);
+  return fetch === undefined ? undefined : mapOne(fetch, (f) => f.host);
+}
+
+/** The icon fetch for `websiteHost`, or `undefined` when the core refuses the host. */
+function startIconFetch(websiteHost: string): IconFetch | undefined {
+  try {
+    return call(() => IconFetch.forHost(websiteHost));
+  } catch (e) {
+    if (e instanceof CoreError && e.code === "invalid_input") {
+      return undefined;
+    }
+    throw e;
+  }
+}
+
+/**
+ * Fetches the icon of `websiteHost` from this server's `icons` role (ADR 0052): the PNG bytes,
+ * re-encoded by the role and checked here, or `undefined` when there is no icon to show (no
+ * usable host, no icon for the site, or no `icons` role on this server). Throws a
+ * {@link CoreError} only for `server_rate_limited` (wait and retry) and `transport_failed`.
+ */
+export async function fetchItemIcon(transport: Transport, websiteHost: string): Promise<Uint8Array | undefined> {
+  ensureReady();
+  const fetch = startIconFetch(websiteHost);
+  if (fetch === undefined) {
+    return undefined;
+  }
+  try {
+    const answer = await transport(takeRequest(call(() => fetch.request())));
+    try {
+      return call(() => fetch.finish(answer.status, answer.body));
+    } catch (e) {
+      if (e instanceof CoreError && e.code !== "server_rate_limited" && e.code !== "transport_failed") {
+        return undefined;
+      }
+      throw e;
+    }
+  } finally {
+    fetch.free();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The session
+
+/**
+ * The account's storage usage as the server reports it (ADR 0048 §5): unsigned, so the
+ * server's word, shown for information only.
+ */
+export interface StorageUsage {
+  /** The account's counted bytes on the server. */
+  readonly bytesUsed: number;
+  /** The instance's per-account quota (`RIZZY_ACCOUNT_QUOTA_BYTES`). */
+  readonly quotaBytes: number;
+}
 
 /**
  * An unlocked session. The keys live in the core's memory behind this handle; `lock` wipes
@@ -872,14 +1433,49 @@ function mapOne<T extends { free(): void }, U>(item: T, f: (item: T) => U): U {
 export class VaultSession {
   #session: Session | undefined;
   readonly #transport: Transport;
+  /** The transport as given, without the ended-session watch (for the sign-out). */
+  readonly #plainTransport: Transport;
   readonly #clock: Clock;
   #enrolment: TwoFactorEnrolment | undefined;
+  /** Breach-check range answers by prefix, memory only, dropped on lock (`checkItemBreach`). */
+  #breachRanges = new Map<string, CoreResponse>();
+  /** Set once a request answered `401` that means the session ended (ADR 0075 §6). */
+  #ended = false;
 
   /** @internal Use {@link login} or {@link Signup.login}. */
   constructor(session: Session, transport: Transport, clock: Clock) {
     this.#session = session;
-    this.#transport = transport;
+    this.#plainTransport = transport;
+    // ADR 0075 §6: a `401` on any request but `login/*`, `recovery/*` and the sign-out means
+    // the session has ended. TOTP confirmation and removal also answer `401` for a wrong code,
+    // so for those two the session is asked once more (`#confirmEnded`).
+    this.#transport = async (request) => {
+      const answer = await transport(request);
+      if (
+        answer.status === 401 &&
+        !TOTP_CODE_PATHS.has(request.path) &&
+        endsSessionOnUnauthorized(request.path)
+      ) {
+        this.#ended = true;
+      }
+      return answer;
+    };
     this.#clock = clock;
+  }
+
+  /**
+   * Whether the server ended this session (ADR 0075 §6): a request answered `401` that only an
+   * ended or unknown session gets. The host locks and shows {@link sessionEndedNotice}.
+   */
+  get ended(): boolean {
+    return this.#ended;
+  }
+
+  /** After a `401` on a TOTP code check: whether the session itself ended (a list answers `401`
+   * too) or only the code was wrong. */
+  async #confirmEnded(): Promise<void> {
+    const s = this.#s();
+    await this.#transport(takeRequest(call(() => s.sessionsListRequest())));
   }
 
   /** The session, or `locked`. */
@@ -920,10 +1516,41 @@ export class VaultSession {
     return call(() => this.#s().unsentChanges);
   }
 
-  /** Locks: wipes every key and decrypted item; unsent changes are lost. */
+  /**
+   * The account's storage usage the server reported with its last account answer (ADR 0048
+   * §5): its counted bytes and the instance's quota, `undefined` when it reported none. The
+   * server's word, unverified: for display only.
+   */
+  get storageUsage(): StorageUsage | undefined {
+    return call(() => {
+      const s = this.#s();
+      const used = s.storageBytesUsed;
+      const quota = s.storageQuotaBytes;
+      return used === undefined || quota === undefined
+        ? undefined
+        : { bytesUsed: Number(used), quotaBytes: Number(quota) };
+    });
+  }
+
+  /**
+   * Locks: wipes every key and decrypted item; unsent changes are lost. The session is also
+   * ended on the server (`sessions/current/end`, ADR 0075 §6), best effort: the request is
+   * sent and not awaited, a failure is ignored and not retried, and the token then lapses at
+   * its TTL. Not sent for a session the server already ended.
+   */
   lock(): void {
     this.#enrolment?.free();
     this.#enrolment = undefined;
+    this.#breachRanges.clear();
+    const s = this.#session;
+    if (s !== undefined && !s.locked && !this.#ended) {
+      try {
+        const signOut = takeRequest(s.signOutRequest());
+        this.#plainTransport(signOut).catch(() => undefined);
+      } catch {
+        // Best effort (module docs of lock).
+      }
+    }
     this.#session?.lock();
     this.#session?.free();
     this.#session = undefined;
@@ -936,6 +1563,11 @@ export class VaultSession {
    * is rethrown: the outcome of that request is unknown, the unsent changes stay queued, and
    * the next `sync()` sends them again (ADR 0028 "Retry after an unknown outcome"). Writes are
    * accepted again at once.
+   *
+   * Once the fetch/upload driver settles, this also runs the client-side trash auto-purge
+   * (gap 00; ADR 0012 §5, ADR 0018 §9, §11): a pass over every trashed item whose retention
+   * period has elapsed, run only here, after a successful sync, while unlocked — never by the
+   * server (ADR 0022).
    */
   async sync(): Promise<void> {
     const s = this.#s();
@@ -943,7 +1575,7 @@ export class VaultSession {
     for (;;) {
       const request = call(() => s.syncRequest());
       if (request === undefined) {
-        return;
+        break;
       }
       let answer: CoreResponse;
       try {
@@ -960,6 +1592,7 @@ export class VaultSession {
       }
       call(() => s.syncRespond(answer.status, answer.body, this.#now()));
     }
+    call(() => this.#s().autoPurge(this.#now()));
   }
 
   /** The active items, or the trashed ones. */
@@ -968,6 +1601,7 @@ export class VaultSession {
       call(() => this.#s().items(trash)),
       (i) => ({
         id: i.id,
+        vaultId: i.vaultId,
         itemType: i.itemType as ItemType | "unknown",
         title: i.title,
         username: i.username,
@@ -986,6 +1620,7 @@ export class VaultSession {
       call(() => this.#s().item(id)),
       (i) => ({
         id: i.id,
+        vaultId: i.vaultId,
         itemType: i.itemType as ItemType | "unknown",
         title: i.title,
         username: i.username,
@@ -1021,11 +1656,12 @@ export class VaultSession {
     return call(() => this.#s().revealField(id, key));
   }
 
-  /** Creates an item; returns its id. */
-  createItem(itemType: ItemType, changes: readonly ItemChange[]): string {
+  /** Creates an item in `vaultId` (the editor preselects {@link personalVaultId}, ADR 0081
+   * §A8); returns its reference. */
+  createItem(vaultId: string, itemType: ItemType, changes: readonly ItemChange[]): string {
     const draft = draftOf(changes);
     try {
-      return call(() => this.#s().createItem(itemType, draft, this.#now()));
+      return call(() => this.#s().createItem(vaultId, itemType, draft, this.#now()));
     } finally {
       draft.free();
     }
@@ -1056,6 +1692,173 @@ export class VaultSession {
     call(() => this.#s().purgeItem(id, this.#now()));
   }
 
+  /**
+   * The item's password history, without values (ADR 0013 §3 rule 3): one entry per former
+   * password, `merge` entries newest first, then `imported` ones. List it again after every
+   * sync: a sync can shift the entries.
+   */
+  passwordHistory(id: string): HistoryEntry[] {
+    return mapFree(
+      call(() => this.#s().passwordHistory(id)),
+      (h) => ({
+        source: h.source as HistoryEntry["source"],
+        index: h.index,
+        changedMs: h.changedMs === undefined ? undefined : Number(h.changedMs),
+        id: h.id,
+      }),
+    );
+  }
+
+  /**
+   * One password-history entry's value, as {@link passwordHistory} listed it, on the user's
+   * request only. Pass the entry's `id` as listed: when a sync has since moved another entry
+   * to that position, the core refuses (`unknown_item`) instead of revealing it.
+   */
+  revealPasswordHistory(
+    id: string,
+    source: HistoryEntry["source"],
+    index: number,
+    entryId: string,
+  ): string {
+    return call(() => this.#s().revealPasswordHistory(id, source, index, entryId));
+  }
+
+  /**
+   * Every field's history, without values ({@link FieldHistory}'s own doc; ROADMAP §4.2 "Item
+   * revision history (restore old versions)", M3): generalizes {@link passwordHistory} to
+   * every field. List it again after every sync: a sync can shift the entries.
+   */
+  itemHistory(id: string): FieldHistory[] {
+    return mapFree(call(() => this.#s().itemHistory(id)), (field) => ({
+      key: field.key,
+      entries: mapFree(field.entries, (h) => ({
+        source: h.source as HistoryEntry["source"],
+        index: h.index,
+        changedMs: h.changedMs === undefined ? undefined : Number(h.changedMs),
+        id: h.id,
+      })),
+    }));
+  }
+
+  /**
+   * One field-history entry's value, as {@link itemHistory} listed it, on the user's request
+   * only. `key` scopes `index`/`entryId` ({@link FieldHistory}'s own doc): when a sync has
+   * since moved another entry to that position, or the id was listed under a different field,
+   * the core refuses (`unknown_item`) instead of revealing it.
+   */
+  revealFieldHistory(id: string, key: string, index: number, entryId: string): string {
+    return call(() => this.#s().revealFieldHistory(id, key, index, entryId));
+  }
+
+  /**
+   * Restores one field-history entry as the field's current value (ROADMAP §4.2): an ordinary
+   * edit, which syncs and merges like any other. `key`, `index` and `entryId` name the entry
+   * exactly as {@link itemHistory} listed it, checked the same way {@link revealFieldHistory}
+   * is.
+   */
+  restoreFieldHistory(id: string, key: string, index: number, entryId: string): void {
+    call(() => this.#s().restoreFieldHistory(id, key, index, entryId, this.#now()));
+  }
+
+  /**
+   * A conflicting field's distinct values ({@link ConflictValue}'s own doc), the displayed one
+   * first, concealed values withheld. Empty when the field does not conflict. List it again
+   * after every sync: a sync can resolve the conflict or add a value.
+   */
+  fieldConflict(id: string, key: string): ConflictValue[] {
+    return mapFree(call(() => this.#s().fieldConflict(id, key)), (v) => ({
+      index: v.index,
+      id: v.id,
+      device: v.device,
+      writtenMs: Number(v.writtenMs),
+      displayed: v.displayed,
+      cleared: v.cleared,
+      kind: v.kind as FieldView["kind"],
+      concealed: v.concealed,
+      value: v.value,
+    }));
+  }
+
+  /** One conflicting value, as {@link fieldConflict} listed it, on the user's request only. */
+  revealConflictValue(id: string, key: string, index: number, valueId: string): string {
+    return call(() => this.#s().revealConflictValue(id, key, index, valueId));
+  }
+
+  /**
+   * "Pick one": writes the named value back to the field, an ordinary edit whose context
+   * covers every conflicting value, so the conflict ends on every device once it syncs.
+   */
+  resolveConflictPick(id: string, key: string, index: number, valueId: string): void {
+    call(() => this.#s().resolveConflictPick(id, key, index, valueId, this.#now()));
+  }
+
+  /**
+   * "Keep both": keeps the named value in the field and moves every other non-empty value into
+   * a new website (for a website) or a new custom field, hidden when the field is concealed,
+   * labelled `label` (required for a fixed field such as the password; a custom field's copies
+   * take its own label without one). Returns the new elements' ids. A field that is not text,
+   * or has no second value to keep, is refused (`invalid_edit`): "pick one" resolves it.
+   */
+  resolveConflictKeepBoth(
+    id: string,
+    key: string,
+    index: number,
+    valueId: string,
+    label: string | undefined,
+  ): string[] {
+    return call(() =>
+      this.#s().resolveConflictKeepBoth(id, key, index, valueId, label, this.#now()),
+    );
+  }
+
+  /**
+   * The notices not yet handed over in this session, each handed over once (gap 02): an edit
+   * that arrived for an item deleted permanently (offer {@link restoreLateAsNew}), and an item
+   * deleted on one device while it was being edited on another. Call it after each `sync`.
+   * The "handed over" marks live in the core's memory only and end with the session.
+   */
+  takeNotices(): Notice[] {
+    return mapFree(
+      call(() => this.#s().takeNotices()),
+      (n) => ({
+        kind: n.kind as Notice["kind"],
+        item: n.item,
+        devices: n.devices,
+        conflictId: n.conflictId,
+        movedTo: n.movedTo,
+      }),
+    );
+  }
+
+  /**
+   * Restores the late edits of an item deleted permanently as a new item of `itemType`, the
+   * type the user picked; returns the new item's id. The deleted item stays deleted.
+   */
+  restoreLateAsNew(id: string, itemType: ItemType): string {
+    return call(() => this.#s().restoreLateAsNew(id, itemType, this.#now()));
+  }
+
+  /** What each custom field's autocomplete id does, list order (ADR 0076 §2.5): the editor's
+   * inline errors and its "also used by" warning. */
+  customFieldAutofill(id: string): CustomFieldAutofill[] {
+    return mapCustomFieldAutofill(call(() => this.#s().customFieldAutofill(id)));
+  }
+
+  /**
+   * Checks the item's `login.password` against the breach corpus (ADR 0053): the core reads the
+   * password, so it never crosses; only its 5-character hash prefix is sent, without the session
+   * token. `undefined` when the item has no password. Errors as {@link checkPasswordBreach}.
+   * Answers are kept by prefix in memory until lock, so a vault-wide check sends one request per
+   * distinct prefix.
+   */
+  async checkItemBreach(id: string): Promise<BreachResult | undefined> {
+    const check = call(() => this.#s().breachCheckItem(id));
+    if (check === undefined) {
+      return undefined;
+    }
+    return runBreachCheck(check, this.#plainTransport, this.#breachRanges);
+  }
+
   /** The item's current TOTP code. */
   totp(id: string): TotpCode {
     return mapOne(
@@ -1073,26 +1876,56 @@ export class VaultSession {
   }
 
   /**
+   * Every stored passkey's non-secret metadata on one item (ADR 0039 §1), for the host to pick
+   * which credential to run {@link passkeyAssertion} with — in particular, to filter against
+   * the page's `allowCredentials` before picking one (gap 35(b) in the M2 gap audit).
+   */
+  passkeyCandidates(id: string): PasskeyCandidateResult[] {
+    return mapPasskeyCandidates(call(() => this.#s().passkeyCandidates(id)));
+  }
+
+  /**
    * The vault as an encrypted export file under a new password for that file, which is needed
    * to import it. Needs {@link reauthenticate} within five minutes, and spends it
    * (`reauth_required` otherwise).
    */
-  exportEncrypted(exportPassword: SecretInput): EncryptedExport {
+  exportEncrypted(vaultId: string, exportPassword: SecretInput): EncryptedExport {
     const s = this.#s();
     return mapOne(
-      withSecrets([exportPassword], (b) => call(() => s.exportEncrypted(at(b, 0), this.#now()))),
+      withSecrets([exportPassword], (b) => call(() => s.exportEncrypted(vaultId, at(b, 0), this.#now()))),
       (e) => ({ file: e.file, items: e.items, unresolved: e.unresolved }),
     );
   }
 
+  /** How many passkeys a CXF export would hold now (ADR 0074 §2). */
+  cxfExportPasskeys(vaultId: string): number {
+    return call(() => this.#s().cxfExportPasskeys(vaultId));
+  }
+
+  /**
+   * The vault's passkeys as a CXF export file under a new password for that file (ADR 0074
+   * §2), gated like {@link exportPlaintext}: {@link cxfExportWarning} shown
+   * ({@link plaintextWarningShown}), its hold ended, {@link plaintextExportPhrase} typed, within
+   * five minutes of {@link reauthenticate}.
+   */
+  exportCxf(vaultId: string, typedPhrase: string, exportPassword: SecretInput): CxfExport {
+    const s = this.#s();
+    return mapOne(
+      withSecrets([exportPassword], (b) =>
+        call(() => s.exportCxf(vaultId, typedPhrase, at(b, 0), this.#now())),
+      ),
+      (e) => ({ file: e.file, passkeys: e.passkeys }),
+    );
+  }
+
   /** The ids of the items too large to export. */
-  exportBlockers(): string[] {
-    return call(() => this.#s().exportBlockers());
+  exportBlockers(vaultId: string): string[] {
+    return call(() => this.#s().exportBlockers(vaultId));
   }
 
   /** The warning to add before a CSV export. */
-  csvExportWarning(): string {
-    return call(() => this.#s().csvExportWarning());
+  csvExportWarning(vaultId: string): string {
+    return call(() => this.#s().csvExportWarning(vaultId));
   }
 
   /**
@@ -1102,7 +1935,7 @@ export class VaultSession {
   async reauthenticate(
     secretKey: SecretInput,
     password: SecretInput,
-    askTotp?: AskTotp,
+    askTotp?: AskTotp | SecondFactorPrompts,
     totp?: string,
   ): Promise<void> {
     const s = this.#s();
@@ -1140,21 +1973,32 @@ export class VaultSession {
    * ({@link plaintextWarningShown}), its hold of {@link plaintextExportHoldMs} ended, and the
    * user typed {@link plaintextExportPhrase}, within five minutes of {@link reauthenticate}.
    */
-  exportPlaintext(format: "json" | "csv", typedPhrase: string): Uint8Array {
-    return call(() => this.#s().exportPlaintext(format, typedPhrase, this.#now()));
+  exportPlaintext(vaultId: string, format: "json" | "csv", typedPhrase: string): Uint8Array {
+    return call(() => this.#s().exportPlaintext(vaultId, format, typedPhrase, this.#now()));
   }
 
   /** Imports another product's file, or our own plaintext JSON, as new items. */
-  importFile(format: ImportFormat, file: Uint8Array): ImportReport {
-    return mapOne(call(() => this.#s().importFile(format, file, this.#now())), report);
+  importFile(vaultId: string, format: ImportFormat, file: Uint8Array): ImportReport {
+    return mapOne(call(() => this.#s().importFile(vaultId, format, file, this.#now())), report);
   }
 
   /** Imports our own encrypted export as new items. */
-  importEncrypted(file: Uint8Array, exportPassword: SecretInput): ImportReport {
+  importEncrypted(vaultId: string, file: Uint8Array, exportPassword: SecretInput): ImportReport {
     const s = this.#s();
     return mapOne(
       withSecrets([exportPassword], (b) =>
-        call(() => s.importEncrypted(file, at(b, 0), this.#now())),
+        call(() => s.importEncrypted(vaultId, file, at(b, 0), this.#now())),
+      ),
+      report,
+    );
+  }
+
+  /** Imports our own CXF passkey export (ADR 0074) as new Login items, one per passkey. */
+  importCxfEncrypted(vaultId: string, file: Uint8Array, exportPassword: SecretInput): ImportReport {
+    const s = this.#s();
+    return mapOne(
+      withSecrets([exportPassword], (b) =>
+        call(() => s.importCxfEncrypted(vaultId, file, at(b, 0), this.#now())),
       ),
       report,
     );
@@ -1166,6 +2010,172 @@ export class VaultSession {
       call(() => this.#s().devices()),
       (d) => ({ id: d.id, kind: d.kind, createdAtMs: Number(d.createdAtMs), revoked: d.revoked }),
     );
+  }
+
+  /** The account's live sessions (`sessions/list`, ADR 0075 R1), newest first. */
+  async sessions(): Promise<SessionListView> {
+    const s = this.#s();
+    const answer = await this.#transport(takeRequest(call(() => s.sessionsListRequest())));
+    const rows = mapFree(
+      call(() => s.sessionsListResponse(answer.status, answer.body)),
+      (r) => ({
+        id: r.id,
+        kind: r.kind,
+        deviceId: r.deviceId,
+        createdAtMs: Number(r.createdAtMs),
+        expiresAtMs: Number(r.expiresAtMs),
+        current: r.current,
+        endable: r.endable,
+      }),
+    );
+    return { sessions: rows, truncated: call(() => s.sessionsTruncated()) };
+  }
+
+  /**
+   * Ends one other session of the last {@link sessions} list (`sessions/end`, R3). Needs a
+   * fresh login (`server_fresh_session_required` otherwise: call {@link refreshSession} and try
+   * again).
+   */
+  async endSession(id: string): Promise<void> {
+    const s = this.#s();
+    const answer = await this.#transport(takeRequest(call(() => s.endSessionRequest(id))));
+    call(() => expectNoContent(answer.status, answer.body));
+  }
+
+  /** The attachments of an item, in list order (ADR 0054 §4). */
+  attachments(itemId: string): AttachmentInfo[] {
+    return mapFree(call(() => this.#s().attachments(itemId)), (a) => ({
+      id: a.id,
+      name: a.name,
+      mime: a.mime,
+      size: Number(a.size),
+    }));
+  }
+
+  /**
+   * Adds a file to an item as an encrypted attachment (ADR 0054): the core writes the item op
+   * naming it first (§7), seals every chunk, and this sends `attachments/create` and each
+   * `upload-chunk` in turn. Then syncs, so the op reaches the server. Returns the attachment id.
+   * Codes: `attachment_too_large` over 25 MiB, `server_quota_exceeded` past the account's quota.
+   */
+  async addAttachment(itemId: string, name: string, mime: string, data: Uint8Array): Promise<string> {
+    const s = this.#s();
+    const id = call(() => s.addAttachment(itemId, name, mime, data, this.#now()));
+    try {
+      const created = await this.#transport(takeRequest(call(() => s.attachmentCreateRequest(id))));
+      call(() => expectNoContent(created.status, created.body));
+      const count = call(() => s.attachmentChunkCount(id));
+      for (let i = 0; i < count; i++) {
+        const answer = await this.#transport(
+          takeRequest(call(() => s.attachmentUploadChunkRequest(id, i))),
+        );
+        call(() => expectNoContent(answer.status, answer.body));
+      }
+    } finally {
+      if (!this.locked) {
+        call(() => s.attachmentUploadDone(id));
+      }
+    }
+    await this.sync();
+    return id;
+  }
+
+  /**
+   * Downloads and verifies an attachment: the chunk count comes from the item's own size, every
+   * chunk is opened where it was asked for, and the file is returned only when all of them
+   * opened (INV-79). Codes: `server_not_found` (the server lacks it), `attachment_incomplete`.
+   */
+  async downloadAttachment(itemId: string, attachmentId: string): Promise<Uint8Array> {
+    const s = this.#s();
+    const count = call(() => s.attachmentDownloadStart(itemId, attachmentId));
+    try {
+      const wrap = await this.#transport(takeRequest(call(() => s.attachmentGetRequest(attachmentId))));
+      call(() => s.attachmentGetResponse(attachmentId, wrap.status, wrap.body));
+      for (let i = 0; i < count; i++) {
+        const answer = await this.#transport(
+          takeRequest(call(() => s.attachmentDownloadChunkRequest(attachmentId, i))),
+        );
+        call(() => s.attachmentDownloadChunkResponse(attachmentId, i, answer.status, answer.body));
+      }
+      return call(() => s.attachmentDownloadFinish(attachmentId));
+    } catch (e) {
+      if (!this.locked) {
+        call(() => s.attachmentDownloadAbort(attachmentId));
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Deletes an attachment: `attachments/delete` first (a `server_not_found` answer means it is
+   * gone already), then the item's fields are cleared and synced, so a failure leaves a
+   * reference that heals rather than a blob that keeps counting against the quota.
+   */
+  async deleteAttachment(itemId: string, attachmentId: string): Promise<void> {
+    const s = this.#s();
+    const answer = await this.#transport(takeRequest(call(() => s.attachmentDeleteRequest(attachmentId))));
+    try {
+      call(() => expectNoContent(answer.status, answer.body));
+    } catch (e) {
+      if (!(e instanceof CoreError) || e.code !== "server_not_found") {
+        throw e;
+      }
+    }
+    call(() => s.removeAttachment(itemId, attachmentId, this.#now()));
+    await this.sync();
+  }
+
+  /**
+   * Deletes every attachment an item names from the server (`attachments/delete`; a
+   * `server_not_found` answer counts as deleted), leaving the item's fields as they are. For an
+   * item about to be deleted for good: the server cannot tell which attachments an item names
+   * (ADR 0054 §7), so without this they would stay and keep counting against the quota.
+   */
+  async deleteAttachmentsOf(itemId: string): Promise<void> {
+    const s = this.#s();
+    for (const a of this.attachments(itemId)) {
+      const answer = await this.#transport(takeRequest(call(() => s.attachmentDeleteRequest(a.id))));
+      try {
+        call(() => expectNoContent(answer.status, answer.body));
+      } catch (e) {
+        if (!(e instanceof CoreError) || e.code !== "server_not_found") {
+          throw e;
+        }
+      }
+    }
+  }
+
+  /**
+   * Ends every other password and recovery session (`sessions/others/end`, R4); device sessions
+   * stay. Needs a fresh login, as {@link endSession}.
+   */
+  async endOtherSessions(): Promise<void> {
+    const s = this.#s();
+    const answer = await this.#transport(takeRequest(call(() => s.endOtherSessionsRequest())));
+    call(() => expectNoContent(answer.status, answer.body));
+  }
+
+  /**
+   * Logs in again (Secret Key and master password typed again) and switches this vault to the
+   * new, fresh session; the old one is ended on the server, best effort (ADR 0075 §9: "It
+   * switches to the new session and ends the old one").
+   */
+  async refreshSession(
+    secretKey: SecretInput,
+    password: SecretInput,
+    askTotp?: AskTotp | SecondFactorPrompts,
+  ): Promise<void> {
+    const s = this.#s();
+    const flow = withSecrets([secretKey, password], (b) =>
+      call(() => s.refresh(at(b, 0), at(b, 1), undefined)),
+    );
+    try {
+      await drive(flow, this.#transport, this.#clock, askTotp);
+      const signOut = takeRequest(call(() => s.adoptRefresh(flow)));
+      this.#plainTransport(signOut).catch(() => undefined);
+    } finally {
+      flow.free();
+    }
   }
 
   /** Starts a 2FA enrolment: the server's secret, to show once (QR or Base32). */
@@ -1188,16 +2198,267 @@ export class VaultSession {
     const answer = await this.#transport(
       takeRequest(call(() => s.twoFactorConfirmRequest(enrolment, code))),
     );
+    if (answer.status === 401) {
+      await this.#confirmEnded();
+    }
     call(() => expectNoContent(answer.status, answer.body));
     enrolment.free();
     this.#enrolment = undefined;
+  }
+
+  /** Starts a security-key enrolment (ADR 0058 point 2): the options for
+   * `navigator.credentials.create`, which the UI thread runs. Needs a fresh session. */
+  async startSecurityKeyEnrolment(): Promise<SecurityKeyEnrolmentInfo> {
+    const s = this.#s();
+    const answer = await this.#transport(takeRequest(call(() => s.securityKeyEnrolRequest())));
+    if (answer.status === 401) {
+      await this.#confirmEnded();
+    }
+    const enrolment = call(() => s.securityKeyEnrolResponse(answer.status, answer.body));
+    try {
+      return { enrolmentId: enrolment.enrolmentId, options: enrolment.options };
+    } finally {
+      enrolment.free();
+    }
+  }
+
+  /** Confirms an enrolment with the browser's `create()` result (JSON) and the user's label. */
+  async confirmSecurityKey(enrolmentId: string, label: string, credential: string): Promise<void> {
+    const s = this.#s();
+    const answer = await this.#transport(
+      takeRequest(call(() => s.securityKeyConfirmRequest(enrolmentId, label, credential))),
+    );
+    if (answer.status === 401) {
+      await this.#confirmEnded();
+    }
+    call(() => expectNoContent(answer.status, answer.body));
+  }
+
+  /** The account's security keys, oldest first (the server's word, for display). */
+  async listSecurityKeys(): Promise<SecurityKeyInfo[]> {
+    const s = this.#s();
+    const answer = await this.#transport(takeRequest(call(() => s.securityKeyListRequest())));
+    if (answer.status === 401) {
+      await this.#confirmEnded();
+    }
+    const rows = call(() => s.securityKeyListResponse(answer.status, answer.body));
+    return rows.map((row) => {
+      try {
+        return {
+          credentialId: row.credentialId,
+          label: row.label,
+          createdMs: Number(row.createdMs),
+        };
+      } finally {
+        row.free();
+      }
+    });
+  }
+
+  /** Removes one security key. Needs a fresh session. */
+  async removeSecurityKey(credentialId: string): Promise<void> {
+    const s = this.#s();
+    const answer = await this.#transport(
+      takeRequest(call(() => s.securityKeyRemoveRequest(credentialId))),
+    );
+    if (answer.status === 401) {
+      await this.#confirmEnded();
+    }
+    call(() => expectNoContent(answer.status, answer.body));
   }
 
   /** Removes 2FA with a current code. */
   async disableTwoFactor(code: string): Promise<void> {
     const s = this.#s();
     const answer = await this.#transport(takeRequest(call(() => s.twoFactorDisableRequest(code))));
+    if (answer.status === 401) {
+      await this.#confirmEnded();
+    }
     call(() => expectNoContent(answer.status, answer.body));
+  }
+
+  /** The account's matching settings (ADR 0037 §6–§7, ADR 0042): `settings_update_required` when a
+   * newer rizzy-vault wrote them, `invalid_server_response` when they do not read. */
+  matchSettings(): MatchSettings {
+    const s = this.#s();
+    return matchSettingsOf(call(() => s.matchSettings()));
+  }
+
+  /** The identity generator's synced defaults (ADR 0079 Open question 7), or `null` until first
+   * set; written with `changeMatchSettings({ kind: "identityDefaults", defaults })`. */
+  identityDefaults(): IdentityDefaults | null {
+    const s = this.#s();
+    return identityDefaultsOf(call(() => s.identityDefaults()));
+  }
+
+  /** What the extension would offer on `pageUrl` (a top frame) among this vault's items, under
+   * the account's settings: the settings screen's "check a website". */
+  matchCandidates(pageUrl: string): MatchDecisionResult {
+    const s = this.#s();
+    return decisionOf(call(() => s.matchCandidates(pageUrl)));
+  }
+
+  /**
+   * Changes the account's matching settings: one `account/commit` of a new signed account state
+   * and the whole new settings record (ADR 0042 §5). When another device changed the account
+   * first (`server_state_conflict`), this syncs, which verifies the newer state, and retries the
+   * same change on top of it, once. The server takes the commit only within five minutes of the
+   * login (`server_fresh_session_required` afterwards: log in again).
+   */
+  // --- Vaults (ADR 0081 Part A) -------------------------------------------------------------
+
+  /** Every vault of the account: the Personal vault first, then the others by name. */
+  vaults(): VaultInfo[] {
+    return vaultInfos(call(() => this.#s().vaults()));
+  }
+
+  /** The Personal vault, preselected for every new item, import and export (§A8). */
+  get personalVaultId(): string | undefined {
+    return call(() => this.#s().personalVaultId);
+  }
+
+  /** The vault completeness check's alarms (INV-102); empty for an honest server. */
+  vaultAlarms(): VaultAlarm[] {
+    return vaultAlarms(call(() => this.#s().vaultAlarms()));
+  }
+
+  /** Unsent changes discarded with vaults deleted on another device, since the last call. */
+  takeDiscardedChanges(): number {
+    return call(() => this.#s().takeDiscardedChanges());
+  }
+
+  /** Creates an owned vault named `name` (§A3), then syncs; returns its id. */
+  async createVault(name: string): Promise<string> {
+    const s = this.#s();
+    let request = takeRequest(call(() => s.createVaultRequest(name)));
+    for (let attempt = 0; ; attempt++) {
+      const answer = await this.#transport(request);
+      try {
+        const id = call(() => s.vaultRespond(answer.status, answer.body, this.#now()));
+        await this.sync();
+        return id ?? "";
+      } catch (e) {
+        if (!(e instanceof CoreError) || e.code !== "server_state_conflict" || attempt > 0) {
+          throw e;
+        }
+      }
+      await this.sync();
+      request = takeRequest(call(() => s.vaultRetryRequest()));
+    }
+  }
+
+  /** Renames an owned vault (§A4; never the Personal vault), then syncs. */
+  async renameVault(vaultId: string, name: string): Promise<void> {
+    call(() => this.#s().renameVault(vaultId, name, this.#now()));
+    await this.sync();
+  }
+
+  /**
+   * Deletes an owned vault (§A5). With `keepItems` its items are first moved to the Personal
+   * vault (each copied there, attachments included, and synced; the vault's deletion removes
+   * the originals); without, they are deleted with it. Needs a fresh login:
+   * `server_fresh_session_required` otherwise — call {@link refreshSession} and call this
+   * again (moves already made are not made twice).
+   */
+  async deleteVault(vaultId: string, keepItems: boolean): Promise<void> {
+    const s = this.#s();
+    if (vaultId === this.personalVaultId) {
+      throw new CoreError("personal_vault_protected");
+    }
+    if (keepItems) {
+      const personal = this.personalVaultId;
+      if (personal === undefined) {
+        throw new CoreError("vault_set_mismatch");
+      }
+      const ids = [...this.items(false), ...this.items(true)]
+        .filter((i) => i.vaultId === vaultId)
+        .map((i) => i.id);
+      for (const id of ids) {
+        await this.#copyInto(id, personal, true);
+      }
+      await this.sync();
+    }
+    let request = takeRequest(call(() => s.deleteVaultRequest(vaultId)));
+    for (let attempt = 0; ; attempt++) {
+      const answer = await this.#transport(request);
+      try {
+        call(() => s.vaultRespond(answer.status, answer.body, this.#now()));
+        break;
+      } catch (e) {
+        if (!(e instanceof CoreError) || e.code !== "server_state_conflict" || attempt > 0) {
+          throw e;
+        }
+      }
+      await this.sync();
+      request = takeRequest(call(() => s.vaultRetryRequest()));
+    }
+    await this.sync();
+  }
+
+  /** Copies an item into another vault (§A6), attachments included; returns the copy's reference. */
+  async copyItem(id: string, targetVaultId: string): Promise<string> {
+    const copied = await this.#copyInto(id, targetVaultId, false);
+    await this.sync();
+    return copied;
+  }
+
+  /**
+   * Moves an item into another vault (§A6): the copy with its attachments, a sync, then the
+   * original trashed and purged and synced — only once the server stored the copy (INV-104).
+   * Returns the new reference.
+   */
+  async moveItem(id: string, targetVaultId: string): Promise<string> {
+    const moved = await this.#copyInto(id, targetVaultId, true);
+    await this.sync();
+    if (call(() => this.#s().finishMoves(this.#now())) > 0) {
+      await this.sync();
+    }
+    return moved;
+  }
+
+  /** The copy of `id` in `target` (a move's when `move`), with each attachment downloaded from
+   * the original and uploaded to the copy. */
+  async #copyInto(id: string, target: string, move: boolean): Promise<string> {
+    const s = this.#s();
+    const view = call(() => (move ? s.moveItem(id, target, this.#now()) : s.copyItem(id, target, this.#now())));
+    let copyId: string;
+    let attachments: { id: string; name: string; mime: string }[];
+    try {
+      copyId = view.id;
+      attachments = mapFree(view.attachments(), (a) => ({ id: a.id, name: a.name, mime: a.mime }));
+    } finally {
+      view.free();
+    }
+    for (const a of attachments) {
+      const data = await this.downloadAttachment(id, a.id);
+      try {
+        await this.addAttachment(copyId, a.name, a.mime, data);
+      } finally {
+        data.fill(0);
+      }
+    }
+    if (move && attachments.length > 0) {
+      call(() => this.#s().moveAttachmentsStored(copyId));
+    }
+    return copyId;
+  }
+
+  async changeMatchSettings(change: SettingsChange): Promise<void> {
+    const s = this.#s();
+    let request = takeRequest(call(() => settingsRequest(s, change)));
+    for (let attempt = 0; ; attempt++) {
+      const answer = await this.#transport(request);
+      try {
+        call(() => s.settingsRespond(answer.status, answer.body));
+        return;
+      } catch (e) {
+        if (!(e instanceof CoreError) || e.code !== "server_state_conflict" || attempt > 0) {
+          throw e;
+        }
+      }
+      await this.sync();
+      request = takeRequest(call(() => s.settingsRetryRequest()));
+    }
   }
 }
 
@@ -1209,6 +2470,7 @@ function report(r: {
   collapsedConflicts: number;
   historyNotCarried: number;
   fieldsNotCarried: number;
+  credentialsSkipped: number;
 }): ImportReport {
   return {
     imported: r.imported,
@@ -1217,6 +2479,7 @@ function report(r: {
     collapsedConflicts: r.collapsedConflicts,
     historyNotCarried: r.historyNotCarried,
     fieldsNotCarried: r.fieldsNotCarried,
+    credentialsSkipped: r.credentialsSkipped,
   };
 }
 
@@ -1511,6 +2774,15 @@ export function plaintextExportWarning(): string {
   return wasmPlaintextExportWarning();
 }
 
+/**
+ * The warning before a CXF passkey export (ADR 0074 §2): its own text, under the same gate as
+ * a plaintext export (the hold and {@link plaintextExportPhrase}).
+ */
+export function cxfExportWarning(): string {
+  ensureReady();
+  return wasmCxfExportWarning();
+}
+
 /** The phrase the user types to allow a plaintext export (ADR 0027 §5). */
 export function plaintextExportPhrase(): string {
   ensureReady();
@@ -1540,12 +2812,209 @@ export function detectImportFormat(file: Uint8Array): DetectedImportFormat {
     case "rizzy-json":
     case "aliasvault-csv":
     case "aliasvault-avux":
+    case "cxf-json":
     case "rizzy-encrypted":
+    case "rizzy-cxf-encrypted":
     case "rizzy-csv":
       return found;
     default:
       return "unknown";
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The identity generator (ADR 0079): a new identity opens pre-filled. Over `rizzy-client`'s
+// `identity_gen` through `rizzy-wasm`'s `identity` module: the draw order, the bundled data,
+// the age presets and every check live in Rust; this wrapper only passes plain values.
+
+/** A stored sex value (ADR 0079 §1): writers that pick from the UI write exactly these. */
+export type IdentitySex = "male" | "female";
+/** The sex option: one of the two, or a draw (ADR 0079 §4 step 1). */
+export type IdentitySexChoice = IdentitySex | "random";
+/** How the email local part is built (ADR 0079 §4 step 10). */
+export type IdentityEmailStyle = "name" | "nickname";
+
+/** The generator's options (ADR 0079 §3). Title and phone are always on (Open questions 4, 5). */
+export interface IdentityGeneratorOptions {
+  readonly sex: IdentitySexChoice;
+  /** ISO 3166-1 alpha-2, one of {@link identityCountries}. */
+  readonly country: string;
+  /** Completed years, `18 <= ageMin <= ageMax <= 99`; an exact age `n` is `[n, n]`. */
+  readonly ageMin: number;
+  readonly ageMax: number;
+  readonly emailStyle: IdentityEmailStyle;
+  /** The user's email domain; empty or absent means none, and the email stays empty (§8). */
+  readonly emailDomain?: string | null;
+  /** Today in local time; defaults to now. */
+  readonly today?: Date;
+}
+
+/** One age preset (ADR 0079 §3), in the core's order; the label is the client's. */
+export interface AgePreset {
+  readonly id: string;
+  readonly min: number;
+  readonly max: number;
+}
+
+/** One bundled country. */
+export interface IdentityCountry {
+  readonly code: string;
+  /** The CLDR English name. */
+  readonly name: string;
+}
+
+/** The synced generator defaults (ACCOUNT_SETTINGS tag `0x0004`, ADR 0079 Open question 7). */
+export interface IdentityDefaults {
+  readonly sex: IdentitySexChoice;
+  readonly country: string | null;
+  readonly ageMin: number;
+  readonly ageMax: number;
+  readonly emailStyle: IdentityEmailStyle;
+  readonly emailDomain: string | null;
+}
+
+/** The first-time defaults (ADR 0079 §3): a drawn sex, 18–27, name and birthday, no domain. */
+export const DEFAULT_IDENTITY_DEFAULTS: IdentityDefaults = Object.freeze({
+  sex: "random",
+  country: null,
+  ageMin: 18,
+  ageMax: 27,
+  emailStyle: "name",
+  emailDomain: null,
+});
+
+/** The oldest and youngest ages a range may hold (ADR 0079 §3). */
+export const IDENTITY_MIN_AGE = 18;
+export const IDENTITY_MAX_AGE = 99;
+
+/** The `identity_*` codes as sentences for the UI. */
+export const IDENTITY_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
+  identity_unsupported_country: "This country is not supported.",
+  identity_age_range: `Enter an age from ${IDENTITY_MIN_AGE} to ${IDENTITY_MAX_AGE}, minimum first.`,
+  identity_email_domain: "Enter a domain name such as example.com.",
+  identity_email_domain_not_ascii: "Enter the domain in its ASCII form (xn--…).",
+  identity_date: "The date on this device is out of range.",
+  identity_unknown_field: "This field cannot be generated.",
+  identity_invalid_option: "These generator options are not valid.",
+});
+
+/** The sentence for an `identity_*` code. */
+export function identityErrorMessage(code: string): string {
+  return IDENTITY_ERROR_MESSAGES[code] ?? "The identity could not be generated.";
+}
+
+/** The age presets, in display order (ADR 0079 §3). */
+export function agePresets(): AgePreset[] {
+  ensureReady();
+  return mapFree(wasmAgePresets(), (p) => ({ id: p.id, min: p.min, max: p.max }));
+}
+
+/** The bundled countries, in code order. */
+export function identityCountries(): IdentityCountry[] {
+  ensureReady();
+  return mapFree(
+    call(() => wasmIdentityCountries()),
+    (c) => ({ code: c.code, name: c.name }),
+  );
+}
+
+/** Throws `identity_age_range` unless `18 <= min <= max <= 99` (whole numbers). */
+export function checkAgeRange(min: number, max: number): void {
+  ensureReady();
+  if (!Number.isInteger(min) || !Number.isInteger(max) || min < 0 || max < 0 || min > 255 || max > 255) {
+    throw new CoreError("identity_age_range");
+  }
+  call(() => wasmCheckAgeRange(min, max));
+}
+
+/** The email domain lower-cased; throws `identity_email_domain` or `…_not_ascii`. */
+export function normalizeEmailDomain(domain: string): string {
+  ensureReady();
+  return call(() => wasmNormalizeEmailDomain(domain));
+}
+
+/** The wasm arguments of the options, ending with today's local date. */
+function identityArgs(
+  o: IdentityGeneratorOptions,
+): [string, string, number, number, string, string | undefined, number, number, number] {
+  checkAgeRange(o.ageMin, o.ageMax);
+  const today = o.today ?? new Date();
+  return [
+    o.sex,
+    o.country,
+    o.ageMin,
+    o.ageMax,
+    o.emailStyle,
+    o.emailDomain === null || o.emailDomain === undefined || o.emailDomain === "" ? undefined : o.emailDomain,
+    today.getFullYear(),
+    today.getMonth() + 1,
+    today.getDate(),
+  ];
+}
+
+/**
+ * A generated identity (ADR 0079 §3): its field values by key, and the default item name.
+ * It holds the core's draw state so one field can be redrawn; call {@link free} when it is
+ * replaced.
+ */
+export class IdentityDraft {
+  readonly #inner: WasmIdentityDraft;
+  /** The filled fields, by ADR 0018 §7 key, in the core's order. */
+  readonly fields: Readonly<Record<string, string>>;
+  /** "First Last", the editor's default item name. */
+  readonly itemName: string;
+
+  /** @internal */
+  constructor(inner: WasmIdentityDraft) {
+    this.#inner = inner;
+    const fields: Record<string, string> = {};
+    for (const key of inner.keys) {
+      const value = inner.value(key);
+      if (value !== undefined) {
+        fields[key] = value;
+      }
+    }
+    this.fields = Object.freeze(fields);
+    this.itemName = inner.itemName;
+  }
+
+  /**
+   * Redraws `fieldKey` and the fields that depend on it under `options` (ADR 0079 §4). The new
+   * draft holds every field; the form writes only those the user has not edited, plus
+   * `fieldKey` itself. Picker changes are `identity.sex`, `identity.country`,
+   * `identity.birthday` (the age) and `identity.email` (the style or domain).
+   */
+  regenerate(fieldKey: string, options: IdentityGeneratorOptions): IdentityDraft {
+    const args = identityArgs(options);
+    return new IdentityDraft(call(() => wasmRegenerateIdentityField(this.#inner, fieldKey, ...args)));
+  }
+
+  /** Frees the core's copy. */
+  free(): void {
+    this.#inner.free();
+  }
+}
+
+/** Draws a new identity (ADR 0079 §3, §4); throws an `identity_*` {@link CoreError}. */
+export function generateIdentity(options: IdentityGeneratorOptions): IdentityDraft {
+  ensureReady();
+  const args = identityArgs(options);
+  return new IdentityDraft(call(() => wasmGenerateIdentity(...args)));
+}
+
+/** The defaults as a plain object, freed. */
+function identityDefaultsOf(view: WasmIdentityDefaultsView | undefined): IdentityDefaults | null {
+  if (view === undefined) {
+    return null;
+  }
+  return mapOne(view, (v) => ({
+    sex: v.sex as IdentitySexChoice,
+    country: v.country ?? null,
+    ageMin: v.ageMin,
+    ageMax: v.ageMax,
+    emailStyle: v.emailStyle as IdentityEmailStyle,
+    emailDomain: v.emailDomain ?? null,
+  }));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1674,7 +3143,7 @@ export async function enrolDevice(
   transport: Transport,
   input: EnrolInput,
   cacheStore: CacheStore,
-  askTotp?: AskTotp,
+  askTotp?: AskTotp | SecondFactorPrompts,
   clock: Clock = Date.now,
 ): Promise<DurableSession> {
   const flow = withSecrets([input.secretKey, input.password], (b) => {
@@ -1720,7 +3189,7 @@ export async function unlockDurableDevice(
     const rows = cacheRows.map((r) => new KvRow(r.store, r.key, r.value));
     return call(() => WasmDeviceSession.unlock(rows, at(b, 0), nowOf(clock)));
   });
-  return new DurableSession(inner, transport, cacheStore, clock);
+  return DurableSession.started(inner, transport, cacheStore, clock);
 }
 
 /**
@@ -1790,6 +3259,32 @@ export class DurableSession {
     return nowOf(this.#clock);
   }
 
+  /**
+   * The session {@link unlockDurableDevice} returns, with the writes of its start already
+   * persisted: a cache-format migration of the rows it was unlocked from (ADR 0026 §5) and a
+   * raised `highest_equivalence_list_version` once a newer global equivalence list verified
+   * (ADR 0051 §1–§4), committed as part of the load, before any other step. If persisting
+   * fails, the session is locked and the error thrown; the next unlock simply migrates and
+   * verifies again (INV-75). Internal to this package.
+   *
+   * @internal
+   */
+  static async started(
+    inner: WasmDeviceSession,
+    transport: Transport,
+    cacheStore: CacheStore,
+    clock: Clock,
+  ): Promise<DurableSession> {
+    const session = new DurableSession(inner, transport, cacheStore, clock);
+    try {
+      await session.#drain();
+    } catch (e) {
+      session.lock();
+      throw e;
+    }
+    return session;
+  }
+
   /** Drains the core's cache writes since the last drain and persists them (class docs). */
   async #drain(): Promise<void> {
     const delta = takeCacheDelta(call(() => this.#inner.drainCacheWrites()));
@@ -1856,6 +3351,26 @@ export class DurableSession {
     return call(() => this.#inner.unsentChanges);
   }
 
+  /** Every vault of the account (ADR 0081 §A2): the save prompts' picker, the rows' vault. */
+  vaults(): VaultInfo[] {
+    return vaultInfos(call(() => this.#inner.vaults()));
+  }
+
+  /** The Personal vault, which every save prompt preselects (ADR 0081 §A8). */
+  get personalVaultId(): string | undefined {
+    return call(() => this.#inner.personalVaultId);
+  }
+
+  /** The vault completeness check's alarms (INV-102). */
+  vaultAlarms(): VaultAlarm[] {
+    return vaultAlarms(call(() => this.#inner.vaultAlarms()));
+  }
+
+  /** Unsent changes discarded with vaults deleted on another device, since the last call. */
+  takeDiscardedChanges(): number {
+    return call(() => this.#inner.takeDiscardedChanges());
+  }
+
   /** Whether a sync is running. */
   get syncing(): boolean {
     return this.#inner.syncing;
@@ -1867,6 +3382,10 @@ export class DurableSession {
    * drains and persists the step's cache writes (class docs) before the next request is
    * released (ADR 0026 §4's write order) — the durable device's own addition over the
    * ephemeral web vault's sync.
+   *
+   * Once the driver settles, this also runs the client-side trash auto-purge (gap 00; ADR
+   * 0012 §5, ADR 0018 §9, §11) and drains its cache writes, the same write-order rule as every
+   * other step.
    */
   async sync(): Promise<void> {
     const s = this.#inner;
@@ -1875,6 +3394,19 @@ export class DurableSession {
       const request = call(() => s.syncRequest());
       if (request === undefined) {
         await this.#drain();
+        // Mirrors `Device::auto_purge` (rizzy-cli/src/device.rs): whatever the pass journals
+        // before it fails is drained too, so the next drain below always runs before the
+        // error propagates (class docs' write order) — never skipped by a `call()` rethrow.
+        let failure: { error: unknown } | undefined;
+        try {
+          s.autoPurge(this.#now());
+        } catch (e) {
+          failure = { error: toCoreError(e) };
+        }
+        await this.#drain();
+        if (failure !== undefined) {
+          throw failure.error;
+        }
         return;
       }
       let answer: CoreResponse;
@@ -1900,6 +3432,7 @@ export class DurableSession {
       call(() => this.#inner.items(trash)),
       (i) => ({
         id: i.id,
+        vaultId: i.vaultId,
         itemType: i.itemType as ItemType | "unknown",
         title: i.title,
         username: i.username,
@@ -1918,6 +3451,7 @@ export class DurableSession {
       call(() => this.#inner.item(id)),
       (i) => ({
         id: i.id,
+        vaultId: i.vaultId,
         itemType: i.itemType as ItemType | "unknown",
         title: i.title,
         username: i.username,
@@ -1961,12 +3495,92 @@ export class DurableSession {
     return mapPasskeyAssertion(call(() => this.#inner.passkeyAssertion(id, passkeyId, origin, rpId, challenge)));
   }
 
+  /**
+   * Every stored passkey's non-secret metadata on one item (ADR 0039 §1), for the host to pick
+   * which credential to run {@link passkeyAssertion} with — in particular, to filter against
+   * the page's `allowCredentials` before picking one (gap 35(b) in the M2 gap audit).
+   */
+  passkeyCandidates(id: string): PasskeyCandidateResult[] {
+    return mapPasskeyCandidates(call(() => this.#inner.passkeyCandidates(id)));
+  }
+
+  /** What each custom field's autocomplete id does, list order (ADR 0076 §2.5). */
+  customFieldAutofill(id: string): CustomFieldAutofill[] {
+    return mapCustomFieldAutofill(call(() => this.#inner.customFieldAutofill(id)));
+  }
+
+  /**
+   * One inline-menu candidate's offer (ADR 0076 §4.1): whether it fills a TOTP code, and the
+   * custom fields it fills for the page's custom `tokens` — Display Names, the concealed flag
+   * and the element id the long-lived context records. Never a value.
+   */
+  autofillOffer(id: string, tokens: readonly string[]): AutofillOffer {
+    return mapOne(call(() => this.#inner.autofillOffer(id, [...tokens])), (o) => ({
+      fillsTotp: o.fillsTotp,
+      custom: mapFree(o.custom, (c) => ({ token: c.token, element: c.element, label: c.label, concealed: c.concealed })),
+    }));
+  }
+
+  /**
+   * The values of one fill click (ADR 0076 §4.2): one coarse call into `rizzy-client`, the TOTP
+   * code computed there at this session's clock — the secret never crosses.
+   */
+  fillPlan(id: string, request: FillPlanRequest): FillPlanValues {
+    return mapOne(
+      call(() =>
+        this.#inner.fillPlan(
+          id,
+          request.only,
+          request.totp,
+          request.custom.map((c) => c.token),
+          request.custom.map((c) => c.element),
+          request.usernameToken,
+          request.passwordToken,
+          this.#now(),
+        ),
+      ),
+      (v) => {
+        const tokens = v.customTokens;
+        const values = v.customValues;
+        return {
+          ...(v.username !== undefined ? { username: v.username } : {}),
+          ...(v.password !== undefined ? { password: v.password } : {}),
+          ...(v.totp !== undefined ? { totp: v.totp } : {}),
+          custom: tokens.map((token, i) => ({ token, value: values[i] ?? "" })),
+        };
+      },
+    );
+  }
+
+  /** The save dialog's custom-field rows (ADR 0076 §5.3) for a new item (`id` undefined) or an
+   * update; no value crosses back. */
+  customSavePlan(id: string | undefined, captured: readonly CapturedCustomField[]): SaveRow[] {
+    return mapFree(
+      call(() =>
+        this.#inner.customSavePlan(
+          id,
+          captured.map((c) => c.token),
+          captured.map((c) => c.value),
+          Uint8Array.from(captured.map((c) => (c.masked ? 1 : 0))),
+        ),
+      ),
+      (r) => ({
+        index: r.index,
+        kind: r.kind as SaveRow["kind"],
+        element: r.element,
+        label: r.label,
+        concealed: r.concealed,
+        checked: r.checked,
+      }),
+    );
+  }
+
   /** Creates an item; returns its id. Persisted before this resolves (class docs). */
-  async createItem(itemType: ItemType, changes: readonly ItemChange[]): Promise<string> {
+  async createItem(vaultId: string, itemType: ItemType, changes: readonly ItemChange[]): Promise<string> {
     const draft = draftOf(changes);
     let id: string;
     try {
-      id = call(() => this.#inner.createItem(itemType, draft, this.#now()));
+      id = call(() => this.#inner.createItem(vaultId, itemType, draft, this.#now()));
     } finally {
       draft.free();
     }
@@ -2011,6 +3625,30 @@ export class DurableSession {
     this.#locked = true;
     this.#inner.lock();
   }
+
+  /**
+   * Decides which of `itemUris` are autofill candidates for `pageUrl`, requested by `frame`
+   * (ADR 0037 §4, §5), under this account's own settings (ADR 0042 §6): a URI whose mode is
+   * {@link MatchMode.AccountDefault} uses the account's match default, and the account's
+   * disabled global groups and user-defined groups shape the equivalence view. Settings this
+   * build cannot read fail the call (`settings_update_required`, `invalid_server_response`): no
+   * candidate is offered under settings the core could not apply.
+   */
+  decideMatchCandidates(
+    pageUrl: string,
+    frame: MatchFrameInfo,
+    itemUris: readonly MatchUriInput[],
+  ): MatchDecisionResult {
+    const inputs = itemUris.map((u) => new UriInput(u.itemId, u.uriId, u.value, u.mode));
+    return decisionOf(
+      call(() => this.#inner.decideMatchCandidates(pageUrl, frame.isTopFrame, frame.frameOrigin, inputs)),
+    );
+  }
+
+  /** The account's matching settings (ADR 0042 §3), read-only here. */
+  matchSettings(): MatchSettings {
+    return matchSettingsOf(call(() => this.#inner.matchSettings()));
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2018,10 +3656,13 @@ export class DurableSession {
 // `rizzy_client::matching` (that crate's module docs explain the split): every check and every
 // narrowing rule is decided in Rust, never reimplemented here.
 
-/** `uri/<id>/match`'s wire values (ADR 0037 §4). `0x0000` ("account default") is never passed
- * as a URI's own mode to {@link decideMatchCandidates}; resolve it to the account's own
- * default before building {@link MatchUriInput}. */
+/** `uri/<id>/match`'s wire values (ADR 0037 §4). `AccountDefault` (`0x0000`) is a URI's "no
+ * override": the core resolves it to the account-level match default — the account's own
+ * setting through a session's `decideMatchCandidates` ({@link DurableSession.decideMatchCandidates},
+ * {@link VaultSession.matchCandidates}; ADR 0042 §6), or the `accountDefaultMode` argument of
+ * the free {@link decideMatchCandidates}. It is never itself an account default. */
 export const MatchMode = {
+  AccountDefault: 0x0000,
   BaseDomain: 0x0001,
   Host: 0x0002,
   StartsWith: 0x0003,
@@ -2054,10 +3695,27 @@ export interface MatchCandidate {
   /** Whether the fill UI must show the equivalence-only warning (ADR 0037 §5) before the
    * fill. */
   readonly needsWarning: boolean;
+  /** The saved URI's exact normalised host, A-label form (ADR 0037 §5 "Exact host shown";
+   * gap 31 in the M2 gap audit). Never decode this to Unicode in a host UI: a mixed-script
+   * host must keep showing its punycode `xn--` form. */
+  readonly savedHost: string;
+  /** The saved URI's own port, `undefined` when it is its scheme's default (ADR 0037 §2 rule
+   * 5). `savedHost` alone is the page's *registrable-domain-narrowed* candidate set (ADR 0037
+   * §4's `BaseDomain` mode, autofill's own default); a caller doing a destructive "same site"
+   * decision on top of it — never autofill itself — must compare this alongside `savedHost`
+   * against {@link MatchDecisionResult.pagePort}, or two different ports on the same host are
+   * wrongly treated as the same site. */
+  readonly savedPort?: number | undefined;
 }
 
 /** The result of one {@link decideMatchCandidates} call. */
 export interface MatchDecisionResult {
+  /** The page's own exact normalised host, A-label form (ADR 0037 §5 "Exact host shown";
+   * gap 31 in the M2 gap audit): what the fill UI always shows, matching or not. */
+  readonly pageHost: string;
+  /** The page's own port, `undefined` when it is its scheme's default ({@link
+   * MatchCandidate.savedPort}'s own doc explains why a "same site" gate must compare this). */
+  readonly pagePort: number | undefined;
   readonly candidates: readonly MatchCandidate[];
   readonly warnings: readonly string[];
 }
@@ -2079,12 +3737,20 @@ export function registrableDomainOf(url: string): string | undefined {
   return call(() => wasmRegistrableDomainOf(url));
 }
 
+/** The global groups {@link decideMatchCandidates} uses, verified on its first call. */
+let globalWithoutCache: GlobalEquivalence | undefined;
+
 /**
  * Decides which of `itemUris` are autofill candidates for `pageUrl`, requested by `frame`
- * (ADR 0037 §4, §5). `accountDefaultMode` resolves any URI whose own mode is `0x0000`; this
- * call never threads the account's equivalence settings through yet (`not_done`:
- * `crates/rizzy-wasm/src/matching.rs`'s module docs), so matching narrows to plain
- * registrable-domain equality.
+ * (ADR 0037 §4, §5). `accountDefaultMode` resolves any URI whose own mode is `0x0000`. The
+ * merged equivalence view is the compiled-in global list alone (ADR 0037 §7, ADR 0038 §5):
+ * this function holds no session and so no account settings. A host with a session calls the
+ * session's own `decideMatchCandidates` / `matchCandidates` instead, which apply the account's
+ * match default, disabled global groups and user-defined groups (ADR 0042 §6).
+ *
+ * The global list is verified once per module load, not per call (ADR 0051 §4), from
+ * `highest_accepted_version = 0`: like the web vault, this free function keeps no cache and so
+ * no persisted floor (ADR 0051 §5). A durable session verifies against its cache's floor.
  */
 export function decideMatchCandidates(
   pageUrl: string,
@@ -2093,20 +3759,108 @@ export function decideMatchCandidates(
   itemUris: readonly MatchUriInput[],
 ): MatchDecisionResult {
   ensureReady();
+  globalWithoutCache ??= call(() => GlobalEquivalence.withoutCache());
+  const global = globalWithoutCache;
   const inputs = itemUris.map((u) => new UriInput(u.itemId, u.uriId, u.value, u.mode));
-  const decision = call(() =>
-    wasmDecideMatchCandidates(pageUrl, frame.isTopFrame, frame.frameOrigin, accountDefaultMode, inputs),
+  return decisionOf(
+    call(() =>
+      wasmDecideMatchCandidates(pageUrl, frame.isTopFrame, frame.frameOrigin, accountDefaultMode, inputs, global),
+    ),
   );
+}
+
+/** A generated match decision as a plain object, freed. */
+function decisionOf(decision: WasmMatchDecision): MatchDecisionResult {
   try {
     const candidates = decision.candidates.map((c) => {
       try {
-        return { itemId: c.itemId, uriId: c.uriId, needsWarning: c.needsWarning };
+        return { itemId: c.itemId, uriId: c.uriId, needsWarning: c.needsWarning, savedHost: c.savedHost, savedPort: c.savedPort };
       } finally {
         c.free();
       }
     });
-    return { candidates, warnings: [...decision.warnings] };
+    return { pageHost: decision.pageHost, pagePort: decision.pagePort, candidates, warnings: [...decision.warnings] };
   } finally {
     decision.free();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Account match settings (ADR 0037 §6–§7, ADR 0042): the account-level match default, the
+// global equivalence groups the account disabled and its own user-defined groups. They live in
+// the signed account state's `ACCOUNT_SETTINGS`; the core reads, checks and writes them.
+
+/** One equivalence group as the settings screen shows it. Domains are A-label form: never decode
+ * them to Unicode for display (ADR 0037 §2 point 4). */
+export interface EquivalenceGroupInfo {
+  /** The group id, 32 lowercase hex digits. */
+  readonly id: string;
+  readonly domains: readonly string[];
+  /** For a global group: whether the account disabled it. Always `false` for a user group. */
+  readonly disabled: boolean;
+}
+
+/** The account's matching settings. */
+export interface MatchSettings {
+  /** The mode a website with no override of its own uses (`0x0001`–`0x0006`). */
+  readonly matchDefault: MatchModeValue;
+  /** The account's own groups. */
+  readonly userGroups: readonly EquivalenceGroupInfo[];
+  /** This build's signed global list, each with its disabled flag; empty while none is shipped. */
+  readonly globalGroups: readonly EquivalenceGroupInfo[];
+  /** Disabled ids that name no group of this build's global list, hex: still disabled. */
+  readonly otherDisabled: readonly string[];
+}
+
+/** One change to the account's matching settings: one `account/commit` (ADR 0042 §5). */
+export type SettingsChange =
+  | { readonly kind: "matchDefault"; readonly mode: MatchModeValue }
+  | { readonly kind: "addUserGroup"; readonly domains: readonly string[] }
+  | { readonly kind: "removeUserGroup"; readonly id: string }
+  | { readonly kind: "disableGlobalGroup"; readonly id: string }
+  | { readonly kind: "enableGlobalGroup"; readonly id: string }
+  | { readonly kind: "identityDefaults"; readonly defaults: IdentityDefaults };
+
+/** A generated settings view as a plain object, freed. */
+function matchSettingsOf(view: WasmMatchSettingsView): MatchSettings {
+  return mapOne(view, (v) => {
+    const group = (g: WasmEquivalenceGroupView): EquivalenceGroupInfo => ({
+      id: g.id,
+      domains: [...g.domains],
+      disabled: g.disabled,
+    });
+    return {
+      matchDefault: v.matchDefault as MatchModeValue,
+      userGroups: mapFree(v.userGroups, group),
+      globalGroups: mapFree(v.globalGroups, group),
+      otherDisabled: [...v.otherDisabled],
+    };
+  });
+}
+
+/** The core call that builds the commit of `change`. */
+function settingsRequest(s: Session, change: SettingsChange): HttpRequest {
+  switch (change.kind) {
+    case "matchDefault":
+      return s.setMatchDefaultRequest(change.mode);
+    case "addUserGroup":
+      return s.addUserGroupRequest([...change.domains]);
+    case "removeUserGroup":
+      return s.removeUserGroupRequest(change.id);
+    case "disableGlobalGroup":
+      return s.disableGlobalGroupRequest(change.id);
+    case "enableGlobalGroup":
+      return s.enableGlobalGroupRequest(change.id);
+    case "identityDefaults": {
+      const d = change.defaults;
+      return s.setIdentityDefaultsRequest(
+        d.sex,
+        d.country ?? undefined,
+        d.ageMin,
+        d.ageMax,
+        d.emailStyle,
+        d.emailDomain ?? undefined,
+      );
+    }
   }
 }

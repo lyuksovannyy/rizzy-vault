@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `rv` commands (ROADMAP §4.2: "CLI client (`rv`) — list, get, add, generate, copy
 //! TOTP", with import, export, devices and rotation).
 //!
@@ -10,10 +12,19 @@
 //! `item list`, `item show`, `totp` and `generate` need no network: the cache is unlocked and
 //! loaded, and that is all (ROADMAP §4.2 "Offline read access"). `export` reads the cache as it
 //! is too, but first re-authenticates with the server (owner decision 2026-10-05), so it needs
-//! the server. `rv sync` brings the cache up to date. A command that writes (`item
-//! create/edit/trash/restore/purge`, `import`) commits the new ops to the cache first and then
-//! syncs; if the server cannot be reached the ops stay queued, the command says so and still
-//! succeeds, and the next sync uploads them.
+//! the server. `rv sync` brings the cache up to date, then prints the late-edit and trash
+//! notices of gap 02 (see "Notices" below). A command that writes (`item
+//! create/edit/trash/restore/purge/restore-late`, `import`) commits the new ops to the cache
+//! first and then syncs; if the server cannot be reached the ops stay queued, the command says
+//! so and still succeeds, and the next sync uploads them.
+//!
+//! # Notices (gap 02)
+//!
+//! After a sync, `rv` notes "An edit from `<device>` arrived for an item you deleted
+//! permanently. Restore it as a new item?" (ADR 0018 §3 "Surfacing"; `item restore-late`
+//! restores it) and "deleted on X while it was being edited on Y" (ADR 0012 §5 "Active
+//! wins"). It keeps no "already shown" mark: that would be a new local cache record, an ADR
+//! 0026 format change, so every `rv sync` repeats the notices that still hold.
 //!
 //! # Secrets (threat model INV-56)
 //!
@@ -41,25 +52,37 @@ use std::path::Path;
 use std::time::Duration;
 
 use rizzy_client::ClientError;
+use rizzy_client::export::cxf::CXF_EXPORT_WARNING;
 use rizzy_client::export::detect::{DetectedFormat, detect_format};
-use rizzy_client::export::gate::{ExportGate, PLAINTEXT_EXPORT_HOLD_MS, check_export_password};
+use rizzy_client::export::gate::{
+    ExportGate, PLAINTEXT_EXPORT_HOLD_MS, PlaintextExportAuth, check_export_password,
+};
 use rizzy_client::export::plaintext::{
     PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck, csv_export_warning,
 };
-use rizzy_client::items::{FieldEdit, FieldKey, ItemId, ItemLifecycle, ItemType, Value};
+use rizzy_client::identity_gen::{
+    self, CivilDate, CountryCode, GeneratedIdentity, IdentityGenError, IdentityOptions,
+};
+use rizzy_client::items::{Dot, FieldEdit, FieldKey, ItemId, ItemLifecycle, ItemType, Value};
 use rizzy_client::lists::split_order_ops;
 use rizzy_client::rizzy_import::{self, Format};
 use rizzy_client::rotation::RotationLevel;
+use rizzy_client::sessions::{
+    ListedSession, OTHERS_ENDED_NOTICE, SESSION_ENDED_BY_YOU_NOTICE, SessionList, SessionRowKind,
+};
 use rizzy_client::signup::DeviceKind;
 use rizzy_client::store::rows::Alarm;
 use rizzy_client::sync::VaultSync;
+use rizzy_client::vaults::late_edit;
+use rizzy_core::encoding::Reader;
 use rizzy_core::generator::{
     CharClass, CharacterOptions, ClassRule, GeneratorError, MAX_LENGTH, MAX_WORDS, MIN_LENGTH,
     MIN_WORDS, PassphraseOptions, generate_passphrase, generate_password,
 };
-use rizzy_core::ids::DeviceId;
+use rizzy_core::ids::{DeviceId, VaultId};
 use rizzy_core::item::schema::{
-    Concealment, Expected, ITEM_NAME, KeyClass, LIST_FIELD, LIST_URI, LOGIN_TOTP, classify,
+    Concealment, Expected, ITEM_NAME, KeyClass, LIST_FIELD, LIST_PWHIST, LIST_URI, LOGIN_TOTP,
+    SSH_PORT, classify, ssh_port,
 };
 use rizzy_core::item::tag::{tag_key, tag_name};
 use rizzy_core::item::value::ValueRef;
@@ -67,7 +90,10 @@ use rizzy_core::totp::{OtpAuthUri, TotpParams, TotpSecret};
 use zeroize::Zeroizing;
 
 use crate::account;
-use crate::args::{Command, ExportFormat, FieldArgs, Generate, ImportFormat, Invocation, USAGE};
+use crate::args::{
+    Command, DEFAULT_IDENTITY_COUNTRY, ExportFormat, FieldArgs, Generate, IdentityArgs,
+    ImportFormat, Invocation, USAGE,
+};
 use crate::db::Db;
 use crate::device::{CredentialChange, Device, Env, pick_account};
 use crate::enrol;
@@ -76,6 +102,9 @@ use crate::paths::{AccountLock, cache_path, hex, read_limited, unhex, write_new_
 use crate::recover;
 use crate::sys::{now_ms, os_rng};
 use crate::ui::Ui;
+use crate::vaults::{
+    self, ordered_vaults, resolve_among, resolve_item, resolve_vault, target_vault, vault_label,
+};
 
 /// The word that confirms `device forget`.
 const FORGET_WORD: &str = "FORGET";
@@ -86,12 +115,21 @@ const CONCEALED: &str = "********";
 /// The largest file an import reads: the largest input any importer accepts (a 1PUX archive).
 const MAX_IMPORT_FILE_LEN: usize = rizzy_import::limits::MAX_ARCHIVE_LEN;
 
-/// Runs one command.
+/// Runs one command, then ends the device sessions it opened on the server
+/// (`sessions/current/end`; ADR 0075 owner answer 3: best effort, no retry), whatever the
+/// command's outcome.
 ///
 /// # Errors
 /// [`CliError`]; its `Display` is what the user reads.
-#[expect(clippy::too_many_lines, reason = "one arm per command")]
 pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliError> {
+    let outcome = Box::pin(run_command(invocation, env)).await;
+    env.sign_outs.send_all().await;
+    outcome
+}
+
+/// Runs one command ([`run`]).
+#[expect(clippy::too_many_lines, reason = "one arm per command")]
+async fn run_command(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliError> {
     if let Some(account) = &invocation.account {
         env.account = Some(
             unhex::<16>(account)
@@ -124,7 +162,7 @@ pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliErr
             env.ui.note(&format!(
                 "Logged in. This device is enrolled as account {}; {} items.",
                 device.account_hex(),
-                visible_items(device.vault(), false).len()
+                item_count(&device)
             ));
             Ok(())
         }
@@ -132,19 +170,46 @@ pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliErr
         Command::Sync => {
             let mut device = Device::open(env).await?;
             device.sync(env.ui).await?;
+            env.ui
+                .note(&format!("Synced; {} items.", item_count(&device)));
+            print_notices(&device, env.ui);
+            Ok(())
+        }
+        Command::ItemList { trash, vault } => {
+            let device = Device::open(env).await?;
+            let only = vault.map(|v| resolve_vault(&device, &v)).transpose()?;
+            item_list(&device, env.ui, trash, only)
+        }
+        Command::ItemSearch {
+            query,
+            trash,
+            vault,
+        } => {
+            let mut device = Device::open(env).await?;
+            let only = vault.map(|v| resolve_vault(&device, &v)).transpose()?;
+            let mut found = device.search(&query).await?;
+            found.retain(|(v, _)| only.is_none_or(|o| o == *v));
+            print_items(&device, env.ui, &found, Some(trash))
+        }
+        Command::ItemRecent { limit } => {
+            let mut device = Device::open(env).await?;
+            // Purged items lose their row; a trashed one keeps it and shows as such.
+            let used = device.recent(limit).await?;
+            print_items(&device, env.ui, &used, None)
+        }
+        Command::CacheReindex => {
+            let mut device = Device::open(env).await?;
+            let rows = device.reindex().await?;
             env.ui.note(&format!(
-                "Synced; {} items.",
-                visible_items(device.vault(), false).len()
+                "Rebuilt the search index: {rows} items. The record of recently used items was \
+                 cleared."
             ));
             Ok(())
         }
-        Command::ItemList { trash } => {
-            let device = Device::open(env).await?;
-            item_list(&device, env.ui, trash)
-        }
         Command::ItemShow { item, reveal } => {
-            let device = Device::open(env).await?;
-            item_show(&device, env.ui, &item, reveal)
+            let mut device = Device::open(env).await?;
+            let (vault, shown) = item_show(&device, env.ui, &item, reveal)?;
+            device.record_use(vault, shown).await
         }
         Command::ItemCreate { item_type, fields } => {
             Box::pin(item_create(env, &item_type, &fields)).await
@@ -168,13 +233,47 @@ pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliErr
             }))
             .await
         }
-        Command::Generate(options) => generate(env.ui, options),
-        Command::Totp(item) => {
-            let device = Device::open(env).await?;
-            totp(&device, env.ui, &item)
+        Command::ItemRestoreLate { item, item_type } => {
+            Box::pin(item_restore_late(env, &item, &item_type)).await
         }
-        Command::Export { out, name, format } => Box::pin(export(env, &out, &name, format)).await,
-        Command::Import { input, format } => Box::pin(import(env, &input, format)).await,
+        Command::ItemHistory { item, reveal } => {
+            let device = Device::open(env).await?;
+            item_history(&device, env.ui, &item, reveal)
+        }
+        Command::ItemRestoreHistory { item, field, entry } => {
+            Box::pin(item_restore_history(env, &item, &field, &entry)).await
+        }
+        Command::Generate(options) => generate(env.ui, options),
+        Command::GenerateIdentity { options, json } => generate_identity(env.ui, &options, json),
+        Command::Totp(item) => {
+            let mut device = Device::open(env).await?;
+            let (vault, shown) = totp(&device, env.ui, &item)?;
+            device.record_use(vault, shown).await
+        }
+        Command::Export {
+            out,
+            name,
+            format,
+            vault,
+        } => Box::pin(export(env, &out, &name, format, vault.as_deref())).await,
+        Command::Import {
+            input,
+            format,
+            vault,
+        } => Box::pin(import(env, &input, format, vault.as_deref())).await,
+        Command::ItemMove {
+            item,
+            to,
+            keep_source,
+        } => Box::pin(vaults::move_or_copy(env, &item, &to, keep_source)).await,
+        Command::VaultList => Box::pin(vaults::list(env)).await,
+        Command::VaultCreate(name) => Box::pin(vaults::create(env, &name)).await,
+        Command::VaultRename { vault, name } => Box::pin(vaults::rename(env, &vault, &name)).await,
+        Command::VaultDelete {
+            vault,
+            name,
+            with_items,
+        } => Box::pin(vaults::delete(env, &vault, &name, with_items)).await,
         Command::DeviceList => Box::pin(device_list(env)).await,
         Command::DeviceRevoke {
             device,
@@ -182,6 +281,9 @@ pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliErr
             standard,
         } => Box::pin(device_revoke(env, &device, &name, standard)).await,
         Command::DeviceForget => device_forget(env).await,
+        Command::SessionList => Box::pin(session_list(env)).await,
+        Command::SessionEnd(prefix) => Box::pin(session_end(env, Some(&prefix))).await,
+        Command::SessionEndOthers => Box::pin(session_end(env, None)).await,
         Command::Rotate { name, full } => {
             let mut device = Device::open(env).await?;
             let level = if full {
@@ -253,26 +355,22 @@ fn visible_items(vault: &VaultSync, trash: bool) -> Vec<ItemId> {
         .collect()
 }
 
-/// The item a hex id or a unique prefix of one names, among the active and trashed items.
-fn resolve_item(vault: &VaultSync, text: &str) -> Result<ItemId, CliError> {
-    let wanted = text.to_ascii_lowercase();
-    if wanted.is_empty() || !wanted.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(CliError::BadInput(
-            "an item is named by its hex id or a prefix of it",
-        ));
-    }
-    let mut matches = vault.item_ids().into_iter().filter(|item| {
-        hex(item.as_bytes()).starts_with(&wanted)
-            && matches!(
-                vault.item_lifecycle(*item),
-                ItemLifecycle::Active | ItemLifecycle::Trashed
-            )
-    });
-    match (matches.next(), matches.next()) {
-        (Some(item), None) => Ok(item),
-        (None, _) => Err(CliError::Client(ClientError::UnknownItem)),
-        (Some(_), Some(_)) => Err(CliError::BadInput("several items start with that id")),
-    }
+/// The purged item with late edits (ADR 0018 §3) `text` names, in any vault.
+fn resolve_late_item(device: &Device, text: &str) -> Result<(VaultId, ItemId), CliError> {
+    resolve_among(device, text, |vault, item| {
+        vault.item_lifecycle(item) == ItemLifecycle::Purged
+            && !vault.late_edit_devices(item).is_empty()
+    })
+}
+
+/// The active items over every vault this device holds.
+fn item_count(device: &Device) -> usize {
+    device
+        .vaults()
+        .all()
+        .iter()
+        .map(|v| visible_items(v, false).len())
+        .sum()
 }
 
 /// The name of an item type, as `--type` takes it.
@@ -283,12 +381,25 @@ fn type_name(item_type: Option<ItemType>) -> &'static str {
         .map_or("unknown", |(name, _)| name)
 }
 
+/// The item type `--type` names.
+fn type_named(text: &str) -> Result<ItemType, CliError> {
+    TYPES
+        .iter()
+        .find(|(name, _)| *name == text)
+        .map(|(_, t)| *t)
+        .ok_or_else(|| CliError::Usage("unknown item type".into()))
+}
+
 /// The item types `--type` names.
 ///
 /// No `"passkey"` entry: `0x000A` (the standalone-passkey candidate ADR 0018 reserved) was
 /// released back to unassigned by ADR 0039 §1, which puts passkeys on the `passkey/<id>/…` list
 /// of an existing Login item instead (`rizzy-core`'s `item::schema::LIST_PASSKEY`).
-const TYPES: [(&str, ItemType); 9] = [
+///
+/// No `"bank-account"` entry either: ADR 0078 §1 retired `0x0009`, so `--type bank-account` is
+/// refused and a Bank account an older build wrote shows as type `unknown`, its `bank.` keys
+/// concealed unless `--reveal` (ADR 0078 §2: reserved keys are concealed).
+const TYPES: [(&str, ItemType); 8] = [
     ("login", ItemType::LOGIN),
     ("note", ItemType::SECURE_NOTE),
     ("card", ItemType::CARD),
@@ -297,7 +408,6 @@ const TYPES: [(&str, ItemType); 9] = [
     ("api-credential", ItemType::API_CREDENTIAL),
     ("software-license", ItemType::SOFTWARE_LICENSE),
     ("wifi", ItemType::WIFI),
-    ("bank-account", ItemType::BANK_ACCOUNT),
 ];
 
 /// A displayed value as text for the terminal. Bytes and sort keys are described, not dumped.
@@ -343,10 +453,12 @@ async fn unlock(env: &mut Env<'_>) -> Result<(), CliError> {
         .print(&format!("device:   {}", hex(state.device_id().as_bytes())))?;
     env.ui
         .print(&format!("server:   {}", state.server_origin().as_str()))?;
-    env.ui.print(&format!(
-        "items:    {}",
-        visible_items(device.vault(), false).len()
-    ))?;
+    env.ui
+        .print(&format!("items:    {}", item_count(&device)))?;
+    // ADR 0048 §5: the server's figure, not verified; shown only when this run went online.
+    if let Some(usage) = device.usage() {
+        env.ui.print(&format!("storage:  {}", usage_text(usage)))?;
+    }
     for alarm in device.alarms() {
         env.ui.print(&format!("ALARM:    {}", alarm_text(*alarm)))?;
     }
@@ -359,27 +471,99 @@ async fn unlock(env: &mut Env<'_>) -> Result<(), CliError> {
     }
 }
 
+/// The usage line of `unlock`: bytes used of the quota, as the server reported them, in whole
+/// bytes so a script reads them exactly (`12345 of 5368709120 bytes, as reported by the server`).
+pub(crate) fn usage_text(usage: rizzy_client::account::StorageUsage) -> String {
+    format!(
+        "{} of {} bytes, as reported by the server",
+        usage.bytes_used, usage.quota_bytes
+    )
+}
+
 /// `item list`.
-fn item_list(device: &Device, ui: &mut dyn Ui, trash: bool) -> Result<(), CliError> {
-    let vault = device.vault();
-    for item in visible_items(vault, trash) {
-        let name = text_field(vault, item, ITEM_NAME).unwrap_or_default();
-        ui.print(&format!(
-            "{}  {:<16}  {}",
-            hex(item.as_bytes()),
-            type_name(vault.item_type(item)),
-            name.as_str()
-        ))?;
+fn item_list(
+    device: &Device,
+    ui: &mut dyn Ui,
+    trash: bool,
+    only: Option<VaultId>,
+) -> Result<(), CliError> {
+    for vault_id in ordered_vaults(device) {
+        if only.is_some_and(|o| o != vault_id) {
+            continue;
+        }
+        let Some(vault) = device.vaults().get(vault_id) else {
+            continue;
+        };
+        let label = vault_label(device, vault_id);
+        for item in visible_items(vault, trash) {
+            let name = text_field(vault, item, ITEM_NAME).unwrap_or_default();
+            let line = Zeroizing::new(format!(
+                "{}  {:<16}  {label:<16}  {}",
+                hex(item.as_bytes()),
+                type_name(vault.item_type(item)),
+                name.as_str()
+            ));
+            ui.print(&line)?;
+        }
     }
     Ok(())
 }
 
-/// `item show`.
-fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Result<(), CliError> {
-    let vault = device.vault();
-    let item = resolve_item(vault, item)?;
+/// The items of `ids` as `item list` prints them, in the given order: with `trash` set, only
+/// those in (`Some(true)`) or out of (`Some(false)`) the trash; with `None`, both, a trashed
+/// one marked. An id the vault does not show (purged since, or the vault-settings item) is
+/// skipped.
+fn print_items(
+    device: &Device,
+    ui: &mut dyn Ui,
+    ids: &[(VaultId, ItemId)],
+    trash: Option<bool>,
+) -> Result<(), CliError> {
+    for (vault_id, item) in ids {
+        let Some(vault) = device.vaults().get(*vault_id) else {
+            continue;
+        };
+        let label = vault_label(device, *vault_id);
+        let trashed = match vault.item_lifecycle(*item) {
+            ItemLifecycle::Active => false,
+            ItemLifecycle::Trashed => true,
+            _ => continue,
+        };
+        if trash.is_some_and(|t| t != trashed)
+            || vault.item_type(*item) == Some(ItemType::VAULT_SETTINGS)
+        {
+            continue;
+        }
+        let name = text_field(vault, *item, ITEM_NAME).unwrap_or_default();
+        let mark = if trashed && trash.is_none() {
+            "  (in the trash)"
+        } else {
+            ""
+        };
+        let line = Zeroizing::new(format!(
+            "{}  {:<16}  {label:<16}  {}{mark}",
+            hex(item.as_bytes()),
+            type_name(vault.item_type(*item)),
+            name.as_str()
+        ));
+        ui.print(&line)?;
+    }
+    Ok(())
+}
+
+/// `item show`; returns the item shown, for the use record (ADR 0056 §2).
+fn item_show(
+    device: &Device,
+    ui: &mut dyn Ui,
+    item: &str,
+    reveal: bool,
+) -> Result<(VaultId, ItemId), CliError> {
+    let (vault_id, item) = resolve_item(device, item)?;
+    let vault = device.vaults().require(vault_id)?;
     ui.print(&format!("id:    {}", hex(item.as_bytes())))?;
     ui.print(&format!("type:  {}", type_name(vault.item_type(item))))?;
+    let label = Zeroizing::new(format!("vault: {}", vault_label(device, vault_id)));
+    ui.print(&label)?;
     if vault.item_lifecycle(item) == ItemLifecycle::Trashed {
         ui.print("state: in the trash")?;
     }
@@ -387,6 +571,13 @@ fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Resu
         let Ok(parsed) = FieldKey::parse(key.as_bytes()) else {
             continue;
         };
+        // Imported password history is its own section below (gap 01), concealed the same
+        // way as every other secret, never through this generic loop's `concealed()` check
+        // (the schema classifies `pwhist/*` as `Concealment::Shown`, since concealment there
+        // is this view's call, not the schema's).
+        if parsed.as_key().namespace() == LIST_PWHIST {
+            continue;
+        }
         let Some(value) = vault.field_value(item, &key) else {
             continue;
         };
@@ -411,6 +602,16 @@ fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Resu
         let line = Zeroizing::new(format!("{}: {}{conflict}", label.as_str(), shown.as_str()));
         ui.print(&line)?;
     }
+    // ADR 0055 §1: an SSH key without `ssh.port` (or with it cleared) uses port 22, a display
+    // default that is never stored, so it is marked as one.
+    if vault.item_type(item) == Some(ItemType::SSH_KEY) {
+        let port = vault.field_value(item, SSH_PORT);
+        if port.as_ref().is_none_or(Value::is_cleared)
+            && let Some(default) = ssh_port(None)
+        {
+            ui.print(&format!("{SSH_PORT}: {default} (default)"))?;
+        }
+    }
     // The fields above are in key order; the lists a user reorders, in list order (ADR 0018
     // §6), by the element ids `--move-uri` and `--move-custom` take.
     for list in [LIST_URI, LIST_FIELD] {
@@ -422,7 +623,140 @@ fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Resu
         let line = Zeroizing::new(format!("order of {list}: {}", ids.join(" ")));
         ui.print(&line)?;
     }
+    print_password_history(vault, ui, item, reveal)?;
+    Ok((vault_id, item))
+}
+
+/// The password-history section of `item show` (gap 01; ADR 0012 §5 "Password history is the
+/// history of `login.password`"; ADR 0018 §7): newest first, concealed unless `--reveal`
+/// exactly like every other secret (module docs). Tags and password history have no order of
+/// their own (docs/rv.md). The merge history and the imported history are separate sections:
+/// the ADR defines no order across the two.
+fn print_password_history(
+    vault: &VaultSync,
+    ui: &mut dyn Ui,
+    item: ItemId,
+    reveal: bool,
+) -> Result<(), CliError> {
+    let history = vault.password_history(item);
+    if !history.is_empty() {
+        let plural = if history.len() == 1 { "" } else { "s" };
+        ui.print(&format!(
+            "password history ({} older value{plural}, newest first):",
+            history.len()
+        ))?;
+        for entry in &history {
+            let shown = if reveal {
+                show_value(&entry.value)
+            } else {
+                Zeroizing::new(CONCEALED.to_owned())
+            };
+            let line = Zeroizing::new(format!("  {} ms: {}", entry.changed_ms, shown.as_str()));
+            ui.print(&line)?;
+        }
+    }
+    let imported = vault.imported_password_history(item);
+    if !imported.is_empty() {
+        let plural = if imported.len() == 1 { "" } else { "s" };
+        ui.print(&format!(
+            "imported password history ({imported_len} value{plural}):",
+            imported_len = imported.len()
+        ))?;
+        for entry in &imported {
+            let shown = match (&entry.value, reveal) {
+                (Some(_), false) => Zeroizing::new(CONCEALED.to_owned()),
+                (Some(value), true) => show_value(value),
+                (None, _) => Zeroizing::new("(no value)".to_owned()),
+            };
+            let when = entry
+                .changed_ms
+                .map_or_else(|| "unknown time".to_owned(), |ms| format!("{ms} ms"));
+            let line = Zeroizing::new(format!("  {when}: {}", shown.as_str()));
+            ui.print(&line)?;
+        }
+    }
     Ok(())
+}
+
+/// Lower-case hex of a dot's canonical encoding (`device_id ‖ seq`, ADR 0012 §2): a history
+/// entry's identity, stable across a sync that only reorders the list. Not a persistent or
+/// wire format: computed fresh for one `item history` listing.
+fn dot_hex(dot: Dot) -> String {
+    let mut buf = Vec::with_capacity(Dot::ENCODED_LEN);
+    dot.encode(&mut buf);
+    hex(&buf)
+}
+
+/// The dot `item restore-history --entry` names, as [`dot_hex`] printed it.
+fn parse_dot(text: &str) -> Result<Dot, CliError> {
+    let bad = || CliError::BadInput("not a valid history entry id");
+    let bytes = unhex::<{ Dot::ENCODED_LEN }>(text).ok_or_else(bad)?;
+    Dot::read(&mut Reader::new(&bytes)).map_err(|_| bad())
+}
+
+/// `item history` (ROADMAP §4.2 "Item revision history (restore old versions)", M3):
+/// generalizes `item show`'s password-history section ([`print_password_history`]) to every
+/// field. Concealed unless `--reveal`, newest first per field, each entry printed with the id
+/// `item restore-history --entry` takes.
+fn item_history(
+    device: &Device,
+    ui: &mut dyn Ui,
+    item: &str,
+    reveal: bool,
+) -> Result<(), CliError> {
+    let (vault_id, item) = resolve_item(device, item)?;
+    let vault = device.vaults().require(vault_id)?;
+    let history = vault.item_history(item);
+    if history.is_empty() {
+        ui.print("no field history")?;
+        return Ok(());
+    }
+    for field in &history {
+        let plural = if field.entries.len() == 1 { "" } else { "s" };
+        // The key is user content (a tag key holds the tag's name, ADR 0018 §2), so the line
+        // that carries it is wiped like `item show`'s labels.
+        let header = Zeroizing::new(format!(
+            "{} ({} older value{plural}, newest first):",
+            field.key.as_str(),
+            field.entries.len()
+        ));
+        ui.print(&header)?;
+        for entry in &field.entries {
+            let shown = if reveal {
+                show_value(&entry.value)
+            } else {
+                Zeroizing::new(CONCEALED.to_owned())
+            };
+            let line = Zeroizing::new(format!(
+                "  {}  {} ms: {}",
+                dot_hex(entry.dot),
+                entry.changed_ms,
+                shown.as_str()
+            ));
+            ui.print(&line)?;
+        }
+    }
+    Ok(())
+}
+
+/// `item restore-history`: writes one history entry back as its field's current value
+/// (ROADMAP §4.2), through [`rizzy_client::items::VaultSync::restore_field_history`]: an
+/// ordinary entered write (ADR 0018 §2 "Flow"), so it syncs and merges like any other edit.
+async fn item_restore_history(
+    env: &mut Env<'_>,
+    item: &str,
+    field: &str,
+    entry: &str,
+) -> Result<(), CliError> {
+    let mut device = Device::open(env).await?;
+    let (vault_id, item) = resolve_item(&device, item)?;
+    let dot = parse_dot(entry)?;
+    device
+        .edit(vault_id, |vault, rng, unlocked, now| {
+            vault.restore_field_history(rng, unlocked, item, field, dot, now)
+        })
+        .await?;
+    sync_after_write(&mut device, env.ui).await
 }
 
 /// The encoded value of `text` for `key`, as the schema expects it.
@@ -491,7 +825,7 @@ fn collect_writes(
 }
 
 /// Syncs after a local write; an unreachable server leaves the ops queued and is not an error.
-async fn sync_after_write(device: &mut Device, ui: &mut dyn Ui) -> Result<(), CliError> {
+pub(crate) async fn sync_after_write(device: &mut Device, ui: &mut dyn Ui) -> Result<(), CliError> {
     match device.sync(ui).await {
         Ok(()) => Ok(()),
         Err(CliError::Network) => {
@@ -511,19 +845,31 @@ async fn item_create(
     type_text: &str,
     fields: &FieldArgs,
 ) -> Result<(), CliError> {
-    let item_type = TYPES
-        .iter()
-        .find(|(name, _)| *name == type_text)
-        .map(|(_, t)| *t)
-        .ok_or_else(|| CliError::Usage("unknown item type".into()))?;
+    let item_type = type_named(type_text)?;
+    // `--generate` pre-fills the identity (ADR 0079 §10) before the device opens, so a bad
+    // option fails without unlocking. A `--field` of the same key wins.
+    let generated;
+    let fields = match &fields.generate {
+        Some(options) => {
+            if item_type != ItemType::IDENTITY {
+                return Err(CliError::Usage("--generate needs --type identity".into()));
+            }
+            generated = with_generated(fields, &new_identity(options)?);
+            &generated
+        }
+        None => fields,
+    };
     let mut device = Device::open(env).await?;
+    // ADR 0081 §A8: Personal unless `--vault` names another, every time.
+    let target = target_vault(&device, fields.vault.as_deref())?;
     // A new item has no element whose `order` a rewrite would write: one op at most.
-    let writes: Vec<(FieldKey, Value)> = collect_writes(env.ui, device.vault(), None, fields)?
-        .into_iter()
-        .flatten()
-        .collect();
+    let writes: Vec<(FieldKey, Value)> =
+        collect_writes(env.ui, device.vaults().require(target)?, None, fields)?
+            .into_iter()
+            .flatten()
+            .collect();
     let item = device
-        .edit(|vault, rng, unlocked, now| {
+        .edit(target, |vault, rng, unlocked, now| {
             let edits: Vec<FieldEdit<'_>> = writes
                 .iter()
                 .map(|(key, value)| FieldEdit { key, value })
@@ -538,13 +884,18 @@ async fn item_create(
 /// `item edit`.
 async fn item_edit(env: &mut Env<'_>, item: &str, fields: &FieldArgs) -> Result<(), CliError> {
     let mut device = Device::open(env).await?;
-    let item = resolve_item(device.vault(), item)?;
-    let ops = collect_writes(env.ui, device.vault(), Some(item), fields)?;
+    let (vault_id, item) = resolve_item(&device, item)?;
+    let ops = collect_writes(
+        env.ui,
+        device.vaults().require(vault_id)?,
+        Some(item),
+        fields,
+    )?;
     if ops.is_empty() {
         return Err(CliError::Usage("nothing to change".into()));
     }
     device
-        .edit(|vault, rng, unlocked, now| {
+        .edit(vault_id, |vault, rng, unlocked, now| {
             // The consecutive ops of a list rewrite too large for one op first (ADR 0018 §6),
             // then the edit.
             for writes in &ops {
@@ -573,11 +924,108 @@ async fn lifecycle(
     ) -> Result<(), ClientError>,
 ) -> Result<(), CliError> {
     let mut device = Device::open(env).await?;
-    let item = resolve_item(device.vault(), item)?;
+    let (vault_id, item) = resolve_item(&device, item)?;
     device
-        .edit(|vault, rng, unlocked, now| op(vault, rng, unlocked, item, now))
+        .edit(vault_id, |vault, rng, unlocked, now| {
+            op(vault, rng, unlocked, item, now)
+        })
         .await?;
     sync_after_write(&mut device, env.ui).await
+}
+
+/// `item restore-late`: the late edits of an item deleted permanently, restored as a new item
+/// of the type the user names (ADR 0018 §3 "Surfacing": the type is never inferred). Prints the
+/// new item's id; the deleted item stays deleted, and its late edits stay restorable.
+async fn item_restore_late(env: &mut Env<'_>, item: &str, type_text: &str) -> Result<(), CliError> {
+    let item_type = type_named(type_text)?;
+    let mut device = Device::open(env).await?;
+    let (vault_id, item) = resolve_late_item(&device, item)?;
+    let restored = device
+        .edit(vault_id, |vault, rng, unlocked, now| {
+            vault.restore_late_as_new_item(rng, unlocked, item, item_type, now)
+        })
+        .await?;
+    env.ui.print(&hex(restored.as_bytes()))?;
+    sync_after_write(&mut device, env.ui).await
+}
+
+/// The notices after `sync` (gap 02): "An edit from `<device>` arrived for an item you deleted
+/// permanently. Restore it as a new item?" (ADR 0018 §3 "Surfacing"), and "deleted on X while
+/// it was being edited on Y" (ADR 0012 §5 "Active wins"). Notes, not results: standard error.
+///
+/// `rv` keeps no "already shown" mark. Its session is one process, so the only memory that
+/// outlasts a command is the local cache, and a mark there is a new cache record: a
+/// persistent-format change that needs an ADR 0026 amendment first. So each `rv sync` prints
+/// every notice that still holds; a late-edit notice holds as long as the deleted item keeps
+/// its late edits, a trash notice until the next write of the item's lifecycle.
+fn print_notices(device: &Device, ui: &mut dyn Ui) {
+    for vault in device.vaults().all() {
+        print_vault_notices(device, vault, ui);
+    }
+}
+
+/// [`print_notices`] for one vault.
+fn print_vault_notices(device: &Device, vault: &VaultSync, ui: &mut dyn Ui) {
+    for item in vault.item_ids() {
+        let id = hex(item.as_bytes());
+        if let Some(late) = late_edit(vault, item, device.recorded_moves()) {
+            let from: Vec<String> = late
+                .devices
+                .iter()
+                .map(|d| device_label(device, *d))
+                .collect();
+            // ADR 0081 §A6 step 2: the prompt names the target vault when this device
+            // recorded the move.
+            let what = match late.moved_to {
+                Some(target) => format!(
+                    "an item you moved to the vault \"{}\"",
+                    vault_label(device, target)
+                ),
+                None => "an item you deleted permanently".to_owned(),
+            };
+            ui.note(&format!(
+                "An edit from {} arrived for {what} ({id}). Restore it as a new item? \
+                 `rv item restore-late {id} --type <type>`",
+                from.join(" and ")
+            ));
+        }
+        if let Some(trash) = vault.concurrent_trash(item) {
+            let name = text_field(vault, item, ITEM_NAME).unwrap_or_default();
+            let line = Zeroizing::new(format!(
+                "{id}  {}: deleted on {} while it was being edited on {}; the edit kept it.",
+                name.as_str(),
+                device_label(device, trash.trashed_by),
+                device_label(device, trash.edited_by),
+            ));
+            ui.note(&line);
+        }
+    }
+}
+
+/// How many hex digits of a device id a notice shows (module-wide: [`device_label`] and the
+/// web vault's `notices.ts` `deviceLabel` use the same length), a prefix of what `device list`
+/// prints in full: short enough to read in a sentence, long enough that `device revoke`
+/// (which accepts a prefix, module docs) rarely sees two devices sharing it.
+const DEVICE_LABEL_HEX_LEN: usize = 16;
+
+/// How a notice names a device: "this device", or its kind and the first
+/// [`DEVICE_LABEL_HEX_LEN`] digits of its id, a prefix of the full id `device list` prints
+/// (and that `device revoke` accepts in place of the full id). A device certificate holds a
+/// kind and an id, no name.
+fn device_label(device: &Device, id: DeviceId) -> String {
+    if id == device.state().device_id() {
+        return "this device".to_owned();
+    }
+    let text = hex(id.as_bytes());
+    let short = text.get(..DEVICE_LABEL_HEX_LEN).unwrap_or(&text);
+    let (certificates, _) = device.devices();
+    certificates
+        .iter()
+        .find(|c| c.certificate.device_id == id)
+        .map_or_else(
+            || format!("device {short}"),
+            |c| format!("{} {short}", kind_name(c.certificate.device_kind)),
+        )
 }
 
 /// `generate`: the generator of `rizzy-core` (CRYPTO.md §12.1), printed because that is what
@@ -621,6 +1069,91 @@ fn generate(ui: &mut dyn Ui, options: Generate) -> Result<(), CliError> {
     ui.print(generated.expose_secret())
 }
 
+/// Today's civil date for the identity generator. `rv` uses the UTC date: reading the local
+/// time zone needs either the C library (`unsafe`) or a time-zone crate, and neither is
+/// admitted. Near midnight the date, and so an exact age's birthday window, can be a day off
+/// the local one.
+fn today_utc() -> Result<CivilDate, CliError> {
+    let days = i64::try_from(now_ms() / 86_400_000).map_err(|_| ClientError::Internal)?;
+    CivilDate::from_days(days).ok_or(CliError::Client(ClientError::Internal))
+}
+
+/// Draws an identity with `rv`'s options (ADR 0079 §10): the OS RNG and today's date.
+fn new_identity(options: &IdentityArgs) -> Result<GeneratedIdentity, CliError> {
+    let data = identity_gen::embedded_data().map_err(|_| ClientError::Internal)?;
+    let country = match options.country {
+        Some(c) => c,
+        None => CountryCode::parse(DEFAULT_IDENTITY_COUNTRY).map_err(|_| ClientError::Internal)?,
+    };
+    let mut o = IdentityOptions::new(country);
+    o.sex = options.sex;
+    o.age = options.age;
+    o.email_style = options.email_style;
+    o.email_domain.clone_from(&options.domain);
+    identity_gen::generate_identity(&mut os_rng(), data, &o, today_utc()?).map_err(|e| match e {
+        IdentityGenError::UnsupportedCountry => {
+            let codes: Vec<&str> = data
+                .countries()
+                .iter()
+                .map(identity_gen::Country::code)
+                .collect();
+            CliError::Usage(format!("--country takes one of {}", codes.join(", ")))
+        }
+        IdentityGenError::AgeRange => CliError::Usage("--age is out of range".into()),
+        _ => CliError::Client(ClientError::Internal),
+    })
+}
+
+/// `fields` with the generated identity's fields and its default name ("First Last") added,
+/// except where `fields` already sets the key (a `--field` or `--secret` of it wins).
+fn with_generated(fields: &FieldArgs, identity: &GeneratedIdentity) -> FieldArgs {
+    let taken = |key: &str| {
+        fields.fields.iter().any(|(k, _)| k == key) || fields.secrets.iter().any(|k| k == key)
+    };
+    let mut merged = fields.clone();
+    let mut generated: Vec<(String, String)> = Vec::new();
+    if !taken(ITEM_NAME) {
+        generated.push((ITEM_NAME.to_owned(), identity.item_name()));
+    }
+    for (key, value) in identity.fields() {
+        if !taken(key) {
+            generated.push((key.to_owned(), value));
+        }
+    }
+    generated.append(&mut merged.fields);
+    merged.fields = generated;
+    merged.generate = None;
+    merged
+}
+
+/// `generate identity` (ADR 0079 §10): `key=value` lines in the generator's order, or with
+/// `--json` one object `{"name": …, "fields": {key: value, …}}`. A generated identity is not
+/// a secret (ADR 0079 §2).
+fn generate_identity(ui: &mut dyn Ui, options: &IdentityArgs, json: bool) -> Result<(), CliError> {
+    let identity = new_identity(options)?;
+    if json {
+        let mut fields = serde_json::Map::new();
+        for (key, value) in identity.fields() {
+            fields.insert(key.to_owned(), serde_json::Value::String(value));
+        }
+        let mut object = serde_json::Map::new();
+        object.insert(
+            "name".to_owned(),
+            serde_json::Value::String(identity.item_name()),
+        );
+        object.insert("fields".to_owned(), serde_json::Value::Object(fields));
+        let text = serde_json::to_string_pretty(&serde_json::Value::Object(object))
+            .map_err(|_| ClientError::Internal)?;
+        return ui.print(&text);
+    }
+    ui.note("Generated details are random and may match real people or places.");
+    ui.print(&format!("{ITEM_NAME}={}", identity.item_name()))?;
+    for (key, value) in identity.fields() {
+        ui.print(&format!("{key}={value}"))?;
+    }
+    Ok(())
+}
+
 /// What to tell the user when the generator refuses the options: which rule they broke, in
 /// terms of `rv generate`'s flags. The options are not secret; no generated value is involved.
 fn generator_usage(e: GeneratorError) -> CliError {
@@ -658,9 +1191,10 @@ fn generator_usage(e: GeneratorError) -> CliError {
 
 /// `totp`: the current code of an item's `login.totp`, which holds an `otpauth://` URI or a
 /// bare Base32 secret (then SHA-1, 6 digits, 30 s; CRYPTO.md §11.15).
-fn totp(device: &Device, ui: &mut dyn Ui, item: &str) -> Result<(), CliError> {
-    let vault = device.vault();
-    let item = resolve_item(vault, item)?;
+/// `totp`; returns the item, for the use record (ADR 0056 §2: a code copied from it).
+fn totp(device: &Device, ui: &mut dyn Ui, item: &str) -> Result<(VaultId, ItemId), CliError> {
+    let (vault_id, item) = resolve_item(device, item)?;
+    let vault = device.vaults().require(vault_id)?;
     let bad = || CliError::BadInput("the item's one-time-code secret is not valid");
     let stored = text_field(vault, item, LOGIN_TOTP)
         .ok_or(CliError::BadInput("the item has no one-time-code secret"))?;
@@ -683,7 +1217,8 @@ fn totp(device: &Device, ui: &mut dyn Ui, item: &str) -> Result<(), CliError> {
     let code = params.code_at(&secret, seconds).map_err(|_| bad())?;
     let period = u64::from(params.period.get());
     ui.note(&format!("valid for {} s", period - seconds % period));
-    ui.print(&code.to_digits())
+    ui.print(&code.to_digits())?;
+    Ok((vault_id, item))
 }
 
 /// `export` (ADR 0027 §5; CRYPTO.md §11.14; owner decision 2026-10-05): the cache as it is, to
@@ -697,7 +1232,10 @@ fn totp(device: &Device, ui: &mut dyn Ui, item: &str) -> Result<(), CliError> {
 ///    checks; it is needed to import the file and is not the master password.
 /// 4. Plaintext: ADR 0027 §5's warning (with the CSV addition), then a hold of 10 seconds that
 ///    no flag or environment variable shortens ([`Ui::hold`]), then the typed `EXPORT
-///    PLAINTEXT` from the terminal.
+///    PLAINTEXT` from the terminal. CXF (ADR 0074 §2): the new file password of step 3, then
+///    this gate with the CXF export's own warning ([`CXF_EXPORT_WARNING`]) instead of ADR 0027
+///    §5's: the file is encrypted, but once decrypted it is a portable dump of every passkey's
+///    private key.
 /// 5. The export takes the gate's permission (`rizzy_client::export::gate`): one export per
 ///    re-authentication, within five minutes of it.
 async fn export(
@@ -705,6 +1243,7 @@ async fn export(
     out: &Path,
     login_name: &str,
     format: ExportFormat,
+    vault: Option<&str>,
 ) -> Result<(), CliError> {
     // Nothing is derived or typed for a path that cannot be written: the check the final
     // `create_new` makes again.
@@ -712,7 +1251,9 @@ async fn export(
         return Err(CliError::FileExists);
     }
     let mut device = Device::open(env).await?;
-    let blockers = device.vault().export_blockers();
+    // ADR 0081 §A8: one payload is one vault; Personal unless `--vault` names another.
+    let source = target_vault(&device, vault)?;
+    let blockers = device.vaults().require(source)?.export_blockers();
     if !blockers.is_empty() {
         for item in blockers {
             env.ui.note(&format!(
@@ -726,23 +1267,10 @@ async fn export(
     device
         .reauthenticate_for_export(env.ui, login_name, &mut gate)
         .await?;
-    let vault = device.vault();
+    let vault = device.vaults().require(source)?;
     match format {
         ExportFormat::Encrypted => {
-            env.ui.note(
-                "Choose a password for this export file. It is needed to import the file. It \
-                 is not your master password, and nobody can recover it if it is lost.",
-            );
-            let password = env.ui.secret("Password for this export file")?;
-            let again = env.ui.secret("Password for this export file, again")?;
-            if *password != *again {
-                return Err(CliError::BadInput("the two passwords differ"));
-            }
-            check_export_password(&password).map_err(|_| {
-                CliError::BadInput(
-                    "the export file's password must not be empty or hold unassigned characters",
-                )
-            })?;
+            let password = new_export_password(env.ui)?;
             let auth = gate.authorize_encrypted(now_ms())?;
             let mut rng = os_rng();
             let exported = vault.export_encrypted(&mut rng, auth, &password, now_ms())?;
@@ -760,6 +1288,27 @@ async fn export(
             }
             Ok(())
         }
+        ExportFormat::Cxf => {
+            let passkeys = vault.cxf_export_passkeys()?;
+            let password = new_export_password(env.ui)?;
+            env.ui.note(CXF_EXPORT_WARNING);
+            let (auth, ack, now) = plaintext_gate(env.ui, &mut gate)?;
+            let mut rng = os_rng();
+            let exported = vault.export_cxf(&mut rng, auth, ack, &password, now)?;
+            write_new_file(out, &exported.file)?;
+            env.ui.note(&format!(
+                "Exported {} passkeys of {passkeys} as a CXF file, encrypted. Keep the file's \
+                 password: it is needed to import the file.",
+                exported.passkeys
+            ));
+            if exported.skipped > 0 {
+                env.ui.note(&format!(
+                    "{} passkeys could not be read and were left out.",
+                    exported.skipped
+                ));
+            }
+            Ok(())
+        }
         ExportFormat::Json | ExportFormat::Csv => {
             // ADR 0027 §5: the warning, then the phrase typed at a terminal; no flag skips it.
             env.ui.note(PLAINTEXT_EXPORT_WARNING);
@@ -767,23 +1316,7 @@ async fn export(
                 let loss = vault.csv_export_loss()?;
                 env.ui.note(&csv_export_warning(loss.items_losing_data()));
             }
-            // The hold after the warning (owner decision 2026-10-05).
-            let shown = now_ms();
-            gate.plaintext_warning_shown(shown);
-            env.ui.note(&format!(
-                "Read the warning above. rv waits {} seconds before it asks for the phrase.",
-                PLAINTEXT_EXPORT_HOLD_MS / 1000
-            ));
-            let held = env.ui.hold(Duration::from_millis(PLAINTEXT_EXPORT_HOLD_MS));
-            let typed = env
-                .ui
-                .typed(&format!("Type {PLAINTEXT_EXPORT_PHRASE} to write the file"))?;
-            let ack = PlaintextExportAck::from_typed_phrase(&typed)?;
-            // The hold was measured on the monotonic clock; the wall clock may have moved
-            // less (or back) meanwhile.
-            let held_ms = u64::try_from(held.as_millis()).unwrap_or(u64::MAX);
-            let now = now_ms().max(shown.saturating_add(held_ms));
-            let auth = gate.authorize_plaintext(now)?;
+            let (auth, ack, _) = plaintext_gate(env.ui, &mut gate)?;
             let plaintext = if format == ExportFormat::Json {
                 vault.export_plaintext_json(auth, ack, now_ms())?
             } else {
@@ -797,6 +1330,49 @@ async fn export(
     }
 }
 
+/// Asks for a new export-file password, twice, with CRYPTO.md §2's new-password checks.
+fn new_export_password(ui: &mut dyn Ui) -> Result<Zeroizing<String>, CliError> {
+    ui.note(
+        "Choose a password for this export file. It is needed to import the file. It is not \
+         your master password, and nobody can recover it if it is lost.",
+    );
+    let password = ui.secret("Password for this export file")?;
+    let again = ui.secret("Password for this export file, again")?;
+    if *password != *again {
+        return Err(CliError::BadInput("the two passwords differ"));
+    }
+    check_export_password(&password).map_err(|_| {
+        CliError::BadInput(
+            "the export file's password must not be empty or hold unassigned characters",
+        )
+    })?;
+    Ok(password)
+}
+
+/// The gate after a plaintext or CXF warning was printed (ADR 0027 §5, owner decision
+/// 2026-10-05, ADR 0074 §2): the hold of 10 seconds, then the typed phrase, then the gate's
+/// permission. Returns it, the acknowledgement and the time it was granted at.
+fn plaintext_gate(
+    ui: &mut dyn Ui,
+    gate: &mut ExportGate,
+) -> Result<(PlaintextExportAuth, PlaintextExportAck, u64), CliError> {
+    let shown = now_ms();
+    gate.plaintext_warning_shown(shown);
+    ui.note(&format!(
+        "Read the warning above. rv waits {} seconds before it asks for the phrase.",
+        PLAINTEXT_EXPORT_HOLD_MS / 1000
+    ));
+    let held = ui.hold(Duration::from_millis(PLAINTEXT_EXPORT_HOLD_MS));
+    let typed = ui.typed(&format!("Type {PLAINTEXT_EXPORT_PHRASE} to write the file"))?;
+    let ack = PlaintextExportAck::from_typed_phrase(&typed)?;
+    // The hold was measured on the monotonic clock; the wall clock may have moved less (or
+    // back) meanwhile.
+    let held_ms = u64::try_from(held.as_millis()).unwrap_or(u64::MAX);
+    let now = now_ms().max(shown.saturating_add(held_ms));
+    let auth = gate.authorize_plaintext(now)?;
+    Ok((auth, ack, now))
+}
+
 /// What `import` reads a file as.
 #[derive(Clone, Copy, Debug)]
 enum ImportAs {
@@ -804,6 +1380,8 @@ enum ImportAs {
     Foreign(Format),
     /// Our own encrypted export.
     Encrypted,
+    /// Our own CXF passkey export (ADR 0074 §2).
+    CxfEncrypted,
 }
 
 /// The name of an import format as the user reads it.
@@ -818,6 +1396,7 @@ const fn format_name(format: Format) -> &'static str {
         Format::RizzyPlaintextJson => "a rizzy-vault plaintext JSON export",
         Format::AliasVaultCsv => "an AliasVault CSV export",
         Format::AliasVaultAvux => "an AliasVault .avux export",
+        Format::CxfJson => "a CXF passkey file (FIDO Credential Exchange Format)",
         _ => "a file of a known format",
     }
 }
@@ -835,6 +1414,10 @@ fn import_as(
             Some(DetectedFormat::RizzyEncrypted) => {
                 ui.note("Recognised: a rizzy-vault encrypted export.");
                 ImportAs::Encrypted
+            }
+            Some(DetectedFormat::RizzyCxfEncrypted) => {
+                ui.note("Recognised: a rizzy-vault CXF passkey export.");
+                ImportAs::CxfEncrypted
             }
             Some(DetectedFormat::Import(format)) => {
                 ui.note(&format!("Recognised: {}.", format_name(format)));
@@ -865,6 +1448,8 @@ fn import_as(
         ImportFormat::RizzyEncrypted => ImportAs::Encrypted,
         ImportFormat::AliasVaultCsv => ImportAs::Foreign(Format::AliasVaultCsv),
         ImportFormat::AliasVaultAvux => ImportAs::Foreign(Format::AliasVaultAvux),
+        ImportFormat::CxfJson => ImportAs::Foreign(Format::CxfJson),
+        ImportFormat::RizzyCxfEncrypted => ImportAs::CxfEncrypted,
     })
 }
 
@@ -874,16 +1459,19 @@ async fn import(
     env: &mut Env<'_>,
     input: &Path,
     format: Option<ImportFormat>,
+    vault: Option<&str>,
 ) -> Result<(), CliError> {
     let file = Zeroizing::new(read_limited(input, MAX_IMPORT_FILE_LEN)?);
     let read_as = import_as(env.ui, &file, format)?;
     let mut device = Device::open(env).await?;
+    // ADR 0081 §A8: Personal unless `--vault` names another, every time.
+    let target = target_vault(&device, vault)?;
     match read_as {
         ImportAs::Foreign(format) => {
             let mut rng = os_rng();
             let parsed = rizzy_import::import(format, &file, &mut rng).map_err(CliError::Import)?;
             let done = device
-                .edit(|vault, rng, unlocked, now| {
+                .edit(target, |vault, rng, unlocked, now| {
                     vault.import_items(rng, unlocked, &parsed.items, now)
                 })
                 .await?;
@@ -894,20 +1482,31 @@ async fn import(
                 done.skipped.len() + parsed.counts.skipped_items,
                 parsed.warnings.len()
             ));
-            let counts = parsed.counts;
-            if counts.collapsed_conflicts + counts.dropped_history + counts.dropped_fields > 0 {
-                env.ui.note(&format!(
-                    "{} conflicts collapsed, {} history entries and {} fields not carried.",
-                    counts.collapsed_conflicts, counts.dropped_history, counts.dropped_fields
-                ));
-            }
+            note_counts(env.ui, &parsed.counts);
+        }
+        ImportAs::CxfEncrypted => {
+            let password = env
+                .ui
+                .secret("Password of this export file (the one chosen when it was exported)")?;
+            let done = device
+                .edit(target, |vault, rng, unlocked, now| {
+                    vault.import_cxf_encrypted(rng, unlocked, &file, &password, now)
+                })
+                .await?;
+            env.ui.note(&format!(
+                "Imported {} items; {} skipped; {} entries with warnings.",
+                done.imported.len(),
+                done.skipped.len() + done.counts.skipped_items,
+                done.warnings.len()
+            ));
+            note_counts(env.ui, &done.counts);
         }
         ImportAs::Encrypted => {
             let password = env
                 .ui
                 .secret("Password of this export file (the one chosen when it was exported)")?;
             let done = device
-                .edit(|vault, rng, unlocked, now| {
+                .edit(target, |vault, rng, unlocked, now| {
                     vault.import_encrypted(rng, unlocked, &file, &password, now)
                 })
                 .await?;
@@ -923,6 +1522,120 @@ async fn import(
         }
     }
     sync_after_write(&mut device, env.ui).await
+}
+
+/// The losses of an import, counts only (INV-48): what ADR 0027 §6 and ADR 0074 §1, §3 count.
+fn note_counts(ui: &mut dyn Ui, counts: &rizzy_import::Counts) {
+    if counts.collapsed_conflicts + counts.dropped_history + counts.dropped_fields > 0 {
+        ui.note(&format!(
+            "{} conflicts collapsed, {} history entries and {} fields not carried.",
+            counts.collapsed_conflicts, counts.dropped_history, counts.dropped_fields
+        ));
+    }
+    if counts.skipped_credentials > 0 {
+        ui.note(&format!(
+            "{} CXF credentials not imported (only passkeys are imported, and only those that \
+             could be read).",
+            counts.skipped_credentials
+        ));
+    }
+}
+
+/// How `session list` names a session (ADR 0075 §9).
+fn session_kind_text(device: &Device, row: &ListedSession) -> String {
+    let on = |id: Option<DeviceId>| {
+        id.map_or_else(
+            || "an unknown device".to_owned(),
+            |d| device_label(device, d),
+        )
+    };
+    match row.kind() {
+        SessionRowKind::PasswordLogin => "web or password login".to_owned(),
+        SessionRowKind::PasswordRecheck => format!("password re-check on {}", on(row.device_id())),
+        SessionRowKind::Device => format!("device session of {}", on(row.device_id())),
+        SessionRowKind::Recovery => "account recovery in progress".to_owned(),
+        SessionRowKind::Unknown => "a session of a kind this rv does not know".to_owned(),
+    }
+}
+
+/// `session list` (ADR 0075 R1, §9): the account's live sessions as the server reports them.
+async fn session_list(env: &mut Env<'_>) -> Result<(), CliError> {
+    let mut device = Device::open(env).await?;
+    device.online(env.ui).await?;
+    let list = device.sessions().await?;
+    for row in list.sessions() {
+        // Times as `device list` prints them: seconds since the Unix epoch, the server's word.
+        let mut line = format!(
+            "{}  {}  opened {}  expires {}",
+            hex(&row.session_id()),
+            session_kind_text(&device, row),
+            row.created_at_ms() / 1000,
+            row.expires_at_ms() / 1000
+        );
+        if row.current() {
+            line.push_str("  (this rv run; it ends when rv exits)");
+        }
+        env.ui.print(&line)?;
+    }
+    if list.truncated() {
+        env.ui
+            .note("The server listed only the newest sessions; the account has more.");
+    }
+    env.ui.note(
+        "This is the server's list, not proof that nothing else is open. A device's session \
+         ends by suspending or revoking the device (`rv device revoke`).",
+    );
+    Ok(())
+}
+
+/// `session end <prefix>` (R3) or, with `None`, `session end --others` (R4). No password:
+/// rv's device session counts as fresh (ADR 0075 §4, §9).
+async fn session_end(env: &mut Env<'_>, prefix: Option<&str>) -> Result<(), CliError> {
+    let mut device = Device::open(env).await?;
+    device.online(env.ui).await?;
+    let Some(prefix) = prefix else {
+        device.end_other_sessions().await?;
+        env.ui.note(OTHERS_ENDED_NOTICE);
+        return Ok(());
+    };
+    let list = device.sessions().await?;
+    let row = resolve_session(&list, prefix)?;
+    if row.kind() == SessionRowKind::Device {
+        return Err(CliError::BadInput(
+            "that is a device's session, which signs in again by itself: suspend or revoke the \
+             device instead (rv device revoke)",
+        ));
+    }
+    if row.current() {
+        return Err(CliError::BadInput(
+            "that is this rv run's own session; rv ends it when it exits",
+        ));
+    }
+    let request = row.end_request()?;
+    device.end_session(&request).await?;
+    env.ui.note(SESSION_ENDED_BY_YOU_NOTICE);
+    Ok(())
+}
+
+/// The listed session a hex id or a unique prefix of one names.
+fn resolve_session<'a>(list: &'a SessionList, prefix: &str) -> Result<&'a ListedSession, CliError> {
+    let wanted = prefix.to_ascii_lowercase();
+    if wanted.is_empty() || !wanted.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(CliError::Usage(
+            "a session is named by its hex id or a prefix of it".into(),
+        ));
+    }
+    let mut found = list
+        .sessions()
+        .iter()
+        .filter(|s| hex(&s.session_id()).starts_with(&wanted));
+    match (found.next(), found.next()) {
+        (Some(row), None) => Ok(row),
+        (None, _) => Err(CliError::BadInput("no listed session has that id")),
+        (Some(_), Some(_)) => Err(CliError::BadInput(
+            "that prefix names more than one session; give more digits",
+        )),
+    }
 }
 
 /// The name of a device kind.
@@ -1103,9 +1816,10 @@ async fn device_forget(env: &mut Env<'_>) -> Result<(), CliError> {
             } else {
                 env.ui
                     .note("The edits the server never acknowledged could not be uploaded now.");
-                device.vault().unacknowledged()
+                device.unacknowledged()
             };
             let (_, lock) = device.close().await;
+            let lock = lock.ok_or(CliError::Client(ClientError::Internal))?;
             (lock, Some(unsent))
         }
         Err(CliError::InUse) => return Err(CliError::InUse),
@@ -1148,4 +1862,46 @@ async fn device_forget(env: &mut Env<'_>) -> Result<(), CliError> {
     delete_account_files(env, &account, lock)?;
     env.ui.note("Removed.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ADR 0078 §1, §5: `--type bank-account` is refused, and a Bank account an older build
+    /// wrote (`0x0009`) shows as type `unknown`, like any type this build does not support.
+    #[test]
+    fn the_retired_bank_account_type_is_not_named() {
+        assert!(matches!(
+            type_named("bank-account"),
+            Err(CliError::Usage(_))
+        ));
+        assert_eq!(type_name(Some(ItemType::RETIRED_BANK_ACCOUNT)), "unknown");
+        assert_eq!(type_name(Some(ItemType::from_id(0x000B))), "unknown");
+        for (name, item_type) in TYPES {
+            assert_eq!(type_named(name).unwrap(), item_type);
+            assert_eq!(type_name(Some(item_type)), name);
+            assert!(item_type.supported().is_some(), "{name}");
+        }
+    }
+
+    /// ADR 0078 §2: every `bank.` key is reserved, so `item show` prints it as `********`
+    /// unless `--reveal`; the keys ADR 0055 showed included.
+    #[test]
+    fn retired_bank_keys_are_concealed() {
+        for key in [
+            "bank.bank_name",
+            "bank.account_holder",
+            "bank.account_number",
+            "bank.routing_number",
+            "bank.account_type",
+            "bank.other",
+        ] {
+            assert!(
+                concealed(&FieldKey::parse(key.as_bytes()).unwrap()),
+                "{key}"
+            );
+        }
+        assert!(!concealed(&FieldKey::parse(b"item.name").unwrap()));
+    }
 }

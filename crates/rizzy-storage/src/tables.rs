@@ -1,14 +1,18 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The tables a logical backup carries, with their columns, in restore order (ADR 0011
 //! "Backups").
 //!
-//! [`TABLES`] lists every `auth_` and `vault_` table except the short-lived session state, in
-//! foreign-key order: a table comes after every table it references, so `restore` inserts
+//! [`TABLES`] lists every `auth_` and `vault_` table except the short-lived session state, and
+//! `storage_account_usage` (ADR 0048 §4: backed up, so a restore's counter matches its restored
+//! rows), in foreign-key order: a table comes after every table it references, so `restore` inserts
 //! rows with foreign keys on. Each table has two shared query files under
 //! `queries/backup/`, one `SELECT` of every column in primary-key order and one `INSERT` of one
 //! row with `$1 … $n`; both list the columns in the order of [`TableSpec::columns`].
 //!
 //! **Not backed up** (the conservative reading of "every table as rows"; see the crate docs):
-//! - `auth_sessions`, `auth_login_states` and `auth_device_challenges`: a restore must not
+//! - `auth_sessions`, `auth_login_states`, `auth_device_challenges` and the `WebAuthn`
+//!   `auth_webauthn_pending`/`auth_webauthn_challenges` rows (ADR 0077 §2): a restore must not
 //!   revive sessions that were ended after the backup (for example those of a device revoked
 //!   since, INV-59), and 60 s login state and challenges mean nothing after a restore. Every
 //!   user signs in again.
@@ -67,6 +71,8 @@ pub const NOT_BACKED_UP: &[&str] = &[
     "auth_sessions",
     "auth_login_states",
     "auth_device_challenges",
+    "auth_webauthn_pending",
+    "auth_webauthn_challenges",
     "storage_meta",
     "storage_reconciliation",
 ];
@@ -218,6 +224,21 @@ pub const TABLES: &[TableSpec] = &[
         ],
     },
     TableSpec {
+        name: "auth_webauthn_credentials",
+        select: include_str!("../queries/backup/auth_webauthn_credentials.select.sql"),
+        insert: include_str!("../queries/backup/auth_webauthn_credentials.insert.sql"),
+        columns: &[
+            col("account_id", Kind::Blob, false),
+            col("credential_id", Kind::Blob, false),
+            col("alg", Kind::Integer, false),
+            col("security_key", Kind::Text, false),
+            col("security_key_format", Kind::Integer, false),
+            col("sign_count", Kind::Integer, false),
+            col("label", Kind::Text, false),
+            col("created_ms", Kind::Integer, false),
+        ],
+    },
+    TableSpec {
         name: "auth_totp_credentials",
         select: include_str!("../queries/backup/auth_totp_credentials.select.sql"),
         insert: include_str!("../queries/backup/auth_totp_credentials.insert.sql"),
@@ -263,6 +284,7 @@ pub const TABLES: &[TableSpec] = &[
             col("vault_key_epoch", Kind::Integer, false),
             col("next_store_seq", Kind::Integer, false),
             col("created_at_ms", Kind::Integer, false),
+            col("kind", Kind::Integer, false),
         ],
     },
     TableSpec {
@@ -352,6 +374,42 @@ pub const TABLES: &[TableSpec] = &[
             col("vault_id", Kind::Blob, false),
             col("device_id", Kind::Blob, false),
             col("cursor", Kind::Blob, false),
+            col("updated_at_ms", Kind::Integer, false),
+        ],
+    },
+    // ADR 0054 §5: attachment rows ride the logical backup like every other vault row; the
+    // dump grows with the stored attachment bytes (ADR 0054, Consequences).
+    TableSpec {
+        name: "vault_attachments",
+        select: include_str!("../queries/backup/vault_attachments.select.sql"),
+        insert: include_str!("../queries/backup/vault_attachments.insert.sql"),
+        columns: &[
+            col("attachment_id", Kind::Blob, false),
+            col("vault_id", Kind::Blob, false),
+            col("item_id", Kind::Blob, false),
+            col("attachment_key_wrap", Kind::Blob, false),
+            col("total_plaintext_len", Kind::Integer, false),
+            col("chunk_count", Kind::Integer, false),
+            col("created_at_ms", Kind::Integer, false),
+        ],
+    },
+    TableSpec {
+        name: "vault_attachment_chunks",
+        select: include_str!("../queries/backup/vault_attachment_chunks.select.sql"),
+        insert: include_str!("../queries/backup/vault_attachment_chunks.insert.sql"),
+        columns: &[
+            col("attachment_id", Kind::Blob, false),
+            col("chunk_index", Kind::Integer, false),
+            col("chunk_envelope", Kind::Blob, false),
+        ],
+    },
+    TableSpec {
+        name: "storage_account_usage",
+        select: include_str!("../queries/backup/storage_account_usage.select.sql"),
+        insert: include_str!("../queries/backup/storage_account_usage.insert.sql"),
+        columns: &[
+            col("account_id", Kind::Blob, false),
+            col("bytes_used", Kind::Integer, false),
             col("updated_at_ms", Kind::Integer, false),
         ],
     },

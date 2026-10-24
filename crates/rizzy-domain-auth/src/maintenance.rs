@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! What `worker` runs for the auth domain (ADR 0010 §1 row `worker`, §5: "`worker` deletes
 //! expired rows"; ADR 0012 §7 "End of the reconciliation epoch"; CRYPTO.md §5.11 "Rotation":
 //! "`worker` re-seals TOTP rows under the account lock").
@@ -61,6 +63,10 @@ pub struct Purged {
     pub challenges: u64,
     /// Expired rate-limit buckets.
     pub rate_limits: u64,
+    /// Expired `WebAuthn` second-factor-pending rows (ADR 0058 point 3).
+    pub webauthn_pending: u64,
+    /// Expired `WebAuthn` ceremony states (ADR 0077 §2).
+    pub webauthn_challenges: u64,
 }
 
 /// What one page of [`AuthService::reseal_totp_secrets`] did.
@@ -124,6 +130,8 @@ impl<V: VaultPort> AuthService<V> {
             login_states: exec!(tx.conn(), sql::LOGIN_STATES_DELETE_EXPIRED, now)?,
             challenges: exec!(tx.conn(), sql::CHALLENGES_DELETE_EXPIRED, now)?,
             rate_limits: exec!(tx.conn(), sql::RATE_DELETE_EXPIRED, now)?,
+            webauthn_pending: exec!(tx.conn(), sql::WEBAUTHN_PENDING_DELETE_EXPIRED, now)?,
+            webauthn_challenges: exec!(tx.conn(), sql::WEBAUTHN_CHALLENGES_DELETE_EXPIRED, now)?,
         };
         tx.commit().await?;
         Ok(purged)

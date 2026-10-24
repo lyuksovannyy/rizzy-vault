@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Unit tests of the item schema (ADR 0018 §6–§9, §11 and the schema-layer parts of §12): one
 //! test group per rule, each rejection with the input that breaks only that rule, the
 //! redacted `Debug` output of every type that holds a key or value, and a simulated newer
@@ -715,8 +717,20 @@ fn item_type_registry() {
         (0x0002, ItemTypeClass::Supported(SupportedType::SecureNote)),
         (0x0003, ItemTypeClass::Supported(SupportedType::Card)),
         (0x0004, ItemTypeClass::Supported(SupportedType::Identity)),
-        (0x0005, ItemTypeClass::ReservedM3),
-        (0x0009, ItemTypeClass::ReservedM3),
+        // ADR 0055 §2: assigned, no longer "M3, reserved" (owner answer 2 dropped
+        // `ItemTypeClass::ReservedM3`).
+        (0x0005, ItemTypeClass::Supported(SupportedType::SshKey)),
+        (
+            0x0006,
+            ItemTypeClass::Supported(SupportedType::ApiCredential),
+        ),
+        (
+            0x0007,
+            ItemTypeClass::Supported(SupportedType::SoftwareLicense),
+        ),
+        (0x0008, ItemTypeClass::Supported(SupportedType::Wifi)),
+        // ADR 0078 §1: the Bank account type ADR 0055 assigned is retired, never reassigned.
+        (0x0009, ItemTypeClass::Retired),
         (0x000A, ItemTypeClass::Unassigned),
         (0x000B, ItemTypeClass::Unassigned),
         (0xEFFF, ItemTypeClass::Unassigned),
@@ -737,18 +751,26 @@ fn item_type_registry() {
         SupportedType::SecureNote,
         SupportedType::Card,
         SupportedType::Identity,
+        SupportedType::SshKey,
+        SupportedType::ApiCredential,
+        SupportedType::SoftwareLicense,
+        SupportedType::Wifi,
         SupportedType::VaultSettings,
     ] {
         assert_eq!(t.item_type().supported(), Some(t));
         assert_eq!(t.is_user_item(), t != SupportedType::VaultSettings);
     }
+    for (t, id) in [
+        (ItemType::SSH_KEY, 0x0005),
+        (ItemType::API_CREDENTIAL, 0x0006),
+        (ItemType::SOFTWARE_LICENSE, 0x0007),
+        (ItemType::WIFI, 0x0008),
+    ] {
+        assert_eq!(t.id(), id);
+        assert!(t.supported().is_some_and(SupportedType::is_user_item));
+    }
     for t in [
         ItemType::INVALID,
-        ItemType::SSH_KEY,
-        ItemType::API_CREDENTIAL,
-        ItemType::SOFTWARE_LICENSE,
-        ItemType::WIFI,
-        ItemType::BANK_ACCOUNT,
         // `0x000A`, released to unassigned by ADR 0039 §1 (it was the standalone-passkey
         // candidate ADR 0018 reserved).
         ItemType::from_id(0x000A),
@@ -849,11 +871,35 @@ fn fixed_keys_belong_to_their_types() {
         .iter()
         .filter(|(k, _)| k.starts_with("identity."))
         .count();
-    assert_eq!((card, identity), (7, 18));
+    // ADR 0018 §7's 18 identity keys plus ADR 0079 §1's `identity.sex` and `identity.birthday`.
+    assert_eq!((card, identity), (7, 20));
+    // ADR 0055 §3 as ADR 0078 §7 amends it: 6 ssh + 4 api + 4 license + 3 wifi = 17, and 54
+    // keys in all with ADR 0079 §1's two; the retired `bank.` prefix has none (ADR 0078 §2).
+    let count = |prefix: &str| {
+        FIXED_KEYS
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .count()
+    };
+    assert_eq!(
+        [
+            count("ssh."),
+            count("api."),
+            count("license."),
+            count("wifi."),
+            count("bank.")
+        ],
+        [6, 4, 4, 3, 0]
+    );
+    assert_eq!(FIXED_KEYS.len(), 54);
     for (k, s) in FIXED_KEYS {
         let expected = match k.split('.').next() {
             Some("card") => Applies::Only(SupportedType::Card),
             Some("identity") => Applies::Only(SupportedType::Identity),
+            Some("ssh") => Applies::Only(SupportedType::SshKey),
+            Some("api") => Applies::Only(SupportedType::ApiCredential),
+            Some("license") => Applies::Only(SupportedType::SoftwareLicense),
+            Some("wifi") => Applies::Only(SupportedType::Wifi),
             Some("vault") => Applies::Only(SupportedType::VaultSettings),
             Some("login") => Applies::Only(SupportedType::Login),
             _ => Applies::All,
@@ -889,6 +935,14 @@ fn concealed_by_default_is_the_adr_list() {
             schema::CARD_PIN,
             schema::IDENTITY_SSN,
             schema::IDENTITY_PASSPORT_NUMBER,
+            // ADR 0055 §4: the six concealed keys join the list (ADR 0078 §7; the `bank.`
+            // keys are reserved now, and the clients conceal every non-Known key).
+            schema::SSH_PRIVATE_KEY,
+            schema::SSH_PASSPHRASE,
+            schema::API_KEY,
+            schema::API_SECRET,
+            schema::LICENSE_KEY,
+            schema::WIFI_PASSWORD,
         ]
     );
     let field_value = element_key("field", "value");
@@ -912,6 +966,28 @@ fn concealed_by_default_is_the_adr_list() {
     assert!(!spec.concealed(CustomFieldKind::Hidden));
 }
 
+/// ADR 0054 §4: the four `attachment/<id>/…` attributes, on every item type.
+#[test]
+fn attachment_keys_are_classified() {
+    for (attribute, expected) in [
+        ("name", Expected::Text),
+        ("mime", Expected::Text),
+        ("size", Expected::U64),
+        ("order", Expected::SortKey),
+    ] {
+        assert_eq!(
+            classify(key(&element_key("attachment", attribute))),
+            KeyClass::Known(KeySpec {
+                expected,
+                applies: Applies::All,
+                writers: Writers::Any,
+                concealment: Concealment::Shown,
+            }),
+            "attachment/{attribute}"
+        );
+    }
+}
+
 #[test]
 fn list_keys_are_classified() {
     use Concealment::{Concealed, IfHiddenField, Shown};
@@ -921,6 +997,8 @@ fn list_keys_are_classified() {
     // Every column of the ADR 0018 §7 table, for every known list key.
     for (list, attribute, expected, applies, writers, concealment) in [
         ("field", "label", Expected::Text, all, Any, Shown),
+        // ADR 0076 §2.1.
+        ("field", "autocomplete", Expected::Text, all, Any, Shown),
         ("field", "kind", Expected::Enum, all, Any, Shown),
         (
             "field",
@@ -1041,29 +1119,34 @@ fn keys_outside_the_m1_schema_are_classified() {
             "passkey.rp_id".to_owned(),
             KeyClass::Reserved(ReservedFor::PasskeyDotKeys),
         ),
+        // ADR 0054 §4 assigns `name`, `mime`, `size` and `order`; any other attribute stays
+        // reserved.
         (
-            element_key("attachment", "name"),
+            element_key("attachment", "wrap"),
             KeyClass::Reserved(ReservedFor::M3Attachments),
         ),
+        // ADR 0055 §2: a key under the four M3 prefixes that §1 does not assign stays reserved
+        // (its own example: a later `ssh.key_type`); the 17 it assigns are `Known` (below).
         (
-            "ssh.private_key".to_owned(),
+            "ssh.key_type".to_owned(),
             KeyClass::Reserved(ReservedFor::M3Types),
         ),
         (
-            "api.key".to_owned(),
+            "api.token".to_owned(),
             KeyClass::Reserved(ReservedFor::M3Types),
         ),
         (
-            "license.key".to_owned(),
+            "license.vendor".to_owned(),
             KeyClass::Reserved(ReservedFor::M3Types),
         ),
         (
-            "wifi.ssid".to_owned(),
+            "wifi.hidden".to_owned(),
             KeyClass::Reserved(ReservedFor::M3Types),
         ),
+        // ADR 0078 §2: every key under the retired `bank.` prefix is reserved, never known.
         (
             "bank.iban".to_owned(),
-            KeyClass::Reserved(ReservedFor::M3Types),
+            KeyClass::Reserved(ReservedFor::Retired),
         ),
         ("login.passkey_hint".to_owned(), KeyClass::Unknown),
         ("item.color".to_owned(), KeyClass::Unknown),
@@ -1385,7 +1468,7 @@ fn writers_are_refused_keys_outside_the_m1_schema() {
         (login, Edit, "ssh.key", TEXT, Err(WriteError::ReservedKey)),
         (login, Edit, &share_note, TEXT, Err(WriteError::ReservedKey)),
         (
-            ItemType::SSH_KEY,
+            ItemType::from_id(0x000A),
             Edit,
             schema::ITEM_NAME,
             TEXT,
@@ -1553,7 +1636,7 @@ fn removing_an_element_clears_attributes_this_client_does_not_know() {
             Err(WriteError::BlankInCreate),
         ),
         (
-            ItemType::SSH_KEY,
+            ItemType::from_id(0x000B),
             Edit,
             &uri_label,
             CLEARED,
@@ -2279,4 +2362,560 @@ fn a_newer_clients_key_and_value_are_carried() {
         ),
         Ok(())
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0055: the M3 item types and their field keys
+// ---------------------------------------------------------------------------------------------
+
+/// ADR 0055 §1 (as ADR 0078 §7 amends it): each M3 type, its own keys, and which of them are
+/// concealed.
+const M3_TYPES: [(ItemType, &[(&str, bool)]); 4] = [
+    (
+        ItemType::SSH_KEY,
+        &[
+            (schema::SSH_HOST, false),
+            (schema::SSH_PORT, false),
+            (schema::SSH_USERNAME, false),
+            (schema::SSH_PRIVATE_KEY, true),
+            (schema::SSH_PUBLIC_KEY, false),
+            (schema::SSH_PASSPHRASE, true),
+        ],
+    ),
+    (
+        ItemType::API_CREDENTIAL,
+        &[
+            (schema::API_NAME, false),
+            (schema::API_KEY, true),
+            (schema::API_SECRET, true),
+            (schema::API_ENDPOINT, false),
+        ],
+    ),
+    (
+        ItemType::SOFTWARE_LICENSE,
+        &[
+            (schema::LICENSE_NAME, false),
+            (schema::LICENSE_KEY, true),
+            (schema::LICENSE_SEATS, false),
+            (schema::LICENSE_EXPIRES, false),
+        ],
+    ),
+    (
+        ItemType::WIFI,
+        &[
+            (schema::WIFI_SSID, false),
+            (schema::WIFI_PASSWORD, true),
+            (schema::WIFI_SECURITY_TYPE, false),
+        ],
+    ),
+];
+
+/// ADR 0055 §1, §3 (as ADR 0078 §7 amends them): the 17 keys, by name, each Text,
+/// `Applies::Only` its own type, written by anyone; the 6 of §4 concealed and the other 11 shown.
+#[test]
+fn m3_keys_are_adr_0055s_table() {
+    let names: Vec<&str> = M3_TYPES
+        .iter()
+        .flat_map(|(_, keys)| keys.iter().map(|(k, _)| *k))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "ssh.host",
+            "ssh.port",
+            "ssh.username",
+            "ssh.private_key",
+            "ssh.public_key",
+            "ssh.passphrase",
+            "api.name",
+            "api.key",
+            "api.secret",
+            "api.endpoint",
+            "license.name",
+            "license.key",
+            "license.seats",
+            "license.expires",
+            "wifi.ssid",
+            "wifi.password",
+            "wifi.security_type",
+        ]
+    );
+    let mut concealed = 0;
+    for (item_type, keys) in M3_TYPES {
+        let own = item_type.supported().unwrap();
+        for (k, secret) in keys {
+            let KeyClass::Known(spec) = classify(key(k)) else {
+                panic!("{k} is not known");
+            };
+            assert_eq!(spec.expected, Expected::Text, "{k}");
+            assert_eq!(spec.applies, Applies::Only(own), "{k}");
+            assert_eq!(spec.writers, Writers::Any, "{k}");
+            let want = if *secret {
+                Concealment::Concealed
+            } else {
+                Concealment::Shown
+            };
+            assert_eq!(spec.concealment, want, "{k}");
+            assert_eq!(spec.concealed(CustomFieldKind::Text), *secret, "{k}");
+            concealed += usize::from(*secret);
+            // §10: well inside the 160-byte key limit, and one fixed key of the grammar.
+            assert!(k.len() <= MAX_KEY_LEN);
+            assert_eq!(key(k).kind(), KeyKind::Fixed);
+        }
+    }
+    assert_eq!((names.len(), concealed), (17, 6));
+}
+
+/// ADR 0055 §1 "Every key applies only to its own item type": a writer may write each key on
+/// its own type, in a create and an edit, and on no other type (`WrongItemType`), whether
+/// entered or carried (ADR 0055 Negative consequences, "`check_carried` tightens").
+#[test]
+fn m3_keys_stay_inside_their_type() {
+    use WriteMode::{Create, Edit, Import};
+    let all = [
+        ItemType::LOGIN,
+        ItemType::SECURE_NOTE,
+        ItemType::CARD,
+        ItemType::IDENTITY,
+        ItemType::SSH_KEY,
+        ItemType::API_CREDENTIAL,
+        ItemType::SOFTWARE_LICENSE,
+        ItemType::WIFI,
+    ];
+    for (own, keys) in M3_TYPES {
+        for (k, _) in keys {
+            for mode in [Create, Import, Edit] {
+                assert_eq!(check_write(own, mode, k.as_bytes(), TEXT), Ok(()), "{k}");
+                assert_eq!(check_carried(own, mode, k.as_bytes(), TEXT), Ok(()), "{k}");
+                for other in all.iter().filter(|t| **t != own) {
+                    assert_eq!(
+                        check_write(*other, mode, k.as_bytes(), TEXT),
+                        Err(WriteError::WrongItemType),
+                        "{k} on {:#06x}",
+                        other.id()
+                    );
+                    assert_eq!(
+                        check_carried(*other, mode, k.as_bytes(), TEXT),
+                        Err(WriteError::WrongItemType),
+                        "{k} carried on {:#06x}",
+                        other.id()
+                    );
+                }
+            }
+            // ADR 0018 §6: an entered Text is never empty, a create never writes Cleared, and
+            // an edit clears with Cleared. Other value types are not what the key expects.
+            assert_eq!(
+                check_write(own, Edit, k.as_bytes(), EMPTY_TEXT),
+                Err(WriteError::EmptyText)
+            );
+            assert_eq!(
+                check_write(own, Create, k.as_bytes(), CLEARED),
+                Err(WriteError::BlankInCreate)
+            );
+            assert_eq!(check_write(own, Edit, k.as_bytes(), CLEARED), Ok(()));
+            for wrong in [TRUE, U64_ONE, ENUM_TWO, BYTES_SHORT] {
+                assert_eq!(
+                    check_write(own, Edit, k.as_bytes(), wrong),
+                    Err(WriteError::UnexpectedValue),
+                    "{k}"
+                );
+            }
+        }
+        // The shared keys still apply to every M3 type; a Login key does not.
+        for k in [schema::ITEM_NAME, schema::ITEM_NOTES] {
+            assert_eq!(check_write(own, Create, k.as_bytes(), TEXT), Ok(()));
+        }
+        assert_eq!(
+            check_write(own, Create, schema::LOGIN_PASSWORD.as_bytes(), TEXT),
+            Err(WriteError::WrongItemType)
+        );
+        assert_eq!(
+            check_write(own, Edit, element_key("uri", "value").as_bytes(), TEXT),
+            Err(WriteError::WrongItemType)
+        );
+        assert_eq!(
+            check_write(own, Edit, element_key("field", "label").as_bytes(), TEXT),
+            Ok(())
+        );
+    }
+}
+
+/// ADR 0055 §2: every key under the four M3 prefixes that §1 does not assign stays reserved, so
+/// an entered value is refused on every type while a carried one is kept byte for byte.
+#[test]
+fn unassigned_m3_prefix_keys_stay_reserved() {
+    for k in [
+        "ssh.key_type",
+        "ssh.fingerprint",
+        "api.token",
+        "license.vendor",
+        "wifi.hidden",
+    ] {
+        assert_eq!(classify(key(k)), KeyClass::Reserved(ReservedFor::M3Types));
+        for t in [ItemType::LOGIN, ItemType::SSH_KEY, ItemType::WIFI] {
+            assert_eq!(
+                check_write(t, WriteMode::Edit, k.as_bytes(), TEXT),
+                Err(WriteError::ReservedKey),
+                "{k}"
+            );
+            assert_eq!(
+                check_carried(t, WriteMode::Create, k.as_bytes(), TEXT),
+                Ok(())
+            );
+        }
+    }
+}
+
+/// A create of each M3 type passes `check_create` with its `item.type` and only its own keys.
+#[test]
+fn a_create_of_each_m3_type() {
+    for (own, keys) in M3_TYPES {
+        let type_value = [0x05, 0x00, u8::try_from(own.id()).unwrap()];
+        let mut writes: Vec<(WriteSource, &[u8], &[u8])> = vec![
+            (
+                WriteSource::Entered,
+                schema::ITEM_TYPE.as_bytes(),
+                &type_value,
+            ),
+            (WriteSource::Entered, schema::ITEM_NAME.as_bytes(), TEXT),
+        ];
+        writes.extend(
+            keys.iter()
+                .map(|(k, _)| (WriteSource::Entered, k.as_bytes(), TEXT)),
+        );
+        assert_eq!(
+            check_create(own, WriteMode::Create, writes.iter().copied()),
+            Ok(())
+        );
+        assert!(check_create(ItemType::LOGIN, WriteMode::Create, writes.iter().copied()).is_err());
+    }
+}
+
+/// ADR 0055 §1: `ssh.port` absent means 22, a display default and not a stored value; a
+/// Cleared register is the same as absent (ADR 0018 §6), a Text is shown as entered, and a value
+/// of another type is unsupported, never the default.
+#[test]
+fn ssh_port_absent_displays_22() {
+    assert_eq!(schema::SSH_DEFAULT_PORT, "22");
+    assert_eq!(schema::ssh_port(None), Some("22"));
+    assert_eq!(schema::ssh_port(Some(CLEARED)), Some("22"));
+    assert_eq!(schema::ssh_port(Some(b"\x012222")), Some("2222"));
+    assert_eq!(schema::ssh_port(Some(b"\x01 22 ")), Some(" 22 "));
+    assert_eq!(schema::ssh_port(Some(U64_ONE)), None);
+    assert_eq!(schema::ssh_port(Some(&[0x01, 0xff])), None);
+    assert_eq!(schema::ssh_port(Some(&[0x7f, 0x01])), None);
+    // The default is never written for the user: a create leaves the blank field out.
+    assert_eq!(
+        check_write(
+            ItemType::SSH_KEY,
+            WriteMode::Create,
+            schema::SSH_PORT.as_bytes(),
+            CLEARED
+        ),
+        Err(WriteError::BlankInCreate)
+    );
+}
+
+/// ADR 0018 §11 for a client built before ADR 0055: it held `0x0005`–`0x0009` as reserved and
+/// every `ssh.`/`api.`/`license.`/`wifi.`/`bank.` key as reserved, and showed such an item
+/// generically. The same rules hold in this build for the next type an ADR assigns (`0x000B`
+/// stands in for it) and its keys (`zz.` stands in for the prefix): the item is unsupported,
+/// edits are refused, its keys are carried byte for byte. And the record of an M3 item is
+/// grammar-valid, so an older parser never rejects it (the record layer is `rizzy-sync`'s and
+/// needs no schema; its vectors carry a create of each M3 type).
+#[test]
+fn an_older_client_shows_a_newer_type_generically() {
+    let future = ItemType::from_id(0x000B);
+    assert_eq!(future.class(), ItemTypeClass::Unassigned);
+    assert_eq!(future.supported(), None);
+    for mode in [WriteMode::Create, WriteMode::Edit] {
+        assert_eq!(
+            check_write(future, mode, schema::ITEM_NAME.as_bytes(), TEXT),
+            Err(WriteError::UnsupportedItemType)
+        );
+    }
+    // Every M3 key is a fixed key of the §7 grammar under one of the four prefixes an M1
+    // client held as reserved (`KeyClass::Reserved(ReservedFor::M3Types)`), the class an
+    // unassigned key under them still has here.
+    for (_, keys) in M3_TYPES {
+        for (k, _) in keys {
+            let parsed = FieldKey::parse(k.as_bytes()).unwrap();
+            assert_eq!(parsed.as_bytes(), k.as_bytes());
+            assert!(matches!(
+                key(k).namespace(),
+                "ssh" | "api" | "license" | "wifi"
+            ));
+        }
+    }
+    // Not even a carried write: an unsupported type is never created (ADR 0018 §8), so a
+    // restore or duplicate offers only the types this client supports.
+    assert_eq!(
+        check_carried(
+            future,
+            WriteMode::Create,
+            b"zz.private_key",
+            b"\x01-----BEGIN"
+        ),
+        Err(WriteError::UnsupportedItemType)
+    );
+}
+
+/// ADR 0018 §2: the M3 types print nothing of themselves either.
+#[test]
+fn m3_types_never_print() {
+    for (t, _) in M3_TYPES {
+        let out = format!("{t:?} {:?} {:?}", t.class(), t.supported());
+        assert!(!out.contains("Ssh") && !out.contains("Bank") && !out.contains("Wifi"));
+        assert_eq!(out.matches("[REDACTED]").count(), 3, "{out}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0078: the retired Bank account type (`0x0009`) and its `bank.` keys
+// ---------------------------------------------------------------------------------------------
+
+/// The five keys ADR 0055 §1 assigned under `bank.`, which ADR 0078 §2 retired, plus one it
+/// never assigned.
+const RETIRED_BANK_KEYS: [&str; 6] = [
+    "bank.bank_name",
+    "bank.account_holder",
+    "bank.account_number",
+    "bank.routing_number",
+    "bank.account_type",
+    "bank.other",
+];
+
+/// ADR 0078 §1: `0x0009` is retired, not supported and not unassigned; it keeps a named
+/// constant for tests only.
+#[test]
+fn the_bank_account_type_is_retired() {
+    let retired = ItemType::RETIRED_BANK_ACCOUNT;
+    assert_eq!(retired.id(), 0x0009);
+    assert_eq!(retired, ItemType::from_id(0x0009));
+    assert_eq!(retired.class(), ItemTypeClass::Retired);
+    assert_eq!(retired.supported(), None);
+    // Its neighbours keep their classes: Wi-Fi below, the released `0x000A` above.
+    assert_eq!(
+        ItemType::from_id(0x0008).class(),
+        ItemTypeClass::Supported(SupportedType::Wifi)
+    );
+    assert_eq!(ItemType::from_id(0x000A).class(), ItemTypeClass::Unassigned);
+    // `Debug` prints no part of the class either (ADR 0018 §2).
+    let out = format!("{retired:?} {:?}", retired.class());
+    assert!(!out.contains("Retired") && !out.contains("Bank") && !out.contains('9'));
+}
+
+/// ADR 0078 §1 with ADR 0018 §8 "Unknown type": no writer creates a `0x0009` item, and no
+/// field write to one is accepted, entered or carried; it is unsupported like an unassigned id.
+#[test]
+fn a_retired_item_is_never_created_or_edited() {
+    use WriteMode::{Create, Edit, Import};
+    let retired = ItemType::RETIRED_BANK_ACCOUNT;
+    let type_value = [0x05, 0x00, 0x09];
+    // A create of it: `check_create`, as `create_item` calls it, refuses.
+    assert_eq!(
+        check_create(
+            retired,
+            Create,
+            [
+                (
+                    WriteSource::Entered,
+                    schema::ITEM_TYPE.as_bytes(),
+                    type_value.as_slice()
+                ),
+                (WriteSource::Entered, schema::ITEM_NAME.as_bytes(), TEXT),
+                (
+                    WriteSource::Entered,
+                    b"bank.account_number".as_slice(),
+                    TEXT
+                ),
+            ]
+        ),
+        Err(WriteError::UnsupportedItemType)
+    );
+    for mode in [Create, Import, Edit] {
+        for k in [schema::ITEM_TYPE, schema::ITEM_NAME, schema::ITEM_NOTES]
+            .into_iter()
+            .chain(RETIRED_BANK_KEYS)
+        {
+            let value = if k == schema::ITEM_TYPE {
+                type_value.as_slice()
+            } else {
+                TEXT
+            };
+            assert_eq!(
+                check_write(retired, mode, k.as_bytes(), value),
+                Err(WriteError::UnsupportedItemType),
+                "{k}"
+            );
+            assert_eq!(
+                check_carried(retired, mode, k.as_bytes(), value),
+                Err(WriteError::UnsupportedItemType),
+                "{k}"
+            );
+        }
+    }
+    // Not even a Cleared edit: field edits are not offered on an unsupported item.
+    assert_eq!(
+        check_write(retired, Edit, b"bank.account_number", CLEARED),
+        Err(WriteError::UnsupportedItemType)
+    );
+}
+
+/// ADR 0078 §2: every key under `bank.`, the five ADR 0055 assigned and any other, is
+/// `Reserved(Retired)`, never `Known`; like every reserved key it is never entered, and is
+/// written only as Cleared in an edit or copied verbatim (`check_carried`).
+#[test]
+fn bank_keys_are_retired_and_reserved() {
+    use WriteMode::{Create, Edit, Import};
+    for k in RETIRED_BANK_KEYS {
+        assert_eq!(
+            classify(key(k)),
+            KeyClass::Reserved(ReservedFor::Retired),
+            "{k}"
+        );
+        assert!(!FIXED_KEYS.iter().any(|(f, _)| *f == k), "{k}");
+        for t in [
+            ItemType::LOGIN,
+            ItemType::SECURE_NOTE,
+            ItemType::SSH_KEY,
+            ItemType::WIFI,
+        ] {
+            for mode in [Create, Import, Edit] {
+                assert_eq!(
+                    check_write(t, mode, k.as_bytes(), TEXT),
+                    Err(WriteError::ReservedKey),
+                    "{k}"
+                );
+                // A verbatim copy, as restore and duplicate make it (ADR 0018 §11).
+                assert_eq!(check_carried(t, mode, k.as_bytes(), TEXT), Ok(()), "{k}");
+            }
+            // Cleared in an edit (ADR 0018 §6 element removal), entered or carried.
+            assert_eq!(check_write(t, Edit, k.as_bytes(), CLEARED), Ok(()), "{k}");
+            assert_eq!(check_carried(t, Edit, k.as_bytes(), CLEARED), Ok(()), "{k}");
+            assert_eq!(
+                check_write(t, Create, k.as_bytes(), CLEARED),
+                Err(WriteError::BlankInCreate),
+                "{k}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0079 §1: `identity.sex` and `identity.birthday`
+// ---------------------------------------------------------------------------------------------
+
+/// ADR 0079 §1 and §12 "Schema tests": both keys are Known, Text, Identity-only, written by
+/// anyone and not concealed.
+#[test]
+fn identity_sex_and_birthday_are_adr_0079s_rows() {
+    for k in [schema::IDENTITY_SEX, schema::IDENTITY_BIRTHDAY] {
+        let KeyClass::Known(spec) = classify(key(k)) else {
+            panic!("{k} is not known");
+        };
+        assert_eq!(spec.expected, Expected::Text, "{k}");
+        assert_eq!(spec.applies, Applies::Only(SupportedType::Identity), "{k}");
+        assert_eq!(spec.writers, Writers::Any, "{k}");
+        assert_eq!(spec.concealment, Concealment::Shown, "{k}");
+        assert!(!spec.concealed(CustomFieldKind::Text), "{k}");
+        assert_eq!(key(k).kind(), KeyKind::Fixed);
+    }
+    assert_eq!(schema::IDENTITY_SEX, "identity.sex");
+    assert_eq!(schema::IDENTITY_BIRTHDAY, "identity.birthday");
+    assert_eq!(
+        (schema::IDENTITY_SEX_MALE, schema::IDENTITY_SEX_FEMALE),
+        ("male", "female")
+    );
+}
+
+/// ADR 0079 §1: Text "stored as entered": the UI's `male` and `YYYY-MM-DD`, and any other text
+/// (an import's `04/17/1998`, a sex value outside the two), are accepted on an identity and on
+/// no other type.
+#[test]
+fn identity_sex_and_birthday_take_any_text_on_identities_only() {
+    use WriteMode::{Create, Edit, Import};
+    let values = ["male", "female", "diverse", "1998-04-17", "04/17/1998"];
+    for k in [schema::IDENTITY_SEX, schema::IDENTITY_BIRTHDAY] {
+        for v in values {
+            let text = Value::text(v).unwrap();
+            for mode in [Create, Import, Edit] {
+                assert_eq!(
+                    check_write(ItemType::IDENTITY, mode, k.as_bytes(), text.expose_secret()),
+                    Ok(()),
+                    "{k} {v}"
+                );
+                assert_eq!(
+                    check_write(ItemType::LOGIN, mode, k.as_bytes(), text.expose_secret()),
+                    Err(WriteError::WrongItemType),
+                    "{k} {v}"
+                );
+            }
+        }
+        assert_eq!(
+            check_write(ItemType::IDENTITY, Edit, k.as_bytes(), CLEARED),
+            Ok(())
+        );
+    }
+}
+
+/// ADR 0079 §1 "What older clients see" and §12, through the ADR 0018 §11 harness of
+/// `a_newer_clients_key_and_value_are_carried`: a client whose registry predates the two rows
+/// sees an unassigned `identity.` key, which is `Unknown`; it carries the key and its Text value
+/// byte for byte, may clear it in an edit, and never writes a new value. `identity.zodiac` stands
+/// in for the two keys exactly as they classify on such a client.
+#[test]
+fn an_older_client_carries_identity_sex_and_birthday() {
+    let older_view = "identity.zodiac";
+    assert!(!FIXED_KEYS.iter().any(|(f, _)| *f == older_view));
+    assert_eq!(classify(key(older_view)), KeyClass::Unknown);
+    for v in ["female", "1998-04-17"] {
+        let written = Value::text(v).unwrap();
+        let carried = Value::copy_from_encoded(written.expose_secret()).unwrap();
+        assert_eq!(carried.expose_secret(), written.expose_secret());
+        // Shown as its raw text by any reader.
+        assert!(read_value(Expected::Text, carried.expose_secret()).is_some());
+        assert_eq!(
+            check_write(
+                ItemType::IDENTITY,
+                WriteMode::Edit,
+                older_view.as_bytes(),
+                carried.expose_secret()
+            ),
+            Err(WriteError::UnknownKey)
+        );
+        assert_eq!(
+            check_write(
+                ItemType::IDENTITY,
+                WriteMode::Edit,
+                older_view.as_bytes(),
+                CLEARED
+            ),
+            Ok(())
+        );
+        for mode in [WriteMode::Create, WriteMode::Edit] {
+            assert_eq!(
+                check_carried(
+                    ItemType::IDENTITY,
+                    mode,
+                    older_view.as_bytes(),
+                    carried.expose_secret()
+                ),
+                Ok(())
+            );
+        }
+    }
+    // On this client both keys are Known, so the same verbatim copy still passes.
+    for k in [schema::IDENTITY_SEX, schema::IDENTITY_BIRTHDAY] {
+        let v = Value::text("x").unwrap();
+        assert_eq!(
+            check_carried(
+                ItemType::IDENTITY,
+                WriteMode::Create,
+                k.as_bytes(),
+                v.expose_secret()
+            ),
+            Ok(())
+        );
+    }
 }

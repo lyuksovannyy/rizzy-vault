@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Known-answer vector files (CRYPTO.md §15 item 1): generation and byte-for-byte replay.
 //!
 //! The files live in `crates/rizzy-core/tests/vectors/` and follow `schema.json` there; its
@@ -33,6 +35,16 @@
 //! specification checks inside `compute`. The vectors hold only test values drawn from the
 //! documented seeds or written as fixtures; none is a real credential.
 
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
+mod attachments;
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code slices fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
+mod breach;
 mod derivations;
 #[expect(
     clippy::indexing_slicing,
@@ -90,7 +102,7 @@ struct VectorFile {
     contents: &'static [(&'static str, &'static str, usize)],
 }
 
-const FILES: [VectorFile; 6] = [
+const FILES: [VectorFile; 8] = [
     VectorFile {
         name: "derivations",
         tier: "A",
@@ -121,6 +133,7 @@ const FILES: [VectorFile; 6] = [
             ("derivation", "fingerprint", 1),
             ("derivation", "device-set", 3),
             ("derivation", "settings", 2),
+            ("derivation", "server/db-backup", 1),
         ],
     },
     VectorFile {
@@ -150,6 +163,9 @@ const FILES: [VectorFile; 6] = [
             ("envelope", "SERVER_TOTP_SECRET", 1),
             ("envelope", "SERVER_LOGIN_STATE", 1),
             ("envelope", "SERVER_SECRETS_BACKUP", 1),
+            ("envelope", "SERVER_DB_BACKUP", 1),
+            ("envelope", "ACCOUNT_KEY_KEYSTORE_WRAP", 1),
+            ("envelope", "ACCOUNT_KEY_FORWARD", 1),
         ],
     },
     VectorFile {
@@ -218,6 +234,24 @@ const FILES: [VectorFile; 6] = [
         ],
     },
     VectorFile {
+        name: "attachments",
+        tier: "A",
+        spec: "ADR 0054 §1, §3, §8; CRYPTO.md §8.3, §8.4, §9.1",
+        seed: 0x0054,
+        committed: include_str!("../../tests/vectors/attachments.json"),
+        generate: attachments::generate,
+        compute: attachments::compute,
+        check_file: |_| {},
+        // ADR 0054 §8: the key wrap, a single-chunk and a three-chunk attachment (short final
+        // chunk), and the three negative cases (index, attachment id, chunk count).
+        contents: &[
+            ("attachment", "ATTACHMENT_KEY_WRAP", 1),
+            ("attachment", "single-chunk", 1),
+            ("attachment", "three-chunk", 1),
+            ("attachment", "reject", 3),
+        ],
+    },
+    VectorFile {
         name: "transcript",
         tier: "B",
         spec: "CRYPTO.md §5, §11.1, §11.2, §11.3, §15 item 1 (B)",
@@ -228,6 +262,17 @@ const FILES: [VectorFile; 6] = [
         check_file: |_| {},
         contents: &[("transcript", "signup-login-unlock", 1)],
     },
+    VectorFile {
+        name: "breach",
+        tier: "A",
+        spec: "CRYPTO.md §11.16 (ADR 0053 item 1: digest, prefix, suffix match)",
+        seed: 0x1116,
+        committed: include_str!("../../tests/vectors/breach.json"),
+        generate: breach::generate,
+        compute: breach::compute,
+        check_file: |_| {},
+        contents: &[("breach", "digest", 10), ("breach", "match", 6)],
+    },
 ];
 
 /// One vector: `{id, kind, name, inputs, outputs}`.
@@ -235,8 +280,8 @@ const FILES: [VectorFile; 6] = [
 struct Vector {
     /// `<kind>/<name>/<index>`, unique within its file.
     id: String,
-    /// The group: `derivation`, `envelope`, `statement`, `encoding`, `padding`, `item` or
-    /// `transcript`.
+    /// The group: `derivation`, `envelope`, `statement`, `encoding`, `padding`, `item`,
+    /// `breach` or `transcript`.
     kind: String,
     /// The §4.3 label, §8.4 purpose, §10.2 statement type or encoding the vector exercises;
     /// `compute` dispatches on it.
@@ -559,8 +604,18 @@ fn replay_items() {
 }
 
 #[test]
+fn replay_attachments() {
+    replay(file("attachments"));
+}
+
+#[test]
 fn replay_transcript() {
     replay(file("transcript"));
+}
+
+#[test]
+fn replay_breach() {
+    replay(file("breach"));
 }
 
 /// Rewrites every committed vector file from its seed. Run only in a change that is meant to

@@ -1,0 +1,96 @@
+name: Equivalence group proposal
+description: >-
+  Propose a new group for the signed global equivalence list, or a change to an existing
+  group, under ADR 0038 §4's review rules.
+title: "equivalence-list: "
+labels:
+  - equivalence-list
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read [ADR 0038 §4](https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0038-equivalent-domain-list.md#4-review-rules-for-list-entries)
+        and [docs/equivalence-list.md §2](https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/equivalence-list.md#2-editing-the-source-file)
+        before filing this. This issue is where the group is reviewed; it does not change
+        `data/equivalence/groups.txt` by itself — once the evidence below stands up to review,
+        follow up with a PR using the
+        [`equivalence-list` pull request template](https://github.com/lyuksovannyy/rizzy-vault/blob/main/.github/PULL_REQUEST_TEMPLATE/equivalence-list.md).
+
+        The global list stays deliberately short and high-bar (ADR 0038 §4 point 6): a
+        well-known multi-domain brand with clear public ownership evidence, not a long tail.
+        An entry without ownership proof, or without per-ccTLD-variant proof, is rejected.
+  - type: textarea
+    id: domains
+    attributes:
+      label: Domains in the group
+      description: >-
+        Every registrable domain that belongs in this group, one per line, in the form the
+        site actually uses (e.g. `example.com`, not a subdomain).
+      placeholder: |
+        example.com
+        example.co.uk
+    validations:
+      required: true
+  - type: textarea
+    id: ownership-evidence
+    attributes:
+      label: Ownership evidence, per domain and per ccTLD pairing
+      description: >-
+        For every domain, and separately for every ccTLD-variant pairing (ADR 0038 §4 point
+        4 — owning `example.com` does not by itself prove ownership of `example.co.uk`), link
+        public proof of common ownership: a shared WHOIS registrant/organisation, a
+        security.txt or support article on one domain naming the other, or equivalent public
+        evidence. "Looks plausible next to a known brand" is explicitly not proof (ADR 0038
+        §4 point 1).
+      placeholder: |
+        example.com <-> example.co.uk: https://example.com/.well-known/security.txt names
+        example.co.uk as the same operator.
+    validations:
+      required: true
+  - type: dropdown
+    id: third-party-hostable
+    attributes:
+      label: Is any domain in this group third-party-hostable?
+      description: >-
+        A domain other people can host unrelated content on, unless the Public Suffix List
+        already splits that suffix by registrant (ADR 0038 §4 point 3).
+      options:
+        - "No"
+        - "Yes — explained below"
+    validations:
+      required: true
+  - type: textarea
+    id: third-party-explanation
+    attributes:
+      label: If yes, which domain, and the PSL entry that splits it by registrant
+      description: Leave blank if the answer above is "No".
+    validations:
+      required: false
+  - type: input
+    id: recheck
+    attributes:
+      label: Next scheduled re-check
+      description: >-
+        At minimum, the next release cycle (ADR 0038 §4 point 5). A lapsed domain found at a
+        re-check is removed, not kept on the benefit of the doubt.
+      placeholder: next release cycle
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations (ADR 0038 §4)
+      options:
+        - label: I have read ADR 0038 §4 and docs/equivalence-list.md §2.
+          required: true
+        - label: Every domain above has public ownership evidence linked, proven per ccTLD variant.
+          required: true
+        - label: >-
+            I understand this is reviewed by the project owner (the sole maintainer today),
+            and by two maintainers once a second one exists.
+          required: true
+        - label: >-
+            I understand an entry without ownership proof is rejected, and that review here
+            does not itself sign or ship anything — only the project owner signs a list, from
+            the offline list-signing key, after review.
+          required: true

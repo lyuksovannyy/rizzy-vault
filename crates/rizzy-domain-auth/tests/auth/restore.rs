@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The reconciliation epoch after a restore (THREAT_MODEL §5.8, INV-59; ADR 0012 §7): the
 //! restore drill of INV-59 with a password change and an enrolment made after the backup; the
 //! end of the epoch on a repeated state and at its limit; the device-set check of a
@@ -69,6 +71,8 @@ pub(crate) async fn reregister(
         device_revocations: List::empty(),
         device_grants: List::empty(),
         vault_rotation: None,
+        vault_create: None,
+        vault_delete: None,
     };
     env.svc.commit_change(session, &change, env.now).await?;
     client.adopt(next);

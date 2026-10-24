@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Item edits and reads through the item schema layer (ADR 0018 §2 "Flow", §3, §6–§9;
 //! ADR 0012 §5), and the import path ([ADR 0027] §2 steps 3–5, §6 "Writes").
 //!
@@ -58,9 +60,16 @@
 //!
 //! [ADR 0027]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0027-export-payload.md
 
+use core::fmt;
+
+/// A device id, re-exported for hosts: [`VaultSync::concurrent_trash_device`] and
+/// [`VaultSync::late_edit_devices`] return these, never a name (this crate holds no device
+/// directory).
+pub use rizzy_core::ids::DeviceId;
 /// The item id [`VaultSync::create_item`] returns, re-exported for hosts (see [`ItemType`]).
 pub use rizzy_core::ids::ItemId;
 use rizzy_core::item::LIFECYCLE_KEY;
+use rizzy_core::item::display::hlc_ms;
 use rizzy_core::item::key::FieldKey as SchemaKey;
 /// The field key of [`FieldEdit`], re-exported for hosts (see [`ItemType`]).
 pub use rizzy_core::item::key::FieldKey;
@@ -68,7 +77,8 @@ pub use rizzy_core::item::key::FieldKey;
 /// [`ItemType`]).
 pub use rizzy_core::item::schema::WriteSource;
 use rizzy_core::item::schema::{
-    IMPORT_CREATED_MS, ITEM_TYPE, WriteMode, check_create, check_write,
+    ATTR_KIND, ATTR_VALUE, CustomFieldKind, IMPORT_CREATED_MS, ITEM_TYPE, LIST_FIELD, LIST_PWHIST,
+    LOGIN_PASSWORD, WriteMode, check_create, check_write,
 };
 /// The item type of [`VaultSync::create_item`], re-exported so a host that links only this crate
 /// (a binding, or `rizzy-server`'s end-to-end tests, ADR 0016 §4 owner decision 4) can name it.
@@ -79,13 +89,22 @@ pub use rizzy_core::item::value::Value;
 use rizzy_core::item::value::ValueRef;
 use rizzy_core::rng::CryptoRng;
 use rizzy_import::ImportedItem;
+/// The identity of an op (ADR 0012 §2), re-exported for hosts so a binding need not depend on
+/// `rizzy-sync` directly (ADR 0016 §3): [`HistoryEntry::dot`] and [`ConcurrentTrash`] bind a
+/// host call to the exact op it names, not to a lossy display value that can coincide with
+/// another op's.
+pub use rizzy_sync::dot::Dot;
 /// The lifecycle [`VaultSync::item_lifecycle`] returns, re-exported for hosts (see [`ItemType`]).
 pub use rizzy_sync::merge::ItemLifecycle;
+/// The default retention period for [`VaultSync::auto_purge_due`] (ADR 0012 §5), re-exported
+/// for hosts so a binding need not depend on `rizzy-sync` directly (ADR 0016 §3).
+pub use rizzy_sync::merge::TRASH_RETENTION_MS;
 use rizzy_sync::record::{
     Lifecycle, MAX_GROUPS, MAX_OP_DATA_LEN, MAX_SNAPSHOT_DATA_LEN, MAX_WRITES, SnapshotData,
 };
 use zeroize::Zeroizing;
 
+use crate::autofill::{CheckMode, check_custom_fields};
 use crate::device::UnlockedDevice;
 use crate::error::ClientError;
 use crate::sync::{OwnChange, VaultSync};
@@ -121,6 +140,91 @@ pub struct ItemsImported {
     /// The file positions ([`ImportedItem::entry`]) of the items this vault refused
     /// ([`ClientError::InvalidEdit`]); nothing of them was written.
     pub skipped: Vec<usize>,
+}
+
+/// One password history entry (ADR 0012 §5 "Password history is the history of
+/// `login.password`"; ADR 0018 §9): a value `login.password` once displayed, since replaced
+/// or cleared. Never the current value. A secret: reveal it only on the user's request (ADR
+/// 0013 §3 rule 3). `Debug` redacts both fields.
+pub struct HistoryEntry {
+    /// The former value, as encoded bytes (ADR 0018 §6).
+    pub value: Value,
+    /// When this value stopped being current: the HLC of the op that superseded or cleared
+    /// it, in Unix milliseconds (ADR 0018 §9). Display only: two entries can share this date
+    /// (the HLC's logical counter is not part of it), so a host binds a reveal to
+    /// [`HistoryEntry::dot`], not to this.
+    pub changed_ms: u64,
+    /// The dot of the op that superseded or cleared this value (ADR 0012 §2): unique per op,
+    /// unlike `changed_ms`. A host names this, not the index or the date, to bind a reveal to
+    /// the exact entry a listing showed, so a sync that only reorders the list still reveals
+    /// the same entry instead of refusing or revealing another one under a coincident date.
+    pub dot: Dot,
+}
+
+impl fmt::Debug for HistoryEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("HistoryEntry([REDACTED])")
+    }
+}
+
+/// One field's merge history (ROADMAP §4.2 "Item revision history (restore old versions)",
+/// M3): [`VaultSync::item_history`] generalizes [`VaultSync::password_history`] to every field,
+/// not only `login.password`. A secret: the key is user content (a tag name is part of its
+/// key, §7), and the entries reveal only on the user's request (ADR 0013 §3 rule 3). `Debug`
+/// redacts both fields.
+pub struct FieldHistory {
+    /// The field's key, in the §7 grammar.
+    pub key: Zeroizing<String>,
+    /// Its history, newest first ([`VaultSync::field_history`]). Never empty: [`VaultSync::item_history`]
+    /// leaves out a field with none.
+    pub entries: Vec<HistoryEntry>,
+}
+
+impl fmt::Debug for FieldHistory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FieldHistory([REDACTED])")
+    }
+}
+
+/// One `login.password` entry imported from another manager (ADR 0018 §7, `pwhist/<id>/value`
+/// · `/ms`), kept separate from [`HistoryEntry`]: the ADR defines no order across the two
+/// sources, and `pwhist` elements carry no `order` attribute of their own (module docs,
+/// "Password history view"). A secret: reveal it only on the user's request (ADR 0013 §3 rule
+/// 3). `Debug` redacts every field.
+pub struct ImportedHistoryEntry {
+    /// The element id of this `pwhist` row (ADR 0018 §7): random per row, so it never collides
+    /// and never repeats, unlike `changed_ms`, which the importer may have written for no row
+    /// at all. A host names this, not the index or the date, to bind a reveal to the exact
+    /// entry a listing showed.
+    pub id: Zeroizing<String>,
+    /// The imported value, as encoded bytes; `None` if the importer wrote no `value` for this
+    /// element, which the schema permits for a partially written import.
+    pub value: Option<Value>,
+    /// The imported `/ms` attribute (the source manager's own timestamp, not an HLC), in Unix
+    /// milliseconds; `None` if absent or not a U64.
+    pub changed_ms: Option<u64>,
+}
+
+impl fmt::Debug for ImportedHistoryEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ImportedHistoryEntry([REDACTED])")
+    }
+}
+
+/// The two devices of "deleted on X while it was being edited on Y" (ADR 0012 §5 "Active
+/// wins"), from [`VaultSync::concurrent_trash`]. Device ids and dots only, no item data: the
+/// dots identify the two conflicting ops (not just the two devices), so a host can tell two
+/// conflicts between the same device pair apart, for example to show each only once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConcurrentTrash {
+    /// X: the device of the highest Trashed value that lost to Active.
+    pub trashed_by: DeviceId,
+    /// Y: the device of the displayed Active value, the edit that kept the item.
+    pub edited_by: DeviceId,
+    /// The dot of the losing Trashed value (`trashed_by`'s op).
+    pub trashed_dot: Dot,
+    /// The dot of the displayed Active value (`edited_by`'s op).
+    pub edited_dot: Dot,
 }
 
 /// Op data bytes before the writes: `record_kind`, `lifecycle`, `u16 n` (ADR 0018 §3).
@@ -201,6 +305,10 @@ pub(crate) fn check_import(
         writes.iter().map(|(s, k, v)| (*s, k.as_bytes(), *v)),
     )
     .map_err(|_| ClientError::InvalidEdit)?;
+    // ADR 0076 §2.3: W1–W5 apply to an import too (an empty label is kept, §2.4). A refusal
+    // skips the item like any other invalid one.
+    let pairs: Vec<(&str, &[u8])> = writes.iter().map(|(_, k, v)| (*k, *v)).collect();
+    check_custom_fields(&pairs, CheckMode::Import).map_err(|_| ClientError::InvalidEdit)?;
     // The item must fit one item's snapshot, `@lifecycle` being one of its registers.
     let snapshot_len = writes.iter().fold(SNAPSHOT_MARGIN, |sum, (_, k, v)| {
         sum.saturating_add(REGISTER_OVERHEAD)
@@ -242,6 +350,8 @@ impl VaultSync {
                 .map(|(k, v)| (WriteSource::Entered, k.as_bytes(), *v)),
         )
         .map_err(|_| ClientError::InvalidEdit)?;
+        // ADR 0076 §2.3: W1–W5 on the new item's custom fields.
+        check_custom_fields(&writes, CheckMode::Write)?;
         let item = ItemId::generate(rng);
         self.write_op(
             rng,
@@ -301,7 +411,36 @@ impl VaultSync {
         trashed: bool,
         now_ms: u64,
     ) -> Result<ItemId, ClientError> {
+        let item = ItemId::generate(rng);
+        self.import_item_writes_as(rng, unlocked, item, item_type, writes, trashed, now_ms)
+    }
+
+    /// [`VaultSync::import_item_writes`] under an item id the caller chose: a move's target,
+    /// whose id its pending-move row names before the copy is written ([ADR 0081] §A6 step 3).
+    ///
+    /// # Errors
+    /// As [`VaultSync::import_item_writes`]; [`ClientError::InvalidInput`] when this vault
+    /// already holds `item`.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "import_item_writes' inputs plus the chosen item id"
+    )]
+    pub(crate) fn import_item_writes_as<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        unlocked: &UnlockedDevice,
+        item: ItemId,
+        item_type: ItemType,
+        writes: &[ImportWrite<'_>],
+        trashed: bool,
+        now_ms: u64,
+    ) -> Result<ItemId, ClientError> {
         self.check_writable(unlocked)?;
+        if self.merge(item).is_some() || self.holds_unapplied(item) {
+            return Err(ClientError::InvalidInput);
+        }
         let type_value = Value::enumeration(item_type.id());
         let mut all: Vec<(WriteSource, &str, &[u8])> = writes
             .iter()
@@ -311,7 +450,6 @@ impl VaultSync {
             all.push((WriteSource::Entered, ITEM_TYPE, type_value.expose_secret()));
         }
         check_import(item_type, &mut all)?;
-        let item = ItemId::generate(rng);
         for (index, op) in split_ops(&all).iter().enumerate() {
             self.write_op(
                 rng,
@@ -420,6 +558,9 @@ impl VaultSync {
             .map_err(|_| ClientError::InvalidEdit)?;
             writes.push((f.key.as_str(), f.value.expose_secret()));
         }
+        // ADR 0076 §2.3: W1–W5 against the item's custom fields as they display now. Conflict
+        // resolution and history restore edit through here, so they run them too.
+        self.check_custom_field_edit(item, &writes)?;
         self.write_op(
             rng,
             unlocked,
@@ -497,6 +638,54 @@ impl VaultSync {
             Lifecycle::Purge,
             now_ms,
         )
+    }
+
+    /// Purges every trashed item whose retention period has elapsed (ADR 0012 §5: "manually,
+    /// or automatically once an item has been in the trash for the retention period"; ADR 0018
+    /// §9 "Trashed at", §11 "No purge over an unapplied record"). Call this once the latest
+    /// fetch is applied, while the vault is unlocked, so the pass runs only when a client is
+    /// online with current data: the web vault (`packages/core`) calls it after its
+    /// fetch/upload loop settles, its own post-sync step; `rv`'s `Device::sync` calls it
+    /// mid-sync, after `heal` and before `upload`, so any purge it queues ships in the same
+    /// upload round. `retention_ms` is normally [`rizzy_sync::merge::TRASH_RETENTION_MS`].
+    ///
+    /// The vault-settings item (ADR 0018 §8) is never auto-purged here even though it is
+    /// never trashed in normal operation: purging it resets the vault's settings to defaults,
+    /// which this pass must not trigger silently.
+    ///
+    /// A read-only vault purges nothing and returns an empty list, rather than failing the
+    /// caller's step.
+    ///
+    /// Returns the ids of the items purged, ascending by item id.
+    ///
+    /// # Errors
+    /// The errors of the own-op writer ([`VaultSync::purge_item`]); a partial run (some items
+    /// already purged) is reported as `Err`, and the caller may retry, since purges already
+    /// written are not undone.
+    pub fn auto_purge_due<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        unlocked: &UnlockedDevice,
+        now_ms: u64,
+        retention_ms: u64,
+    ) -> Result<Vec<ItemId>, ClientError> {
+        if self.is_read_only() {
+            return Ok(Vec::new());
+        }
+        let due: Vec<ItemId> = self
+            .merges()
+            .filter(|(id, merge)| {
+                self.item_type(*id) != Some(ItemType::VAULT_SETTINGS)
+                    && merge.purge_due(now_ms, retention_ms, self.holds_unapplied(*id))
+            })
+            .map(|(id, _)| id)
+            .collect();
+        let mut purged = Vec::with_capacity(due.len());
+        for item in due {
+            self.purge_item(rng, unlocked, item, now_ms)?;
+            purged.push(item);
+        }
+        Ok(purged)
     }
 
     /// An op with no field writes, when the item displays `from`.
@@ -577,5 +766,350 @@ impl VaultSync {
             .filter(|k| *k != LIFECYCLE_KEY)
             .map(|k| Zeroizing::new(k.to_owned()))
             .collect()
+    }
+
+    /// How many [`VaultSync::field_history`] entries `key` holds, without revealing any of
+    /// them (ADR 0013 §3 rule 3): cheaply, without decoding a value, since Cleared is encoded
+    /// as 0 bytes ([`Value::is_cleared`] is exactly `expose_secret().is_empty()`). 0 for a
+    /// tombstone or a field with no history. The same count [`VaultSync::field_history`] lists
+    /// (a Cleared value is never one of them: it is a blank, never a revealable former value).
+    #[must_use]
+    pub fn field_history_len(&self, item: ItemId, key: &str) -> usize {
+        self.merge(item).and_then(|m| m.field(key)).map_or(0, |v| {
+            v.history
+                .iter()
+                .filter(|e| !e.value().expose_secret().is_empty())
+                .count()
+        })
+    }
+
+    /// The history of one field (ADR 0018 §3 "History"; ROADMAP §4.2 "Item revision history"),
+    /// newest first (the pruning order of ADR 0012 §5: highest `(hlc, device_id, seq)` first).
+    /// Never includes the current value, nor a Cleared one: a cleared field pushes a blank into
+    /// the history ("every value removed from a register goes into the item's history"), but a
+    /// blank is never a former value to show or reveal, so it is left out here rather than
+    /// listed only to fail every reveal of it. Empty for a tombstone or a field with no history.
+    /// A secret: reveal entries only on the user's request.
+    ///
+    /// A dot is unique within one field's register and history (ADR 0018 §4 "Uniqueness"), but
+    /// *not* across different fields: one op writing two fields puts the same dot in both
+    /// fields' histories. A host naming an entry by its dot (to reveal or
+    /// [`VaultSync::restore_field_history`] it) must also name the field: `(key, dot)` is the
+    /// entry's identity, `dot` alone is not.
+    #[must_use]
+    pub fn field_history(&self, item: ItemId, key: &str) -> Vec<HistoryEntry> {
+        let Some(view) = self.merge(item).and_then(|m| m.field(key)) else {
+            return Vec::new();
+        };
+        let mut entries = view.history;
+        entries.sort_unstable_by_key(|e| core::cmp::Reverse((e.hlc(), e.dot())));
+        entries
+            .into_iter()
+            .filter_map(|e| {
+                let value = Value::copy_from_encoded(e.value().expose_secret()).ok()?;
+                if value.is_cleared() {
+                    return None;
+                }
+                Some(HistoryEntry {
+                    value,
+                    changed_ms: hlc_ms(e.hlc().to_u64()),
+                    dot: e.dot(),
+                })
+            })
+            .collect()
+    }
+
+    /// How many [`VaultSync::password_history`] entries the item holds (module docs;
+    /// [`VaultSync::field_history_len`] of `login.password`).
+    #[must_use]
+    pub fn password_history_len(&self, item: ItemId) -> usize {
+        self.field_history_len(item, LOGIN_PASSWORD)
+    }
+
+    /// The history of `login.password` (ADR 0012 §5 "Password history is the history of
+    /// `login.password`"; [`VaultSync::field_history`] of `login.password`).
+    #[must_use]
+    pub fn password_history(&self, item: ItemId) -> Vec<HistoryEntry> {
+        self.field_history(item, LOGIN_PASSWORD)
+    }
+
+    /// Every field that has history (ROADMAP §4.2 "Item revision history (restore old
+    /// versions)", M3), in the item's field order ([`VaultSync::field_keys`], so `@lifecycle`
+    /// and a tombstone's late values are left out): generalizes [`VaultSync::password_history`]
+    /// to every field, reusing the same merge metadata and the same Cleared/current exclusions
+    /// ([`VaultSync::field_history`]). A field with no history (or only a Cleared one) is left
+    /// out rather than listed empty. Imported `login.password` history
+    /// ([`VaultSync::imported_password_history`]) is a different mechanism (a list, not merge
+    /// history, with no dot) and is never part of this listing.
+    #[must_use]
+    pub fn item_history(&self, item: ItemId) -> Vec<FieldHistory> {
+        self.field_keys(item)
+            .into_iter()
+            .filter_map(|key| {
+                let entries = self.field_history(item, &key);
+                if entries.is_empty() {
+                    None
+                } else {
+                    Some(FieldHistory { key, entries })
+                }
+            })
+            .collect()
+    }
+
+    /// Restores one history entry of `key` as the field's current value (ROADMAP §4.2): writes
+    /// it back through [`VaultSync::edit_item`] as an ordinary entered write (ADR 0018 §2
+    /// "Flow") of the exact bytes the entry holds, so it passes the same [`check_write`] as any
+    /// other edit, syncs and merges by the normal rules, and pushes the value it replaces into
+    /// history in turn. `dot` is the entry's identity, scoped to `key`
+    /// ([`VaultSync::field_history`]'s module doc: a dot is not unique across different
+    /// fields), as [`VaultSync::field_history`] gave it; the host re-reads the history and
+    /// resolves `dot` within it rather than trusting a cached value, so a sync between a
+    /// listing and this call cannot restore a value under the wrong identity.
+    ///
+    /// A custom field's value (`field/<id>/value`) must also fit the kind the field displays
+    /// now ([`CustomFieldKind::accepts`]): [`check_write`] accepts Text or Bool there and leaves
+    /// that check to the caller, so an old Text value is never restored into a field that has
+    /// since become a boolean one, nor the reverse.
+    ///
+    /// # Errors
+    /// [`ClientError::UnknownItem`] when `key` holds no history entry of that `dot` (including
+    /// a tombstone, which holds no history); [`ClientError::InvalidEdit`] when `key` is not a
+    /// valid field key, or the value no longer fits the custom field's kind; the errors of
+    /// [`VaultSync::edit_item`] otherwise (in particular, `UnknownItem` when the item is not
+    /// Active).
+    pub fn restore_field_history<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        unlocked: &UnlockedDevice,
+        item: ItemId,
+        key: &str,
+        dot: Dot,
+        now_ms: u64,
+    ) -> Result<(), ClientError> {
+        let value = self
+            .field_history(item, key)
+            .into_iter()
+            .find(|entry| entry.dot == dot)
+            .map(|entry| entry.value)
+            .ok_or(ClientError::UnknownItem)?;
+        let parsed = SchemaKey::parse(key.as_bytes()).map_err(|_| ClientError::InvalidEdit)?;
+        self.check_custom_field_kind(item, &parsed, &value)?;
+        self.edit_item(
+            rng,
+            unlocked,
+            item,
+            &[FieldEdit {
+                key: &parsed,
+                value: &value,
+            }],
+            now_ms,
+        )
+    }
+
+    /// The kind custom field `element` of `item` displays (ADR 0018 §7): an unknown kind,
+    /// or none, reads as [`CustomFieldKind::Unknown`], which displays as hidden.
+    pub(crate) fn custom_field_kind(&self, item: ItemId, element: &str) -> CustomFieldKind {
+        let kind_value = self.field_value(item, &format!("{LIST_FIELD}/{element}/{ATTR_KIND}"));
+        CustomFieldKind::from_displayed(kind_value.as_ref().and_then(|v| v.decode().ok()))
+    }
+
+    /// For a custom field's value (`field/<id>/value`), that `value` fits the kind the field
+    /// displays now ([`CustomFieldKind::accepts`]): [`check_write`] accepts Text or Bool there
+    /// and leaves that check to the caller. Any other key passes.
+    ///
+    /// # Errors
+    /// [`ClientError::InvalidEdit`] when the value does not fit.
+    pub(crate) fn check_custom_field_kind(
+        &self,
+        item: ItemId,
+        key: &SchemaKey,
+        value: &Value,
+    ) -> Result<(), ClientError> {
+        let parts = key.as_key();
+        if let (Some(LIST_FIELD), Some(element), Some(ATTR_VALUE)) =
+            (parts.list(), parts.element(), parts.attribute())
+        {
+            let kind = self.custom_field_kind(item, element);
+            if !value.decode().is_ok_and(|v| kind.accepts(&v)) {
+                return Err(ClientError::InvalidEdit);
+            }
+        }
+        Ok(())
+    }
+
+    /// `login.password` history imported from another manager (ADR 0018 §7, `pwhist/<id>/value`
+    /// · `/ms`), in list order (the element id's `order`, then the element id itself; ADR 0018
+    /// §6 "List order"). Kept separate from [`VaultSync::password_history`]: the ADR defines
+    /// no order across the two sources. Empty for a tombstone or an item with no imported
+    /// history. A secret: reveal entries only on the user's request.
+    #[must_use]
+    pub fn imported_password_history(&self, item: ItemId) -> Vec<ImportedHistoryEntry> {
+        self.list_elements(item, LIST_PWHIST)
+            .into_iter()
+            .map(|element| {
+                let id = element.element;
+                let value = self.field_value(item, &format!("{LIST_PWHIST}/{}/value", id.as_str()));
+                let changed_ms = self
+                    .field_value(item, &format!("{LIST_PWHIST}/{}/ms", id.as_str()))
+                    .and_then(|v| match v.decode().ok()? {
+                        ValueRef::U64(ms) => Some(ms),
+                        _ => None,
+                    });
+                ImportedHistoryEntry {
+                    id,
+                    value,
+                    changed_ms,
+                }
+            })
+            .collect()
+    }
+
+    /// The device that trashed the item, when `@lifecycle` displays Active over a concurrently
+    /// trashed value ("Active wins", ADR 0012 §5): [`VaultSync::concurrent_trash`]'s
+    /// `trashed_by`. `None` unless the item is Active with a losing concurrent Trashed value.
+    #[must_use]
+    pub fn concurrent_trash_device(&self, item: ItemId) -> Option<DeviceId> {
+        self.concurrent_trash(item).map(|c| c.trashed_by)
+    }
+
+    /// Both devices of "deleted on X while it was being edited on Y" (ADR 0012 §5 "Active
+    /// wins"), when `@lifecycle` displays Active over a concurrently trashed value: the device
+    /// of the highest losing Trashed value and the device of the displayed Active value, and
+    /// each value's own dot, which identifies this one conflict and not just the device pair
+    /// (two different races between the same two devices have different dots). `None` unless
+    /// the item is Active with a losing concurrent Trashed value. Presentation only: the host
+    /// decides when the notice was already shown (`rv sync` and the web vault keep that in
+    /// memory only; ADR 0026 has no slot for it).
+    #[must_use]
+    pub fn concurrent_trash(&self, item: ItemId) -> Option<ConcurrentTrash> {
+        let merge = self.merge(item)?;
+        let display = merge.lifecycle_display()?;
+        let losing = display.trashed_by?;
+        let lifecycle = merge.field(LIFECYCLE_KEY)?;
+        let trashed = lifecycle.current.get(losing)?;
+        let edited = lifecycle.current.get(display.displayed)?;
+        Some(ConcurrentTrash {
+            trashed_by: trashed.dot().device_id(),
+            edited_by: edited.dot().device_id(),
+            trashed_dot: trashed.dot(),
+            edited_dot: edited.dot(),
+        })
+    }
+
+    /// The devices with a late edit on a purged item not yet surfaced (ADR 0018 §3
+    /// "Surfacing"): "An edit from `<device>` arrived for an item you deleted permanently.
+    /// Restore it as a new item?" Ascending, deduplicated; empty for a live item or one with
+    /// nothing left to surface. The host resolves each id to a device name from whatever
+    /// device list it already has; this crate holds no device directory. `rv sync` and the web
+    /// vault's notices (gap 02) read it.
+    #[must_use]
+    pub fn late_edit_devices(&self, item: ItemId) -> Vec<DeviceId> {
+        let Some(merge) = self.merge(item) else {
+            return Vec::new();
+        };
+        let mut devices: Vec<DeviceId> = merge
+            .late_values_to_surface()
+            .iter()
+            .map(|dot| dot.device_id())
+            .collect();
+        devices.sort_unstable();
+        devices.dedup();
+        devices
+    }
+
+    /// Marks every current late value of `item` as surfaced, so [`VaultSync::late_edit_devices`]
+    /// stops listing it. Local presentation only: ADR 0018 §3 "Surfacing" changes no bytes, so
+    /// this writes nothing to the cache journal. By design, a host that calls this would see
+    /// the notice once per unlock session, not forever, since the surfaced mark lives only in
+    /// this in-memory merge and is gone on the next unlock; persisting it across sessions needs
+    /// an ADR 0026 change first. A no-op for an item this replica never saw. The web vault
+    /// calls it when it hands a notice to the UI; `rv` runs one process per command, so its
+    /// marks end with the process.
+    pub fn mark_late_edits_surfaced(&mut self, item: ItemId) {
+        if let Some(merge) = self.existing_merge_mut(item) {
+            merge.mark_surfaced();
+        }
+    }
+
+    /// Restores a purged item's late values as a new item of `item_type`, the type the user
+    /// confirms (ADR 0018 §3 "Surfacing"): never inferred from the late registers, which carry
+    /// no type of their own. Takes the displayed value (ADR 0018 §6 "Display") of each late
+    /// register that fits `item_type`; a late value that type does not expect, or that is
+    /// Cleared, is dropped rather than failing the whole restore, the way an import drops a
+    /// write the schema refuses. The purged item is unchanged: it stays a tombstone, and its
+    /// late values stay available to restore again. `rv item restore-late` and the web vault's
+    /// late-edit notice call it (gap 02).
+    ///
+    /// # Errors
+    /// [`ClientError::UnknownItem`] unless `item` is purged; [`ClientError::InvalidEdit`] for
+    /// a type this client does not support; the errors of [`VaultSync::create_item`].
+    pub fn restore_late_as_new_item<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        unlocked: &UnlockedDevice,
+        item: ItemId,
+        item_type: ItemType,
+        now_ms: u64,
+    ) -> Result<ItemId, ClientError> {
+        if self.item_lifecycle(item) != ItemLifecycle::Purged {
+            return Err(ClientError::UnknownItem);
+        }
+        if !item_type
+            .supported()
+            .is_some_and(SupportedType::is_user_item)
+        {
+            return Err(ClientError::InvalidEdit);
+        }
+        let Some(Ok(Some(SnapshotData::Tombstone(tomb)))) = self
+            .merge(item)
+            .map(rizzy_sync::merge::ItemMerge::snapshot_data)
+        else {
+            return Err(ClientError::InvalidEdit);
+        };
+        let late_keys: Vec<Zeroizing<String>> = tomb
+            .late()
+            .iter()
+            .map(|r| Zeroizing::new(r.key().expose_secret().to_owned()))
+            .collect();
+        let mut parsed: Vec<(SchemaKey, Value)> = Vec::with_capacity(late_keys.len());
+        for key in &late_keys {
+            if key.as_str() == ITEM_TYPE || key.as_str() == IMPORT_CREATED_MS {
+                continue;
+            }
+            let Some(view) = self.merge(item).and_then(|m| m.field(key)) else {
+                continue;
+            };
+            let Some(display) = view.display else {
+                continue;
+            };
+            let Some(entry) = view.current.get(display.displayed) else {
+                continue;
+            };
+            let Ok(value) = Value::copy_from_encoded(entry.value().expose_secret()) else {
+                continue;
+            };
+            if value.is_cleared() {
+                continue;
+            }
+            if check_write(
+                item_type,
+                WriteMode::Create,
+                key.as_bytes(),
+                value.expose_secret(),
+            )
+            .is_err()
+            {
+                continue;
+            }
+            let Ok(parsed_key) = SchemaKey::parse(key.as_bytes()) else {
+                continue;
+            };
+            parsed.push((parsed_key, value));
+        }
+        let fields: Vec<FieldEdit<'_>> = parsed
+            .iter()
+            .map(|(key, value)| FieldEdit { key, value })
+            .collect();
+        self.create_item(rng, unlocked, item_type, &fields, now_ms)
     }
 }

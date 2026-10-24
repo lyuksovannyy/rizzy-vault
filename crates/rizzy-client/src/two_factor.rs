@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Server-side 2FA with TOTP, the client half (CRYPTO.md §5.10 "Server-side 2FA", §11.15;
 //! `rizzy_proto::totp`).
 //!

@@ -23,6 +23,8 @@ Each account has one SQLite file, `<account id>.sqlite3`, and a lock file next t
 
 **Exclude this directory from backups and file-sync tools** (Time Machine, iCloud Drive, Dropbox, rsync jobs, home-directory snapshots). The file holds this device's Secret Key in the clear and the vault keys wrapped under the master password ([ADR 0026](adr/0026-client-device-state-and-cache.md) §2). A copy of it lets whoever holds the copy guess the master password offline (threat model INV-61). `rv` does not set the exclusion for you.
 
+The file also holds the **search index** in the clear ([ADR 0056](adr/0056-local-index-recently-used-search.md)): for every item, its name, username, website addresses, tag names, text custom fields, card holder and brand, and identity names, lower-cased, plus when you last used the item on this device and how often. Anyone who can read the file, or a backup copy of it, reads these **without any password**. It never holds a password, a one-time-code secret, a card number, code or PIN, a hidden custom field, a Secure Note's body or imported password history. This is one more reason to keep the directory out of backups.
+
 Do not restore the file from a copy either. If `rv` finds that the server has seen newer requests or edits from this device than the file knows, it raises the alarm "device state outdated", goes read-only, and asks you to enrol again: `rv device forget`, then `rv login`.
 
 Only one `rv` runs on an account at a time; a second one waits up to two seconds for the first to finish, then fails with "in use".
@@ -70,7 +72,7 @@ A refused handshake names the server and the reason (unknown CA, expired, wrong 
 ```sh
 rv unlock                      # checks the password, syncs, says where the device stands
 rv sync
-rv item list                   # --trash lists the trash
+rv item list                   # --trash lists the trash; --vault <vault> only that vault
 rv item show 3fa2              # ids may be shortened to a unique prefix; --reveal shows secrets
 rv item create --type login --field item.name=Example --field login.username=alice \
                --secret login.password --uri https://example.org --tag work
@@ -79,17 +81,91 @@ rv item edit 3fa2 --uri https://login.example.org --custom "Account=1234" --cust
 rv item edit 3fa2 --set-uri 9b1c=https://example.org/new --remove-custom 52e0
 rv item edit 3fa2 --move-uri 9b1c=first --move-custom 52e0=after:7d41
 rv item trash 3fa2             # restore, purge
+rv item restore-late 77c0 --type login
+rv item history 3fa2           # every field's history; --reveal shows the old values
+rv item restore-history 3fa2 --field login.password --entry <id>
 rv generate --length 24        # or --words 6
+rv generate identity --country DE --age 18-27 --json
+rv item create --type identity --generate --country FR --age 28 --domain mail.example
 rv totp 3fa2
+rv item search ивана           # name, username, websites, tags, text custom fields; any case
+rv item recent                 # the items you viewed here, most recent first; --limit <n>
+rv cache reindex               # rebuilds the search index, forgets the use history
 ```
 
+The commands for several vaults are under [Vaults](#vaults) below.
+
 Every command asks for the master password: nothing unlocked outlives the process. A command that changes something writes it to the local file first and then uploads it. If the server is not reachable the change stays queued and the next `rv sync` sends it.
+
+**Storage quota** ([ADR 0048](adr/0048-per-account-storage-quota.md)). `rv unlock` prints `storage:  <used> of <quota> bytes, as reported by the server`: the account's use and the server's per-account quota, in whole bytes, as the server reports them (not verified; for information). When the account has reached the quota, the server refuses new changes with `quota_exceeded`: `rv` says so, and the change stays on this device, queued, so a later `rv sync` sends it once the operator raised `RIZZY_ACCOUNT_QUOTA_BYTES` ([self-hosting](self-hosting.md#4-configuration-reference)).
 
 URIs and custom fields are list elements: `item show` prints each with its element id in the key (`uri/<id>/value`, `field/<id>/label`), and `--set-uri`, `--remove-uri`, `--set-custom`, `--set-custom-secret` and `--remove-custom` take that id or a unique prefix of it. `--uri`, `--custom <label>=<text>`, `--custom-secret <label>` (a hidden field: the value is asked for) and `--custom-bool <label>=true|false` add one, after the last. Removing one clears every attribute of it, so it disappears on every device. A hidden field's value is never taken from the command line: `--set-custom` refuses it, `--set-custom-secret` asks.
 
 `--move-uri <id>=<place>` and `--move-custom <id>=<place>` reorder them; a place is `first`, `last`, `before:<id>` or `after:<id>`, and `item show` prints each list's ids in order (`order of uri: …`). Moves run in the order given, after the same command's removals and additions. A move writes only the moved element's position; when two devices placed elements at the same spot and nothing fits between them any more, the whole list's positions are rewritten evenly, which is invisible apart from the new `order` values. Tags and password history have no order of their own and cannot be moved.
 
-Item types: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`, `software-license`, `wifi`, `bank-account`, `passkey`. Field keys are those of the item schema ([ADR 0018](adr/0018-item-record-encoding.md)), for example `item.name`, `item.notes`, `login.username`, `login.password`, `login.totp`, `card.number`.
+`item show` lists `login.password`'s history (up to 50 older values) in its own section, newest first, each concealed as `********` unless `--reveal` is given, same as every other secret. A password imported from another manager (`pwhist/<id>/value` · `/ms`) gets a second, separate section: the ADR defines no order across the two, so they are never interleaved.
+
+`item history` lists every field's history the same way (ROADMAP §4.2 "Item revision history (restore old versions)", M3), not only `login.password`: one section per field that has one, each entry concealed unless `--reveal`, printed with an id. `item restore-history <item> --field <key> --entry <id>` writes that entry back as the field's current value — an ordinary edit, not a special operation: it syncs and merges like any other, and the value it displaces becomes history in turn. The id is `item history`'s own, scoped to the field it was listed under (the same dot can appear in two different fields' history when one op wrote both, so an id from one field's listing never restores a value under another field's name); a stale or mismatched id is refused rather than restoring the wrong entry.
+
+`rv sync` prints two kinds of notice on standard error ([ADR 0018](adr/0018-item-record-encoding.md) §3 "Surfacing", [ADR 0012](adr/0012-sync-engine.md) §5):
+
+- **An edit arrived for an item you deleted permanently**: another device edited the item before it heard of the deletion. The item stays deleted; `rv item restore-late <item> --type <type>` copies those edits into a new item of the type you name and prints its id. The deleted item keeps the edits, so the notice stays. When this device moved the item to another vault, the notice says so instead: "an item you moved to the vault "Work"" ([ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) §A6); the moved copy is not changed by the late edit.
+- **Deleted on X while it was being edited on Y**: the edit wins, so the item stays in the list. The notice stays until the item is next changed.
+
+Devices are named by kind and the first 16 digits of their id, a prefix of the full id `rv device list` prints (which `device revoke` also accepts in place of the full id). `rv` cannot remember that it already showed a notice: every command is its own process, and keeping that mark in the local file would change the file's format, which needs a new decision ([ADR 0026](adr/0026-client-device-state-and-cache.md)) first. So every `rv sync` repeats the notices that still hold.
+
+**Search and recently used** ([ADR 0056](adr/0056-local-index-recently-used-search.md)). `rv item search <query>` finds the items whose name, or one of whose username, website addresses, tag names, text custom fields (label or value), card holder and brand, or identity title, first, middle and last name, company and e-mail, contains the query, ignoring case (Unicode-aware: `ИВАН` finds `Иван`). It is a plain substring match: `%` and `_` are ordinary characters. A Secure Note is found by its title only, never by its body, and nothing concealed is ever searched. The new item types (SSH key, API credential, software license, Wi-Fi) are found by their name only, until a later decision names which of their fields are safe to index. Without a query it lists every item; results come most recently used first, then by name. `--trash` searches the trash instead. `rv item recent` lists the items you viewed with `item show` or `totp` on this device, most recent first (20 unless `--limit` says otherwise), a trashed one marked. The search runs on this device only, over the index in its local file; the server never sees a query, and when you used an item is never synced or sent. The use history is lost with `rv cache reindex` (for when search results look wrong), when an item is deleted permanently, or with the local file.
+
+Item types: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`, `software-license`, `wifi`, `passkey`. Field keys are those of the item schema ([ADR 0018](adr/0018-item-record-encoding.md)), for example `item.name`, `item.notes`, `login.username`, `login.password`, `login.totp`, `card.number`.
+
+The M3 types have their own keys ([ADR 0055](adr/0055-m3-item-type-field-keys.md)), all text, each only on its own type:
+
+| Type | Keys | Concealed (typed at a prompt with `--secret`) |
+|---|---|---|
+| `ssh-key` | `ssh.host`, `ssh.port`, `ssh.username`, `ssh.private_key`, `ssh.public_key`, `ssh.passphrase` | `ssh.private_key`, `ssh.passphrase` |
+| `api-credential` | `api.name`, `api.key`, `api.secret`, `api.endpoint` | `api.key`, `api.secret` |
+| `software-license` | `license.name`, `license.key`, `license.seats`, `license.expires` | `license.key` |
+| `wifi` | `wifi.ssid`, `wifi.password`, `wifi.security_type` | `wifi.password` |
+
+`api.name` and `license.name` name the service and the product; `item.name` stays the item's own title. An SSH key without `ssh.port` uses port 22: `item show` prints `ssh.port: 22 (default)`, and nothing is stored for it. A CSV export leaves items of these types out (the JSON export keeps them whole). An `rv` older than these types lists and shows such items but refuses to create or edit them, and keeps their fields as they are.
+
+**Bank account, retired** ([ADR 0078](adr/0078-retire-bank-account-item-type.md)). Builds between ADR 0055 and ADR 0078 also had a `bank-account` type. It is retired: `--type bank-account` is refused, and a Bank account such a build wrote is shown like any type this `rv` does not support, as `type:  unknown`, every `bank.` field printed as `********` unless `--reveal`, so you can copy the data out by hand. It cannot be edited; `item trash`, `item restore` and `item purge` work. Encrypted and JSON exports keep it as it is, a CSV export leaves it out and counts it, and importing an export skips it and counts it in the report.
+
+**Generated identities** ([ADR 0079](adr/0079-identity-generator.md)). `rv generate identity` prints a synthetic identity: sex, title, first and last name, birthday, username, address line, city, state or province, postcode and country, and a phone only where the country has a published fictional range. `--json` prints one object, `{"name": "First Last", "fields": {"identity.sex": "female", …}}`; without it, `key=value` lines. `rv item create --type identity --generate` saves one; a `--field` of the same key wins, and the item name defaults to "First Last". Both take:
+
+- `--sex male|female`: without it the sex is drawn.
+- `--country <CC>`: one of AT, AU, CA, CH, DE, ES, FR, GB, IE, IT, NL, SE, US; without it, US. `rv` does not read the defaults the web vault saves in the account settings.
+- `--age <min>-<max>`, `--age <n>` (an exact age) or `--age <preset>`: completed years, 18 to 99. The presets are `18-27` (the default), `28-65` ("28+"), `21-25`, `26-30`, `31-35`, `36-40`, `41-45`, `46-50`, `51-55`, `56-60`, `61-65` and `any` (21–65). The birthday is drawn so that the age today, in completed years, is in the range.
+- `--email-style name|nickname`: the email's local part from the name and the birth year or day (`anna.mueller98`), or the nickname that is also the username (two words and two digits).
+- `--domain <domain>`: the email domain, for example your own catch-all domain; enter an internationalized domain in its `xn--` form. Without it there is no email. A name-style address on a catch-all domain is easy to guess.
+
+Generated details are random and may match real people or places: don't use them where you must give your real details. No identity number (SSN, passport, driver's licence) is ever generated. `rv` takes today's date in UTC, so within a few hours of midnight an exact age's birthday window can be one day off your local date.
+
+## Vaults
+
+Every account has a **Personal** vault, and you can create more vaults of your own to keep items apart ([ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) Part A). Vaults are not shared with other accounts in this build.
+
+```sh
+rv vault list                               # Personal first, then your vaults by name
+rv vault create Work                        # prints the new vault's id
+rv vault rename Work "Work 2026"
+rv item create --type login --vault Work --field item.name=VPN --secret login.password
+rv item list --vault Work                   # also: rv item search vpn --vault Work
+rv item move 3fa2 --to Personal             # copy into Personal, then remove the original
+rv item copy 3fa2 --to Work                 # a new item in Work; the original stays
+rv vault delete Work --name alice           # moves Work's items to Personal, then deletes it
+rv vault delete Work --name alice --with-items   # deletes the vault and its items
+```
+
+- **Naming a vault.** `<vault>` is `Personal`, a vault's name, or its id (or a unique prefix of the id) as `rv vault list` prints it. A name that two vaults share is refused with both ids listed; use an id then.
+- **`rv vault list`** prints one line per vault: the id, the name (`Personal`; `Untitled vault` for a vault without a name), the number of items (the trash not counted), the bytes the server counts for it when it said, and a state when the vault is not open: `withheld` (the account lists it but the server did not send its key: read-only, as this device last saw it), `needs-update` (it needs a newer rizzy-vault: read-only and not synced; the other vaults go on syncing) or `read-only`.
+- **Where new items go.** `rv item create` and `rv import` write into the Personal vault unless `--vault` names another, and `rv export` exports the Personal vault unless `--vault` names another (one export file holds one vault). There is no remembered "last used" vault: Personal is the default every time.
+- **Lists and search** span every vault. Each `item list`, `item search` and `item recent` row shows its vault between the type and the name, and `item show` prints a `vault:` line. `--vault` on `item list` and `item search` keeps one vault.
+- **Item ids** are looked up in every vault. An id prefix that matches items in two vaults is refused with each match's vault and id; give more of the id.
+- **The Personal vault** cannot be renamed or deleted; it is always shown as `Personal`. A vault name is at most 64 characters.
+- **Move and copy.** An item never changes vault: `item copy` makes a new item (a new id) in the other vault with the same fields, history, tags, passkeys and one-time-code secret, and uploads each attachment again under the other vault's key; a trashed item stays trashed in the copy. `item move` does the same, then, only after the server has stored the copy and every attachment, puts the original in the trash and purges it. The move is written down on this device first: if `rv` is interrupted, the next `rv sync` finishes it, so an interrupted move can leave a copy behind but never loses the item. The note of a finished move stays on this device, so an edit made elsewhere before the move arrived names the vault the item went to; it goes when either vault is deleted. A trashed item stays in the trash when it is moved, as when it is copied.
+- **Deleting a vault** shows how many items it holds and asks you to type the vault's name at the terminal. It then logs in again with your master password (`--name` is your login name), because the server only deletes a vault right after a password login. By default every item of the vault, the trash included, is first moved to Personal; if a move cannot finish, nothing is deleted. With `--with-items` the items are deleted with the vault. The delete is immediate and cannot be undone; other devices drop the vault at their next sync, and changes to it they had not sent yet are discarded, with a note saying how many.
+- **Creating a vault** works over this device's session; if the answer is lost, the vault may exist without its name: it then shows as `Untitled vault`, and `rv vault rename` names it.
 
 ## Export and import
 
@@ -97,17 +173,22 @@ Item types: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`, `s
 rv export --out vault.rizzy --name alice                 # encrypted, under a password for this file
 rv export --out vault.json  --name alice --format json   # plaintext
 rv export --out vault.csv   --name alice --format csv    # plaintext, loses what CSV cannot hold
+rv export --out keys.rizzy  --name alice --format cxf    # passkeys only, CXF, encrypted for this file
 rv import --in vault.rizzy                               # the format is recognised from the file
+rv import --in passkeys.json                             # a CXF passkey file of another manager
 rv import --in export.csv --format chrome-csv            # name the format when it is not
+rv export --out work.rizzy --name alice --vault Work     # one vault per file; Personal by default
+rv import --in vault.rizzy --vault Work                  # into Work instead of Personal
 ```
 
 - **Every export asks for your master password again** and checks it with the server (an OPAQUE login with this device's Secret Key, as for a password change), so an export needs the server. A wrong password ends the export and writes nothing. `--name` is your login name.
 - **The encrypted export** then asks for a new password for that file, twice. It is needed to import the file; it is not your master password, and nobody can recover it if it is lost. It must not be empty.
 - **A plaintext export** shows a warning, waits 10 seconds, then asks you to type `EXPORT PLAINTEXT` at the terminal. No flag or environment variable skips the warning, the wait or the phrase. What you type during the wait is read by the phrase prompt afterwards. Delete the file when you are done with it.
+- **The passkey export** (`--format cxf`, [ADR 0074](adr/0074-passkey-cxf-import-export.md)) holds only passkeys: one standard FIDO Credential Exchange Format (CXF 1.0) document with the private key of every passkey of your active (not trashed) logins, inside a file encrypted like the encrypted export, under a new password for that file. Because the decrypted document is a portable copy of every passkey key, it is gated like a plaintext export as well: its own warning, the 10-second wait and the typed `EXPORT PLAINTEXT`. Another password manager cannot read this file directly; there is no unencrypted CXF export yet. An imported passkey keeps its key; its login is named after the passkey's user.
 - An export never overwrites a file. Choose a new name.
 - Trashed items are in every export. An export larger than 16 MiB is refused in M1 ([ADR 0027](adr/0027-export-payload.md)).
 - An export holds what this computer has. Run `rv sync` first.
-- **Import recognises the format** of the file: our encrypted export (it then asks for that file's password), our plaintext JSON export, Bitwarden JSON, 1Password 1PUX, KeePass XML, Chrome, Firefox or generic CSV, and AliasVault's CSV export or its `.avux` (unencrypted) export archive. Our own CSV export cannot be imported (it leaves data out): import the JSON or the encrypted export. AliasVault's encrypted `.avex` export cannot be imported either; export unencrypted (CSV or `.avux`) instead. When the format is not recognised, name it with `--format`: `bitwarden-json` (unencrypted), `1pux`, `keepass-xml`, `csv`, `chrome-csv`, `firefox-csv`, `rizzy-json` (our plaintext JSON), `rizzy-encrypted` (our encrypted export), `aliasvault-csv`, `aliasvault-avux`. `--format` also overrides what was recognised. `rv` reports what it could not import.
+- **Import recognises the format** of the file: our encrypted export (it then asks for that file's password), our plaintext JSON export, Bitwarden JSON, 1Password 1PUX, KeePass XML, Chrome, Firefox or generic CSV, AliasVault's CSV export or its `.avux` (unencrypted) export archive, a CXF passkey file another password manager wrote, and our passkey export (it then asks for that file's password). From CXF only passkeys are imported, each as a new login (ES256 and Ed25519 keys); other credential types (passwords, notes, one-time codes, …) are counted and skipped. Our own CSV export cannot be imported (it leaves data out): import the JSON or the encrypted export. AliasVault's encrypted `.avex` export cannot be imported either; export unencrypted (CSV or `.avux`) instead. When the format is not recognised, name it with `--format`: `bitwarden-json` (unencrypted), `1pux`, `keepass-xml`, `csv`, `chrome-csv`, `firefox-csv`, `rizzy-json` (our plaintext JSON), `rizzy-encrypted` (our encrypted export), `aliasvault-csv`, `aliasvault-avux`, `cxf-json` (a CXF passkey file), `rizzy-cxf-encrypted` (our passkey export). `--format` also overrides what was recognised. `rv` reports what it could not import.
 
 ## Devices and key rotation
 
@@ -124,6 +205,18 @@ rv device forget                       # removes this computer's copy of the acc
 If a rotation or a signup is interrupted after it was sent, the next `rv` run finds out whether the server took it and finishes it or sends it again before doing anything else. `rv` keeps what it saved for the rotation or signup as long as the outcome is unknown: no answer, a proxy's error page (`502`, `504`), a server failure or a rate limit. It drops it only when the server answers with a refusal and, for a rotation, a second look at the account shows the rotation was not applied.
 
 `rv login` and `rv recovery complete` save nothing before the server answers ([ADR 0026](adr/0026-client-device-state-and-cache.md) defines no pending stage for them; an open point). If their answer is lost, `rv` says that the outcome is unknown: run the command again, and if the first attempt did reach the server, revoke the extra device it left with `rv device revoke`. After a recovery with an unknown outcome keep both Emergency Kits until you know which one logs in.
+
+## Sessions
+
+```sh
+rv session list            # the account's open sessions, as the server reports them
+rv session end 3fa0        # ends one web or password login (or a recovery session) by id prefix
+rv session end --others    # ends every other web or password login and recovery session
+```
+
+`session list` prints one line per session the server holds for the account: its id, what it is ("web or password login", "password re-check on" a device, "device session of" a device, "account recovery in progress"), and when it was opened and expires, in seconds since the Unix epoch. The line of this run's own session says so. Each `rv` command opens a device session of its own and ends it on the server when it exits (best effort: if the server cannot be reached then, the session lapses after its hour). The list is the server's word, not proof that nothing else is open ([ADR 0075](adr/0075-session-listing-and-ending.md)).
+
+`session end` takes a hex id or a unique prefix of one, as `device revoke` does. Neither form needs your password: `rv`'s requests are signed with the device key. Neither ends a device's session: a device signs in again by itself, so the way to log a device out is to suspend or revoke it (`rv device revoke`). `session end` refuses a device's session and says so. Ending a session does not stop someone who knows your master password and Secret Key from logging in again; if you think someone does, change your password (below).
 
 ## Master password, Secret Key and two-factor login
 
@@ -142,6 +235,8 @@ If such a change is interrupted after it was sent, it is kept like an interrupte
 **When the server retires its old login setup** ([ADR 0031](adr/0031-retiring-old-opaque-setups.md)). After the operator runs `rizzy-vault secrets rotate`, the server asks clients to move each account to its new login setup. `rv` does it by itself the next time it goes online, with the master password you typed to open the device (no prompt, no change to your password, Secret Key or kit). If the operator later retires the old setup (`secrets retire-setups`) before an account moved, its password login stops working, but its enrolled devices still open: `rv` moves the account then, and password logins work again. An interrupted signup that was waiting when the setup was retired is registered again: `rv` asks for its master password, the login name and the invite, and sends it once more; its Emergency Kit stays valid. If the server refuses it a second time, the signup stays saved and the next run tries again. An interrupted master password or Secret Key change, or key rotation, cannot be sent once the account's own setup was retired: it needs a password login, which the retired setup no longer allows. `rv` then says so and keeps the change saved, nothing is changed, and your current master password, Secret Key and Emergency Kit stay the valid ones; tell the operator (a recovery with the Emergency Kit also restores the password login).
 
 `2fa enable` shows the secret once, as an `otpauth://` URI and in Base32, for your authenticator app, then asks for the app's current code. From then on every login asks for a code. `2fa disable` needs a current code too, a newer one than the code its own login used. Codes are typed at the terminal or piped in, never given on the command line. Losing the authenticator needs the server administrator.
+
+**Security keys.** A hardware security key (FIDO2/WebAuthn) can be the account's second factor too, added in the web vault under Settings, Two-factor authentication ([ADR 0058](adr/0058-webauthn-2fa-second-factor.md)). `rv` cannot complete a security-key login: it is not a browser on the server's origin. When the account's only second factor is a security key, `rv`'s login says so and stops; log in with the web vault, or add an authenticator app there as well and type its code to `rv`. When the account has both, `rv` asks for the code.
 
 ## Forgotten master password
 
@@ -176,4 +271,4 @@ rv recovery repair --name alice --retype   # or: type the current recovery code 
 
 ## Not in this build
 
-Certificate pinning, revocation checking, the operating system's trust store and TLS 1.2 ([ADR 0030](adr/0030-client-tls-rv.md)); a full key rotation together with a Secret Key change, reordering list elements, and no-echo input on platforms without `stty` (there, pipe the secrets in).
+Certificate pinning, revocation checking, the operating system's trust store, TLS 1.2 and HTTP proxies ([ADR 0030](adr/0030-client-tls-rv.md)); and no-echo input on platforms without `stty` (there, pipe the secrets in).

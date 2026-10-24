@@ -1,10 +1,21 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Keyboard shortcuts and list navigation (redesign slice 2, item 3; `src/shortcuts.ts`): `/`
 // focuses search, arrow keys move the list selection and Enter opens the selected row, `N`
 // starts a new item, `?` opens the shortcuts help (and Escape closes it), and a shortcut like
 // `N` is suppressed while a text field has focus.
+//
+// "Keyboard only" walks every screen the accessibility audit covers (`a11y.spec.ts`) without
+// the pointer: each control is reached with Tab alone (`tabTo`, which fails when it is not
+// reached within its bound) and operated with Enter, Space, Escape or typing. That includes a
+// Secure Note rendered from its Markdown (ADR 0062), whose rendered body holds nothing focusable.
+// The Sessions section's "End all other sessions", its dialog and its log-in-again form are
+// walked the same way in `sessions.spec.ts`, which needs a second session.
 import { expect, test } from "@playwright/test";
 
-import { newItem, signUp, watch } from "./helpers.ts";
+import { tabTo } from "./a11y.ts";
+import { MARKDOWN_NOTE, PASSWORD, newItem, signUp, watch } from "./helpers.ts";
+import { M3_TYPES, fieldLine, inEditorOrder } from "./m3-types.ts";
 import { type RunningServer, startServer } from "./server.ts";
 
 let server: RunningServer;
@@ -63,5 +74,448 @@ test("keyboard: search focus, list navigation, new item, shortcuts help", async 
   await page.keyboard.press("Escape");
   await expect(help).toBeHidden();
 
+  expect(problems).toEqual([]);
+});
+
+test("keyboard only: every audited screen is reachable and operable without a pointer", async ({ page }) => {
+  const { problems } = watch(page);
+  const kb = page.keyboard;
+  const button = (name: string | RegExp) => page.getByRole("button", { name, exact: typeof name === "string" });
+
+  // Login screen to signup.
+  await page.goto(server.origin);
+  await tabTo(page, button("Create an account"));
+  await kb.press("Enter");
+
+  // Signup, then the Emergency Kit.
+  await tabTo(page, page.getByLabel("Login name"));
+  await kb.type("keyboardonly");
+  await tabTo(page, page.getByLabel("Master password", { exact: true }));
+  await kb.type(PASSWORD);
+  await tabTo(page, page.getByLabel("Repeat the master password", { exact: true }));
+  await kb.type(PASSWORD);
+  await tabTo(page, button("Continue"));
+  await kb.press("Enter");
+  await expect(page.getByTestId("emergency-kit")).toBeVisible();
+  const secretKey = (await page.getByTestId("kit-secret-key").textContent()) ?? "";
+  await tabTo(page, page.getByLabel(/last group of your Secret Key/));
+  await kb.type(secretKey.split("-").at(-1) ?? "");
+  await tabTo(page, button("Create the account"));
+  await kb.press("Enter");
+
+  // The getting-started guide: confirm, skip, close.
+  const guide = page.getByRole("region", { name: "Get started" });
+  await expect(guide).toBeVisible();
+  await tabTo(page, guide.getByRole("checkbox", { name: /I saved my Emergency Kit/ }));
+  await kb.press("Space");
+  await tabTo(page, guide.getByRole("button", { name: "Continue" }));
+  await kb.press("Enter");
+  await tabTo(page, guide.getByRole("button", { name: "Skip this step" }));
+  await kb.press("Enter");
+  await tabTo(page, guide.getByRole("button", { name: "Close the guide" }));
+  await kb.press("Enter");
+  await expect(guide).toHaveCount(0);
+
+  // New item through the menu, the editor, save.
+  await tabTo(page, button(/New item/));
+  await kb.press("Enter");
+  await tabTo(page, page.getByRole("menuitem", { name: "Login" }));
+  await kb.press("Enter");
+  await tabTo(page, page.getByLabel("Title"));
+  await kb.type("Keys Co");
+  await tabTo(page, page.getByLabel("Password", { exact: true }));
+  await kb.type("keys-password-long-enough");
+  await tabTo(page, button("Save"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Keys Co" })).toBeVisible();
+
+  // The item view: reveal, large type (Escape), edit and cancel.
+  const passwordRow = page.locator('[data-field="login.password"]');
+  await tabTo(page, passwordRow.getByRole("button", { name: "Reveal" }));
+  await kb.press("Enter");
+  await tabTo(page, passwordRow.getByRole("button", { name: "Large type" }));
+  await kb.press("Enter");
+  await expect(page.getByRole("dialog", { name: "Password" })).toBeVisible();
+  await kb.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Password" })).toHaveCount(0);
+  await tabTo(page, button("Edit"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Edit item" })).toBeVisible();
+  await tabTo(page, button("Cancel"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Keys Co" })).toBeVisible();
+
+  // The generator: generate a value.
+  await tabTo(page, button("Generator"));
+  await kb.press("Enter");
+  await tabTo(page, button("Generate"));
+  await kb.press("Enter");
+  await expect(page.getByLabel("Generated", { exact: true })).toBeVisible();
+
+  // Password health (ADR 0053): start the report. This server runs no `icons` role, so it ends
+  // on "not enabled"; the report with a mocked role is walked in `breach.spec.ts`.
+  await tabTo(page, button("Password health"));
+  await kb.press("Enter");
+  await tabTo(page, button("Check all passwords"));
+  await kb.press("Enter");
+  await expect(page.getByTestId("health-status")).toHaveText(/not enabled on this server|No Login item/);
+
+  // Export and import: re-authenticate, open and cancel the plaintext dialog with Escape.
+  await tabTo(page, button("Export and import"));
+  await kb.press("Enter");
+  await tabTo(page, page.getByLabel("Secret Key", { exact: true }));
+  await kb.type(secretKey);
+  await tabTo(page, page.getByLabel("Master password", { exact: true }));
+  await kb.type(PASSWORD);
+  await kb.press("Enter");
+  await tabTo(page, button("Export in plaintext…"));
+  await kb.press("Enter");
+  const plaintext = page.getByRole("dialog", { name: /Plaintext export/ });
+  await expect(plaintext.getByLabel(/to continue/)).toBeFocused();
+  await kb.press("Escape");
+  await expect(plaintext).toHaveCount(0);
+  await expect(button("Export in plaintext…")).toBeFocused();
+  // The passkey (CXF) export dialog (ADR 0074 §2): opens on its first password field, Escape
+  // closes it and the focus goes back to its button.
+  await tabTo(page, button("Export passkeys…"));
+  await kb.press("Enter");
+  const cxf = page.getByRole("dialog", { name: "Export passkeys (CXF)" });
+  await expect(cxf.getByLabel("Password for this export file", { exact: true })).toBeFocused();
+  await kb.press("Escape");
+  await expect(cxf).toHaveCount(0);
+  await expect(button("Export passkeys…")).toBeFocused();
+
+  // Settings: the theme select, then the getting-started guide again.
+  await tabTo(page, button("Settings"));
+  await kb.press("Enter");
+  await expect(page.getByRole("region", { name: "What the server stores" })).toBeVisible();
+  const theme = page.getByLabel("Theme");
+  await tabTo(page, theme);
+  await kb.press("ArrowDown");
+  await expect(theme).toHaveValue("light");
+  await tabTo(page, button("Open the getting-started guide"));
+  await kb.press("Enter");
+  await tabTo(page, guide.getByRole("button", { name: "Close the guide" }));
+  await kb.press("Enter");
+  await expect(guide).toHaveCount(0);
+
+  // The command palette jumps to a view; the trash through its confirmation dialog.
+  await kb.press("Control+k");
+  await kb.type("Keys Co");
+  await expect(page.getByRole("option", { name: /^Open — Keys Co/ })).toBeVisible();
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Keys Co" })).toBeVisible();
+  await tabTo(page, button("Move to trash"));
+  await kb.press("Enter");
+  const confirm = page.getByRole("dialog", { name: "Move this item to trash?" });
+  await expect(confirm.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await tabTo(page, confirm.getByRole("button", { name: "Move to trash" }));
+  await kb.press("Enter");
+  await expect(confirm).toHaveCount(0);
+  await tabTo(page, button("Trash"));
+  await kb.press("Enter");
+  await tabTo(page, page.getByRole("button", { name: /Keys Co/ }));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Keys Co" })).toBeVisible();
+
+  // Lock through the account menu, and unlock.
+  await tabTo(page, button("Account menu"));
+  await kb.press("Enter");
+  await tabTo(page, page.getByRole("menuitem", { name: "Lock" }));
+  await kb.press("Enter");
+  await tabTo(page, page.getByLabel("Secret Key", { exact: true }));
+  await kb.type(secretKey);
+  await tabTo(page, page.getByLabel("Master password", { exact: true }));
+  await kb.type(PASSWORD);
+  await kb.press("Enter");
+  await expect(button("Account menu")).toBeVisible();
+
+  expect(problems).toEqual([]);
+});
+
+test("keyboard: a Secure Note rendered from Markdown", async ({ page, context }) => {
+  const { problems } = watch(page);
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: server.origin });
+  await signUp(page, server.origin, "keyboardnote");
+  const kb = page.keyboard;
+  const button = (name: string | RegExp) => page.getByRole("button", { name });
+
+  // New Secure Note through the menu, typed and saved from the keyboard.
+  await tabTo(page, button(/New item/));
+  await kb.press("Enter");
+  await tabTo(page, page.getByRole("menuitem", { name: "Secure note" }));
+  await kb.press("Enter");
+  await tabTo(page, page.getByLabel("Title"));
+  await kb.type("Keys note");
+  await tabTo(page, page.getByLabel("Notes"));
+  await kb.insertText(MARKDOWN_NOTE);
+  await tabTo(page, button("Save"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Keys note" })).toBeVisible();
+
+  // The rendered note holds nothing focusable (it has no links: ADR 0062 §6), so Tab walks
+  // from the favourite toggle to the notes' Copy without ever stopping inside it.
+  const notes = page.locator('[data-field="item.notes"]');
+  const rendered = notes.locator(".md-note");
+  await expect(rendered.getByRole("heading", { name: "Wi-Fi and alarm" })).toBeVisible();
+  const copy = notes.getByRole("button", { name: "Copy" });
+  await tabTo(page, button("Add to favorites"));
+  let reached = false;
+  for (let i = 0; i < 20 && !reached; i++) {
+    await kb.press("Tab");
+    expect(await rendered.evaluate((root) => root.contains(document.activeElement))).toBe(false);
+    reached = await copy.evaluate((el) => el === document.activeElement);
+  }
+  expect(reached).toBe(true);
+
+  // Copy returns the Markdown source (§12); Edit shows it in the plain textarea (§2).
+  await kb.press("Enter");
+  await expect(notes.getByRole("button", { name: "Copied" })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(MARKDOWN_NOTE);
+  await tabTo(page, button("Edit"));
+  await kb.press("Enter");
+  await expect(page.getByLabel("Notes")).toHaveValue(MARKDOWN_NOTE);
+  await tabTo(page, button("Cancel"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Keys note" })).toBeVisible();
+  expect(problems).toEqual([]);
+});
+
+test("keyboard: an item's attachments, download and delete (ADR 0054)", async ({ page }) => {
+  const { problems } = watch(page);
+  await signUp(page, server.origin, "keyboardattach");
+  const kb = page.keyboard;
+  const button = (name: string | RegExp) => page.getByRole("button", { name });
+  await tabTo(page, button(/New item/));
+  await kb.press("Enter");
+  await tabTo(page, page.getByRole("menuitem", { name: "Login", exact: true }));
+  await kb.press("Enter");
+  await tabTo(page, page.getByLabel("Title", { exact: true }));
+  await kb.type("Keys attachment");
+  await tabTo(page, button("Save"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Keys attachment" })).toBeVisible();
+
+  // The file input is reachable by Tab; the file itself comes from the chooser, which a test
+  // fills the way the operating system's dialog would.
+  const section = page.getByRole("region", { name: "Attachments" });
+  const input = section.getByLabel("Attach a file");
+  await tabTo(page, input);
+  const chooser = page.waitForEvent("filechooser");
+  await kb.press("Space");
+  await (await chooser).setFiles({ name: "keys.txt", mimeType: "text/plain", buffer: Buffer.from("typed by keys") });
+  await expect(section.locator("li.attachment")).toHaveCount(1);
+
+  // Download and Delete by keyboard; the dialog's buttons too.
+  await tabTo(page, button("Download keys.txt"));
+  const downloading = page.waitForEvent("download");
+  await kb.press("Enter");
+  expect((await downloading).suggestedFilename()).toBe("keys.txt");
+  await tabTo(page, button("Delete keys.txt"));
+  await kb.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Delete this attachment?" });
+  await expect(dialog).toBeVisible();
+  await tabTo(page, dialog.getByRole("button", { name: "Delete attachment" }));
+  await kb.press("Enter");
+  await expect(section.getByText("No attachments.")).toBeVisible();
+  expect(problems).toEqual([]);
+});
+
+test("keyboard only: create, view and reveal each M3 item type (ADR 0055)", async ({ page }) => {
+  const { problems } = watch(page);
+  const kb = page.keyboard;
+  await signUp(page, server.origin, "keyboardm3");
+  for (const t of M3_TYPES) {
+    // The "New item" menu, the type's entry, every field of its editor, Save.
+    await tabTo(page, page.getByRole("button", { name: /New item/ }));
+    await kb.press("Enter");
+    await tabTo(page, page.getByRole("menuitem", { name: t.menu, exact: true }));
+    await kb.press("Enter");
+    await expect(page.getByRole("heading", { name: t.heading })).toBeVisible();
+    await tabTo(page, page.getByLabel("Title", { exact: true }));
+    await kb.type(t.title);
+    for (const f of inEditorOrder(t)) {
+      await tabTo(page, page.getByLabel(f.label, { exact: true }));
+      // A textarea takes Enter as a line break, which is how a multi-line key is typed.
+      for (const [i, line] of f.value.split("\n").entries()) {
+        if (i > 0) {
+          await kb.press("Enter");
+        }
+        await kb.type(line);
+      }
+    }
+    await tabTo(page, page.getByRole("button", { name: "Save" }));
+    await kb.press("Enter");
+    await expect(page.getByRole("heading", { name: t.title })).toBeVisible();
+    // Each concealed value: Reveal shows exactly what was typed; Copy is reachable too.
+    for (const f of inEditorOrder(t).filter((x) => t.concealed.includes(x))) {
+      const line = fieldLine(page, f.key);
+      await tabTo(page, line.getByRole("button", { name: "Reveal" }));
+      await kb.press("Enter");
+      await expect(line.locator("[data-secret-field]")).toHaveValue(f.value);
+      await tabTo(page, line.locator(".field-actions").getByRole("button", { name: "Hide" }));
+      await kb.press("Enter");
+      await expect(line.locator(".masked")).toBeVisible();
+      await tabTo(page, line.getByRole("button", { name: "Copy" }));
+    }
+    // The type's sidebar filter, by keyboard (backwards: it sits before the list).
+    await tabTo(page, page.getByRole("button", { name: t.menu, exact: true }), { backwards: true });
+    await kb.press("Enter");
+    await expect(page.locator(".row-title")).toHaveText([t.title]);
+    await tabTo(page, page.getByRole("button", { name: "All items", exact: true }), { backwards: true });
+    await kb.press("Enter");
+  }
+  expect(problems).toEqual([]);
+});
+
+test("keyboard only: the identity generator and its settings (ADR 0079 §10)", async ({ page }) => {
+  const { problems } = watch(page);
+  const kb = page.keyboard;
+  const button = (name: string) => page.getByRole("button", { name, exact: true });
+  await signUp(page, server.origin, "keyboardidentity");
+
+  // Settings → Identity generator: a default sex, an exact age and a domain, saved.
+  await tabTo(page, button("Settings"));
+  await kb.press("Enter");
+  const pane = page.getByRole("region", { name: "Identity generator" });
+  await tabTo(page, pane.getByLabel("Default sex"));
+  await kb.press("ArrowDown");
+  await expect(pane.getByLabel("Default sex")).toHaveValue("male");
+  await tabTo(page, pane.getByLabel("Default age"));
+  await kb.type("Exact");
+  await expect(pane.getByLabel("Default age")).toHaveValue("exact");
+  await tabTo(page, pane.getByLabel("Age (years)", { exact: true }));
+  await kb.press("ControlOrMeta+a");
+  await kb.type("40");
+  await tabTo(page, pane.getByLabel("Email domain for generated identities"));
+  await kb.type("example.com");
+  await tabTo(page, pane.getByRole("button", { name: "Save identity defaults" }));
+  await kb.press("Enter");
+  await expect(pane.getByRole("status")).toHaveText("The identity generator defaults are saved.");
+
+  // New identity: every control of the generator bar, by keyboard.
+  await tabTo(page, button("All items"), { backwards: true });
+  await kb.press("Enter");
+  await tabTo(page, page.getByRole("button", { name: /New item/ }));
+  await kb.press("Enter");
+  await tabTo(page, page.getByRole("menuitem", { name: "Identity", exact: true }));
+  await kb.press("Enter");
+  const bar = page.getByRole("group", { name: "Generated details" });
+  const first = page.locator('.item-editor [name="identity.first_name"]');
+  await expect(first).not.toHaveValue("");
+  const live = bar.getByRole("status");
+  // The sex radio group: Tab reaches the checked radio, an arrow key picks the other.
+  await expect(bar.getByRole("radio", { name: "Male", exact: true })).toBeChecked();
+  await tabTo(page, bar.getByRole("radio", { name: "Male", exact: true }));
+  await kb.press("ArrowDown");
+  await expect(bar.getByRole("radio", { name: "Female", exact: true })).toBeChecked();
+  await expect(page.locator('.item-editor [name="identity.sex"]')).toHaveValue("female");
+  await tabTo(page, bar.getByLabel("Country", { exact: true }));
+  // The browser's en-US gives United States, the last bundled code; one up is Sweden.
+  await kb.press("ArrowUp");
+  await expect(bar.getByLabel("Country", { exact: true })).toHaveValue("SE");
+  await expect(page.locator('.item-editor [name="identity.country"]')).toHaveValue("SE");
+  // The age select with both custom modes open.
+  const age = bar.getByLabel("Age", { exact: true });
+  await expect(age).toHaveValue("exact");
+  await tabTo(page, age);
+  await kb.type("Custom");
+  await expect(age).toHaveValue("custom");
+  await tabTo(page, bar.getByLabel("Min", { exact: true }));
+  await kb.press("ControlOrMeta+a");
+  await kb.type("30");
+  await tabTo(page, bar.getByLabel("Max", { exact: true }));
+  await kb.press("ControlOrMeta+a");
+  await kb.type("35");
+  await tabTo(page, age, { backwards: true });
+  await kb.type("Exact");
+  await expect(age).toHaveValue("exact");
+  await tabTo(page, bar.getByLabel("Age (years)", { exact: true }));
+  await kb.press("ControlOrMeta+a");
+  await kb.type("50");
+  await tabTo(page, bar.getByRole("radio", { name: "Name + birthday" }));
+  await kb.press("ArrowDown");
+  await expect(bar.getByRole("radio", { name: "Nickname" })).toBeChecked();
+  await tabTo(page, bar.getByRole("button", { name: "Regenerate all" }));
+  await kb.press("Enter");
+  await expect(live).toContainText("All generated fields regenerated");
+  // A field's own Regenerate button.
+  await tabTo(page, button("Regenerate first name"));
+  await kb.press("Enter");
+  await expect(live).toHaveText("First name regenerated");
+  // Start blank, then Save with a title typed.
+  await tabTo(page, bar.getByRole("button", { name: "Start blank" }), { backwards: true });
+  await kb.press("Enter");
+  await expect(first).toHaveValue("");
+  await tabTo(page, page.getByLabel("Title", { exact: true }));
+  await kb.type("Typed persona");
+  await tabTo(page, button("Save"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Typed persona" })).toBeVisible();
+  expect(problems).toEqual([]);
+});
+
+test("keyboard only: the vault switcher, the vault screen, its dialogs and Move to… (ADR 0081 §A8)", async ({ page }) => {
+  const { problems } = watch(page);
+  const kb = page.keyboard;
+  const button = (name: string | RegExp) => page.getByRole("button", { name, exact: typeof name === "string" });
+  await signUp(page, server.origin, "keyboardvaults");
+
+  // The vault screen: create a vault.
+  await tabTo(page, button("Manage vaults"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { level: 1, name: "Vaults" })).toBeVisible();
+  await tabTo(page, page.locator(".vaults-pane").getByLabel("Name", { exact: true }));
+  await kb.type("Work");
+  await kb.press("Enter");
+  await expect(page.locator(".vaults-pane tbody tr", { hasText: "Work" })).toBeVisible();
+
+  // Rename it in its dialog.
+  await tabTo(page, button("Rename Work"));
+  await kb.press("Enter");
+  const rename = page.getByRole("dialog", { name: "Rename vault" });
+  await expect(rename.getByLabel("Name", { exact: true })).toBeFocused();
+  await kb.press("Control+A");
+  await kb.type("Office");
+  await kb.press("Enter");
+  await expect(rename).toHaveCount(0);
+  await expect(page.locator(".vaults-pane tbody tr", { hasText: "Office" })).toBeVisible();
+
+  // The delete dialog: the first choice is preselected; Escape closes it.
+  await tabTo(page, button("Delete Office"));
+  await kb.press("Enter");
+  const del = page.getByRole("dialog", { name: "Delete vault Office" });
+  await tabTo(page, del.getByLabel("Type the vault's name to confirm"));
+  await kb.press("Escape");
+  await expect(del).toHaveCount(0);
+
+  // A new item in Personal (the picker's default), then Move to… Office.
+  await tabTo(page, button("All items"));
+  await kb.press("Enter");
+  await tabTo(page, button(/New item/));
+  await kb.press("Enter");
+  await tabTo(page, page.getByRole("menuitem", { name: "Login" }));
+  await kb.press("Enter");
+  await tabTo(page, page.getByLabel("Title"));
+  await kb.type("Desk");
+  await tabTo(page, button("Save"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Desk" })).toBeVisible();
+  await tabTo(page, button("Move to…"));
+  await kb.press("Enter");
+  const move = page.getByRole("dialog", { name: "Move to another vault" });
+  await expect(move.getByLabel("Target vault")).toBeFocused();
+  await tabTo(page, move.getByRole("button", { name: "Move", exact: true }));
+  await kb.press("Enter");
+  await expect(move).toHaveCount(0);
+  await expect(page.getByRole("list", { name: "Items" }).locator(".row-vault")).toHaveText(["Office"]);
+
+  // The switcher: Office, then All vaults.
+  await tabTo(page, button("Office"), { backwards: true });
+  await kb.press("Enter");
+  await expect(button("Office")).toHaveAttribute("aria-pressed", "true");
+  await tabTo(page, button("All vaults"), { backwards: true });
+  await kb.press("Enter");
+  await expect(button("All vaults")).toHaveAttribute("aria-pressed", "true");
   expect(problems).toEqual([]);
 });

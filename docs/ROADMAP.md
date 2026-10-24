@@ -33,10 +33,10 @@ Target users by phase: **Personal → Enthusiasts/Families → Small & medium bu
 | **M2** | Browser extension & URL matching | Autofill in Chromium + Firefox, save-on-submit, domain equivalence (youtube.com ≡ youtu.be), match modes, passkeys in desktop browsers through the extension (moved from M7 on 2026-10-07). | Personal |
 | **M3** | 1Password-grade UX & desktop | Design system (shared tokens; React components for web), native desktop app for macOS (Windows and Linux: §4.5), quick-access search, Watchtower-style health report, tags/favorites. Author uses it daily (moved from M1 on 2026-10-07). | Personal |
 | **M4** | *Removed* | Removed on 2026-09-27: On-device sync is parked as a post-1.0 idea (§4.6; ADR 0022). The number is kept, so M5–M10 keep theirs. Its conflict UI and transparency page moved to M3, scheduled encrypted backups to M8. | — |
-| **M5** | Public sharing | Share an item by link with fragment-held key, expiry, view limits, optional recipient verification. | Personal |
-| **M6** | Aliases & email receiving | Generate alias identities, receive-only mailbox in UI, ingress encryption, autofill integration. | Personal / enthusiasts |
+| **M5** | Public sharing (**after v1.0**) | Share an item by link with fragment-held key, expiry, view limits, optional recipient verification. Scheduled after the v1.0 release by owner decision of 2026-10-22: v1.0 (M8) ships without it. The number is kept. | Personal |
+| **M6** | Aliases & email receiving (**after v1.0**) | Generate alias identities, receive-only mailbox in UI, ingress encryption, autofill integration. Scheduled after the v1.0 release by owner decision of 2026-10-22: v1.0 (M8) ships without it. The number is kept. | Personal / enthusiasts |
 | **M7** | Mobile & passkeys | Native iOS (SwiftUI) and Android (Kotlin) apps in their own repositories, over the Rust core through UniFFI, with OS autofill and passkey (WebAuthn) use through the OS (passkey storage and browser use arrive in M2). | Personal |
-| **M8** | Hardening → **v1.0** | External security audit, bug bounty, backup/restore drills, docs. Public 1.0 for personal use. | Public |
+| **M8** | Hardening → **v1.0** | External security audit, bug bounty, backup/restore drills, docs. Public 1.0 for personal use. It follows M3 and M7 directly; M5 and M6 come after it (owner decision of 2026-10-22). | Public |
 | **M9** | Families & enthusiasts | Shared vaults, family org, emergency access, multiple mail domains, admin panel. | Enthusiasts |
 | **M10** | Business | Org policies, roles, SSO (OIDC/SAML), SCIM, audit logs, admin console, billing hooks. | SMB |
 
@@ -60,7 +60,7 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 | M | CI: fmt, clippy (deny warnings), tests, `cargo deny` (licenses, bans, sources and RustSec advisories; cargo-deny reads the same advisory database as `cargo audit`, so there is no separate `cargo audit` job) | M0 |
 | M | License policy: AGPL-3.0 server/core; decide client license; dependency license allow-list | M0 |
 | S | `SECURITY.md` with disclosure process | M0 |
-| S | Fuzzing harness for parsers (import formats, email MIME, URL parser) | M1–M6 |
+| S | Fuzzing harness for parsers (import formats, email MIME, URL parser) | M1–M3; email MIME with M6 (after v1.0) |
 | C | Reproducible builds for server binary and extension | M8 |
 | W | Monorepo tooling beyond Cargo + one JS package manager | — |
 
@@ -83,7 +83,9 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 | M | CLI client (`rv`) — list, get, add, generate, copy TOTP | M1 |
 | M | Web vault (minimal UI acceptable in M1) | M1 |
 | S | Attachments (encrypted, size-limited) | M3 |
-| S | Item types: SSH key, API credential, Software license, Wi-Fi, Bank account | M3 |
+| S | Item types: SSH key, API credential, Software license, Wi-Fi (Bank account removed on 2026-10-23, ADR 0078) | M3 |
+| S | Identity generator: new identities open pre-filled (sex, country, age preset, custom range or exact age; names by country, birthday, email, username, address, phone from fictional ranges) with per-field regenerate; web vault and rv ([ADR 0079](adr/0079-identity-generator.md)) | M3 |
+| S | Multiple vaults per account: a Personal vault (created at signup, default save target, cannot be deleted or shared) plus vaults the user creates; rename, delete, move and copy items between vaults ([ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) Part A) | M3 |
 | S | Favorites, recently used, full-text search on decrypted index (client-side only) | M3 |
 | S | Item revision history (restore old versions) | M3 |
 | S | Scheduled encrypted backups to user-chosen storage (local folder, WebDAV, S3-compatible) | M8 |
@@ -133,6 +135,7 @@ The problem: `youtube.com`, `youtu.be`, `m.youtube.com`, `accounts.google.com` a
 | S | Community-contributed equivalence list via PRs with review rules (both domains provably same owner) | M2 |
 | S | Safari extension, after its own key-custody ADR; not in M3, but with the Apple repository's M7 work or later ([ADR 0019](adr/0019-native-clients.md) §2.2) | M7 or later |
 | C | Heuristic multi-step login form support (username page → password page) | M3 |
+| S | Autocomplete-aware autofill: TOTP-code fill with strict detection; custom fields with an autocomplete id (fill and opt-in save) ([ADR 0076](adr/0076-autocomplete-driven-autofill.md); owner decision of 2026-10-22) | M3 |
 | C | Auto-suggest adding a domain to an equivalence group when user manually fills | post-1.0 |
 | W | Fetching website favicons through our server without privacy controls (leaks which sites you use) — must be optional / proxied / cached anonymously | M3 design |
 
@@ -171,6 +174,8 @@ On-device sync (M4) was removed on 2026-09-27 and is parked (last row). Its conf
 
 ### 4.7 Public sharing (M5)
 
+> **Scheduled after the v1.0 release** (owner decision of 2026-10-22). Nothing in this section is part of v1.0.
+
 Model: 1Password-style share links. The share is an **encrypted snapshot**, not a live link to the item.
 
 | Pri | Item | When |
@@ -183,16 +188,19 @@ Model: 1Password-style share links. The share is an **encrypted snapshot**, not 
 | S | Restrict to specific email addresses, verified by one-time code | M5 |
 | S | Optional extra passphrase on share (out-of-band) | M5 |
 | S | "Send"-style arbitrary text/file share (Bitwarden Send equivalent) | M5 |
+| S | Share one item from the Personal vault: link share (M5) or move/copy into a shared vault (M9) ([ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) §C) | M5 / M9 |
 | C | Recipient can "save to my rizzy-vault" in one click | M9 |
 | W | Live shared items between two personal accounts (that is what shared vaults in M9 are for) | M9 |
 
 ### 4.8 Aliases & email receiving (M6)
 
+> **Scheduled after the v1.0 release** (owner decision of 2026-10-22). Nothing in this section is part of v1.0, and that includes the `smtp` deployment profile (§4.9) and the mail-ingress spike (§7).
+
 This is the most operationally expensive feature in the whole plan. Read the risks section before starting it.
 
 | Pri | Item | When |
 |---|---|---|
-| M | Generate alias identity (random name, username, alias address, password) from item creation and from the extension on sign-up forms | M6 |
+| M | Generate alias identity (random name, username, alias address, password) from item creation and from the extension on sign-up forms; builds on the M3 identity generator ([ADR 0079](adr/0079-identity-generator.md) §9) | M6 |
 | M | Inbound SMTP receiver (Rust, e.g. `mail-parser` + own SMTP listener, or front with Postfix/Haraka and hand off) — **receive only** | M6 |
 | M | Catch-all per configured domain; alias → owner lookup without revealing which aliases exist (no SMTP user enumeration) | M6 |
 | M | **Encrypt at ingress** with the alias owner's public key; server stores ciphertext only; plaintext held in RAM for the minimum time | M6 |
@@ -250,7 +258,7 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 
 | Item |
 |---|
-| Shared vaults with per-member permissions (view / edit / manage) |
+| Shared vaults with per-member permissions (view / edit / manage) ([ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) Part B; never the Personal vault) |
 | Family organization (up to N users), invites |
 | Emergency access (trusted contact can request access after a waiting period) |
 | Multiple / custom mail domains for aliases |

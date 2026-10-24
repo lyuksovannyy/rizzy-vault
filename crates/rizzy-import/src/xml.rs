@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! A bounded, non-validating XML reader into a tree of zeroizing strings, for the `KeePass` XML
 //! export.
 //!

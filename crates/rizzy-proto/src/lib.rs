@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-proto` — the `/api/v1` request and response types of rizzy-vault (roadmap M1,
 //! [ADR 0002] point 3, [ADR 0016] §3).
 //!
@@ -51,7 +53,10 @@
 //! | [`account`] | CRYPTO.md §10.1, §10.2, §11.2 step 7, §11.3, §11.4; ADR 0012 §7 healing steps 1–3 | Account state, enrolment, the web vault's kind-4 certificate, bundles, device grants |
 //! | [`change`] | CRYPTO.md §11 "Replacing credentials", §11.3 step 5, §11.5, §11.8 steps 0–2, §11.9 steps 5–6; ADR 0012 §6 | OPAQUE re-registration, the atomic commit of a credential, settings, device or key-rotation change (ADR 0025), suspension |
 //! | [`recovery`] | CRYPTO.md §11.9; ADR 0008 | Recovery start, cancel and complete |
+//! | [`attachments`] | ADR 0054 §6 | Creating, uploading, downloading and deleting encrypted attachments |
+//! | [`session`] | CRYPTO.md §5.10; ADR 0075 | Listing and ending the account's sessions |
 //! | [`totp`] | CRYPTO.md §5.10, §5.11, §11.15 | Server-side 2FA enrolment and removal |
+//! | [`webauthn`] | CRYPTO.md §11.17; ADRs 0058, 0077 | Security keys as a server-side second factor: enrolment, list, removal, login |
 //! | [`vault`] | ADR 0012 §3, §7; ADR 0021 §2, §4, §9 | Upload, Fetch and the healing request |
 //!
 //! # The HTTP conventions
@@ -96,16 +101,21 @@
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
 pub mod account;
+pub mod attachments;
 pub mod auth;
+pub mod breach;
 pub mod change;
 pub mod error;
 pub mod http;
+pub mod icons;
 pub mod limits;
 pub mod meta;
 pub mod objects;
 pub mod recovery;
+pub mod session;
 pub mod totp;
 pub mod vault;
+pub mod webauthn;
 pub mod wire;
 
 #[cfg(test)]

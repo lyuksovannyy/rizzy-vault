@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Minimal ambient WebExtension types for exactly the APIs this extension calls (ADR 0036 §2,
 // §4). Deliberately not `@types/chrome`: that package types the whole Chrome extension surface,
 // most of it unused here, and pulling it in is a dependency-review question for the owner

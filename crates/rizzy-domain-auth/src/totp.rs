@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Server-side 2FA with TOTP (CRYPTO.md §5.10 "Server-side 2FA", §5.11, §11.15; INV-8).
 //!
 //! - **Secrets.** rizzy-vault issues them: 20 random bytes from the injected CSPRNG
@@ -147,9 +149,11 @@ impl<V: VaultPort> AuthService<V> {
         Ok(true)
     }
 
-    /// The second factor of a login whose KE3 verified (CRYPTO.md §11.2 step 5, §11.15), in the
-    /// login's transaction: `true` when the account has no confirmed enrolment, or `code`
-    /// matches one (its step is then stored).
+    /// The second factor of a login whose KE3 verified (CRYPTO.md §11.2 step 5, §11.15,
+    /// §11.17), in the login's transaction: `true` when the account has neither a confirmed TOTP
+    /// enrolment nor a security key, or `code` matches a confirmed TOTP enrolment (its step is
+    /// then stored). Either kind satisfies the second factor on its own (ADR 0058 point 3); a
+    /// security key is checked only through `webauthn/login/finish`.
     pub(crate) async fn check_second_factor(
         &self,
         tx: &mut WriteTx,
@@ -163,7 +167,7 @@ impl<V: VaultPort> AuthService<V> {
             .filter(|s| s.last_step.is_some())
             .collect();
         if confirmed.is_empty() {
-            return Ok(true);
+            return Ok(crate::webauthn::count(tx, account_id).await? == 0);
         }
         let Some(code) = code else {
             return Ok(false);

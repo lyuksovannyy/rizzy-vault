@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The store transaction's rules, shared by upload and restore healing (ADR 0012 §7 "Upload" as
 //! ADR 0021 §9 supersedes it in part; ADR 0021 §2, §3 "Where it runs").
 //!
@@ -15,12 +17,16 @@
 //! 3. the author's revocation, suspension and expiry rules;
 //! 4. ops: the `vault_prev_seq` chain check; snapshots: [`check_snapshot`];
 //! 5. the stale-epoch check with its exemptions;
-//! 6. the insert, with the clamped VV and store sequence for a snapshot, and the item queued for
-//!    `worker`.
+//! 6. for an ordinary upload, the account's storage quota ([`Session::over_quota`], ADR 0048 §3):
+//!    refused when the account's counted bytes plus the record's would pass the quota plus the
+//!    upload limit; never for a healing request;
+//! 7. the insert, with the clamped VV and store sequence for a snapshot, and the item queued for
+//!    `worker`. The record's counted bytes advance [`Session::bytes_used`], written to
+//!    `rizzy-storage`'s counter once, at commit ([`Session::settle`]).
 
 use std::collections::BTreeSet;
 
-use rizzy_core::ids::{ItemId, VaultId};
+use rizzy_core::ids::{AccountId, ItemId, VaultId};
 use rizzy_proto::error::ErrorCode;
 use rizzy_storage::WriteTx;
 use rizzy_sync::compaction::{CertificateExpiry, VaultChains, check_snapshot, clamp};
@@ -30,6 +36,7 @@ use crate::authors::{AuthorStatus, Authors};
 use crate::error::VaultError;
 use crate::intake::{Signed, VerifiedOp, VerifiedSnapshot};
 use crate::repo::{self, StoredRecord, VaultRow, WrapRow};
+use crate::usage::{charge, op_bytes, snapshot_bytes};
 
 /// Why one record is refused. Each maps to one [`ErrorCode`] ([`Refusal::code`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +53,9 @@ pub(crate) enum Refusal {
     /// The session may not make this repair (ADR 0032 §3: a self-grant that lags is repaired only
     /// over a device session of a durable device of the held device set).
     Unauthorized,
+    /// The record would push the account's counted bytes past its quota and headroom (ADR 0048
+    /// §3).
+    Quota,
 }
 
 impl Refusal {
@@ -57,6 +67,7 @@ impl Refusal {
             Self::PrevSeq => ErrorCode::PrevSeqMismatch,
             Self::Stale => ErrorCode::StaleEpoch,
             Self::Unauthorized => ErrorCode::Unauthorized,
+            Self::Quota => ErrorCode::QuotaExceeded,
         }
     }
 }
@@ -64,6 +75,8 @@ impl Refusal {
 /// The state one store transaction works on.
 #[derive(Debug)]
 pub(crate) struct Session {
+    /// The account, whose lock the transaction holds.
+    pub(crate) account_id: AccountId,
     /// The vault.
     pub(crate) vault_id: VaultId,
     /// Its row, read under the account lock.
@@ -78,6 +91,45 @@ pub(crate) struct Session {
     pub(crate) now_sql: i64,
     /// The items whose snapshots were stored, to publish after commit.
     pub(crate) queued: BTreeSet<ItemId>,
+    /// The account's counted bytes (ADR 0048 §2): read under the lock when the session opened,
+    /// advanced by every record stored since.
+    pub(crate) bytes_used: u64,
+    /// [`Session::bytes_used`] when the session opened.
+    pub(crate) bytes_at_open: u64,
+    /// The most counted bytes a record may leave the account with: the quota plus its headroom
+    /// for an ordinary upload, `None` for a healing request, which is never refused for quota.
+    pub(crate) byte_limit: Option<u64>,
+}
+
+impl Session {
+    /// Whether storing `added` counted bytes would pass the session's limit (ADR 0048 §3).
+    pub(crate) fn over_quota(&self, added: u64) -> bool {
+        self.byte_limit
+            .is_some_and(|limit| self.bytes_used.saturating_add(added) > limit)
+    }
+
+    /// Writes the bytes stored since the session opened to the account's counter, once, before
+    /// commit (ADR 0048 §3).
+    pub(crate) async fn settle(&self, tx: &mut WriteTx) -> Result<(), VaultError> {
+        let delta = i128::from(self.bytes_used) - i128::from(self.bytes_at_open);
+        let delta = i64::try_from(delta).unwrap_or(if delta < 0 { i64::MIN } else { i64::MAX });
+        charge(tx, self.account_id, delta, self.now_sql).await
+    }
+
+    /// The counted bytes `op` adds once stored ([`store_op`] drops a wrap below the current
+    /// epoch).
+    pub(crate) fn op_bytes(&self, op: &VerifiedOp) -> u64 {
+        op_bytes(op, current_wrap(self, op.header.vault_key_epoch))
+    }
+
+    /// The counted bytes `snapshot` adds once stored ([`store_snapshot`] drops a wrap below the
+    /// current epoch).
+    pub(crate) fn snapshot_bytes(&self, snapshot: &VerifiedSnapshot) -> u64 {
+        snapshot_bytes(
+            snapshot,
+            current_wrap(self, snapshot.header.vault_key_epoch),
+        )
+    }
 }
 
 /// The answer of "Already stored" (ADR 0021 §9).
@@ -274,6 +326,7 @@ pub(crate) async fn store_op(
         op
     };
     repo::insert_op(tx.conn(), session.vault_id, op, session.now_sql).await?;
+    session.bytes_used = session.bytes_used.saturating_add(op_bytes(op, true));
     session.heads.add(op.header.dot);
     fill_wrap(
         tx,
@@ -321,6 +374,9 @@ pub(crate) async fn store_snapshot(
         session.now_sql,
     )
     .await?;
+    session.bytes_used = session
+        .bytes_used
+        .saturating_add(snapshot_bytes(snapshot, true));
     repo::advance_store_seq(tx.conn(), session.vault_id).await?;
     session.vault.next_store_seq = store_seq.checked_add(1).ok_or(VaultError::Corrupt {
         what: "vault_vaults.next_store_seq overflows",

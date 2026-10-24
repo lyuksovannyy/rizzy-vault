@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `decideClick` (`inline-menu/decide-click.ts`): the exact decision whose hardcoded-`true`
 // regression (caught only by code review, not by a test, since nothing exercised it directly)
 // is why this file exists at all. ADR 0037 §5.

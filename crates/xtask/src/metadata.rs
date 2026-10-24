@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The resolved dependency graph, read from `cargo metadata --format-version 1` JSON.
 //!
 //! Only the fields the checks need are kept. The JSON is read through `serde_json::Value`, and

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `handleContentScriptRequest`'s passkey cases (ADR 0039 §2) and `handlePasskeyCeremonyApproval`
 // (ADR 0040's pattern applied to a ceremony): same style as `content-handler.test.ts` — no
 // session is ever set up in this module's test environment, so every case that would otherwise
@@ -84,6 +86,7 @@ describe("handlePasskeyCeremonyApproval", () => {
     const ext = { tabs: { sendMessage: vi.fn(async () => undefined) } } as unknown as WebExtNamespace;
     const response = await handlePasskeyCeremonyApproval(ext, 1, "not-a-url", {
       type: "passkey_ceremony_approved",
+      instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962",
       ceremonyToken: "tok-1",
     });
     expect(response).toEqual({ type: "content_error", code: "passkey_ceremony: the sender's tab URL does not parse" });
@@ -94,6 +97,7 @@ describe("handlePasskeyCeremonyApproval", () => {
     const ext = { tabs: { sendMessage } } as unknown as WebExtNamespace;
     const response = await handlePasskeyCeremonyApproval(ext, 1, "https://example.com/login", {
       type: "passkey_ceremony_approved",
+      instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962",
       ceremonyToken: "no-such-token",
     });
     expect(response).toEqual({ type: "passkey_ceremony_dispatched" });
@@ -105,6 +109,7 @@ describe("handlePasskeyCeremonyApproval", () => {
     const ext = { tabs: { sendMessage } } as unknown as WebExtNamespace;
     const response = await handlePasskeyCeremonyApproval(ext, 1, "https://example.com/login", {
       type: "passkey_ceremony_declined",
+      instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962",
       ceremonyToken: "tok-1",
     });
     expect(response).toEqual({ type: "passkey_ceremony_dispatched" });

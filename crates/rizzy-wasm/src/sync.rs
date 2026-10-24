@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The sync step driver of a web-vault session: the steps `rv sync` takes (ADR 0012 §7; ADR
 //! 0021 §9; `rizzy-cli`'s `Device::sync`), one request at a time, for JavaScript to carry.
 //!
@@ -35,12 +37,20 @@
 //! - **An older copy of this device's history** cannot exist for an ephemeral device; if the
 //!   server shows one anyway (`own_history_ahead`, `own_conflict`), the vault becomes read-only
 //!   and the sync ends with `device_state_outdated`, as in `rv`.
-//! - **One healing round per sync**, as `rv` does; a second need is `cannot_heal`.
+//! - **One healing round per vault and sync**, as `rv` does; a second need is `cannot_heal`.
+//! - **Every vault, one after the other** ([ADR 0081] §A7): after the account answer the vault
+//!   set follows the catalog (`crate::vaults`: new vaults get a driver, dropped ones are
+//!   removed), then each open vault runs Fetch → heal → Upload → Fetch in turn, the Personal
+//!   vault first. A `client_too_old` refusal of one vault's request marks only that vault as
+//!   needing an update (§A12) and the next vault follows; any other error ends the sync.
+//!
+//! [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
 
 use rizzy_client::ClientError;
 use rizzy_client::account::VerifiedAccount;
 use rizzy_client::device::UnlockedDevice;
 use rizzy_client::login::{verify_web_refresh, web_account_query};
+use rizzy_client::rizzy_core::ids::VaultId;
 use rizzy_client::rizzy_proto::account::AccountView;
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
@@ -53,6 +63,7 @@ use serde::Serialize;
 use crate::error::{CoreError, CoreResult, VAULT_KEY_ROTATED, WRONG_STATE};
 use crate::http::{self, HttpRequest};
 use crate::rng::Rng;
+use crate::vaults::VaultSet;
 
 /// How a step signs the request it builds (module docs; `crate::device`'s module docs, "Sync
 /// and items"): a bearer-only OPAQUE session (the web vault) or a device-authenticated one,
@@ -114,8 +125,8 @@ enum Phase {
 
 /// What a step works on: the session's parts, borrowed.
 pub(crate) struct Ctx<'a> {
-    /// The vault.
-    pub(crate) vault: &'a mut VaultSync,
+    /// The vaults (ADR 0081 §A7: a sync round fetches every vault in the directory).
+    pub(crate) vaults: &'a mut VaultSet,
     /// The verified account of the last login or refresh.
     pub(crate) account: &'a mut VerifiedAccount,
     /// The account's authors.
@@ -135,8 +146,15 @@ pub(crate) struct SyncDriver {
     phase: Phase,
     /// The outstanding request.
     pending: Option<HttpRequest>,
-    /// Whether this sync already sent a healing request.
+    /// Whether this sync already sent a healing request for the current vault.
     healed: bool,
+    /// The vaults still to sync, in order (ADR 0081 §A7).
+    queue: Vec<VaultId>,
+    /// The vault being synced.
+    current: Option<VaultId>,
+    /// The vaults the last account answer dropped (deleted elsewhere, ADR 0081 §A5), for a
+    /// host with a cache to delete their rows.
+    dropped: Vec<VaultId>,
 }
 
 impl Default for SyncDriver {
@@ -145,6 +163,9 @@ impl Default for SyncDriver {
             phase: Phase::Idle,
             pending: None,
             healed: false,
+            queue: Vec::new(),
+            current: None,
+            dropped: Vec::new(),
         }
     }
 }
@@ -164,6 +185,8 @@ impl SyncDriver {
             return Err(CoreError::new(WRONG_STATE));
         }
         self.healed = false;
+        self.queue.clear();
+        self.current = None;
         let query = web_account_query(ctx.account);
         self.pending = Some(
             ctx.signer
@@ -200,8 +223,49 @@ impl SyncDriver {
         if result.is_err() {
             self.phase = Phase::Idle;
             self.pending = None;
+            self.queue.clear();
+            self.current = None;
         }
         result
+    }
+
+    /// The vaults the account answers of this sync dropped, since the last call.
+    pub(crate) fn take_dropped(&mut self) -> Vec<VaultId> {
+        core::mem::take(&mut self.dropped)
+    }
+
+    /// The driver of the vault being synced.
+    fn vault<'v>(&self, vaults: &'v mut VaultSet) -> CoreResult<&'v mut VaultSync> {
+        vaults.get_mut(self.current.ok_or(CoreError::new(WRONG_STATE))?)
+    }
+
+    /// The next vault's Fetch, or the end of the sync after the last vault.
+    fn next_vault(&mut self, ctx: &mut Ctx<'_>) -> CoreResult<()> {
+        loop {
+            if self.queue.is_empty() {
+                self.current = None;
+                self.phase = Phase::Idle;
+                return Ok(());
+            }
+            let vault_id = self.queue.remove(0);
+            if ctx.vaults.get(vault_id).is_err() {
+                continue;
+            }
+            self.current = Some(vault_id);
+            self.healed = false;
+            return self.fetch(ctx, AfterFetch::HealOrUpload);
+        }
+    }
+
+    /// ADR 0081 §A12: a `client_too_old` refusal of one vault's request marks only that vault
+    /// "needs an update" and the sync goes on with the next vault.
+    fn too_old(&mut self, ctx: &mut Ctx<'_>, status: u16, body: &[u8]) -> Option<CoreResult<()>> {
+        if http::server_code(status, body) != Some(ErrorCode::ClientTooOld) {
+            return None;
+        }
+        let vault_id = self.current?;
+        ctx.vaults.mark_too_new(vault_id);
+        Some(self.next_vault(ctx))
     }
 
     /// Ends the running sync without an answer: the host could not carry the outstanding
@@ -219,12 +283,16 @@ impl SyncDriver {
     ///   changes, the vault stays read-only, and the next sync's Fetch shows whether the server
     ///   stored it; an own op it carried is then acknowledged through the upload path ("already
     ///   stored"), as `rizzy-client`'s healing docs describe for a lost healing answer.
-    pub(crate) fn abort(&mut self, vault: &mut VaultSync) {
-        if self.phase == Phase::Heal {
+    pub(crate) fn abort(&mut self, vaults: &mut VaultSet) {
+        if self.phase == Phase::Heal
+            && let Ok(vault) = self.vault(vaults)
+        {
             vault.healing_refused();
         }
         self.phase = Phase::Idle;
         self.pending = None;
+        self.queue.clear();
+        self.current = None;
     }
 
     /// One answer in `phase`.
@@ -240,14 +308,20 @@ impl SyncDriver {
             Phase::Idle => Err(CoreError::new(WRONG_STATE)),
             Phase::Account => {
                 let view: AccountView = http::json(status, body)?;
-                adopt_account(ctx, &view)?;
-                self.fetch(ctx, AfterFetch::HealOrUpload)
+                let dropped = adopt_account(ctx, &view)?;
+                self.dropped.extend(dropped);
+                self.queue = ctx.vaults.sync_order();
+                self.next_vault(ctx)
             }
             Phase::Fetch(then) => {
+                if let Some(next) = self.too_old(ctx, status, body) {
+                    return next;
+                }
                 let response: FetchResponse = http::json(status, body)?;
-                let outcome = ctx.vault.apply_fetch(&*ctx.authors, &response, now_ms)?;
+                let vault = self.vault(ctx.vaults)?;
+                let outcome = vault.apply_fetch(&*ctx.authors, &response, now_ms)?;
                 if outcome.own_history_ahead {
-                    ctx.vault.set_read_only(true);
+                    vault.set_read_only(true);
                     return Err(ClientError::DeviceStateOutdated.into());
                 }
                 if !response.complete {
@@ -256,33 +330,37 @@ impl SyncDriver {
                 match then {
                     AfterFetch::HealOrUpload => self.heal_or_upload(ctx),
                     AfterFetch::CheckHealed => {
-                        if ctx.vault.needs_healing() {
+                        if self.vault(ctx.vaults)?.needs_healing() {
                             return Err(ClientError::CannotHeal.into());
                         }
                         self.upload_next(ctx)
                     }
-                    AfterFetch::Done => {
-                        self.phase = Phase::Idle;
-                        Ok(())
-                    }
+                    AfterFetch::Done => self.next_vault(ctx),
                 }
             }
             Phase::Heal => {
                 let response: HealingResponse = match http::json(status, body) {
                     Ok(response) => response,
                     Err(e) => {
-                        ctx.vault.healing_refused();
+                        self.vault(ctx.vaults)?.healing_refused();
+                        if let Some(next) = self.too_old(ctx, status, body) {
+                            return next;
+                        }
                         return Err(e);
                     }
                 };
-                ctx.vault.apply_healing_response(&response)?;
+                self.vault(ctx.vaults)?.apply_healing_response(&response)?;
                 self.fetch(ctx, AfterFetch::CheckHealed)
             }
             Phase::Upload => {
+                if let Some(next) = self.too_old(ctx, status, body) {
+                    return next;
+                }
                 let response: UploadResponse = http::json(status, body)?;
-                let outcome = ctx.vault.apply_upload_response(&response)?;
+                let vault = self.vault(ctx.vaults)?;
+                let outcome = vault.apply_upload_response(&response)?;
                 if outcome.own_conflict {
-                    ctx.vault.set_read_only(true);
+                    vault.set_read_only(true);
                     return Err(ClientError::DeviceStateOutdated.into());
                 }
                 if outcome.rejected.contains(&ErrorCode::StaleEpoch) {
@@ -298,7 +376,7 @@ impl SyncDriver {
 
     /// Sends a Fetch page; `then` follows the complete Fetch.
     fn fetch(&mut self, ctx: &mut Ctx<'_>, then: AfterFetch) -> CoreResult<()> {
-        let request = ctx.vault.fetch_request()?;
+        let request = self.vault(ctx.vaults)?.fetch_request()?;
         self.pending = Some(
             ctx.signer
                 .build(paths::VAULT_FETCH, &request, ctx.unlocked)?,
@@ -310,13 +388,13 @@ impl SyncDriver {
     /// After a complete Fetch: a healing request when the server is behind and this sync has
     /// not healed yet, else the uploads.
     fn heal_or_upload(&mut self, ctx: &mut Ctx<'_>) -> CoreResult<()> {
-        if !ctx.vault.needs_healing() {
+        if !self.vault(ctx.vaults)?.needs_healing() {
             return self.upload_next(ctx);
         }
         if self.healed {
             return Err(ClientError::CannotHeal.into());
         }
-        match ctx.vault.healing_request()? {
+        match self.vault(ctx.vaults)?.healing_request()? {
             Some(request) => {
                 self.healed = true;
                 self.pending = Some(
@@ -332,7 +410,8 @@ impl SyncDriver {
 
     /// The next upload, or the final Fetch when nothing is queued.
     fn upload_next(&mut self, ctx: &mut Ctx<'_>) -> CoreResult<()> {
-        match ctx.vault.upload_request(ctx.rng, ctx.unlocked) {
+        let vault = self.vault(ctx.vaults)?;
+        match vault.upload_request(ctx.rng, ctx.unlocked) {
             Ok(Some(request)) => {
                 self.pending = Some(ctx.signer.build(
                     paths::VAULT_UPLOAD,
@@ -353,32 +432,24 @@ impl SyncDriver {
     }
 }
 
-/// Verifies a refreshed account answer and adopts it: the authors, and the vault key at a new
-/// epoch (module docs, "The account first"). A rollback or fork makes the vault read-only.
-fn adopt_account(ctx: &mut Ctx<'_>, view: &AccountView) -> CoreResult<()> {
+/// Verifies a refreshed account answer and adopts it: the authors, and the vault set brought in
+/// step with the account's catalog (module docs, "The account first"; `crate::vaults`): each
+/// held vault's key at a new epoch, new vaults, dropped vaults (returned). A rollback or fork
+/// makes the vaults read-only.
+fn adopt_account(ctx: &mut Ctx<'_>, view: &AccountView) -> CoreResult<Vec<VaultId>> {
     let mut fresh = match verify_web_refresh(ctx.account, ctx.unlocked, view) {
         Ok(fresh) => fresh,
         Err(e @ (ClientError::Rollback | ClientError::Fork)) => {
-            ctx.vault.set_read_only(true);
+            for vault in ctx.vaults.all_mut() {
+                vault.set_read_only(true);
+            }
             return Err(e.into());
         }
         Err(e) => return Err(e.into()),
     };
     let authors = Authors::from_account(&fresh)?;
-    let key = fresh
-        .take_vault_key(ctx.vault.vault_id())
-        .ok_or(ClientError::InvalidServerResponse)?;
-    // ADR 0025 §4: a second key at a seen epoch is a fork (the vault is now read-only), a key
-    // below the held epoch a rollback; either way nothing of the answer is adopted.
-    match ctx.vault.adopt_vault_key(key) {
-        Ok(()) => {}
-        Err(e @ ClientError::Rollback) => {
-            ctx.vault.set_read_only(true);
-            return Err(e.into());
-        }
-        Err(e) => return Err(e.into()),
-    }
+    let dropped = ctx.vaults.reconcile(&mut fresh, ctx.unlocked)?;
     *ctx.authors = authors;
     *ctx.account = fresh;
-    Ok(())
+    Ok(dropped)
 }

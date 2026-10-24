@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The compaction job `worker` runs (ADR 0021 §3 "Where it runs", §7).
 //!
 //! `api` stores a snapshot with its clamped VV and store sequence and queues its item
@@ -24,6 +26,8 @@ use crate::VaultDomain;
 use crate::authors::DeviceDirectory;
 use crate::error::VaultError;
 use crate::repo;
+use crate::to_sql_time;
+use crate::usage::{STATEMENT_FRAME, charge, credit};
 
 /// What one compaction run did to one item.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -36,7 +40,8 @@ pub struct CompactionReport {
 
 impl<D: DeviceDirectory> VaultDomain<D> {
     /// Runs R1 then R3 on one item, in one transaction under the account lock, and dequeues it
-    /// (module docs). An item of a vault that no longer exists is only dequeued.
+    /// (module docs). An item of a vault that no longer exists is only dequeued. What it frees
+    /// is credited to the account's storage counter, stamped `now_ms` (ADR 0048 §3).
     ///
     /// # Errors
     /// [`VaultError::Storage`] or [`VaultError::Corrupt`]; nothing is changed then, and the item
@@ -45,7 +50,9 @@ impl<D: DeviceDirectory> VaultDomain<D> {
         &self,
         vault_id: VaultId,
         item_id: ItemId,
+        now_ms: u64,
     ) -> Result<CompactionReport, VaultError> {
+        let now_sql = to_sql_time(now_ms)?;
         let mut tx = self.database().begin_write().await?;
         let Some(vault) = repo::vault(tx.conn(), vault_id).await? else {
             repo::dequeue(tx.conn(), vault_id, item_id).await?;
@@ -58,12 +65,27 @@ impl<D: DeviceDirectory> VaultDomain<D> {
         let plan = plan_worker(&snapshots, &ops).map_err(|_| VaultError::Corrupt {
             what: "an item's retained snapshots or ops repeat a key",
         })?;
+        // ADR 0048 §3: each deleted body's and dropped snapshot's length is read before the
+        // delete and credited in this transaction, before the dequeue.
+        let mut freed: u64 = 0;
         for &dot in &plan.delete_bodies {
+            let body = repo::op_body_len(tx.conn(), vault_id, item_id, dot).await?;
+            freed = freed.saturating_add(body);
             repo::delete_body(tx.conn(), vault_id, item_id, dot).await?;
+        }
+        if !plan.drop_snapshots.is_empty() {
+            let sizes = repo::item_snapshot_sizes(tx.conn(), vault_id, item_id).await?;
+            for store_seq in &plan.drop_snapshots {
+                let stored = sizes.get(store_seq).copied().unwrap_or(0);
+                let counted =
+                    u64::try_from(STATEMENT_FRAME.saturating_add(stored)).unwrap_or(u64::MAX);
+                freed = freed.saturating_add(counted);
+            }
         }
         for &store_seq in &plan.drop_snapshots {
             repo::delete_snapshot(tx.conn(), vault_id, item_id, store_seq).await?;
         }
+        charge(&mut tx, vault.account_id, credit(freed), now_sql).await?;
         repo::dequeue(tx.conn(), vault_id, item_id).await?;
         tx.commit().await?;
         Ok(CompactionReport {
@@ -72,7 +94,8 @@ impl<D: DeviceDirectory> VaultDomain<D> {
         })
     }
 
-    /// Compacts up to `max_items` queued items, oldest first, each in its own transaction.
+    /// Compacts up to `max_items` queued items, oldest first, each in its own transaction, at
+    /// `now_ms` ([`VaultDomain::compact_item`]).
     ///
     /// **Failures are isolated per item.** An item whose compaction fails (a damaged row, a
     /// database error) is rolled back, moved behind every other queued item in its own write
@@ -84,13 +107,17 @@ impl<D: DeviceDirectory> VaultDomain<D> {
     /// # Errors
     /// [`VaultError::Storage`] or [`VaultError::Corrupt`] only when the queue cannot be read, or
     /// a failed item cannot be moved back; the items processed before stay compacted.
-    pub async fn run_compaction(&self, max_items: usize) -> Result<CompactionRun, VaultError> {
+    pub async fn run_compaction(
+        &self,
+        max_items: usize,
+        now_ms: u64,
+    ) -> Result<CompactionRun, VaultError> {
         let mut read = self.database().begin_read().await?;
         let queued = repo::queued(read.conn(), max_items).await?;
         read.finish().await?;
         let mut run = CompactionRun::default();
         for &(vault_id, item_id) in &queued {
-            match self.compact_item(vault_id, item_id).await {
+            match self.compact_item(vault_id, item_id, now_ms).await {
                 Ok(report) => {
                     run.processed = run.processed.saturating_add(1);
                     run.report.bodies_deleted = run

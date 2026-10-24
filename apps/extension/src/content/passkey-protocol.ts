@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The `window.postMessage` protocol between the page-world shim (`passkey-page-shim.ts`, running
 // in the untrusted page's own main-world JS realm) and the isolated-world relay content script
 // (`passkey-relay.ts`) that shares its `window`/DOM with that page (ADR 0039 §2). Unlike

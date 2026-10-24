@@ -1,6 +1,8 @@
-// How the web vault lays out items: the fixed fields of each writable M1 item type (ADR 0018
-// §7), their labels, and the grouping of a field list into fixed fields, URIs, custom fields
-// and tags. Which fields are concealed is the core's answer (`FieldView.concealed`), never
+// SPDX-License-Identifier: AGPL-3.0-only
+
+// How the web vault lays out items: the fixed fields of each writable item type (the M1 types of
+// ADR 0018 §7 and the M3 types of ADR 0055 §1), their labels, and the grouping of a field list
+// into fixed fields, URIs, custom fields and tags. Which fields are concealed is the core's answer (`FieldView.concealed`), never
 // this module's; `secret` below only picks the input used to *type* a new value.
 import type { FieldView, ItemChange, ItemType } from "@rizzy-vault/core";
 
@@ -10,17 +12,58 @@ export interface FixedField {
   readonly label: string;
   /** Typed in the secret-field component (INV-68). */
   readonly secret?: boolean;
-  /** A multi-line text. */
+  /** A multi-line text (a secret one is a multi-line secret field: an SSH private key). */
   readonly multiline?: boolean;
+  /** What an empty field means, shown as the input's placeholder (`ssh.port`: 22). */
+  readonly placeholder?: string;
+  /** A Text key with its own control (ADR 0079 §1, §10): `sex` is a Male/Female select and
+   * `date` a date input, each only while the stored value is one they can show; any other text
+   * stays a text input, shown and edited as entered. */
+  readonly kind?: "sex" | "date";
 }
 
-/** The item types this web vault creates (the writable M1 types of ADR 0018 §7). */
-export const CREATABLE_TYPES: readonly { readonly type: ItemType; readonly label: string }[] = [
-  { type: "login", label: "Login" },
-  { type: "note", label: "Secure note" },
-  { type: "card", label: "Card" },
-  { type: "identity", label: "Identity" },
+/** A type this web vault creates: its menu and sidebar label, and the noun of "New …". */
+export interface CreatableType {
+  readonly type: ItemType;
+  readonly label: string;
+  readonly noun: string;
+}
+
+/** The item types this web vault creates: the writable M1 types of ADR 0018 §7 and the M3 types
+ * of ADR 0055 §2. Not the Bank account type ADR 0078 §1 retired: an item of it shows as
+ * {@link UNSUPPORTED_ITEM}, its `bank.` fields concealed (§2). */
+export const CREATABLE_TYPES: readonly CreatableType[] = [
+  { type: "login", label: "Login", noun: "login" },
+  { type: "note", label: "Secure note", noun: "note" },
+  { type: "card", label: "Card", noun: "card" },
+  { type: "identity", label: "Identity", noun: "identity" },
+  { type: "ssh-key", label: "SSH key", noun: "SSH key" },
+  { type: "api-credential", label: "API credential", noun: "API credential" },
+  { type: "software-license", label: "Software license", noun: "software license" },
+  { type: "wifi", label: "Wi-Fi", noun: "Wi-Fi network" },
 ];
+
+/** What an item of a type this build does not support shows instead of its type (ADR 0018 §8:
+ * "Unsupported item, update rizzy-vault"). Trash, restore and purge still work; field edits are
+ * not offered ({@link canEditFields}). */
+export const UNSUPPORTED_ITEM = "Unsupported item, update rizzy-vault";
+
+/** The label of an item's type, for the item view; {@link UNSUPPORTED_ITEM} for one this build
+ * does not create (ADR 0018 §8, §11: a newer client's type, such as the M3 types were to a build
+ * before ADR 0055). */
+export function typeLabel(type: ItemType | "unknown"): string {
+  return CREATABLE_TYPES.find((t) => t.type === type)?.label ?? UNSUPPORTED_ITEM;
+}
+
+/** Whether the fields of an item of `type` may be edited: only for a type this build supports
+ * (ADR 0018 §8, "field edits are not offered"; the core refuses them too). */
+export function canEditFields(type: ItemType | "unknown"): boolean {
+  return CREATABLE_TYPES.some((t) => t.type === type);
+}
+
+/** What an SSH key without `ssh.port` uses: port 22, a display default that is never stored
+ * (ADR 0055 §1; `rizzy-core`'s `item::schema::SSH_DEFAULT_PORT`). */
+export const SSH_DEFAULT_PORT = "22";
 
 const NAME: FixedField = { key: "item.name", label: "Title" };
 const NOTES: FixedField = { key: "item.notes", label: "Notes", multiline: true };
@@ -52,6 +95,9 @@ export const FIXED_FIELDS: Readonly<Partial<Record<ItemType, readonly FixedField
     { key: "identity.first_name", label: "First name" },
     { key: "identity.middle_name", label: "Middle name" },
     { key: "identity.last_name", label: "Last name" },
+    // ADR 0079 §1: Text keys; a picked value is exactly `male`/`female` or `YYYY-MM-DD`.
+    { key: "identity.sex", label: "Sex", kind: "sex" },
+    { key: "identity.birthday", label: "Birthday", kind: "date" },
     { key: "identity.company", label: "Company" },
     { key: "identity.email", label: "Email" },
     { key: "identity.phone", label: "Phone" },
@@ -68,13 +114,67 @@ export const FIXED_FIELDS: Readonly<Partial<Record<ItemType, readonly FixedField
     { key: "identity.drivers_license", label: "Driver's license" },
     NOTES,
   ],
+  // ADR 0055 §1. `secret` marks the eight keys the core conceals (§4); the core's
+  // `FieldView.concealed` still decides how a stored value is shown.
+  "ssh-key": [
+    NAME,
+    { key: "ssh.host", label: "Host" },
+    { key: "ssh.port", label: "Port", placeholder: SSH_DEFAULT_PORT },
+    { key: "ssh.username", label: "Username" },
+    { key: "ssh.private_key", label: "Private key", secret: true, multiline: true },
+    { key: "ssh.public_key", label: "Public key" },
+    { key: "ssh.passphrase", label: "Passphrase", secret: true },
+    NOTES,
+  ],
+  "api-credential": [
+    NAME,
+    { key: "api.name", label: "Service" },
+    { key: "api.key", label: "API key", secret: true },
+    { key: "api.secret", label: "API secret", secret: true },
+    { key: "api.endpoint", label: "Endpoint" },
+    NOTES,
+  ],
+  "software-license": [
+    NAME,
+    { key: "license.name", label: "Product" },
+    { key: "license.key", label: "License key", secret: true },
+    { key: "license.seats", label: "Seats" },
+    { key: "license.expires", label: "Expires" },
+    NOTES,
+  ],
+  wifi: [
+    NAME,
+    { key: "wifi.ssid", label: "Network name (SSID)" },
+    { key: "wifi.password", label: "Wi-Fi password", secret: true },
+    { key: "wifi.security_type", label: "Security type" },
+    NOTES,
+  ],
 };
+
+/** `fixed` in the display order of `type`'s fixed fields (`FIXED_FIELDS`), the order the editor
+ * shows them in; a key the type does not list (a newer client's) keeps its place after them, in
+ * the order the core sent it. */
+export function orderFixed<T extends { readonly key: string }>(type: ItemType | "unknown", fixed: readonly T[]): T[] {
+  const order = (type === "unknown" ? undefined : FIXED_FIELDS[type]) ?? [];
+  const rank = (key: string): number => {
+    const i = order.findIndex((f) => f.key === key);
+    return i === -1 ? order.length : i;
+  };
+  return fixed
+    .map((f, i) => ({ f, i }))
+    .sort((a, b) => rank(a.f.key) - rank(b.f.key) || a.i - b.i)
+    .map(({ f }) => f);
+}
+
+/** Whether the fixed field `key` holds multi-line text (`item.notes`, `ssh.private_key`). */
+export function isMultiline(key: string): boolean {
+  return Object.values(FIXED_FIELDS).some((fields) => fields?.some((f) => f.key === key && f.multiline === true));
+}
 
 /** `uri/<id>/match`'s wire values (ADR 0037 §4, Accepted M2), for the editor's select and the
  * item detail view. `0x0000` ("absent") falls back to the account-level match default
- * (ADR 0037 §6); this web vault has no UI for that account setting yet (see ROADMAP §4.4 and
- * the M2 report), so it is shown as "Account default" without naming which mode that resolves
- * to. `0x0005` (Regex) is a value `rizzy-match` accepts and stores, but its own matching
+ * (ADR 0037 §6), which Settings → Website matching sets (`MatchingPane.tsx`; ADR 0042), so it is
+ * shown as "Account default" here without naming which mode that resolves to. `0x0005` (Regex) is a value `rizzy-match` accepts and stores, but its own matching
  * decision reports `NotSupported` for it today (`crates/rizzy-match/src/modes.rs`): the editor
  * must not claim it works. */
 export const MATCH_MODE_OPTIONS: readonly { readonly value: number; readonly label: string }[] = [
@@ -97,6 +197,85 @@ export const MATCH_MODE_REGEX = 0x0005;
 export function matchModeLabel(value: string | undefined): string {
   const n = value === undefined ? 0 : Number.parseInt(value, 10);
   return MATCH_MODE_OPTIONS.find((o) => o.value === n)?.label ?? `Unknown (${value ?? ""})`;
+}
+
+/** The two values a sex picker writes (ADR 0079 §1), with their labels. */
+export const SEX_OPTIONS: readonly { readonly value: string; readonly label: string }[] = [
+  { value: "male", label: "Male" },
+  { value: "female", label: "Female" },
+];
+
+/** `identity.sex` as shown: "Male" and "Female" for the picked values, any other text as entered. */
+export function sexLabel(value: string): string {
+  return SEX_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
+/** Whether `value` is an RFC 3339 `full-date` (`YYYY-MM-DD`) naming a real calendar day. */
+export function isIsoDate(value: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
+  if (m === null) {
+    return false;
+  }
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (mo < 1 || mo > 12 || d < 1) {
+    return false;
+  }
+  // Day 0 of the next month is the last day of this one (UTC: a civil date has no zone).
+  return d <= new Date(Date.UTC(y, mo, 0)).getUTCDate();
+}
+
+/** A `YYYY-MM-DD` date in the reader's locale, read as a civil date (no time zone shift). */
+export function formatIsoDate(value: string, locale?: string): string {
+  const [y, mo, d] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(y ?? 1970, (mo ?? 1) - 1, d ?? 1));
+  // `Date.UTC` maps years 0–99 to 1900–1999; set the year itself.
+  date.setUTCFullYear(y ?? 1970);
+  return date.toLocaleDateString(locale, { timeZone: "UTC", dateStyle: "long" });
+}
+
+/** The name of a two-letter region code, in any case, in the reader's locale; `undefined` for
+ * anything else or a code the browser does not know (ADR 0079 §1 `identity.country`). */
+export function countryName(value: string, locale?: string): string | undefined {
+  if (!/^[A-Za-z]{2}$/.test(value)) {
+    return undefined;
+  }
+  const code = value.toUpperCase();
+  try {
+    const name = new Intl.DisplayNames(locale === undefined ? undefined : [locale], { type: "region" }).of(code);
+    return name === undefined || name === code ? undefined : name;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A field's value as the item view shows it (ADR 0079 §1): the sex and birthday localized
+ * when they hold a picked value, a two-letter country code with the country's name next to it,
+ * every other value as entered. */
+export function displayValue(key: string, value: string): string {
+  if (key === "identity.sex") {
+    return sexLabel(value);
+  }
+  if (key === "identity.country") {
+    const name = countryName(value);
+    return name === undefined ? value : `${value} (${name})`;
+  }
+  if (key === "identity.birthday" && isIsoDate(value)) {
+    return formatIsoDate(value);
+  }
+  return value;
+}
+
+/** Which control a fixed field is edited with, decided once from its value when the form opens
+ * (switching while the user types would move the focus): the select or date input only for a
+ * value they can show unchanged, else a text input (ADR 0079 §1: never silently rewritten). */
+export function controlOf(field: FixedField, value: string): "sex" | "date" | "text" {
+  if (field.kind === "sex" && (value === "" || SEX_OPTIONS.some((o) => o.value === value))) {
+    return "sex";
+  }
+  if (field.kind === "date" && (value === "" || isIsoDate(value))) {
+    return "date";
+  }
+  return "text";
 }
 
 /** The label of a fixed key, or the key itself. */
@@ -156,7 +335,8 @@ export function group(fields: readonly FieldView[]): Grouped {
           elements.set(id, e);
         }
         e.attributes.set(f.attribute, f);
-      } else {
+      } else if (f.list !== "attachment") {
+        // Attachments (ADR 0054 §4) have their own section (`AttachmentsSection.tsx`).
         other.push(f);
       }
     } else if (f.key === "item.favorite") {
@@ -232,6 +412,17 @@ export function matches(
     (item.websiteHost?.toLocaleLowerCase().includes(q) ?? false) ||
     (item.tags?.some((tag) => tag.toLocaleLowerCase().includes(q)) ?? false)
   );
+}
+
+/** Sorts favorites before non-favorites, then by title (case-insensitive, locale-aware).
+ * Shared by the item list (`ItemsPane.tsx`) and the command palette's item results
+ * (`palette.ts`, ROADMAP §4.2/§4.5 "favorites first"), so the two places items are ranked in
+ * this vault never drift apart. */
+export function compareFavoriteFirst(
+  a: { readonly favorite: boolean; readonly title: string },
+  b: { readonly favorite: boolean; readonly title: string },
+): number {
+  return Number(b.favorite) - Number(a.favorite) || a.title.localeCompare(b.title);
 }
 
 /** Every distinct tag over `items`, with how many items carry it, most-used first and

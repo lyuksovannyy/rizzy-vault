@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-storage` on a real PostgreSQL database.
 //!
 //! `#[ignore]`d by default: run with `RIZZY_TEST_POSTGRES_URL` set to an **empty** database the
@@ -152,6 +154,11 @@ fn postgres_migrate_restore_dump_and_lock() {
         assert_eq!(after, before + TASKS);
 
         debug_hides_row_values(&db).await;
+        crate::common::exercise_quota(&db).await;
+        crate::common::exercise_vault_kinds(&db).await;
+        db.close().await;
+        let db = open_handle().await;
+        crate::common::finish_vault_kinds(&db).await;
         db.close().await;
     });
 }

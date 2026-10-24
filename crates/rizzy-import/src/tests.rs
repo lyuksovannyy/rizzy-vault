@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! End-to-end tests of each importer on small synthetic fixtures. No fixture is a real export
 //! and no value is a real secret.
 
@@ -1156,6 +1158,7 @@ fn rizzy_json_reads_every_value_type() {
         import.counts,
         crate::Counts {
             skipped_items: 0,
+            skipped_credentials: 0,
             ignored_members: 0,
             collapsed_conflicts: 1,
             // Two past the fiftieth, one that is not a text, two of another field.
@@ -1291,11 +1294,37 @@ fn rizzy_json_per_item_failures_skip_the_item_only() {
         ),
         // Types the schema refuses, and the vault-settings type.
         (r#"{"type":0,"fields":[]}"#, WarningKind::UnsupportedItemType),
-        (r#"{"type":5,"fields":[]}"#, WarningKind::UnsupportedItemType),
+        // `0x0005`–`0x0008` are the M3 types of ADR 0055 (imported, below); `0x0009` is the
+        // Bank account type ADR 0078 §1 retired, read back like any unsupported type (§3);
+        // `0x000B` is unassigned.
+        (r#"{"type":9,"fields":[]}"#, WarningKind::UnsupportedItemType),
+        (
+            r#"{"type":9,"fields":[{"key":"bank.account_number","value":{"text":"1"}}]}"#,
+            WarningKind::UnsupportedItemType,
+        ),
+        (r#"{"type":11,"fields":[]}"#, WarningKind::UnsupportedItemType),
         (r#"{"type":999,"fields":[]}"#, WarningKind::UnsupportedItemType),
         (
             r#"{"type":61441,"fields":[{"key":"vault.name","value":{"text":"v"}}]}"#,
             WarningKind::UnsupportedItemType,
+        ),
+        // A key of another item type skips the whole item (ADR 0055 owner answer 4): an M3
+        // key on a Login, an M1 key on an SSH key, one M3 type's key on another.
+        (
+            r#"{"type":1,"fields":[{"key":"ssh.host","value":{"text":"h"}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":5,"fields":[{"key":"card.number","value":{"text":"4111"}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":8,"fields":[{"key":"ssh.host","value":{"text":"h"}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":4,"fields":[{"key":"card.number","value":{"text":"4111"}}]}"#,
+            WarningKind::MalformedEntry,
         ),
         // Fields.
         (r#"{"type":1,"fields":[1]}"#, WarningKind::MalformedEntry),
@@ -1441,6 +1470,70 @@ fn rizzy_json_per_item_failures_skip_the_item_only() {
     assert_eq!(w["a.b"].len(), 65_536);
 }
 
+/// ADR 0055: an item of each M3 type is imported with its type and every key of its type; the
+/// concealed ones are carried like any other value (concealment is display, never import). The
+/// retired Bank account type (`0x0009`, ADR 0078 §1) is not among them: see the per-item
+/// failures, where it is skipped as unsupported.
+#[test]
+fn rizzy_json_imports_the_m3_types() {
+    let items = [
+        (
+            5,
+            [
+                "ssh.host",
+                "ssh.port",
+                "ssh.username",
+                "ssh.private_key",
+                "ssh.public_key",
+                "ssh.passphrase",
+            ]
+            .as_slice(),
+        ),
+        (
+            6,
+            ["api.name", "api.key", "api.secret", "api.endpoint"].as_slice(),
+        ),
+        (
+            7,
+            [
+                "license.name",
+                "license.key",
+                "license.seats",
+                "license.expires",
+            ]
+            .as_slice(),
+        ),
+        (
+            8,
+            ["wifi.ssid", "wifi.password", "wifi.security_type"].as_slice(),
+        ),
+    ];
+    let doc = rizzy_doc(
+        &items
+            .iter()
+            .map(|(id, keys)| {
+                let fields: Vec<String> = keys
+                    .iter()
+                    .map(|k| format!(r#"{{"key":"{k}","value":{{"text":"v {k}"}}}}"#))
+                    .collect();
+                format!(r#"{{"type":{id},"fields":[{}]}}"#, fields.join(","))
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    let import = run(Format::RizzyPlaintextJson, doc.as_bytes()).unwrap();
+    assert_eq!(warns(&import), vec![]);
+    assert_eq!(import.items.len(), 4);
+    for (item, (id, keys)) in import.items.iter().zip(items) {
+        assert_eq!(item.item_type(), ItemType::from_id(id));
+        let w = carried(item);
+        for k in keys {
+            assert_eq!(v(&w[*k]), t(&format!("v {k}")), "{k}");
+        }
+        assert_eq!(w.len(), keys.len() + 1);
+    }
+}
+
 #[test]
 fn rizzy_json_unknown_members_and_unwritable_fields() {
     let doc = r#"{"format":"rizzy-vault-plaintext-export","version":1,"later":[1,2],"version":9,
@@ -1449,7 +1542,6 @@ fn rizzy_json_unknown_members_and_unwritable_fields() {
           {"key":"item.name","value":{"text":"a","note":1},"hint":"x"},
           {"key":"uri/00112233445566778899aabbccddeeff/match","value":{"enum":2}},
           {"key":"share/00112233445566778899aabbccddeeff/secret","value":{"bytes":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
-          {"key":"card.number","value":{"text":"4111"}},
           {"key":"login.password","value":{"text":"p"},
            "history":[{"value":{"text":"o"},"ms":1,"device":"x"}]}
         ]},
@@ -1459,9 +1551,9 @@ fn rizzy_json_unknown_members_and_unwritable_fields() {
     let import = run(Format::RizzyPlaintextJson, doc.as_bytes()).unwrap();
     assert_eq!(import.items.len(), 3);
     let w = carried(&import.items[0]);
-    // The first `type` counts (the JSON reader's rule); the unwritable fields (`share/<id>/secret`,
-    // M5's, and `card.number` on a Login) are left out. `uri/<id>/match` now carries (ADR 0037,
-    // Accepted, M2).
+    // The first `type` counts (the JSON reader's rule); the unwritable field (`share/<id>/secret`,
+    // M5's) is left out. `uri/<id>/match` now carries (ADR 0037, Accepted, M2). A key of another
+    // item type would skip the item (ADR 0055 owner answer 4; see the per-item failures).
     assert_eq!(import.items[0].item_type(), ItemType::LOGIN);
     assert_eq!(
         w.keys()
@@ -1487,13 +1579,14 @@ fn rizzy_json_unknown_members_and_unwritable_fields() {
         import.counts,
         crate::Counts {
             skipped_items: 0,
+            skipped_credentials: 0,
             // Root: `later`, the second `version`. Item 0: `extra`, the second `type`, `note`,
             // `hint`, `device`.
             ignored_members: 7,
             collapsed_conflicts: 0,
             dropped_history: 0,
-            // `share/<id>/secret` and `card.number` on a Login.
-            dropped_fields: 2,
+            // `share/<id>/secret`.
+            dropped_fields: 1,
         }
     );
     assert_eq!(

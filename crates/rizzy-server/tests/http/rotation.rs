@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Key rotation end to end over HTTP ([ADR 0025]; CRYPTO.md §11.6, §11.8): real clients
 //! (`rizzy-client`, the dev-only edge ADR 0016 §4 owner decision 4 admits) sign up, log in,
 //! enrol, authenticate their devices, write items, sync, and rotate through the router, over the
@@ -69,7 +71,7 @@ pub(crate) enum Auth<'a> {
     Device(&'a mut DeviceSession, &'a UnlockedDevice),
 }
 
-/// Sends `method path` with `body`.
+/// Sends `method path` with `body`, and records the exchange ([`Server::record`]).
 pub(crate) async fn call(
     server: &Server,
     method: &str,
@@ -77,7 +79,10 @@ pub(crate) async fn call(
     body: Vec<u8>,
     auth: Auth<'_>,
 ) -> Reply {
-    server.send(request(method, path, body, auth)).await
+    let sent = body.clone();
+    let reply = server.send(request(method, path, body, auth)).await;
+    server.record(path, &sent, &reply);
+    reply
 }
 
 /// The request `method path` with `body`, authenticated by `auth`.
@@ -269,6 +274,19 @@ pub(crate) async fn login_named(
     awaiting.complete(reply.json()).unwrap()
 }
 
+/// What a paged Fetch did, summed over its pages ([`Client::fetch_counting`]).
+#[derive(Debug, Default)]
+pub(crate) struct FetchTotals {
+    /// Pages fetched.
+    pub(crate) pages: usize,
+    /// Covers held across pages (ADR 0050 §2).
+    pub(crate) held_covers: usize,
+    /// Covers refused for good.
+    pub(crate) refused_covers: usize,
+    /// The chain check's and the complete Fetch's reports, as text.
+    pub(crate) reports: Vec<String>,
+}
+
 /// A device of the test: its state, keys, session, vault and the authors it verifies with.
 pub(crate) struct Client {
     /// The device state.
@@ -278,7 +296,7 @@ pub(crate) struct Client {
     /// Its device session.
     pub(crate) session: DeviceSession,
     /// The personal vault.
-    vault: VaultSync,
+    pub(crate) vault: VaultSync,
     /// The account's authors.
     authors: Authors,
 }
@@ -301,7 +319,7 @@ impl Client {
     }
 
     /// The client of a device enrolled by login.
-    async fn enrolled(server: &Server, enrolled: Enrolled) -> Self {
+    pub(crate) async fn enrolled(server: &Server, enrolled: Enrolled) -> Self {
         let Enrolled {
             device: state,
             unlocked,
@@ -342,6 +360,60 @@ impl Client {
         let account = verify_unlock(&mut self.state, &self.unlocked, &view, None).unwrap();
         self.authors = Authors::from_account(&account).unwrap();
         account
+    }
+
+    /// This device's id.
+    pub(crate) const fn device_id(&self) -> rizzy_client::items::DeviceId {
+        self.unlocked.device_id()
+    }
+
+    /// The lifecycle `item` displays.
+    pub(crate) fn lifecycle(&self, item: ItemId) -> rizzy_client::items::ItemLifecycle {
+        self.vault.item_lifecycle(item)
+    }
+
+    /// Trashes `item`.
+    pub(crate) fn trash(&mut self, rng: &mut ChaCha20Rng, item: ItemId) {
+        self.vault
+            .trash_item(rng, &self.unlocked, item, now_ms())
+            .unwrap();
+    }
+
+    /// Purges `item`.
+    pub(crate) fn purge(&mut self, rng: &mut ChaCha20Rng, item: ItemId) {
+        self.vault
+            .purge_item(rng, &self.unlocked, item, now_ms())
+            .unwrap();
+    }
+
+    /// Fetches until complete, summing what each page did.
+    pub(crate) async fn fetch_counting(&mut self, server: &Server) -> FetchTotals {
+        let mut totals = FetchTotals::default();
+        loop {
+            let request = self.vault.fetch_request().unwrap();
+            let reply = post(
+                server,
+                "/api/v1/vault/fetch",
+                &request,
+                Auth::Device(&mut self.session, &self.unlocked),
+            )
+            .await;
+            let response = reply.json();
+            let outcome = self
+                .vault
+                .apply_fetch(&self.authors, &response, now_ms())
+                .unwrap();
+            totals.pages += 1;
+            totals.held_covers += outcome.held_covers;
+            totals.refused_covers += outcome.refused_covers;
+            totals
+                .reports
+                .extend(outcome.reports.iter().map(|r| format!("{r:?}")));
+            if response.complete {
+                return totals;
+            }
+            assert!(totals.pages < 1_000, "the Fetch never completes");
+        }
     }
 
     /// Fetches until complete.
@@ -470,7 +542,7 @@ impl Client {
 }
 
 /// A login on a new device and its enrolment (CRYPTO.md §11.2 step 7).
-async fn enrol(server: &Server, rng: &mut ChaCha20Rng, sk: &str) -> Enrolled {
+pub(crate) async fn enrol(server: &Server, rng: &mut ChaCha20Rng, sk: &str) -> Enrolled {
     let logged_in = login(server, rng, sk, None).await;
     let token = copy_token(logged_in.bearer_token());
     let (pending, request) = logged_in

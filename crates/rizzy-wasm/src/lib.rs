@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-wasm` — the wasm-bindgen bindings of rizzy-vault's client core for the web vault
 //! ([ADR 0013] §1, §3, §4; [ADR 0016] §3 row `rizzy-wasm`; [ADR 0014] §4 `packages/core`).
 //!
@@ -28,13 +30,15 @@
 //! |---|---|
 //! | [`SignupFlow`], [`EmergencyKit`] | signup of a web-vault account (CRYPTO.md §11.1, kind 4) |
 //! | [`LoginFlow`] | an OPAQUE login with an optional second factor; also a session's re-authentication |
-//! | [`Session`] | the unlocked session: sync driver, items, TOTP, export, import, devices, 2FA, lock |
+//! | [`Session`], [`AttachmentView`] | the unlocked session: sync driver, items, attachments (ADR 0054), TOTP, export, import, devices, 2FA, lock |
 //! | [`ItemDraft`], [`ItemSummary`], [`FieldView`] | item edits and views |
+//! | [`autofill::CustomFieldAutofillView`], [`autofill::AutofillOffer`], [`autofill::FillValues`], [`autofill::SaveRowView`] | autocomplete-driven autofill (ADR 0076): the editor's id states, the offer's disclosure, one fill's values, the save dialog's rows |
 //! | [`HttpRequest`], [`meta_request`], [`check_meta`], [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
 //! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], [`Generated`] | the generator, every option ([`generator`]) |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
 //! | [`create_passkey`] (`createPasskey`), [`CreatedPasskey`], [`Session::passkey_assertion`] (`passkeyAssertion`), [`PasskeyAssertion`] | `WebAuthn` passkey registration and assertion ([`passkey`]; ADR 0039) |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
+//! | [`cxf_export_warning`] | the CXF passkey export's own warning (ADR 0074 §2) |
 //! | [`plaintext_export_hold_ms`], [`detect_import_format`] | the hold after the plaintext warning; recognising an import file (owner decision 2026-10-05) |
 //! | [`CoreError`] | the one thrown error: a stable code ([`error`]) |
 //!
@@ -89,10 +93,14 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
+pub mod autofill;
+pub mod breach;
 pub mod device;
 pub mod error;
 pub mod generator;
 pub mod http;
+pub mod icons;
+pub mod identity;
 pub mod items;
 mod login;
 pub mod matching;
@@ -103,7 +111,9 @@ pub mod session;
 mod signup;
 pub mod store;
 pub mod sync;
+pub mod vaults;
 
+pub use breach::{BreachCheck, BreachVerdict};
 pub use device::{DeviceSession, EnrolFlow};
 pub use error::CoreError;
 pub use generator::{
@@ -111,17 +121,21 @@ pub use generator::{
     generator_limits, passphrase_entropy, password_entropy,
 };
 pub use http::{HttpRequest, check_meta, expect_no_content, meta_request};
-pub use items::{FieldView, ItemDraft, ItemSummary, generate_element_id};
+pub use icons::IconFetch;
+pub use items::{FieldView, HistoryEntryView, ItemDraft, ItemSummary, generate_element_id};
 pub use login::LoginFlow;
-pub use matching::{MatchDecision, decide_match_candidates, normalize_page_url};
+pub use matching::{GlobalEquivalence, MatchDecision, decide_match_candidates, normalize_page_url};
 pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
 pub use session::{
-    DeviceView, EncryptedExport, ImportReport, Session, TotpCode, TwoFactorEnrolment,
-    detect_import_format, plaintext_export_hold_ms, plaintext_export_phrase,
-    plaintext_export_warning,
+    AttachmentView, CxfExport, DeviceView, EncryptedExport, ImportReport, Notice, Session,
+    SessionRow, TotpCode, TwoFactorEnrolment, cxf_export_warning, detect_import_format,
+    ends_session_on_unauthorized, others_ended_notice, plaintext_export_hold_ms,
+    plaintext_export_phrase, plaintext_export_warning, session_ended_by_you_notice,
+    session_ended_notice,
 };
 pub use signup::{EmergencyKit, SignupFlow};
 pub use store::{KvRow, cache_store_names};
+pub use vaults::{VaultAlarmView, VaultView};
 
 use wasm_bindgen::prelude::wasm_bindgen;
 

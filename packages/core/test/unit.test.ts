@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // packages/core without a server: loading, errors, the transport's request shape, the
 // generator, the frozen texts, and the flows' refusals of bad input.
 import { beforeAll, describe, expect, it } from "vitest";
@@ -6,9 +8,13 @@ import {
   CoreError,
   type CoreRequest,
   type Transport,
+  breachCheckUnavailable,
+  checkPasswordBreach,
   checkServer,
   createPasskey,
+  fetchItemIcon,
   fetchTransport,
+  iconHost,
   generatePassphraseWithOptions,
   generatePasswordWithOptions,
   login,
@@ -200,3 +206,88 @@ describe("the transport", () => {
   });
 });
 
+
+describe("the breach check (ADR 0053)", () => {
+  // SHA-1("password") = 5BAA6 1E4C9B93F3F0682250B6CF8331B7EE68FD8 (HIBP's documented example).
+  const hit = "1E4C9B93F3F0682250B6CF8331B7EE68FD8";
+
+  it("sends the 5-character prefix only, without a session, and zeroes the password", async () => {
+    const { transport, seen } = fixed(200, JSON.stringify({ range: `0018A45C4D1DEF81644B54AB7F969B88D65:1\r\n${hit}:42` }));
+    const password = new TextEncoder().encode("password");
+    const result = await checkPasswordBreach(transport, password);
+    expect(result).toEqual({ found: true, count: 42 });
+    expect(password.every((b) => b === 0)).toBe(true);
+    expect(seen).toHaveLength(1);
+    const request = seen[0]!;
+    expect(request.method).toBe("POST");
+    expect(request.path).toBe("/api/v1/icons/breach-range");
+    expect(request.headers["Authorization"]).toBeUndefined();
+    expect(new TextDecoder().decode(request.body)).toBe('{"prefix":"5BAA6"}');
+  });
+
+  it("reads not found, padding and the server's refusals", async () => {
+    expect(await checkPasswordBreach(fixed(200, JSON.stringify({ range: "" })).transport, "password")).toEqual({
+      found: false,
+      count: 0,
+    });
+    expect(
+      await checkPasswordBreach(fixed(200, JSON.stringify({ range: `${hit}:0` })).transport, "password"),
+    ).toEqual({ found: false, count: 0 });
+    for (const [status, body, code] of [
+      [404, '{"error":"not_found"}', "server_not_found"],
+      [429, '{"error":"rate_limited"}', "server_rate_limited"],
+      [500, '{"error":"internal"}', "server_internal"],
+      [200, '{"range":"<html>"}', "invalid_server_response"],
+    ] as const) {
+      const error = await checkPasswordBreach(fixed(status, body).transport, "password").catch((e: unknown) => e);
+      expect((error as CoreError).code).toBe(code);
+      expect(breachCheckUnavailable(code)).toBe(code !== "server_rate_limited");
+    }
+    const empty = await checkPasswordBreach(fixed(200, "{}").transport, "").catch((e: unknown) => e);
+    expect((empty as CoreError).code).toBe("invalid_input");
+  });
+});
+
+describe("item icons (ADR 0052)", () => {
+  // A PNG signature and three more bytes, as base64url.
+  const png = "iVBORw0KGgoAAA";
+
+  it("sends the normalised hostname only, without Authorization, and returns the PNG", async () => {
+    const { transport, seen } = fixed(200, JSON.stringify({ content_type: "image/png", data: png }));
+    const bytes = await fetchItemIcon(transport, "Secret-Bank.Example.");
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect(Array.from(bytes?.subarray(0, 8) ?? [])).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    expect(seen).toHaveLength(1);
+    const request = seen[0]!;
+    expect(request.method).toBe("POST");
+    expect(request.path).toBe("/api/v1/icons/fetch");
+    expect(request.headers["Authorization"]).toBeUndefined();
+    expect(new TextDecoder().decode(request.body)).toBe('{"host":"secret-bank.example"}');
+  });
+
+  it("normalises hosts and sends nothing for unusable ones", async () => {
+    expect(iconHost("WWW.Example.COM")).toBe("www.example.com");
+    expect(iconHost("b\u00fccher.de")).toBe("xn--bcher-kva.de");
+    expect(iconHost("[::1]")).toBeUndefined();
+    expect(iconHost("")).toBeUndefined();
+    const { transport, seen } = fixed(200, "{}");
+    expect(await fetchItemIcon(transport, "[2001:db8::1]")).toBeUndefined();
+    expect(seen).toHaveLength(0);
+  });
+
+  it("reads no icon, a bad answer and a missing role as no icon; a rate limit throws", async () => {
+    for (const [status, body] of [
+      [404, '{"error":"not_found"}'],
+      [500, '{"error":"internal"}'],
+      [200, JSON.stringify({ content_type: "image/svg+xml", data: png })],
+      [200, JSON.stringify({ content_type: "image/png", data: "PHN2Zy8-" })],
+      [200, "<html>"],
+    ] as const) {
+      expect(await fetchItemIcon(fixed(status, body).transport, "example.com")).toBeUndefined();
+    }
+    const error = await fetchItemIcon(fixed(429, '{"error":"rate_limited"}').transport, "example.com").catch(
+      (e: unknown) => e,
+    );
+    expect((error as CoreError).code).toBe("server_rate_limited");
+  });
+});

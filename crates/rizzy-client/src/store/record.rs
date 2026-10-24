@@ -1,15 +1,33 @@
-//! The device-state record, record version 1 ([ADR 0026] §2): the one opaque byte string a
-//! durable device persists for its enrolment (ADR 0013 §3 rule 2).
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! The device-state record, record version 2 ([ADR 0057] §2, extending [ADR 0026] §2): the one
+//! opaque byte string a durable device persists for its enrolment (ADR 0013 §3 rule 2).
 //!
 //! ```text
-//! device_state = u16(record_version = 1) ‖ u8(stage: 1 committed | 2 signup-pending)
+//! device_state = u16(record_version = 1 | 2) ‖ u8(stage: 1 committed | 2 signup-pending)
 //!              ‖ str(server_origin) ‖ account_id (16) ‖ device_id (16) ‖ u8(device_kind: 1–3)
 //!              ‖ secret_key (16) ‖ device_salt (16) ‖ u16(kdf_id) ‖ bytes(E_dev)
 //!              ‖ u8(has_local: 0 | 1) ‖ [u32(local_account_key_epoch) ‖ u32(local_password_epoch) ‖ bytes(E_local)]
+//!              ‖ u8(has_ks: 0 | 1) ‖ [u32(ks_account_key_epoch) ‖ bytes(E_ks)]               -- version 2 only
+//!              ‖ u8(forward_count: 0..=8) ‖ forward*                                       -- version 2 only
 //!              ‖ u8(pending: 0 | 1) ‖ [pending]
+//! forward      = u32(from_account_key_epoch) ‖ u32(to_account_key_epoch) ‖ bytes(E_ks_forward)
 //! pending      = secret_key' (16) ‖ device_salt' (16) ‖ u16(kdf_id') ‖ u32(account_key_epoch')
 //!              ‖ u32(password_epoch') ‖ bytes(E_local') ‖ bytes(E_dev' or empty)
 //! ```
+//!
+//! A version-1 record has neither `has_ks` nor `forward_count` and reads as `has_ks = 0`,
+//! `forward_count = 0`. [`DeviceRecord::encode`] always writes version 2, so a build that knows
+//! version 2 upgrades a version-1 record on the first write after loading it, in the same
+//! transaction as that write (ADR 0057 §3); a build that knows only version 1 refuses a
+//! version-2 record as "update required" (ADR 0026 §5).
+//!
+//! # The platform gate (INV-81)
+//!
+//! [`DeviceRecord::parse`] takes `keystore_capable` from its host: `true` only from a binding
+//! on a keystore that enforces user presence (ADR 0057 §2: `rizzy-ffi` on macOS, iOS and
+//! Android). `rv` and `rizzy-wasm` pass `false`, and a record with `has_ks = 1` is then
+//! refused as corrupt. No `cfg(target_os)` is read here.
 //!
 //! # Parsing (untrusted input)
 //!
@@ -19,9 +37,11 @@
 //! and must already be canonical; `device_kind` is 1–3; each `kdf_id` is on the client
 //! allow-list; each envelope is at most 256 bytes and parses as a symmetric envelope
 //! (`rizzy_core::envelope::parse`); a `stage` or flag outside its values, a signup-pending
-//! record without `E_local` or with a pending record, and a trailing byte are refused. One
-//! state has one encoding: [`DeviceRecord::encode`] of a parsed record gives the input back.
-//! A record version above 1 is [`ClientError::CacheUpdateRequired`]; everything else is
+//! record without `E_local` or with a pending record, `has_ks = 1` without `E_local` or
+//! without `keystore_capable`, a `forward_count` above [`MAX_FORWARD_COUNT`], and a trailing
+//! byte are refused. One state has one encoding: [`DeviceRecord::encode`] of a parsed
+//! version-2 record gives the input back, and of a version-1 record its version-2 form. A
+//! record version above 2 is [`ClientError::CacheUpdateRequired`]; everything else is
 //! [`ClientError::CacheCorrupt`]. Nothing panics, and no error carries a byte of the record.
 //! The fuzz target `client_device_state` runs the parser.
 //!
@@ -32,7 +52,10 @@
 //! zeroizing buffer. The pending record holds the Secret Key that will be current after the
 //! commit; the recovery code is never stored (CRYPTO.md §11 "Secrets before commit").
 //!
+//! The keystore unlock secret itself is never in the record (INV-82): only `E_ks`.
+//!
 //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
+//! [ADR 0057]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0057-device-state-v2-keystore.md
 
 use core::fmt;
 
@@ -48,11 +71,18 @@ use rizzy_proto::limits::MAX_KEY_ENVELOPE_LEN;
 use zeroize::Zeroizing;
 
 use crate::account::AccountPin;
-use crate::device::{DeviceState, LocalWrap, OfflineUnlock, UnlockedDevice, offline_unlock};
+use crate::device::{
+    DeviceState, ForwardWrap, KeystoreWrap, LocalWrap, MAX_FORWARD_COUNT, OfflineUnlock,
+    UnlockedDevice, keystore_unlock, offline_unlock,
+};
 use crate::error::{ClientError, internal};
 
-/// The record version this build writes and reads (ADR 0026 §2).
-pub const RECORD_VERSION: u16 = 1;
+/// The record version this build writes (ADR 0057 §3); it also reads
+/// [`RECORD_VERSION_1`].
+pub const RECORD_VERSION: u16 = 2;
+
+/// The first record version (ADR 0026 §2): read, upgraded on the next write, never written.
+pub const RECORD_VERSION_1: u16 = 1;
 
 /// The most bytes of a device-state record, checked before anything is parsed (ADR 0026 §2).
 pub const MAX_DEVICE_STATE_LEN: usize = 4096;
@@ -136,6 +166,10 @@ pub struct DeviceRecord {
     pub(crate) device_keys_wrap: Vec<u8>,
     /// `E_local` with its context epochs; `None` is `has_local = 0`.
     pub(crate) local_wrap: Option<LocalWrap>,
+    /// `E_ks` with its context epoch; `None` is `has_ks = 0` (ADR 0057 §2).
+    pub(crate) keystore_wrap: Option<KeystoreWrap>,
+    /// The `ACCOUNT_KEY_FORWARD` chain, oldest first, at most [`MAX_FORWARD_COUNT`].
+    pub(crate) forward: Vec<ForwardWrap>,
     /// The pending record, if a commit is outstanding.
     pub(crate) pending: Option<PendingRecord>,
 }
@@ -147,6 +181,8 @@ impl fmt::Debug for DeviceRecord {
             .field("account_id", &self.account_id)
             .field("device_id", &self.device_id)
             .field("has_local", &self.local_wrap.is_some())
+            .field("has_ks", &self.keystore_wrap.is_some())
+            .field("forward_count", &self.forward.len())
             .field("pending", &self.pending.is_some())
             .finish_non_exhaustive()
     }
@@ -182,6 +218,38 @@ fn flag(reader: &mut Reader<'_>) -> Result<bool, ClientError> {
     }
 }
 
+/// Reads the version-2 fields `u8(has_ks) ‖ [ks] ‖ u8(forward_count) ‖ forward*` (ADR 0057
+/// §2). The count is checked against [`MAX_FORWARD_COUNT`] before any entry is read.
+fn keystore_and_forward(
+    reader: &mut Reader<'_>,
+) -> Result<(Option<KeystoreWrap>, Vec<ForwardWrap>), ClientError> {
+    let bad = |_| ClientError::CacheCorrupt;
+    let keystore_wrap = if flag(reader)? {
+        let account_key_epoch = reader.u32().map_err(bad)?;
+        Some(KeystoreWrap {
+            envelope: key_envelope(reader)?,
+            account_key_epoch,
+        })
+    } else {
+        None
+    };
+    let count = usize::from(reader.u8().map_err(bad)?);
+    if count > MAX_FORWARD_COUNT {
+        return Err(ClientError::CacheCorrupt);
+    }
+    let mut forward = Vec::with_capacity(count);
+    for _ in 0..count {
+        let from_account_key_epoch = reader.u32().map_err(bad)?;
+        let to_account_key_epoch = reader.u32().map_err(bad)?;
+        forward.push(ForwardWrap {
+            envelope: key_envelope(reader)?,
+            from_account_key_epoch,
+            to_account_key_epoch,
+        });
+    }
+    Ok((keystore_wrap, forward))
+}
+
 /// Reads a `kdf_id` and checks it against the client allow-list (CRYPTO.md §6.2).
 fn kdf_id(reader: &mut Reader<'_>) -> Result<KdfId, ClientError> {
     let raw = reader.u16().map_err(|_| ClientError::CacheCorrupt)?;
@@ -200,22 +268,24 @@ fn key_and_salt(
 }
 
 impl DeviceRecord {
-    /// Parses a device-state record (see the module docs, "Parsing").
+    /// Parses a device-state record (see the module docs, "Parsing"). `keystore_capable` is
+    /// the host's platform gate (module docs, INV-81): `false` refuses a record with
+    /// `has_ks = 1`.
     ///
     /// # Errors
     /// [`ClientError::CacheUpdateRequired`] for a record version this build does not know;
     /// [`ClientError::CacheCorrupt`] for every other failure.
-    pub fn parse(bytes: &[u8]) -> Result<Self, ClientError> {
+    pub fn parse(bytes: &[u8], keystore_capable: bool) -> Result<Self, ClientError> {
         let bad = |_| ClientError::CacheCorrupt;
         if bytes.len() > MAX_DEVICE_STATE_LEN {
             return Err(ClientError::CacheCorrupt);
         }
         let mut reader = Reader::new(bytes);
-        match reader.u16().map_err(bad)? {
-            RECORD_VERSION => {}
+        let version = match reader.u16().map_err(bad)? {
+            version @ (RECORD_VERSION_1 | RECORD_VERSION) => version,
             0 => return Err(ClientError::CacheCorrupt),
             _ => return Err(ClientError::CacheUpdateRequired),
-        }
+        };
         let stage = Stage::from_u8(reader.u8().map_err(bad)?).ok_or(ClientError::CacheCorrupt)?;
         let origin_text = reader.str().map_err(bad)?;
         let server_origin =
@@ -244,6 +314,11 @@ impl DeviceRecord {
         } else {
             None
         };
+        let (keystore_wrap, forward) = if version == RECORD_VERSION {
+            keystore_and_forward(&mut reader)?
+        } else {
+            (None, Vec::new())
+        };
         let pending = if flag(&mut reader)? {
             let (secret_key, device_salt) = key_and_salt(&mut reader)?;
             let kdf_id = kdf_id(&mut reader)?;
@@ -270,6 +345,11 @@ impl DeviceRecord {
         if stage == Stage::SignupPending && (local_wrap.is_none() || pending.is_some()) {
             return Err(ClientError::CacheCorrupt);
         }
+        // `has_ks = 1` requires `has_local = 1`, and is read only behind the platform gate
+        // (ADR 0057 §2, INV-81).
+        if keystore_wrap.is_some() && (local_wrap.is_none() || !keystore_capable) {
+            return Err(ClientError::CacheCorrupt);
+        }
         Ok(Self {
             stage,
             server_origin,
@@ -281,6 +361,8 @@ impl DeviceRecord {
             kdf_id: kdf,
             device_keys_wrap,
             local_wrap,
+            keystore_wrap,
+            forward,
             pending,
         })
     }
@@ -296,6 +378,11 @@ impl DeviceRecord {
     pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>, ClientError> {
         if self.stage == Stage::SignupPending
             && (self.local_wrap.is_none() || self.pending.is_some())
+        {
+            return Err(ClientError::Internal);
+        }
+        if (self.keystore_wrap.is_some() && self.local_wrap.is_none())
+            || self.forward.len() > MAX_FORWARD_COUNT
         {
             return Err(ClientError::Internal);
         }
@@ -324,6 +411,23 @@ impl DeviceRecord {
                 put_u32(&mut out, local.password_epoch);
                 envelope(&mut out, &local.envelope)?;
             }
+        }
+        match &self.keystore_wrap {
+            None => put_u8(&mut out, 0),
+            Some(ks) => {
+                put_u8(&mut out, 1);
+                put_u32(&mut out, ks.account_key_epoch);
+                envelope(&mut out, &ks.envelope)?;
+            }
+        }
+        put_u8(
+            &mut out,
+            u8::try_from(self.forward.len()).map_err(|_| ClientError::Internal)?,
+        );
+        for step in &self.forward {
+            put_u32(&mut out, step.from_account_key_epoch);
+            put_u32(&mut out, step.to_account_key_epoch);
+            envelope(&mut out, &step.envelope)?;
         }
         match &self.pending {
             None => put_u8(&mut out, 0),
@@ -378,6 +482,18 @@ impl DeviceRecord {
         self.local_wrap.is_some()
     }
 
+    /// Whether the record holds `E_ks` (`has_ks = 1`, ADR 0057 §2).
+    #[must_use]
+    pub const fn has_keystore(&self) -> bool {
+        self.keystore_wrap.is_some()
+    }
+
+    /// How many `ACCOUNT_KEY_FORWARD` envelopes the record holds (`forward_count`).
+    #[must_use]
+    pub const fn forward_count(&self) -> usize {
+        self.forward.len()
+    }
+
     /// Whether a pending record is present (a commit is outstanding).
     #[must_use]
     pub const fn has_pending(&self) -> bool {
@@ -430,8 +546,35 @@ impl DeviceRecord {
                 device_salt: &self.device_salt,
                 kdf_id: self.kdf_id,
                 local_wrap,
+                forward: &self.forward,
                 device_keys_wrap: &self.device_keys_wrap,
             },
+        )
+    }
+
+    /// The keystore unlock from this record (CRYPTO.md §5.6 step 3; ADR 0057 §1, the "Load"
+    /// step): `secret` is the keystore unlock secret the OS released after its user-presence
+    /// check; it opens `E_ks`, then `E_dev`. `E_local` is not opened.
+    ///
+    /// # Errors
+    /// [`ClientError::SignupPending`] in stage 2 and [`ClientError::LocalUnlockUnavailable`]
+    /// without `E_local`: neither state unlocks (ADR 0026 §2, ADR 0057 §1);
+    /// [`ClientError::KeystoreUnlockUnavailable`] without `E_ks` or when it does not open;
+    /// [`ClientError::InvalidInput`] unless `secret` is 32 bytes; [`ClientError::CacheCorrupt`]
+    /// when `E_dev` does not open.
+    pub fn unlock_keystore(&self, secret: &[u8]) -> Result<UnlockedDevice, ClientError> {
+        if self.stage == Stage::SignupPending {
+            return Err(ClientError::SignupPending);
+        }
+        if self.local_wrap.is_none() {
+            return Err(ClientError::LocalUnlockUnavailable);
+        }
+        keystore_unlock(
+            secret,
+            self.account_id,
+            self.device_id,
+            self.keystore_wrap.as_ref(),
+            &self.device_keys_wrap,
         )
     }
 
@@ -461,6 +604,7 @@ impl DeviceRecord {
                 device_salt: &self.device_salt,
                 kdf_id: self.kdf_id,
                 local_wrap,
+                forward: &[],
                 device_keys_wrap: &self.device_keys_wrap,
             },
         )
@@ -485,6 +629,7 @@ impl DeviceRecord {
                 device_salt: &pending.device_salt,
                 kdf_id: pending.kdf_id,
                 local_wrap: &pending.local_wrap,
+                forward: &[],
                 device_keys_wrap: pending
                     .device_keys_wrap
                     .as_deref()
@@ -511,6 +656,20 @@ impl DeviceRecord {
             self.secret_key = pending.secret_key;
             self.device_salt = pending.device_salt;
             self.kdf_id = pending.kdf_id;
+            // `E_local'` wraps the account key current at the commit: the forward envelopes up
+            // to its epoch are no longer needed, and an `E_ks` under an older key (a rotation
+            // committed here, `E_dev'` present) would open a key `E_dev'` no longer matches, so
+            // it is deleted (ADR 0057 §2; the host re-enables keystore unlock).
+            let epoch = pending.local_wrap.account_key_epoch;
+            self.forward
+                .retain(|step| step.from_account_key_epoch >= epoch);
+            if self
+                .keystore_wrap
+                .as_ref()
+                .is_some_and(|ks| ks.account_key_epoch < epoch)
+            {
+                self.keystore_wrap = None;
+            }
             self.local_wrap = Some(pending.local_wrap);
             if let Some(wrap) = pending.device_keys_wrap {
                 self.device_keys_wrap = wrap;
@@ -560,6 +719,8 @@ impl DeviceRecord {
             kdf_id: self.kdf_id,
             local_wrap,
             device_keys_wrap: self.device_keys_wrap.clone(),
+            keystore_wrap: self.keystore_wrap.clone(),
+            forward: self.forward.clone(),
             pin,
         })
     }

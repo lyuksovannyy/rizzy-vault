@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! What the server believes about an account's keys, re-verified from storage.
 //!
 //! The server never trusts its own database for public keys beyond what the specs allow. Its

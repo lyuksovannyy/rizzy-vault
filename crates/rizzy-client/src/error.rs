@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The one error type of the client flows (ADR 0013 §3 rule 4: "Errors are typed and carry no
 //! secrets. They cross as enums with stable codes, never with key bytes, plaintext or
 //! passwords"; threat model INV-21).
@@ -148,6 +150,11 @@ pub enum ClientError {
     /// The device state holds no `E_local` (ADR 0026 §2, `has_local = 0`): it cannot unlock;
     /// the one path left is CRYPTO.md §11.3 step 5, "I changed my password on another device".
     LocalUnlockUnavailable,
+    /// The keystore unlock is not available on this device state (ADR 0057 §2): no `E_ks`, an
+    /// `E_ks` the released secret does not open, or a keystore-only unlock that would extend
+    /// the `ACCOUNT_KEY_FORWARD` chain past [`crate::device::MAX_FORWARD_COUNT`] (owner
+    /// answer 2: read-only on that path). The host asks for the password instead.
+    KeystoreUnlockUnavailable,
     /// The server refused a registration's OPAQUE setup (`setup_retired`) again after the
     /// registration was restarted once under the current setup (ADR 0031 point 8, "Risks": at
     /// most one restart per commit attempt). The pending change is kept; the host reports it.
@@ -157,6 +164,52 @@ pub enum ClientError {
     /// holds another record at an own dot. A restored image or a copied profile. The device is
     /// read-only; the one resolution is removal and a new enrolment.
     DeviceStateOutdated,
+    /// The account settings were written by a newer rizzy-vault: their `format_version` is not
+    /// the one this build knows (ADR 0042 §2: "parked and reported 'update required', like an
+    /// unknown `item_schema_version`"). Matching uses no account setting and no settings
+    /// write is made until the client is updated.
+    SettingsUpdateRequired,
+    /// A domain of a new user-defined equivalence group is not a registrable domain: a bare
+    /// public suffix (`co.uk`, `github.io`) or a subdomain (`www.example.com`) (ADR 0042 §4).
+    /// Nothing was written.
+    EquivalenceDomainRejected,
+    /// A settings edit would pass a limit of ADR 0042 §3–§4: more than 64 user groups, more
+    /// than 1,024 disabled global groups, or a settings entry over 1 MiB. Nothing was written.
+    SettingsLimitReached,
+    /// A file over the 25 MiB attachment cap (ADR 0054 §2). Nothing was written or sent.
+    AttachmentTooLarge,
+    /// A downloaded attachment did not verify: a chunk missing, extra, out of place or failing
+    /// to decrypt (INV-78, INV-79). Nothing was assembled; the partial data is wiped.
+    AttachmentIncomplete,
+    /// ADR 0076 §2.3 W1: a custom field's autocomplete id breaks the `ac_id` grammar (1–64
+    /// bytes of `a-z`, `0-9`, `-`, `_`, `.`). Nothing was written. Never normalised.
+    AutocompleteInvalid,
+    /// ADR 0076 §2.3 W2: a custom field's autocomplete id is in the reserved set (§3) or begins
+    /// with `section-`. Nothing was written.
+    AutocompleteReserved,
+    /// ADR 0076 §2.3 W3: after the write another custom field of the item would display the
+    /// same autocomplete id. Nothing was written.
+    AutocompleteDuplicate,
+    /// ADR 0076 §2.3 W4: an autocomplete id on a boolean or unknown-kind custom field. Nothing
+    /// was written.
+    AutocompleteKind,
+    /// ADR 0076 §2.3 W5: a custom field created or edited without a Display Name (its `label`
+    /// would hold no non-whitespace character). Nothing was written.
+    LabelRequired,
+    /// ADR 0081 §A7, INV-103: no vault this client holds open has this id (an unknown, deleted,
+    /// withheld or not-yet-supported vault). Nothing was written.
+    UnknownVault,
+    /// ADR 0081 §A1, INV-101: the Personal vault cannot be deleted, renamed or shared. Nothing
+    /// was written.
+    PersonalVaultProtected,
+    /// ADR 0081 §D: the account owns `MAX_OWNED_VAULTS` (64) vaults, or its vault directory
+    /// holds `MAX_DIRECTORY_ENTRIES` (128) entries. Nothing was written.
+    VaultLimitReached,
+    /// ADR 0081 §A2, INV-102: the server serves the account's vaults inconsistently with its
+    /// authenticated vault directory (a listed vault withheld, an unlisted one served, or two
+    /// vaults without a directory). The client raises an alarm and writes nothing to the vault
+    /// set.
+    VaultSetMismatch,
     /// An internal step failed that the inputs cannot cause: a sealing, signing, encoding or
     /// derivation call that is unreachable for valid state. No detail is kept on purpose.
     Internal,
@@ -205,8 +258,23 @@ impl ClientError {
             Self::CacheCorrupt => "cache_corrupt",
             Self::SignupPending => "signup_pending",
             Self::LocalUnlockUnavailable => "local_unlock_unavailable",
+            Self::KeystoreUnlockUnavailable => "keystore_unlock_unavailable",
             Self::DeviceStateOutdated => "device_state_outdated",
             Self::SetupRetired => "setup_retired",
+            Self::SettingsUpdateRequired => "settings_update_required",
+            Self::EquivalenceDomainRejected => "equivalence_domain_rejected",
+            Self::SettingsLimitReached => "settings_limit_reached",
+            Self::AttachmentTooLarge => "attachment_too_large",
+            Self::AttachmentIncomplete => "attachment_incomplete",
+            Self::AutocompleteInvalid => "autocomplete_invalid",
+            Self::AutocompleteReserved => "autocomplete_reserved",
+            Self::AutocompleteDuplicate => "autocomplete_duplicate",
+            Self::AutocompleteKind => "autocomplete_kind",
+            Self::LabelRequired => "label_required",
+            Self::UnknownVault => "unknown_vault",
+            Self::PersonalVaultProtected => "personal_vault_protected",
+            Self::VaultLimitReached => "vault_limit_reached",
+            Self::VaultSetMismatch => "vault_set_mismatch",
             Self::Internal => "internal",
         }
     }
@@ -275,10 +343,33 @@ impl fmt::Display for ClientError {
             }
             Self::SignupPending => "the signup has not been acknowledged yet",
             Self::LocalUnlockUnavailable => "this device can no longer unlock with a password",
+            Self::KeystoreUnlockUnavailable => "unlock with the password instead",
             Self::DeviceStateOutdated => "the local data is older than this device's own history",
             Self::SetupRetired => {
                 "the server refused the registration again after it was restarted; try later"
             }
+            Self::SettingsUpdateRequired => {
+                "the account settings were written by a newer rizzy-vault; update required"
+            }
+            Self::EquivalenceDomainRejected => {
+                "a group domain must be a registrable domain, not a public suffix or a subdomain"
+            }
+            Self::SettingsLimitReached => "the account settings are at a size limit",
+            Self::AttachmentTooLarge => "the file is larger than the 25 MiB attachment limit",
+            Self::AttachmentIncomplete => "the attachment did not download completely",
+            Self::AutocompleteInvalid => {
+                "an autocomplete id is 1-64 lowercase letters, digits, '-', '_' or '.'"
+            }
+            Self::AutocompleteReserved => "that autocomplete id is reserved for the manager",
+            Self::AutocompleteDuplicate => {
+                "another custom field of this item already uses that autocomplete id"
+            }
+            Self::AutocompleteKind => "only text and hidden custom fields take an autocomplete id",
+            Self::LabelRequired => "a custom field needs a display name",
+            Self::UnknownVault => "no such vault",
+            Self::PersonalVaultProtected => "the Personal vault cannot be deleted, renamed or shared",
+            Self::VaultLimitReached => "the account holds the most vaults allowed",
+            Self::VaultSetMismatch => "the server's vaults do not match the account's vault list",
             Self::Internal => "internal error",
         })
     }
@@ -336,8 +427,23 @@ mod tests {
             ClientError::CacheCorrupt,
             ClientError::SignupPending,
             ClientError::LocalUnlockUnavailable,
+            ClientError::KeystoreUnlockUnavailable,
             ClientError::DeviceStateOutdated,
             ClientError::SetupRetired,
+            ClientError::SettingsUpdateRequired,
+            ClientError::EquivalenceDomainRejected,
+            ClientError::SettingsLimitReached,
+            ClientError::AttachmentTooLarge,
+            ClientError::AttachmentIncomplete,
+            ClientError::AutocompleteInvalid,
+            ClientError::AutocompleteReserved,
+            ClientError::AutocompleteDuplicate,
+            ClientError::AutocompleteKind,
+            ClientError::LabelRequired,
+            ClientError::UnknownVault,
+            ClientError::PersonalVaultProtected,
+            ClientError::VaultLimitReached,
+            ClientError::VaultSetMismatch,
             ClientError::Internal,
         ];
         let mut codes: Vec<&str> = all.iter().map(|e| e.code()).collect();

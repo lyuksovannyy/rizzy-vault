@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rv` — the rizzy-vault command-line client, as a library the binary and the end-to-end
 //! tests share (ROADMAP §4.2, M1: "CLI client (`rv`)"; [ADR 0013] §1–§2; ADR 0016 §3 notes).
 //!
@@ -44,7 +46,6 @@
 //!   it, secrets are read from standard input only.
 //! - A persisted pending stage for `rv login` and `rv recovery complete` (ADR 0026 defines one
 //!   for signup only; see [`enrol`] and [`recover`]).
-//! - Editing URIs and custom fields of an existing item.
 //! - Certificate pinning, revocation checking, the OS trust store, TLS 1.2 and HTTP proxies
 //!   (ADR 0030 Decisions 3, 5 and 6, open question 4). A private CA file replaces the public
 //!   roots; it does not add to them.
@@ -71,6 +72,7 @@ pub mod recover;
 pub mod sys;
 pub mod tls;
 pub mod ui;
+pub mod vaults;
 
 pub use error::CliError;
 
@@ -122,6 +124,7 @@ fn run(arguments: Vec<OsString>) -> Result<(), CliError> {
         account: None,
         trust: tls::Trust::from_settings(None, &|name| std::env::var_os(name)),
         ui: &mut terminal,
+        sign_outs: device::SignOuts::default(),
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()

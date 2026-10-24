@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `rv` command line.
 //!
 //! No argument is ever a secret (threat model INV-56): passwords, the Secret Key, recovery
@@ -12,6 +14,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use rizzy_client::identity_gen::{AgeRange, CountryCode, EmailDomain, EmailStyle, SexChoice};
 use rizzy_core::generator::{CharSet, MAX_SET_TEXT_LEN};
 
 use crate::error::CliError;
@@ -25,10 +28,13 @@ USAGE:
     rv login --server <url> --name <login>
     rv unlock
     rv sync
-    rv item list [--trash]
+    rv item list [--trash] [--vault <vault>]
+    rv item search [<query>] [--trash] [--vault <vault>]
+    rv item recent [--limit <n>]
     rv item show <item> [--reveal]
-    rv item create --type <type> [--field <key>=<value>]... [--secret <key>]...
+    rv item create --type <type> [--vault <vault>] [--field <key>=<value>]... [--secret <key>]...
                    [--uri <uri>]... [--tag <name>]... [<custom field>]...
+                   [--generate [<identity option>]...]
     rv item edit <item> [--field <key>=<value>]... [--secret <key>]... [--clear <key>]...
                    [--tag <name>]... [--untag <name>]... [--uri <uri>]...
                    [--set-uri <id>=<uri>]... [--remove-uri <id>]... [<custom field>]...
@@ -36,14 +42,22 @@ USAGE:
                    [--remove-custom <id>]... [--move-uri <id>=<place>]...
                    [--move-custom <id>=<place>]...
     rv item trash <item> | restore <item> | purge <item>
+    rv item restore-late <item> --type <type>
+    rv item move <item> --to <vault> | copy <item> --to <vault>
+    rv vault list | create <name> | rename <vault> <name>
+    rv vault delete <vault> --name <login> [--with-items]
     rv generate [--length <n>] [--no-symbols | --symbols <chars>] [--no-ambiguous]
                 [--exclude <chars>] | --words <n> [--passphrase-number]
+    rv generate identity [<identity option>]... [--json]
     rv totp <item>
-    rv export --out <file> --name <login> [--format encrypted|json|csv]
-    rv import --in <file> [--format <format>]
+    rv cache reindex
+    rv export --out <file> --name <login> [--format encrypted|json|csv|cxf] [--vault <vault>]
+    rv import --in <file> [--format <format>] [--vault <vault>]
     rv device list
     rv device revoke <device> --name <login> [--standard]
     rv device forget
+    rv session list
+    rv session end <session> | end --others
     rv rotate --name <login> [--full]
     rv recovery start --server <url> --name <login>
     rv recovery complete --server <url> --name <login> [--skip-rotation]
@@ -60,22 +74,56 @@ OPTIONS:
     -h, --help       Print this help
     -V, --version    Print version
 
-<item> and <device> are hex ids or unique prefixes of one, as the list commands print them.
+<item>, <device> and <session> are hex ids or unique prefixes of one, as the list commands
+print them; an item prefix is looked up in every vault, and one that matches items in two
+vaults is refused with each match listed. <vault> is Personal, a vault's name, or its hex id
+or a unique prefix of it; a name two vaults share is refused with their ids. Every item lives
+in one vault: item create, import and export use Personal unless --vault names another, and
+list and search span every vault unless --vault names one; each row shows its vault. item
+move copies the item into the other vault (attachments included) and removes the original
+once the server has stored the copy; item copy keeps the original. The Personal vault cannot
+be renamed or deleted. vault delete asks for the vault's name typed as confirmation and logs
+in again with the master password; it first moves every item of the vault, the trash
+included, to Personal, or with --with-items deletes them with the vault. `session end` ends another web or password login, or a recovery session; a
+device's session is ended by suspending or revoking the device (`device revoke`). `session end
+--others` ends every other one of those; devices stay logged in. rv ends its own session when
+a command exits.
 <custom field> is --custom <label>=<text>, --custom-secret <label> (a hidden field; its value
 is asked for) or --custom-bool <label>=true|false. <id> is a URI's or custom field's element
 id as `item show` prints it in the field's key (uri/<id>/value), or a unique prefix of one.
 <place> is first, last, before:<id> or after:<id>.
-<type> is login, note, card, identity, ssh-key, api-credential, software-license, wifi,
-bank-account or passkey. Field keys are the item schema's (item.name, item.notes,
+<identity option> is --sex male|female, --country <CC>, --age <min>-<max>|<n>|<preset>,
+--email-style name|nickname or --domain <domain> (ADR 0079). `generate identity` prints a
+synthetic identity (names, birthday, username, address, a phone from fictional ranges only);
+`item create --type identity --generate` saves one, and a --field of the same key wins. The
+age is in completed years, 18 to 99; presets: 18-27 (the default), 28-65, 21-25, 26-30, 31-35,
+36-40, 41-45, 46-50, 51-55, 56-60, 61-65, any (21-65); <n> alone is an exact age. Without
+--domain there is no email; without --sex the sex is drawn; without --country it is US.
+Generated details are random and may match real people or places.
+`item search` matches the query, in any case, within an item's name, username, websites, tag
+names, text custom fields, card holder and brand, and identity names; Secure Note bodies and
+concealed fields are never searched. Without a query it lists every item, most recently used
+first. `item recent` lists the items viewed here (`item show`, `totp`), most recent first.
+Searching and use tracking run on this device only, over a search index kept in its cache
+unencrypted; `cache reindex` rebuilds that index and forgets the use history.
+<type> is login, note, card, identity, ssh-key, api-credential, software-license, wifi
+or passkey. Field keys are the item schema's (item.name, item.notes,
 login.username, login.password, login.totp, card.number, …).
 Every export first asks for the master password again and checks it with the server. An
-encrypted export then asks for a new password for that file, needed to import it.
+encrypted export then asks for a new password for that file, needed to import it. A cxf
+export holds only passkeys, as a FIDO Credential Exchange Format document inside a file
+encrypted like the encrypted export; it is gated like a plaintext export (the warning, a
+10-second wait and the typed phrase), since once decrypted it is a portable key dump.
 Import recognises the file's format; --format overrides it. Import formats: bitwarden-json,
 1pux, keepass-xml, csv, chrome-csv, firefox-csv, rizzy-json, rizzy-encrypted, aliasvault-csv,
-aliasvault-avux.
+aliasvault-avux, cxf-json (a CXF passkey file of another product), rizzy-cxf-encrypted.
 After the server was restored from a backup, `recovery repair` makes the recovery code work
 again: a new code and Emergency Kit by default, or with --retype the current code, which the
 server takes only when the code did not change since the backup.
+`sync` prints a notice for an edit that arrived for an item deleted permanently, and for an
+item deleted on one device while it was being edited on another (the edit wins).
+`item restore-late` restores the late edits of an item deleted permanently as a new item of
+<type>; the deleted item stays deleted.
 
 SECRETS are never taken from the command line or the environment. rv asks for them on the
 terminal without echo; when standard input is not a terminal it reads them from it, one per
@@ -96,6 +144,8 @@ pub enum ExportFormat {
     Json,
     /// Plaintext CSV (ADR 0027 §4).
     Csv,
+    /// The CXF passkey export, sealed under a password for the file (ADR 0074 §2).
+    Cxf,
 }
 
 /// What an import reads.
@@ -121,11 +171,20 @@ pub enum ImportFormat {
     AliasVaultCsv,
     /// `AliasVault`'s `.avux` (unencrypted) export archive.
     AliasVaultAvux,
+    /// A bare FIDO CXF document, passkeys only (ADR 0074 §3).
+    CxfJson,
+    /// Our own CXF passkey export (ADR 0074 §2).
+    RizzyCxfEncrypted,
 }
 
 /// The field changes of `item create` and `item edit`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FieldArgs {
+    /// `--vault` (create only): the vault of the new item; `None` is Personal (ADR 0081 §A8).
+    pub vault: Option<String>,
+    /// `--generate` (create only, `--type identity`): pre-fill the identity from the generator
+    /// with these options (ADR 0079 §10). A `--field` of the same key wins.
+    pub generate: Option<IdentityArgs>,
     /// `--field key=value`: fields that are not concealed.
     pub fields: Vec<(String, String)>,
     /// `--secret key`: fields whose value is asked for.
@@ -186,6 +245,83 @@ pub enum Generate {
     },
 }
 
+/// The identity generator's options for `generate identity` and `item create --generate`
+/// (ADR 0079 §10). Unset options take the generator's first-time defaults: a drawn sex, 18–27,
+/// name and birthday, no email domain (so no email), and the country [`DEFAULT_IDENTITY_COUNTRY`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IdentityArgs {
+    /// `--sex male|female`; absent is a draw.
+    pub sex: SexChoice,
+    /// `--country CC`; checked against the bundled data when generating. Absent is
+    /// [`DEFAULT_IDENTITY_COUNTRY`].
+    pub country: Option<CountryCode>,
+    /// `--age MIN-MAX|N|PRESET`.
+    pub age: AgeRange,
+    /// `--email-style name|nickname`.
+    pub email_style: EmailStyle,
+    /// `--domain D`: the email domain; absent leaves the email empty (ADR 0079 §8).
+    pub domain: Option<EmailDomain>,
+}
+
+/// The country `rv` generates for without `--country`. `rv` does not read the synced
+/// generator defaults (tag `0x0004`), which the web vault keeps.
+pub const DEFAULT_IDENTITY_COUNTRY: &str = "US";
+
+impl IdentityArgs {
+    /// Reads one identity option into `self` if `option` is one; `Ok(false)` if it is not.
+    fn read(&mut self, option: &str, args: &mut Args) -> Result<bool, CliError> {
+        match option {
+            "--sex" => {
+                self.sex = match args.value("--sex")?.as_str() {
+                    "male" => SexChoice::Male,
+                    "female" => SexChoice::Female,
+                    _ => return Err(usage("--sex takes male or female")),
+                };
+            }
+            "--country" => {
+                let text = args.value("--country")?;
+                self.country = Some(
+                    CountryCode::parse(&text)
+                        .map_err(|_| usage("--country takes a two-letter country code"))?,
+                );
+            }
+            "--age" => {
+                let text = args.value("--age")?;
+                self.age = AgeRange::parse(&text).map_err(|_| {
+                    usage(
+                        "--age takes MIN-MAX or N (ages 18 to 99, minimum first) or a preset: \
+                         18-27, 28-65, 21-25, 26-30, 31-35, 36-40, 41-45, 46-50, 51-55, 56-60, \
+                         61-65, any",
+                    )
+                })?;
+            }
+            "--email-style" => {
+                self.email_style = match args.value("--email-style")?.as_str() {
+                    "name" => EmailStyle::NameAndBirthday,
+                    "nickname" => EmailStyle::Nickname,
+                    _ => return Err(usage("--email-style takes name or nickname")),
+                };
+            }
+            "--domain" => {
+                let text = args.value("--domain")?;
+                self.domain = Some(EmailDomain::parse(&text).map_err(|e| {
+                    usage(match e {
+                        rizzy_client::identity_gen::IdentityGenError::EmailDomainNotAscii => {
+                            "--domain takes the domain's ASCII (xn--) form"
+                        }
+                        _ => "--domain takes a domain name such as example.com",
+                    })
+                })?);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+}
+
+/// How many items `item recent` lists without `--limit`.
+const DEFAULT_RECENT: usize = 20;
+
 /// A parsed command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -219,7 +355,25 @@ pub enum Command {
     ItemList {
         /// `--trash`: the trashed items instead of the active ones.
         trash: bool,
+        /// `--vault`: only this vault's items (ADR 0081 §A7).
+        vault: Option<String>,
     },
+    /// `item search` (ADR 0056 §5).
+    ItemSearch {
+        /// The query; empty lists every item, most recently used first.
+        query: String,
+        /// `--trash`: the trashed items instead of the active ones.
+        trash: bool,
+        /// `--vault`: only this vault's items (ADR 0081 §A7).
+        vault: Option<String>,
+    },
+    /// `item recent` (ADR 0056 §2).
+    ItemRecent {
+        /// `--limit`: how many items at most.
+        limit: usize,
+    },
+    /// `cache reindex` (ADR 0056 §4).
+    CacheReindex,
     /// `item show`.
     ItemShow {
         /// The item.
@@ -247,8 +401,40 @@ pub enum Command {
     ItemRestore(String),
     /// `item purge`.
     ItemPurge(String),
+    /// `item restore-late`: an item deleted permanently, its late edits restored as a new item
+    /// (ADR 0018 §3 "Surfacing").
+    ItemRestoreLate {
+        /// The deleted item.
+        item: String,
+        /// `--type`: the new item's type, which the user picks.
+        item_type: String,
+    },
+    /// `item history` (ROADMAP §4.2 "Item revision history (restore old versions)", M3): every
+    /// field's history, generalizing `item show`'s password-history section.
+    ItemHistory {
+        /// The item.
+        item: String,
+        /// `--reveal`: print concealed values.
+        reveal: bool,
+    },
+    /// `item restore-history`: restores one history entry as its field's current value.
+    ItemRestoreHistory {
+        /// The item.
+        item: String,
+        /// `--field`: the field's final key.
+        field: String,
+        /// `--entry`: the entry's id, as `item history` printed it.
+        entry: String,
+    },
     /// `generate`.
     Generate(Generate),
+    /// `generate identity` (ADR 0079 §10).
+    GenerateIdentity {
+        /// The options.
+        options: IdentityArgs,
+        /// `--json`.
+        json: bool,
+    },
     /// `totp`.
     Totp(String),
     /// `export`.
@@ -259,6 +445,8 @@ pub enum Command {
         name: String,
         /// `--format`.
         format: ExportFormat,
+        /// `--vault`: the vault to export; `None` is Personal (ADR 0081 §A8).
+        vault: Option<String>,
     },
     /// `import`.
     Import {
@@ -266,6 +454,37 @@ pub enum Command {
         input: PathBuf,
         /// `--format`: an override; `None` lets `rv` recognise the format.
         format: Option<ImportFormat>,
+        /// `--vault`: the vault to import into; `None` is Personal (ADR 0081 §A8).
+        vault: Option<String>,
+    },
+    /// `item move` (`keep_source` false) and `item copy` (ADR 0081 §A6).
+    ItemMove {
+        /// The item.
+        item: String,
+        /// `--to`: the target vault.
+        to: String,
+        /// Copy: keep the original.
+        keep_source: bool,
+    },
+    /// `vault list` (ADR 0081 §A8).
+    VaultList,
+    /// `vault create` (ADR 0081 §A3).
+    VaultCreate(String),
+    /// `vault rename` (ADR 0081 §A4).
+    VaultRename {
+        /// The vault.
+        vault: String,
+        /// The new name.
+        name: String,
+    },
+    /// `vault delete` (ADR 0081 §A5).
+    VaultDelete {
+        /// The vault.
+        vault: String,
+        /// `--name`: the login name, for the fresh login the delete needs.
+        name: String,
+        /// `--with-items`: delete the items with the vault instead of moving them to Personal.
+        with_items: bool,
     },
     /// `device list`.
     DeviceList,
@@ -280,6 +499,12 @@ pub enum Command {
     },
     /// `device forget`.
     DeviceForget,
+    /// `session list` (ADR 0075 R1).
+    SessionList,
+    /// `session end <session>` (R3).
+    SessionEnd(String),
+    /// `session end --others` (R4).
+    SessionEndOthers,
     /// `rotate`.
     Rotate {
         /// `--name`.
@@ -472,8 +697,18 @@ pub fn parse(arguments: Vec<OsString>) -> Result<Invocation, CliError> {
         Some("generate") => generate(&mut args)?,
         Some("totp") => Command::Totp(args.positional("the item")?),
         Some("export") => export(&mut args)?,
+        Some("vault") => vault(&mut args)?,
         Some("import") => import(&mut args)?,
         Some("device") => device(&mut args)?,
+        Some("session") => session(&mut args)?,
+        Some("cache") => match args.next().as_deref() {
+            Some("reindex") => {
+                args.done()?;
+                Command::CacheReindex
+            }
+            Some(other) => return Err(unknown(other)),
+            None => return Err(usage("cache needs a subcommand")),
+        },
         Some("rotate") => {
             let (mut name, mut full) = (None, false);
             while let Some(option) = args.next() {
@@ -633,17 +868,74 @@ fn signup(args: &mut Args) -> Result<Command, CliError> {
     })
 }
 
+/// `item search [<query>] [--trash]`.
+fn item_search(args: &mut Args) -> Result<Command, CliError> {
+    let (mut query, mut trash, mut vault) = (None, false, None);
+    while let Some(arg) = args.next() {
+        if arg == "--trash" {
+            trash = true;
+        } else if arg == "--vault" {
+            vault = Some(args.value("--vault")?);
+        } else if query.is_none() {
+            query = Some(arg);
+        } else {
+            return Err(unknown(&arg));
+        }
+    }
+    Ok(Command::ItemSearch {
+        query: query.unwrap_or_default(),
+        trash,
+        vault,
+    })
+}
+
+/// `item recent [--limit <n>]`.
+fn item_recent(args: &mut Args) -> Result<Command, CliError> {
+    let limit = match args.next().as_deref() {
+        None => DEFAULT_RECENT,
+        Some("--limit") => args
+            .value("--limit")?
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| usage("--limit takes a positive number"))?,
+        Some(other) => return Err(unknown(other)),
+    };
+    args.done()?;
+    Ok(Command::ItemRecent { limit })
+}
+
 /// `item …`.
 fn item(args: &mut Args) -> Result<Command, CliError> {
     match args.next().as_deref() {
         Some("list") => {
-            let trash = match args.next().as_deref() {
-                None => false,
-                Some("--trash") => true,
-                Some(other) => return Err(unknown(other)),
-            };
-            Ok(Command::ItemList { trash })
+            let (mut trash, mut vault) = (false, None);
+            while let Some(option) = args.next() {
+                match option.as_str() {
+                    "--trash" => trash = true,
+                    "--vault" => vault = Some(args.value("--vault")?),
+                    other => return Err(unknown(other)),
+                }
+            }
+            Ok(Command::ItemList { trash, vault })
         }
+        Some(word @ ("move" | "copy")) => {
+            let keep_source = word == "copy";
+            let item = args.positional("the item")?;
+            let to = match args.next().as_deref() {
+                Some("--to") => args.value("--to")?,
+                Some(other) => return Err(unknown(other)),
+                None => return Err(usage("--to is required")),
+            };
+            args.done()?;
+            Ok(Command::ItemMove {
+                item,
+                to,
+                keep_source,
+            })
+        }
+        Some("search") => item_search(args),
+        Some("recent") => item_recent(args),
         Some("show") => {
             let item = args.positional("the item")?;
             let reveal = match args.next().as_deref() {
@@ -669,8 +961,43 @@ fn item(args: &mut Args) -> Result<Command, CliError> {
         Some("trash") => Ok(Command::ItemTrash(args.positional("the item")?)),
         Some("restore") => Ok(Command::ItemRestore(args.positional("the item")?)),
         Some("purge") => Ok(Command::ItemPurge(args.positional("the item")?)),
+        Some("restore-late") => {
+            let item = args.positional("the item")?;
+            let item_type = match args.next().as_deref() {
+                Some("--type") => args.value("--type")?,
+                Some(other) => return Err(unknown(other)),
+                None => return Err(usage("--type is required")),
+            };
+            Ok(Command::ItemRestoreLate { item, item_type })
+        }
+        Some("history") => {
+            let item = args.positional("the item")?;
+            let reveal = match args.next().as_deref() {
+                None => false,
+                Some("--reveal") => true,
+                Some(other) => return Err(unknown(other)),
+            };
+            Ok(Command::ItemHistory { item, reveal })
+        }
+        Some("restore-history") => {
+            let item = args.positional("the item")?;
+            let (mut field, mut entry) = (None, None);
+            while let Some(option) = args.next() {
+                match option.as_str() {
+                    "--field" => field = Some(args.value("--field")?),
+                    "--entry" => entry = Some(args.value("--entry")?),
+                    other => return Err(unknown(other)),
+                }
+            }
+            Ok(Command::ItemRestoreHistory {
+                item,
+                field: required(field, "--field")?,
+                entry: required(entry, "--entry")?,
+            })
+        }
         _ => Err(usage(
-            "item needs list, show, create, edit, trash, restore or purge",
+            "item needs list, show, create, edit, trash, restore, purge, restore-late, history \
+             or restore-history",
         )),
     }
 }
@@ -682,9 +1009,22 @@ fn field_args(
     item_type: &mut Option<String>,
 ) -> Result<FieldArgs, CliError> {
     let mut fields = FieldArgs::default();
+    let mut generate_flags = false;
+    let mut generate = false;
     while let Some(option) = args.next() {
+        generate |= option == "--generate";
         match option.as_str() {
             "--type" if create => *item_type = Some(args.value("--type")?),
+            "--vault" if create => fields.vault = Some(args.value("--vault")?),
+            "--generate" if create => {
+                fields.generate.get_or_insert_with(IdentityArgs::default);
+            }
+            "--sex" | "--country" | "--age" | "--email-style" | "--domain" if create => {
+                let mut options = fields.generate.take().unwrap_or_default();
+                options.read(&option, args)?;
+                fields.generate = Some(options);
+                generate_flags = true;
+            }
             "--field" => {
                 let pair = args.value("--field")?;
                 let (key, value) = pair
@@ -732,7 +1072,30 @@ fn field_args(
             other => return Err(unknown(other)),
         }
     }
+    if generate_flags && !generate {
+        return Err(usage(
+            "--sex, --country, --age, --email-style and --domain need --generate",
+        ));
+    }
+    if !generate {
+        fields.generate = None;
+    }
     Ok(fields)
+}
+
+/// `generate identity [--sex male|female] [--country CC] [--age MIN-MAX|N|PRESET]
+/// [--email-style name|nickname] [--domain D] [--json]` (ADR 0079 §10).
+fn generate_identity(args: &mut Args) -> Result<Command, CliError> {
+    let mut options = IdentityArgs::default();
+    let mut json = false;
+    while let Some(option) = args.next() {
+        if option == "--json" {
+            json = true;
+        } else if !options.read(&option, args)? {
+            return Err(unknown(&option));
+        }
+    }
+    Ok(Command::GenerateIdentity { options, json })
 }
 
 /// The value of `option` split at its first `=`: `<a>=<b>` as `form` names it.
@@ -750,6 +1113,10 @@ fn pair(args: &mut Args, option: &str, form: &str) -> Result<(String, String), C
 /// `--passphrase-number` without it, are refused rather than ignored, as are `--symbols` with
 /// `--no-symbols`.
 fn generate(args: &mut Args) -> Result<Command, CliError> {
+    let mut first = args.next();
+    if first.as_deref() == Some("identity") {
+        return generate_identity(args);
+    }
     let (mut length, mut symbols, mut no_ambiguous, mut words) = (None, true, false, None);
     let (mut exclude, mut symbol_set, mut number) = (None, None, false);
     let count = |text: String, name: &str| {
@@ -763,7 +1130,7 @@ fn generate(args: &mut Args) -> Result<Command, CliError> {
             ))
         })
     };
-    while let Some(option) = args.next() {
+    while let Some(option) = first.take().or_else(|| args.next()) {
         match option.as_str() {
             "--length" => length = Some(count(args.value("--length")?, "--length")?),
             "--words" => words = Some(count(args.value("--words")?, "--words")?),
@@ -801,17 +1168,19 @@ fn generate(args: &mut Args) -> Result<Command, CliError> {
 
 /// `export`.
 fn export(args: &mut Args) -> Result<Command, CliError> {
-    let (mut out, mut name, mut format) = (None, None, ExportFormat::Encrypted);
+    let (mut out, mut name, mut format, mut vault) = (None, None, ExportFormat::Encrypted, None);
     while let Some(option) = args.next() {
         match option.as_str() {
             "--out" => out = Some(args.value("--out")?),
+            "--vault" => vault = Some(args.value("--vault")?),
             "--name" => name = Some(args.value("--name")?),
             "--format" => {
                 format = match args.value("--format")?.as_str() {
                     "encrypted" => ExportFormat::Encrypted,
                     "json" => ExportFormat::Json,
                     "csv" => ExportFormat::Csv,
-                    _ => return Err(usage("--format takes encrypted, json or csv")),
+                    "cxf" => ExportFormat::Cxf,
+                    _ => return Err(usage("--format takes encrypted, json, csv or cxf")),
                 }
             }
             other => return Err(unknown(other)),
@@ -821,15 +1190,51 @@ fn export(args: &mut Args) -> Result<Command, CliError> {
         out: PathBuf::from(required(out, "--out")?),
         name: required(name, "--name")?,
         format,
+        vault,
     })
+}
+
+/// `vault list | create <name> | rename <vault> <name> | delete <vault> --name <login>
+/// [--with-items]` (ADR 0081 §A8).
+fn vault(args: &mut Args) -> Result<Command, CliError> {
+    let command = match args.next().as_deref() {
+        Some("list") => Command::VaultList,
+        Some("create") => Command::VaultCreate(args.positional("the vault's name")?),
+        Some("rename") => {
+            let vault = args.positional("the vault")?;
+            let name = args.positional("the new name")?;
+            Command::VaultRename { vault, name }
+        }
+        Some("delete") => {
+            let vault = args.positional("the vault")?;
+            let (mut name, mut with_items) = (None, false);
+            while let Some(option) = args.next() {
+                match option.as_str() {
+                    "--name" => name = Some(args.value("--name")?),
+                    "--with-items" => with_items = true,
+                    other => return Err(unknown(other)),
+                }
+            }
+            return Ok(Command::VaultDelete {
+                vault,
+                name: required(name, "--name")?,
+                with_items,
+            });
+        }
+        Some(other) => return Err(unknown(other)),
+        None => return Err(usage("vault needs list, create, rename or delete")),
+    };
+    args.done()?;
+    Ok(command)
 }
 
 /// `import`.
 fn import(args: &mut Args) -> Result<Command, CliError> {
-    let (mut input, mut format) = (None, None);
+    let (mut input, mut format, mut vault) = (None, None, None);
     while let Some(option) = args.next() {
         match option.as_str() {
             "--in" => input = Some(args.value("--in")?),
+            "--vault" => vault = Some(args.value("--vault")?),
             "--format" => {
                 format = Some(match args.value("--format")?.as_str() {
                     "bitwarden-json" => ImportFormat::BitwardenJson,
@@ -842,6 +1247,8 @@ fn import(args: &mut Args) -> Result<Command, CliError> {
                     "rizzy-encrypted" => ImportFormat::RizzyEncrypted,
                     "aliasvault-csv" => ImportFormat::AliasVaultCsv,
                     "aliasvault-avux" => ImportFormat::AliasVaultAvux,
+                    "cxf-json" => ImportFormat::CxfJson,
+                    "rizzy-cxf-encrypted" => ImportFormat::RizzyCxfEncrypted,
                     _ => return Err(usage("unknown import format")),
                 });
             }
@@ -851,6 +1258,7 @@ fn import(args: &mut Args) -> Result<Command, CliError> {
     Ok(Command::Import {
         input: PathBuf::from(required(input, "--in")?),
         format,
+        vault,
     })
 }
 
@@ -879,6 +1287,26 @@ fn device(args: &mut Args) -> Result<Command, CliError> {
     }
 }
 
+/// `session …` (ADR 0075 §9).
+fn session(args: &mut Args) -> Result<Command, CliError> {
+    match args.next().as_deref() {
+        Some("list") => Ok(Command::SessionList),
+        Some("end") => match args.next() {
+            Some(flag) if flag == "--others" => match args.next() {
+                None => Ok(Command::SessionEndOthers),
+                Some(other) => Err(unknown(&other)),
+            },
+            Some(flag) if flag.starts_with("--") => Err(unknown(&flag)),
+            Some(id) => match args.next() {
+                None => Ok(Command::SessionEnd(id)),
+                Some(other) => Err(unknown(&other)),
+            },
+            None => Err(usage("session end needs a session or --others")),
+        },
+        _ => Err(usage("session needs list or end")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,6 +1317,39 @@ mod tests {
 
     fn command(line: &str) -> Command {
         parsed(line).unwrap().command
+    }
+
+    /// `item search`, `item recent` and `cache reindex` (ADR 0056 §4, §5).
+    #[test]
+    fn local_index_commands_parse() {
+        assert_eq!(
+            command("item search"),
+            Command::ItemSearch {
+                query: String::new(),
+                trash: false,
+                vault: None
+            }
+        );
+        assert_eq!(
+            command("item search ПОЧТА --trash"),
+            Command::ItemSearch {
+                query: "ПОЧТА".to_owned(),
+                trash: true,
+                vault: None
+            }
+        );
+        assert!(parsed("item search a b").is_err());
+        assert_eq!(command("item recent"), Command::ItemRecent { limit: 20 });
+        assert_eq!(
+            command("item recent --limit 5"),
+            Command::ItemRecent { limit: 5 }
+        );
+        assert!(parsed("item recent --limit 0").is_err());
+        assert!(parsed("item recent --limit x").is_err());
+        assert!(parsed("item recent extra").is_err());
+        assert_eq!(command("cache reindex"), Command::CacheReindex);
+        assert!(parsed("cache").is_err());
+        assert!(parsed("cache reindex now").is_err());
     }
 
     /// `recovery repair` (ADR 0032 §4 step 6): `--name` required, `--retype` optional.
@@ -912,6 +1373,117 @@ mod tests {
         assert!(parsed("recovery repair --name alice --code x").is_err());
     }
 
+    /// `item restore-late` (gap 02): the item and `--type` are both required.
+    #[test]
+    fn restore_late_parses() {
+        assert_eq!(
+            command("item restore-late ab12 --type login"),
+            Command::ItemRestoreLate {
+                item: "ab12".to_owned(),
+                item_type: "login".to_owned(),
+            }
+        );
+        for line in [
+            "item restore-late",
+            "item restore-late ab12",
+            "item restore-late ab12 --type",
+            "item restore-late ab12 --kind login",
+            "item restore-late --type login",
+        ] {
+            assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
+        }
+    }
+
+    /// `item history` and `item restore-history` (ROADMAP §4.2 "Item revision history (restore
+    /// old versions)", M3).
+    #[test]
+    fn history_parses() {
+        assert_eq!(
+            command("item history ab12"),
+            Command::ItemHistory {
+                item: "ab12".to_owned(),
+                reveal: false,
+            }
+        );
+        assert_eq!(
+            command("item history ab12 --reveal"),
+            Command::ItemHistory {
+                item: "ab12".to_owned(),
+                reveal: true,
+            }
+        );
+        assert_eq!(
+            command("item restore-history ab12 --field login.password --entry cd34"),
+            Command::ItemRestoreHistory {
+                item: "ab12".to_owned(),
+                field: "login.password".to_owned(),
+                entry: "cd34".to_owned(),
+            }
+        );
+        for line in [
+            "item history",
+            "item history ab12 --unknown",
+            "item restore-history",
+            "item restore-history ab12",
+            "item restore-history ab12 --field login.password",
+            "item restore-history ab12 --entry cd34",
+            "item restore-history ab12 --field login.password --entry",
+        ] {
+            assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
+        }
+    }
+
+    /// ADR 0075 §9: `session list`, `session end <id>`, `session end --others`.
+    #[test]
+    fn session_commands_parse() {
+        assert_eq!(command("session list"), Command::SessionList);
+        assert_eq!(
+            command("session end 0a1b"),
+            Command::SessionEnd("0a1b".to_owned())
+        );
+        assert_eq!(command("session end --others"), Command::SessionEndOthers);
+        for line in [
+            "session",
+            "session end",
+            "session end --all",
+            "session end ab cd",
+            "session end --others ab",
+            "session kill ab",
+        ] {
+            assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
+        }
+    }
+
+    #[test]
+    fn cxf_commands_parse() {
+        // ADR 0074: the CXF passkey export and both CXF import forms.
+        assert_eq!(
+            command("export --out p.rizzy --name alice --format cxf"),
+            Command::Export {
+                out: PathBuf::from("p.rizzy"),
+                name: "alice".to_owned(),
+                format: ExportFormat::Cxf,
+                vault: None
+            }
+        );
+        assert_eq!(
+            command("import --in a.json --format cxf-json"),
+            Command::Import {
+                input: PathBuf::from("a.json"),
+                format: Some(ImportFormat::CxfJson),
+                vault: None
+            }
+        );
+        assert_eq!(
+            command("import --in p.rizzy --format rizzy-cxf-encrypted"),
+            Command::Import {
+                input: PathBuf::from("p.rizzy"),
+                format: Some(ImportFormat::RizzyCxfEncrypted),
+                vault: None
+            }
+        );
+    }
+
     #[test]
     fn commands_parse() {
         assert_eq!(command("--help"), Command::Help);
@@ -927,7 +1499,10 @@ mod tests {
         );
         assert_eq!(
             command("item list --trash"),
-            Command::ItemList { trash: true }
+            Command::ItemList {
+                trash: true,
+                vault: None
+            }
         );
         assert_eq!(
             command("item show ab12 --reveal"),
@@ -968,21 +1543,24 @@ mod tests {
             Command::Export {
                 out: PathBuf::from("f.rvx"),
                 name: "alice".to_owned(),
-                format: ExportFormat::Encrypted
+                format: ExportFormat::Encrypted,
+                vault: None
             }
         );
         assert_eq!(
             command("import --format 1pux --in a.1pux"),
             Command::Import {
                 input: PathBuf::from("a.1pux"),
-                format: Some(ImportFormat::OnePux)
+                format: Some(ImportFormat::OnePux),
+                vault: None
             }
         );
         assert_eq!(
             command("import --in a.json"),
             Command::Import {
                 input: PathBuf::from("a.json"),
-                format: None
+                format: None,
+                vault: None
             }
         );
         assert_eq!(
@@ -1143,5 +1721,181 @@ mod tests {
         // Too long to be a character set.
         let long = format!("generate --exclude {}", "a".repeat(MAX_SET_TEXT_LEN + 1));
         assert!(matches!(parsed(&long), Err(CliError::Usage(_))));
+    }
+
+    /// ADR 0079 §10: `generate identity` with every option, `--age` in its three forms, and the
+    /// values it refuses.
+    #[test]
+    fn generate_identity_options() {
+        assert_eq!(
+            command("generate identity"),
+            Command::GenerateIdentity {
+                options: IdentityArgs::default(),
+                json: false
+            }
+        );
+        assert_eq!(
+            command(
+                "generate identity --sex female --country de --age 28 --email-style nickname \
+                 --domain Mail.Example --json"
+            ),
+            Command::GenerateIdentity {
+                options: IdentityArgs {
+                    sex: SexChoice::Female,
+                    country: Some(CountryCode::parse("DE").unwrap()),
+                    age: AgeRange::exact(28).unwrap(),
+                    email_style: EmailStyle::Nickname,
+                    domain: Some(EmailDomain::parse("mail.example").unwrap()),
+                },
+                json: true
+            }
+        );
+        for (age, min, max) in [
+            ("18-27", 18, 27),
+            ("30-44", 30, 44),
+            ("any", 21, 65),
+            ("28-65", 28, 65),
+        ] {
+            let Command::GenerateIdentity { options, .. } =
+                command(&format!("generate identity --age {age}"))
+            else {
+                panic!("{age}");
+            };
+            assert_eq!((options.age.min(), options.age.max()), (min, max), "{age}");
+        }
+        for line in [
+            "generate identity --sex other",
+            "generate identity --country DEU",
+            "generate identity --age 17",
+            "generate identity --age 30-20",
+            "generate identity --age old",
+            "generate identity --email-style formal",
+            "generate identity --domain localhost",
+            "generate identity --domain bücher.example",
+            "generate identity --length 20",
+            "generate identity --age",
+        ] {
+            assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
+        }
+    }
+
+    /// ADR 0079 §10: `item create --generate` and its options, which need `--generate`.
+    #[test]
+    fn item_create_generate_options() {
+        let Command::ItemCreate { item_type, fields } = command(
+            "item create --type identity --generate --country FR --age 41-45 --field identity.city=Lyon",
+        ) else {
+            panic!("not a create");
+        };
+        assert_eq!(item_type, "identity");
+        let options = fields.generate.unwrap();
+        assert_eq!(options.country, Some(CountryCode::parse("FR").unwrap()));
+        assert_eq!(options.age, AgeRange::new(41, 45).unwrap());
+        assert_eq!(
+            fields.fields,
+            [("identity.city".to_owned(), "Lyon".to_owned())]
+        );
+        // The options may come before --generate.
+        let Command::ItemCreate { fields, .. } =
+            command("item create --sex male --generate --type identity")
+        else {
+            panic!("not a create");
+        };
+        assert_eq!(fields.generate.unwrap().sex, SexChoice::Male);
+        let Command::ItemCreate { fields, .. } = command("item create --type identity") else {
+            panic!("not a create");
+        };
+        assert_eq!(fields.generate, None);
+        for line in [
+            "item create --type identity --country DE",
+            "item create --type identity --generate --age 100",
+            "item edit ab --generate",
+            "item edit ab --country DE",
+        ] {
+            assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
+        }
+    }
+
+    #[test]
+    fn vault_commands_and_vault_options_parse() {
+        assert_eq!(command("vault list"), Command::VaultList);
+        assert_eq!(
+            command("vault create Work"),
+            Command::VaultCreate("Work".to_owned())
+        );
+        assert_eq!(
+            command("vault rename Work Job"),
+            Command::VaultRename {
+                vault: "Work".to_owned(),
+                name: "Job".to_owned()
+            }
+        );
+        assert_eq!(
+            command("vault delete Work --name alice --with-items"),
+            Command::VaultDelete {
+                vault: "Work".to_owned(),
+                name: "alice".to_owned(),
+                with_items: true
+            }
+        );
+        assert!(parsed("vault delete Work").is_err());
+        assert!(parsed("vault create").is_err());
+        assert!(parsed("vault list extra").is_err());
+        assert!(parsed("vault").is_err());
+        assert_eq!(
+            command("item move ab12 --to Personal"),
+            Command::ItemMove {
+                item: "ab12".to_owned(),
+                to: "Personal".to_owned(),
+                keep_source: false
+            }
+        );
+        assert_eq!(
+            command("item copy ab12 --to Work"),
+            Command::ItemMove {
+                item: "ab12".to_owned(),
+                to: "Work".to_owned(),
+                keep_source: true
+            }
+        );
+        assert!(parsed("item move ab12").is_err());
+        assert_eq!(
+            command("item list --vault Work --trash"),
+            Command::ItemList {
+                trash: true,
+                vault: Some("Work".to_owned())
+            }
+        );
+        assert_eq!(
+            command("item search mail --vault Work"),
+            Command::ItemSearch {
+                query: "mail".to_owned(),
+                trash: false,
+                vault: Some("Work".to_owned())
+            }
+        );
+        let Command::ItemCreate { fields, .. } = command("item create --type note --vault Work")
+        else {
+            panic!("not item create");
+        };
+        assert_eq!(fields.vault.as_deref(), Some("Work"));
+        assert!(parsed("item edit ab --vault Work").is_err());
+        assert_eq!(
+            command("import --in a.json --vault Work"),
+            Command::Import {
+                input: PathBuf::from("a.json"),
+                format: None,
+                vault: Some("Work".to_owned())
+            }
+        );
+        assert_eq!(
+            command("export --out f --name alice --vault Work"),
+            Command::Export {
+                out: PathBuf::from("f"),
+                name: "alice".to_owned(),
+                format: ExportFormat::Encrypted,
+                vault: Some("Work".to_owned())
+            }
+        );
     }
 }

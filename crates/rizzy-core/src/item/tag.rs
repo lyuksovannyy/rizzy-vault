@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Tag keys (ADR 0018 §7, owner decision 7).
 //!
 //! A tag is one field, keyed by its name: `tag/<hex>`, where `<hex>` is the lowercase hex of

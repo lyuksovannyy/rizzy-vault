@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The harness: a server started the way `rizzy-vault` starts (a secrets file on its own
 //! directory, a real `SQLite` database in a data directory, the startup checks), its router driven
 //! in-process with `tower::ServiceExt::oneshot`.
@@ -23,6 +25,8 @@ use chacha20::ChaCha20Rng;
 use chacha20::rand_core::SeedableRng as _;
 use rizzy_domain_auth::ServerSecrets;
 use rizzy_domain_auth::types::SessionToken;
+use rizzy_domain_vault::VaultDomain;
+use rizzy_server::bridge::AuthDirectory;
 use rizzy_server::config::{self, Config, Settings, Sources};
 use rizzy_server::http::api::Api;
 use rizzy_server::server::{Services, open_services};
@@ -108,6 +112,22 @@ pub(crate) struct Server {
     pub(crate) services: Services,
     /// The router of `api` and `web`.
     pub(crate) router: Router,
+    /// Every request `rotation::call` sent and its answer, in order: the captured HTTP bodies
+    /// of the request-capture tests (threat model INV-1, INV-15).
+    pub(crate) exchanges: std::sync::Mutex<Vec<Exchange>>,
+}
+
+/// One request and its answer, as sent and received.
+#[derive(Clone)]
+pub(crate) struct Exchange {
+    /// The path.
+    pub(crate) path: String,
+    /// The request body.
+    pub(crate) request: Vec<u8>,
+    /// The answer's status.
+    pub(crate) status: StatusCode,
+    /// The answer's body.
+    pub(crate) response: Vec<u8>,
 }
 
 /// A response, collected.
@@ -175,15 +195,63 @@ impl Server {
     /// Starts the server of `config`, whose directories are in `dir` and whose secrets file
     /// exists; `adjust` edits its `api` role before the router is built.
     pub(crate) async fn open(dir: TempDir, config: &Config, adjust: impl FnOnce(&mut Api)) -> Self {
+        Self::open_services_with(dir, config, |services| {
+            // The api role is not shared yet: the router is built below.
+            adjust(Arc::get_mut(&mut services.api).unwrap());
+        })
+        .await
+    }
+
+    /// A server with open signup whose Fetch pages hold at most `page_bytes` bytes of ops and
+    /// covers (`VaultDomain::with_page_bytes`; ADR 0021 §4): a page always takes its first op.
+    pub(crate) async fn start_with_page_bytes(page_bytes: usize) -> Self {
+        let dir = TempDir::new();
+        let config = config_in(&dir, &[]);
+        let secrets = ServerSecrets::generate(&mut ChaCha20Rng::seed_from_u64(99));
+        std::fs::write(
+            &config.secrets_file,
+            secrets_file::serialize(&secrets).unwrap(),
+        )
+        .unwrap();
+        Self::open_services_with(dir, &config, |services| {
+            let vault = VaultDomain::new(services.db.clone(), AuthDirectory, services.bus.clone())
+                .with_page_bytes(page_bytes);
+            Arc::get_mut(&mut services.api).unwrap().vault = vault;
+        })
+        .await
+    }
+
+    /// Starts the server of `config` as [`Server::open`], with `adjust` editing its services
+    /// before the router is built.
+    async fn open_services_with(
+        dir: TempDir,
+        config: &Config,
+        adjust: impl FnOnce(&mut Services),
+    ) -> Self {
         let mut services = open_services(config).await.unwrap();
-        // The api role is not shared yet: the router is built below.
-        adjust(Arc::get_mut(&mut services.api).unwrap());
+        adjust(&mut services);
         let router = http::router(Some(services.api.clone()), config.roles.web);
         Self {
             dir,
             services,
             router,
+            exchanges: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Records a request to `path` with `request` as its body, and its answer.
+    pub(crate) fn record(&self, path: &str, request: &[u8], reply: &Reply) {
+        self.exchanges.lock().unwrap().push(Exchange {
+            path: path.to_owned(),
+            request: request.to_vec(),
+            status: reply.status,
+            response: reply.body.clone(),
+        });
+    }
+
+    /// Every exchange recorded so far.
+    pub(crate) fn exchanges(&self) -> Vec<Exchange> {
+        self.exchanges.lock().unwrap().clone()
     }
 
     /// Stops the server: closes the pools, which releases the writer lock, and hands back its

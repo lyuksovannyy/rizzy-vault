@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! What the auth domain needs from the vault domain (ADR 0016 R4).
 //!
 //! No `rizzy-domain-*` crate depends on another: "A domain that needs something from another
@@ -25,7 +27,8 @@
 
 use core::future::Future;
 
-use rizzy_core::ids::{AccountId, DeviceId};
+use rizzy_core::ids::{AccountId, DeviceId, VaultId};
+use rizzy_proto::account::VaultSummary;
 use rizzy_proto::change::VaultRotationUpload;
 use rizzy_proto::objects::VaultSelfGrant;
 use rizzy_proto::recovery::RecoveryVault;
@@ -85,6 +88,47 @@ pub trait VaultPort: Send + Sync {
         grant: &VaultSelfGrant,
         now_ms: u64,
     ) -> impl Future<Output = Result<PersonalVault, AuthError>> + Send;
+
+    /// A `vault_create` commit ([ADR 0081] §A3), in `tx` after every auth-side check passed:
+    /// creates the owned vault named by `grant.vault_id` with `grant` as its first self-grant.
+    /// Refuses with [`AuthError::InvalidRequest`] (a malformed grant: not at vault epoch 0 and
+    /// `account_key_epoch`, or not under `account_key_id`; or the account already owns
+    /// `MAX_OWNED_VAULTS`) and [`AuthError::StateConflict`] (the vault id exists).
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    fn create_owned_vault(
+        &self,
+        tx: &mut WriteTx,
+        account_id: AccountId,
+        grant: &VaultSelfGrant,
+        account_key_epoch: u32,
+        account_key_id: [u8; 16],
+        now_ms: u64,
+    ) -> impl Future<Output = Result<(), AuthError>> + Send;
+
+    /// A `vault_delete` commit ([ADR 0081] §A5), in `tx` after every auth-side check passed:
+    /// deletes the owned vault with everything stored for it and releases its counted bytes.
+    /// Refuses with [`AuthError::InvalidRequest`] for the Personal vault (INV-101) and
+    /// [`AuthError::NotFound`] for a vault the account does not own.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    fn delete_vault(
+        &self,
+        tx: &mut WriteTx,
+        account_id: AccountId,
+        vault_id: VaultId,
+        now_ms: u64,
+    ) -> impl Future<Output = Result<(), AuthError>> + Send;
+
+    /// The account's vaults for the account answer ([ADR 0081] §A9, §A11): id, the server's
+    /// kind and counted bytes, ascending by id. Unsigned and informational.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    fn vault_summaries(
+        &self,
+        conn: Conn<'_>,
+        account_id: AccountId,
+    ) -> impl Future<Output = Result<Vec<VaultSummary>, AuthError>> + Send;
 
     /// The account's current vault self-grants, the ones under `account_key_epoch` (§11.2 step
     /// 5: "the vault self-grants"; §11.2 step 6 opens each with that epoch).

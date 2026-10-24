@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The generator with every option, through packages/core: defaults, each option's effect on
 // the output, entropy without generating, and one stable code and message per refusal.
 import { beforeAll, describe, expect, it } from "vitest";

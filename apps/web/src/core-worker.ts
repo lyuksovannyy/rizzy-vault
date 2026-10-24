@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The core Worker: the one context of the web vault that holds the wasm instance, every handle
 // and every key (ADR 0013 §4 "Where the core lives"). It runs the KDF, does the HTTP transport
 // to its own origin (`/api/v1`, ADR 0028) through packages/core's `fetchTransport`, and answers
@@ -10,39 +12,63 @@
 // drains. Every request also has a deadline (`bounded-fetch.ts`), so a stalled server cannot
 // hold the queue, and the login after a lock, for longer than that.
 //
+// A session the server ended (another session ended it, ADR 0075 §6) answers `401`: the Worker
+// locks it at once and answers the call `session_ended`. A lock also ends the session on the
+// server (`sessions/current/end`), best effort.
+//
 // A trap (a Rust panic under `panic = "abort"`) leaves the instance in an unknown state: every
 // later call answers `core_crashed`, and the UI asks for a reload.
 import {
+  type AskSecurityKey,
   CoreError,
+  type IdentityDraft,
+  type IdentityGeneratorOptions,
+  type SecondFactorPrompts,
+  type SecurityKeyAnswer,
   Signup,
   type Transport,
   type VaultSession,
+  checkPasswordBreach,
   checkServer,
+  cxfExportWarning,
   detectImportFormat,
+  fetchItemIcon,
   fetchTransport,
   generatePassphraseWithOptions,
   generatePasswordWithOptions,
+  generateIdentity,
   generatorLimits,
+  identityCountries,
   init,
   login,
   newElementId,
+  normalizeEmailDomain,
+  othersEndedNotice,
   passphraseEntropy,
   passwordEntropy,
   plaintextExportPhrase,
   plaintextExportWarning,
+  sessionEndedByYouNotice,
+  sessionEndedNotice,
   version,
 } from "@rizzy-vault/core";
 
 import { BoundedTransport } from "./bounded-fetch.ts";
+import { DraftRegistry } from "./identity-drafts.ts";
 import {
   BAD_MESSAGE,
   CORE_CRASHED,
   type CallMessage,
+  type IdentityDraftMessage,
+  SESSION_ENDED,
   type CoreApi,
   type FromWorker,
   type KitMessage,
+  SECURITY_KEY_CANCELLED,
   type SessionInfo,
   TOTP_CANCELLED,
+  isIdentityOptions,
+  isSettingsChange,
   isToWorker,
   transferables,
 } from "./protocol.ts";
@@ -68,6 +94,8 @@ const transport: Transport = bounded.transport;
 let session: VaultSession | undefined;
 let signup: Signup | undefined;
 let crashed = false;
+/** The identity drafts of open "New identity" forms (`identity-drafts.ts`); freed on lock. */
+const drafts = new DraftRegistry<IdentityDraft>();
 /** Counts locks, so that a login that finishes after a lock does not unlock. */
 let lockEpoch = 0;
 
@@ -90,12 +118,79 @@ function askTotp(id: number): () => Promise<string> {
     });
 }
 
+/** Pending security-key prompts, by call id. */
+const keyWaiters = new Map<number, (answer: SecurityKeyAnswer | null) => void>();
+
+/** Asks the UI thread to run the security-key prompt of call `id` (ADR 0058): the browser's
+ * `navigator.credentials` does not exist in a Worker. */
+function askSecurityKey(id: number): AskSecurityKey {
+  return (request) =>
+    new Promise<SecurityKeyAnswer>((resolve, reject) => {
+      keyWaiters.set(id, (answer) => {
+        keyWaiters.delete(id);
+        if (answer === null) {
+          reject(new CoreError(SECURITY_KEY_CANCELLED));
+        } else {
+          resolve(answer);
+        }
+      });
+      scope.postMessage(
+        {
+          kind: "ask-security-key",
+          id,
+          options: request.options,
+          totpAllowed: request.totpAllowed,
+        },
+        [],
+      );
+    });
+}
+
+/** Both second-factor prompts of call `id`. */
+function prompts(id: number): SecondFactorPrompts {
+  return { totp: askTotp(id), securityKey: askSecurityKey(id) };
+}
+
 /** The current session, or `locked`. */
 function current(): VaultSession {
   if (session === undefined || session.locked) {
     throw new CoreError("locked");
   }
   return session;
+}
+
+/**
+ * Locks: every request in flight is aborted first, then the session locks, which also ends it
+ * on the server (`sessions/current/end`, ADR 0075 §6), best effort and unawaited, so that the
+ * abort does not cancel that request.
+ */
+function lockSession(): void {
+  lockEpoch += 1;
+  bounded.abortAll();
+  drafts.clear();
+  session?.lock();
+  session = undefined;
+}
+
+/** Identity options from the UI, rebuilt from their checked fields (no `today`: the Worker's
+ * clock), or `invalid_input`. */
+function identityOptions(v: unknown): IdentityGeneratorOptions {
+  if (!isIdentityOptions(v)) {
+    throw new CoreError("invalid_input");
+  }
+  return {
+    sex: v.sex,
+    country: v.country,
+    ageMin: v.ageMin,
+    ageMax: v.ageMax,
+    emailStyle: v.emailStyle,
+    emailDomain: v.emailDomain ?? null,
+  };
+}
+
+/** A draft kept under `handle`, as it crosses to the UI. */
+function draftMessage(handle: number, draft: IdentityDraft): IdentityDraftMessage {
+  return { handle, fields: { ...draft.fields }, itemName: draft.itemName };
 }
 
 /** The current signup, or `wrong_state`. */
@@ -114,6 +209,7 @@ function info(s: VaultSession): SessionInfo {
     deviceId: s.deviceId,
     readOnly: s.readOnly,
     unsentChanges: s.unsentChanges,
+    storageUsage: s.storageUsage,
   };
 }
 
@@ -155,6 +251,14 @@ function bool(v: unknown): boolean {
   return v;
 }
 
+/** A non-negative safe-integer argument (a list position), or `invalid_input`. */
+function index(v: unknown): number {
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) {
+    throw new CoreError("invalid_input");
+  }
+  return v;
+}
+
 /** Zeroes every byte array among `args`, whatever the call did with them. */
 function wipe(args: readonly unknown[]): void {
   for (const a of args) {
@@ -182,7 +286,7 @@ async function run(m: CallMessage): Promise<unknown> {
       const s = await login(
         transport,
         { origin, loginName: str(a[0]), secretKey: bytes(a[1]), password: bytes(a[2]) },
-        askTotp(m.id),
+        prompts(m.id),
       );
       return setSession(s, epoch);
     },
@@ -220,10 +324,7 @@ async function run(m: CallMessage): Promise<unknown> {
     },
     status: () => (session === undefined || session.locked ? undefined : info(session)),
     lock: () => {
-      lockEpoch += 1;
-      session?.lock();
-      session = undefined;
-      bounded.abortAll();
+      lockSession();
     },
     sync: async () => {
       const s = current();
@@ -233,34 +334,113 @@ async function run(m: CallMessage): Promise<unknown> {
     items: () => current().items(bool(a[0])),
     item: () => current().item(str(a[0])),
     fields: () => current().fields(str(a[0])),
+    customFieldAutofill: () => current().customFieldAutofill(str(a[0])),
     reveal: () => current().reveal(str(a[0]), str(a[1])),
-    createItem: () => current().createItem(str(a[0]) as never, a[1] as never),
+    createItem: () => current().createItem(str(a[0]), str(a[1]) as never, a[2] as never),
+    vaults: () => current().vaults(),
+    personalVaultId: () => current().personalVaultId,
+    vaultAlarms: () => current().vaultAlarms(),
+    takeDiscardedChanges: () => current().takeDiscardedChanges(),
+    createVault: () => current().createVault(str(a[0])),
+    renameVault: () => current().renameVault(str(a[0]), str(a[1])),
+    deleteVault: () => current().deleteVault(str(a[0]), bool(a[1])),
+    copyItem: () => current().copyItem(str(a[0]), str(a[1])),
+    moveItem: () => current().moveItem(str(a[0]), str(a[1])),
     editItem: () => current().editItem(str(a[0]), a[1] as never),
     trashItem: () => current().trashItem(str(a[0])),
     restoreItem: () => current().restoreItem(str(a[0])),
-    purgeItem: () => current().purgeItem(str(a[0])),
+    // ADR 0054 §7: the item's attachments go from the server first, or they would stay behind.
+    purgeItem: async () => {
+      const s = current();
+      await s.deleteAttachmentsOf(str(a[0]));
+      s.purgeItem(str(a[0]));
+    },
+    // Dates only; one value per reveal (ADR 0013 §3 rule 3): the history is never sent whole.
+    passwordHistory: () => current().passwordHistory(str(a[0])),
+    revealPasswordHistory: () =>
+      current().revealPasswordHistory(str(a[0]), str(a[1]) as never, index(a[2]), str(a[3])),
+    // ROADMAP §4.2: the same dates-only/one-value-per-reveal rule, generalized to every field.
+    itemHistory: () => current().itemHistory(str(a[0])),
+    revealFieldHistory: () =>
+      current().revealFieldHistory(str(a[0]), str(a[1]), index(a[2]), str(a[3])),
+    restoreFieldHistory: () =>
+      current().restoreFieldHistory(str(a[0]), str(a[1]), index(a[2]), str(a[3])),
+    // ROADMAP §4.5 "keep both / pick one": the listing withholds concealed values; one value
+    // crosses per reveal; a resolution names the value by its listed index and id.
+    fieldConflict: () => current().fieldConflict(str(a[0]), str(a[1])),
+    revealConflictValue: () =>
+      current().revealConflictValue(str(a[0]), str(a[1]), index(a[2]), str(a[3])),
+    resolveConflictPick: () =>
+      current().resolveConflictPick(str(a[0]), str(a[1]), index(a[2]), str(a[3])),
+    resolveConflictKeepBoth: () =>
+      current().resolveConflictKeepBoth(
+        str(a[0]),
+        str(a[1]),
+        index(a[2]),
+        str(a[3]),
+        a[4] === undefined ? undefined : str(a[4]),
+      ),
+    takeNotices: () => current().takeNotices(),
+    restoreLateAsNew: () => current().restoreLateAsNew(str(a[0]), str(a[1]) as never),
     totp: () => current().totp(str(a[0])),
-    exportEncrypted: () => current().exportEncrypted(bytes(a[0])),
-    exportBlockers: () => current().exportBlockers(),
-    csvExportWarning: () => current().csvExportWarning(),
-    reauthenticate: () => current().reauthenticate(bytes(a[0]), bytes(a[1]), askTotp(m.id)),
+    breachCheckItem: async () => (await current().checkItemBreach(str(a[0]))) ?? null,
+    itemIcon: async () => {
+      current();
+      return (await fetchItemIcon(transport, str(a[0]))) ?? null;
+    },
+    breachCheckPassword: () => {
+      current();
+      return checkPasswordBreach(transport, bytes(a[0]));
+    },
+    exportEncrypted: () => current().exportEncrypted(str(a[0]), bytes(a[1])),
+    exportBlockers: () => current().exportBlockers(str(a[0])),
+    csvExportWarning: () => current().csvExportWarning(str(a[0])),
+    reauthenticate: () => current().reauthenticate(bytes(a[0]), bytes(a[1]), prompts(m.id)),
     reauthFresh: () => current().reauthFresh(),
     plaintextWarningShown: () => current().plaintextWarningShown(),
     exportPlaintext: () => {
-      const format = str(a[0]);
+      const format = str(a[1]);
       if (format !== "json" && format !== "csv") {
         throw new CoreError("unknown_format");
       }
-      return current().exportPlaintext(format, str(a[1]));
+      return current().exportPlaintext(str(a[0]), format, str(a[2]));
     },
     // Recognition needs no session: the file is read here and never leaves the Worker.
     detectImportFormat: () => detectImportFormat(bytes(a[0])),
-    importFile: () => current().importFile(str(a[0]) as never, bytes(a[1])),
-    importEncrypted: () => current().importEncrypted(bytes(a[0]), bytes(a[1])),
+    importFile: () => current().importFile(str(a[0]), str(a[1]) as never, bytes(a[2])),
+    attachments: () => current().attachments(str(a[0])),
+    addAttachment: () => current().addAttachment(str(a[0]), str(a[1]), str(a[2]), bytes(a[3])),
+    downloadAttachment: () => current().downloadAttachment(str(a[0]), str(a[1])),
+    deleteAttachment: () => current().deleteAttachment(str(a[0]), str(a[1])),
+    importEncrypted: () => current().importEncrypted(str(a[0]), bytes(a[1]), bytes(a[2])),
+    cxfExportPasskeys: () => current().cxfExportPasskeys(str(a[0])),
+    exportCxf: () => current().exportCxf(str(a[0]), str(a[1]), bytes(a[2])),
+    importCxfEncrypted: () => current().importCxfEncrypted(str(a[0]), bytes(a[1]), bytes(a[2])),
     devices: () => current().devices(),
+    sessions: () => current().sessions(),
+    endSession: () => current().endSession(str(a[0])),
+    endOtherSessions: () => current().endOtherSessions(),
+    refreshSession: () => current().refreshSession(bytes(a[0]), bytes(a[1]), prompts(m.id)),
+    sessionNotices: () => ({
+      ended: sessionEndedNotice(),
+      othersEnded: othersEndedNotice(),
+      oneEnded: sessionEndedByYouNotice(),
+    }),
     enableTwoFactor: () => current().enableTwoFactor(),
     confirmTwoFactor: () => current().confirmTwoFactor(str(a[0])),
     disableTwoFactor: () => current().disableTwoFactor(str(a[0])),
+    startSecurityKeyEnrolment: () => current().startSecurityKeyEnrolment(),
+    confirmSecurityKey: () => current().confirmSecurityKey(str(a[0]), str(a[1]), str(a[2])),
+    listSecurityKeys: () => current().listSecurityKeys(),
+    removeSecurityKey: () => current().removeSecurityKey(str(a[0])),
+    matchSettings: () => current().matchSettings(),
+    matchCandidates: () => current().matchCandidates(str(a[0])),
+    changeMatchSettings: async () => {
+      if (!isSettingsChange(a[0])) {
+        throw new CoreError("invalid_input");
+      }
+      await current().changeMatchSettings(a[0]);
+    },
     generatePasswordWithOptions: () => generatePasswordWithOptions(a[0] as never),
     generatePassphraseWithOptions: () => generatePassphraseWithOptions(a[0] as never),
     passwordEntropy: () => passwordEntropy(a[0] as never),
@@ -269,7 +449,27 @@ async function run(m: CallMessage): Promise<unknown> {
     newElementId: () => newElementId(),
     plaintextExportWarning: () => plaintextExportWarning(),
     plaintextExportPhrase: () => plaintextExportPhrase(),
-  } satisfies { [K in keyof CoreApi]: () => unknown };
+    cxfExportWarning: () => cxfExportWarning(),
+      identityCountries: () => identityCountries(),
+      identityDefaults: () => current().identityDefaults(),
+      normalizeEmailDomain: () => normalizeEmailDomain(str(a[0])),
+      identityGenerate: () => {
+        const draft = generateIdentity(identityOptions(a[0]));
+        return draftMessage(drafts.add(draft), draft);
+      },
+      identityRegenerate: () => {
+        const handle = index(a[0]);
+        const old = drafts.get(handle);
+        if (old === undefined) {
+          throw new CoreError("wrong_state");
+        }
+        const draft = old.regenerate(str(a[1]), identityOptions(a[2]));
+        return draftMessage(drafts.replace(handle, draft), draft);
+      },
+      identityRelease: () => {
+        drafts.release(index(a[0]));
+      },
+    } satisfies { [K in keyof CoreApi]: () => unknown };
   try {
     return await api[m.method]();
   } finally {
@@ -290,6 +490,19 @@ function answer(id: number, outcome: { value: unknown } | { code: string }): voi
 }
 
 /** Runs a call and answers it; a non-`CoreError` throw marks the instance as crashed. */
+/**
+ * Whether the server ended the current session (ADR 0075 §6: a `401` on a request other than
+ * `login/*`, `recovery/*` and the sign-out); if so, it is locked here, which clears its keys
+ * and decrypted items as a lock does, and the call answers `session_ended`.
+ */
+function endedNow(): boolean {
+  if (session === undefined || !session.ended) {
+    return false;
+  }
+  lockSession();
+  return true;
+}
+
 async function serve(m: CallMessage): Promise<void> {
   if (crashed) {
     wipe(m.args);
@@ -297,10 +510,11 @@ async function serve(m: CallMessage): Promise<void> {
     return;
   }
   try {
-    answer(m.id, { value: await run(m) });
+    const value = await run(m);
+    answer(m.id, endedNow() ? { code: SESSION_ENDED } : { value });
   } catch (e) {
     if (e instanceof CoreError) {
-      answer(m.id, { code: e.code });
+      answer(m.id, { code: endedNow() ? SESSION_ENDED : e.code });
     } else {
       // A trap, or a bug in this module: nothing about it is sent (it could hold anything).
       crashed = true;
@@ -322,11 +536,18 @@ scope.addEventListener("message", (event) => {
     }
     return;
   }
+  if (m.kind === "security-key") {
+    keyWaiters.get(m.id)?.(m.answer);
+    return;
+  }
   if (m.kind === "totp") {
     totpWaiters.get(m.id)?.(m.code);
     return;
   }
-  if (m.method === "lock") {
+  // An icon fetch touches no session state and may wait on a slow site (the role's budget is
+  // 10 s), so it runs beside the queue instead of holding every user action behind it. A lock
+  // still aborts it (`bounded.abortAll`), and it refuses to start while locked.
+  if (m.method === "lock" || m.method === "itemIcon") {
     void serve(m);
     return;
   }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Rate limits and backoff, kept in the database (ADR 0010 §5; CRYPTO.md §5.9; INV-7).
 //!
 //! "Unauthenticated login and registration attempts get exponential backoff per (account
@@ -50,6 +52,10 @@ pub(crate) enum BucketKind {
     SignupNameSource = 8,
     /// Signup attempts per login name from every source (INV-7).
     SignupName = 9,
+    /// Security-key assertions per account (ADR 0058, CRYPTO.md §11.17).
+    Webauthn = 10,
+    /// Vault creations per account (ADR 0081 §D).
+    VaultCreate = 11,
 }
 
 /// A bucket key: the kind byte and `SHA-256` over the fields, each length-prefixed.
@@ -155,6 +161,56 @@ pub(crate) async fn hit(
             next.blocked_until_ms.min(i64::MAX.unsigned_abs()),
             "blocked_until_ms"
         )?,
+        sql::u64_sql(expires, "expires_at_ms")?,
+    )?;
+    Ok(())
+}
+
+/// Counts one attempt against `key` in a fixed window (ADR 0081 §D, vault creation): at most
+/// `rule.max_attempts` per `rule.window_ms`, counted from the window's first attempt; beyond
+/// that, refused until the window ends. In the caller's write transaction, so an attempt that
+/// is refused later rolls its count back with it.
+///
+/// # Errors
+/// [`AuthError::RateLimited`] with the rest of the window; storage errors.
+pub(crate) async fn hit_window(
+    mut conn: Conn<'_>,
+    key: &[u8],
+    rule: &RateRule,
+    now_ms: u64,
+) -> Result<(), AuthError> {
+    let row: Option<(i64, i64, i64)> =
+        fetch_opt!(reborrow(&mut conn), (i64, i64, i64), sql::RATE_GET, key)?;
+    let (mut attempts, mut started) = match row {
+        Some((a, w, _)) => (
+            sql::sql_u64(a, "attempts")?,
+            sql::sql_u64(w, "window_started_at_ms")?,
+        ),
+        None => (0, now_ms),
+    };
+    if now_ms.saturating_sub(started) >= rule.window_ms || now_ms < started {
+        attempts = 0;
+        started = now_ms;
+    }
+    if attempts >= u64::from(rule.max_attempts) {
+        return Err(AuthError::RateLimited {
+            retry_after_ms: Some(
+                started
+                    .saturating_add(rule.window_ms)
+                    .saturating_sub(now_ms),
+            ),
+        });
+    }
+    let expires = started
+        .saturating_add(rule.window_ms)
+        .min(i64::MAX.unsigned_abs());
+    exec!(
+        conn,
+        sql::RATE_UPSERT,
+        key,
+        sql::u64_sql(attempts.saturating_add(1), "attempts")?,
+        sql::u64_sql(started, "window_started_at_ms")?,
+        sql::u64_sql(0, "blocked_until_ms")?,
         sql::u64_sql(expires, "expires_at_ms")?,
     )?;
     Ok(())

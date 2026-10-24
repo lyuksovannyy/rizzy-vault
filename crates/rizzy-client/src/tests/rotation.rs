@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Rotation flow tests (CRYPTO.md §11.6; ADR 0025 §2) against the fake server of the parent
 //! module, which here also plays the account commit of a rotation with the checks these tests
 //! need: the compare-and-swap on `state_seq`, the exact cursor and a covered wrap set (ADR 0025
@@ -22,6 +24,7 @@ use crate::unlock::apply_device_grants;
 impl Server {
     /// The account commit of a rotation (module docs). A byte-identical repeat succeeds.
     pub(super) fn commit_rotation(&mut self, req: &CommitChangeRequest) -> Result<(), ErrorCode> {
+        self.capture(serde_json::to_vec(req));
         let s = self.stored();
         if req.account_state.as_slice() == s.state.as_slice() {
             return Ok(());

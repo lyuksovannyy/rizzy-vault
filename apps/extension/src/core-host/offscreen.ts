@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The Chromium offscreen document's entry point (ADR 0036 §2): one of the two long-lived
 // contexts that may hold `@rizzy-vault/core`'s wasm instance. Created by the service worker
 // (`background/service-worker.ts`) with `chrome.offscreen.createDocument`, reason `WORKERS`

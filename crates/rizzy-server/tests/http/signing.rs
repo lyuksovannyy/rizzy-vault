@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Request signing over HTTP ([ADR 0028] item 5; CRYPTO.md §5.10): the bytes verified are the
 //! bytes sent, and the replay window.
 //!
@@ -7,7 +9,7 @@
 //!   library or a proxy would "tidy" (an empty query, duplicate parameters, parameter order,
 //!   the hex case of a percent-encoding, dot segments, `//`, a trailing slash, an encoded
 //!   octet) and for an absolute-form target, the signature verifies exactly when it was made
-//!   over the path-and-query bytes on the request line, and a path that is not one of the 27
+//!   over the path-and-query bytes on the request line, and a path that is not one of the 31
 //!   literal ones is `404` whatever was signed. The one exception is pinned too: a fragment,
 //!   which is no part of a request-target, is cut off by hyper before routing and verification,
 //!   so a target sent with one verifies under a signature over the bytes before the `#` and

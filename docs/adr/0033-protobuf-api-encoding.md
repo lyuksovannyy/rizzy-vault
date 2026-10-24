@@ -1,7 +1,7 @@
 # ADR 0033: Protocol Buffers encoding for client–server messages
 
-- Status: Proposed
-- Date: 2026-10-05
+- Status: Accepted
+- Date: 2026-10-05 (accepted 2026-10-24)
 - Deciders: project owner
 - Milestone: M1 (JSON stays the only `/api/v1` encoding) / M3 (the trigger below is checked again when `rizzy-ffi` lands)
 
@@ -29,6 +29,10 @@ Crate facts (V unless marked; local registry and RustSec DB at 2026-10-01, a scr
 - wasm size: not measured. The `prost` runtime is small (U, tens of KiB), but `serde_json` stays in `rizzy-wasm` for `/api/meta`, errors, exports and imports, so the bundle grows and nothing is removed (L).
 
 ## Decision
+
+### Owner answers at acceptance (2026-10-24)
+
+The owner accepted this ADR as drafted. Recommendation 1 stands: "Not now" — `/api/v1` keeps JSON as its only body encoding. Recommendation 2: if adopted later, bind the encoding by path. Recommendation 3: do not publish a `.proto` file until an API version uses it.
 
 1. **Not now.** `/api/v1` keeps JSON as its only body encoding. No `application/protobuf` (or `application/x-protobuf`) content type, `.proto` file, `prost`, `prost-build` or `protoc` enters the workspace in M1. ADR 0002 point 3 and ADR 0028 item 2 stand unchanged.
 2. **Why.** For an all-Rust client set the only gain is size and parse time: about 25 % of a body dominated by base64url ciphertext (L: 4/3 inflation, arithmetic). Against it: a second parser over hostile input on both sides; prost cannot refuse unknown request fields (the rule that keeps device-only secrets off the wire); no count caps during decode (a 32 MiB `vault/upload` body could expand into millions of small structs before validation, U how many); a non-canonical encoding under a signature; `protoc` as an unpinned build-time binary; a second set of vectors and fuzz targets; and nothing removed from the bundle.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Field values: the ADR 0018 §6 value encoding, its decoder and encoder (§10 per-value limit).
 //!
 //! A value is either empty (Cleared) or `u8 value_type ‖ payload`:
