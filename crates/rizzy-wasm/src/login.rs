@@ -143,6 +143,9 @@ pub struct LoginFlow {
     totp: Option<Zeroizing<String>>,
     /// On `"needs_security_key"`: the request options and whether TOTP is offered too.
     security_key: Option<(String, bool)>,
+    /// Whether this login was offered a security key already (a later `not_found` is then an
+    /// expired pending login, not a TOTP-only account).
+    security_key_seen: bool,
     /// Session or re-authentication.
     purpose: Purpose,
     /// Where the flow is.
@@ -362,6 +365,7 @@ impl LoginFlow {
             input,
             totp,
             security_key: None,
+            security_key_seen: false,
             purpose,
             stage: Stage::Spent,
             pending: None,
@@ -430,8 +434,14 @@ impl LoginFlow {
                     None => Ok(http::json::<WebauthnLoginChallengeResponse>(status, body)?),
                 };
                 match SecondFactor::from_challenge(answer).map_err(CoreError::server)? {
+                    // A retry whose pending login expired (60 s) or was used: not a TOTP-only
+                    // account, which never got options. The login starts again.
+                    SecondFactor::Totp if self.security_key_seen => {
+                        return Err(CoreError::new(SECURITY_KEY_REFUSED));
+                    }
                     SecondFactor::Totp => self.stage = Stage::NeedsTotp,
                     SecondFactor::SecurityKey { options, totp } => {
+                        self.security_key_seen = true;
                         self.security_key = Some((options, totp));
                         self.stage = Stage::NeedsSecurityKey(awaiting, login_id);
                     }

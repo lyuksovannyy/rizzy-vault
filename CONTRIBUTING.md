@@ -34,6 +34,8 @@ Scope is defined in [docs/ROADMAP.md](docs/ROADMAP.md). A feature that is not th
 
    `cargo xtask build-wasm` also needs `wasm-bindgen-cli` installed at the exact version `Cargo.lock` pins for `wasm-bindgen` (see the `web` job in [ci.yml](.github/workflows/ci.yml) for the install command).
 
+5. **OpenSSL headers and pkg-config.** `rizzy-domain-auth` uses `webauthn-rs` for security keys as a second factor, which builds `openssl-sys` against the system OpenSSL ([ADR 0077](docs/adr/0077-webauthn-rs-integration-fixes.md) §8; our own code never names OpenSSL, and TLS stays rustls). On Debian and Ubuntu: `sudo apt-get install libssl-dev pkg-config`; on Fedora: `sudo dnf install openssl-devel pkgconf`; on macOS: `brew install openssl@3` and `export OPENSSL_DIR=$(brew --prefix openssl@3)`; on Windows: an OpenSSL installation named by `OPENSSL_DIR`. Without pkg-config, `OPENSSL_INCLUDE_DIR` and `OPENSSL_LIB_DIR` work too (for example `/usr/include` and `/usr/lib/x86_64-linux-gnu`). The container image links OpenSSL statically (`deploy/Containerfile`).
+
 ## Checks to run before every push
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs each of these as its own job, and a PR is not reviewed until they pass. This is also the list CLAUDE.md gives AI coding agents as "Before any push":

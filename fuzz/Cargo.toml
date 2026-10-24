@@ -46,6 +46,8 @@
 #   auth_rules         rizzy-domain-auth's rules on untrusted statements and transitions: the
 #                      request-counter window, `account-state` steps, bundle-chain extension
 #                      (CRYPTO.md §5.10, §10.2, §11; ADR 0012 §7)
+#   webauthn_stored    rizzy-domain-auth's decoders of stored webauthn-rs JSON: the credential's
+#                      SecurityKey and the ceremony state (ADR 0077 §§2, 4)
 #   server_headers     rizzy-server's request-header parsers: bearer token, request-signing
 #                      headers, Content-Length, Rizzy-Client, X-Forwarded-For (ADR 0028 items 4, 5,
 #                      7, 11, 14; CRYPTO.md §5.10; threat model §7.6 "S")
@@ -352,6 +354,13 @@ bench = false
 [[bin]]
 name = "auth_rules"
 path = "fuzz_targets/auth_rules.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webauthn_stored"
+path = "fuzz_targets/webauthn_stored.rs"
 test = false
 doc = false
 bench = false

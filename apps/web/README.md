@@ -457,6 +457,14 @@ says how they fit with the token check and the extension's audit.
 - **Keyboard only.** `e2e/keyboard-nav.spec.ts` walks the same screens with Tab, Enter, Space,
   Escape, the arrow keys and typing; `tabTo` fails when a control is not reached within its
   bound.
+- **Security keys** (ADR 0058). `e2e/security-key.spec.ts` runs against a server on `localhost`
+  (a browser refuses an IP address as the WebAuthn relying party) with Chromium's CDP virtual
+  authenticator: enrolment in Settings → Two-factor authentication (`SecurityKeysSection.tsx`),
+  the login's security-key prompt (`SecurityKeyDialog.tsx`), cancel and removal, the axe audit of
+  the section, the prompt and the removal dialog, and the keyboard-only walk through them. The
+  browser's `navigator.credentials` calls run on the UI thread (`webauthn.ts`), never in the
+  Worker. Until the owner decides the Chromium credProtect refusal (ADR 0077 §7, reported), the
+  spec deletes the credProtect members from the enrolment options in the test only.
 - **What is not covered.** Real screen readers (NVDA, JAWS, VoiceOver, Orca): the rules catch
   missing names, labels and structure, not whether the result reads well, so a UI change still
   needs a manual pass with one. Firefox and Safari (Chromium only). Contrast of colours the token
