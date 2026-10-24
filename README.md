@@ -104,4 +104,4 @@ rizzy-vault is licensed under the GNU Affero General Public License, version 3 o
 
 ## Third-party notices
 
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists third-party material copied into this repository. Today that is EFF's Long Wordlist (CC BY 4.0), compiled into `rizzy-core` for the passphrase generator. Every artifact that contains `rizzy-core` must show its attribution. Notices for Cargo and npm dependencies will be generated per release artifact ([ADR 0017](docs/adr/0017-licensing.md) §7).
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists third-party material copied into this repository. Today that is EFF's Long Wordlist (CC BY 4.0), compiled into `rizzy-core` for the passphrase generator, and the identity generator's name and address data from faker-js (MIT) and Unicode CLDR (Unicode License v3), compiled into `rizzy-client` ([ADR 0079](docs/adr/0079-identity-generator.md) §6). Every artifact that contains `rizzy-core` or `rizzy-client` must show their notices. Notices for Cargo and npm dependencies will be generated per release artifact ([ADR 0017](docs/adr/0017-licensing.md) §7).
