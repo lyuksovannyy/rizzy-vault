@@ -107,6 +107,14 @@ pub const MIGRATIONS: &[MigrationFile] = &[
         sqlite: include_str!("../migrations/sqlite/0007_vault_attachments.sql"),
         postgres: include_str!("../migrations/postgres/0007_vault_attachments.sql"),
     },
+    // ADR 0058 as amended by ADR 0077 §§2, 4: WebAuthn security-key credentials, the
+    // second-factor-pending rows and the ceremony state. Raises the backup `schema_version` to 8.
+    MigrationFile {
+        version: 8,
+        description: "auth_webauthn",
+        sqlite: include_str!("../migrations/sqlite/0008_auth_webauthn.sql"),
+        postgres: include_str!("../migrations/postgres/0008_auth_webauthn.sql"),
+    },
 ];
 
 /// This release's schema version: the last migration's version. A logical backup is stamped

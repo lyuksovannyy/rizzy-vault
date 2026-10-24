@@ -719,10 +719,11 @@ fn pre_migration_copy() {
         let last = MIGRATIONS.last().unwrap().version;
         let mut w = db.begin_write().await.unwrap();
         on_engine!(w.conn(), |c| {
-            // Undo the last migration (0007: the two attachment tables, chunks first).
+            // Undo the last migration (0008: the three WebAuthn tables).
             for undo in [
-                "DROP TABLE vault_attachment_chunks",
-                "DROP TABLE vault_attachments",
+                "DROP TABLE auth_webauthn_challenges",
+                "DROP TABLE auth_webauthn_pending",
+                "DROP TABLE auth_webauthn_credentials",
             ] {
                 sqlx::query(undo).execute(&mut *c).await.unwrap();
             }
@@ -785,8 +786,9 @@ fn schema_must_match_this_release() {
         db.restore(&fixture(), RestoreGeneration([5; 16]), 0)
             .await
             .unwrap();
-        exec(&db, "DROP TABLE vault_attachment_chunks").await;
-        exec(&db, "DROP TABLE vault_attachments").await;
+        exec(&db, "DROP TABLE auth_webauthn_challenges").await;
+        exec(&db, "DROP TABLE auth_webauthn_pending").await;
+        exec(&db, "DROP TABLE auth_webauthn_credentials").await;
         exec(
             &db,
             "DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM \
