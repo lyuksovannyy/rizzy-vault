@@ -1,6 +1,6 @@
 # ADR 0011: Storage: SQLite and PostgreSQL via sqlx
 
-- Status: Partially superseded by [ADR 0022](0022-server-mode-only.md) (point 9 in part, "Transactions and concurrency" in part, "What is stored, by sync mode", "Backups" in part)
+- Status: Partially superseded by [ADR 0022](0022-server-mode-only.md) (point 9 in part, "Transactions and concurrency" in part, "What is stored, by sync mode", "Backups" in part); [ADR 0047](0047-opaque-secrets-operator-commands.md) (owner decision 3 in part)
 - Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M1 (SQLite) / M3 (PostgreSQL supported)

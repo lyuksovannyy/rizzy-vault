@@ -295,3 +295,5 @@ amendment, **no version bump**". This entry adds that line and changes nothing e
 `0x0004`, not the lowest free tag, because `0x0002` and `0x0003` were reserved for ADR 0081
 (then Proposed) when the generator was implemented (`crates/rizzy-client/src/identity_gen/defaults.rs`,
 `TAG_IDENTITY_DEFAULTS`, V). `0x0005`–`0xFFFE` stay unassigned.
+
+Approved by the owner on 2026-10-24 (ADR 0020 point 4): "ADR 0042 amendment: ok".

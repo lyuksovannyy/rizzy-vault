@@ -1,7 +1,7 @@
 # ADR 0046: A recovery-pending device-state stage for `rv recovery complete`
 
-- Status: Proposed
-- Date: 2026-10-11
+- Status: Accepted
+- Date: 2026-10-11 (accepted 2026-10-24)
 - Deciders: project owner
 - Milestone: M1
 
@@ -14,6 +14,10 @@ The machinery to fix this already exists and needs no new ADR of its own: ADR 00
 What binds: CRYPTO.md §11 "Secrets before commit" and "Replacing credentials"; §11.9; §5.9; §5.10; ADR 0012 §7 (certificate-carrying reconciliation); ADR 0026 §1–§5 (persisted vs. never persisted, write order, floors); ADR 0028 item 1 (paths), item 5 (`SessionKind::Recovery` carries a bearer token only, no `device-request` signature), item 6, and its Commit and Recovery retry-table rows; ADR 0021 §9 (the healing-only `record_conflict` code); ADR 0025 §1, §3 (the vault half's cursor check); ADR 0031 point 8 (the `setup_retired` restart); ADR 0045 (the pending-recovery field this ADR's resume cannot use, §3). Code (V, 5a78bb5): `crates/rizzy-client/src/{recovery,signup,device,reregister,rotation,login}.rs`, `crates/rizzy-client/src/store/{mod,record}.rs`, `crates/rizzy-cli/src/{recover,paths}.rs`, `crates/rizzy-domain-auth/src/{recovery,change,session,device,login,trust,error}.rs`, `crates/rizzy-domain-vault/src/{error,rotation}.rs`, `crates/rizzy-proto/src/auth.rs`, `crates/rizzy-server/src/http/api.rs`.
 
 ## Decision
+
+### Owner answers at acceptance (2026-10-24)
+
+The owner accepted this ADR as drafted. Recommendation 1 stands: mandatory device-auth short-circuit in `rv recovery complete` before fallback.
 
 ### What this ADR supersedes
 

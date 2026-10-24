@@ -1,7 +1,7 @@
 # ADR 0047: Operator commands for OPAQUE secrets: restore and invalidate
 
-- Status: Proposed
-- Date: 2026-10-11
+- Status: Accepted
+- Date: 2026-10-11 (accepted 2026-10-24)
 - Deciders: project owner
 - Milestone: M1
 - Supersedes: [ADR 0011](0011-storage.md) owner decision 3, in part (reader half), on acceptance.
@@ -38,6 +38,13 @@ skipped, so even a wrong backup's setup gets inserted and can poison a later res
 whether to write a file at all must be equally pure.
 
 ## Decision
+
+### Owner answers at acceptance (2026-10-24)
+
+The owner accepted this ADR as drafted. Recommendations stand:
+1. Bare `--confirm` flag (recommendation 1).
+2. Refuse `invalidate` outside the two diagnosed cases (recommendation 2).
+3. Reject unknown flags (recommendation 3).
 
 Restore is not a new construction: it reuses `secrets_backup::open`, `secrets_file`'s JSON layout
 and `ServerSecrets`'s existing primitives. `invalidate` reuses the same plus one new table (below),

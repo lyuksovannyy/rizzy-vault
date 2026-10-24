@@ -1,7 +1,7 @@
 # ADR 0045: Server-side notification of pending and completed account recovery
 
-- Status: Proposed
-- Date: 2026-10-11
+- Status: Accepted
+- Date: 2026-10-11 (accepted 2026-10-24)
 - Deciders: project owner
 - Milestone: M1
 
@@ -14,6 +14,13 @@ The server already tracks the gap, just not visibly. `crates/rizzy-domain-auth/s
 **The account-state object cannot carry this field.** [CRYPTO.md §10.2](../CRYPTO.md#102-ed25519-signatures-and-signed-statements) fixes `account-state`'s body and says it is signed by the account's own identity key (`E_id`). In code, `AccountStatement = Bytes<MAX_ACCOUNT_STATEMENT_LEN>` (`rizzy-proto/src/objects.rs`, V) — raw signed wire bytes the server stores but never produces. During a pending recovery nobody can re-sign it: the recoverer has no account key yet (that is the point of `recovery/complete`), and no enrolled device knows to sign anything. What the task framing describes as "a field on the signed account-state" is not buildable without a new §10.2 construction — exactly what the ADR gate forbids. The response that already wraps `account_state` alongside other unsigned, separately-trusted fields is `AccountView` (`rizzy-proto/src/account.rs`, V): `bundles`, `device_certificates`, `account_settings`, `identity_secret_keys`, `vault_self_grants` all travel beside the signed statement, not inside it, and its doc states "A response type: unknown fields are ignored." That is where this ADR adds a field.
 
 ## Decision
+
+### Owner answers at acceptance (2026-10-24)
+
+The owner accepted this ADR as drafted. The recommendations of the "Open questions for the owner" stand:
+1. Ship `last_recovery_at_ms` now (recommendation 1).
+2. Show `pending_recovery` banner in web vault, extension, and `rv account status` (recommendation 2).
+3. Reconnect clear behavior stands as drafted.
 
 1. **Add `pending_recovery: Option<PendingRecoveryNotice>` to `AccountView`** (`rizzy-proto/src/account.rs`), `#[serde(default, skip_serializing_if = "Option::is_none")]`, matching the existing `account_settings` field's style:
    ```rust
