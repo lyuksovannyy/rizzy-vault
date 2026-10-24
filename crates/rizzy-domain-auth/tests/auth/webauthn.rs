@@ -837,21 +837,43 @@ fn attestation_and_algorithms() {
     });
 }
 
+/// Touch-only security keys (ADR 0082): the options ask for no user verification and no
+/// credProtect, and UV is never required, whatever the key did at enrolment.
 #[test]
-fn user_verification_follows_enrolment() {
+fn security_keys_are_touch_only() {
     block_on(async {
         let mut env = Env::on_either_engine(87, |_| {}).await;
         let client = env.signup("uma", "pw").await;
         let session = fresh(&mut env, &client).await;
-        // A key that performed UV at enrolment must perform it at every assertion.
+        // The creation options: UV "discouraged", and no credProtect members (Chromium refuses
+        // credProtect userVerificationRequired with UV "preferred").
+        let start = env
+            .svc
+            .webauthn_enrol_start(&mut env.rng, &session, env.now)
+            .await
+            .unwrap();
+        let options: Value = serde_json::from_str(start.options.as_str()).unwrap();
+        let public_key = &options["publicKey"];
+        assert_eq!(
+            public_key["authenticatorSelection"]["userVerification"],
+            "discouraged"
+        );
+        let extensions = public_key["extensions"].as_object().unwrap();
+        assert!(!extensions.contains_key("credentialProtectionPolicy"));
+        assert!(!extensions.contains_key("enforceCredentialProtectionPolicy"));
+        // A key that performed UV at enrolment anyway (a key with a PIN set) asserts with UP
+        // alone.
         let pin = SoftKey::new(&mut env, 20);
         enrol(&mut env, &session, &pin, UP | UV, "pin")
             .await
             .unwrap();
-        assert!(matches!(
-            login_with(&mut env, &client, &pin, UP, 1).await,
-            Err(AuthError::Unauthorized)
-        ));
+        let pending = env.login_pending(&client).await;
+        let assertion = challenge(&mut env, pending).await.unwrap();
+        let request: Value = serde_json::from_str(&assertion).unwrap();
+        assert_eq!(request["publicKey"]["userVerification"], "discouraged");
+        let credential = pin.assert(&assertion, UP, 1);
+        finish(&mut env, pending, credential).await.unwrap();
+        // UP with UV is accepted as well.
         login_with(&mut env, &client, &pin, UP | UV, 2)
             .await
             .unwrap();
@@ -956,7 +978,8 @@ fn assertions_are_rate_limited_per_account() {
 }
 
 /// `webauthn-rs` 0.5.5 `SecurityKey` rows, committed (ADR 0077 §4 "Durability"): each
-/// deserialises from the stored JSON and verifies an assertion from its private key.
+/// deserialises from the stored JSON and verifies an assertion from its private key, under the
+/// touch-only relying party.
 #[test]
 fn committed_fixture_rows_still_verify() {
     block_on(async {
@@ -992,6 +1015,15 @@ fn committed_fixture_rows_still_verify() {
             tx.commit().await.unwrap();
             let flags = u8::try_from(fixture["flags"].as_u64().unwrap()).unwrap();
             let next = u32::try_from(fixture["sign_count"].as_u64().unwrap()).unwrap() + 1;
+            // A row enrolled under the facade's earlier "preferred" policy by a key that did UV
+            // keeps needing UV: the crate reads the policy stored in the row, not the relying
+            // party's touch-only switch (module docs of `webauthn.rs`). No release enrolled one.
+            if flags & UV != 0 {
+                assert!(matches!(
+                    login_with(&mut env, &client, &key, UP, next).await,
+                    Err(AuthError::Unauthorized)
+                ));
+            }
             login_with(&mut env, &client, &key, flags, next)
                 .await
                 .unwrap();
