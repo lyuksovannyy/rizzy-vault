@@ -6,27 +6,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>rizzy-vault</title>
-    <!-- @rizzy-vault/ui's tokens.css is not imported yet (not_done): the popup renders
-         unstyled. Wiring it needs the same `assetFileNames`/CSP care apps/web's vite.config.ts
-         gives its one CSS file, which this change did not attempt to duplicate correctly
-         without a real build to verify it against. -->
-    <style>
-      /* WCAG 2.2 SC 2.5.8 (target size, AA; e2e/a11y.spec.ts): the browser's default button
-         is about 21px tall in this unstyled popup; every button is at least 24px square. */
-      button {
-        min-height: 24px;
-        min-width: 24px;
-      }
-      /* An item's site icon (ADR 0052; packages/ui ItemIcon), in line with the row's text. */
-      .item-favicon {
-        display: inline-block;
-        vertical-align: middle;
-        margin-right: 6px;
-        object-fit: contain;
-      }
-    </style>
+    <!-- Styled by @rizzy-vault/ui's tokens.css and motion.css and ../surface.css, imported by
+         main.tsx (Vite emits them as one stylesheet under src/assets/; the extension_pages CSP
+         sets no style-src, and the files are the extension's own). The 24px target size of
+         WCAG 2.2 SC 2.5.8 that used to sit here inline is in surface.css. -->
   </head>
-  <body>
+  <body class="popup">
     <div id="root"></div>
     <script type="module" src="./main.tsx"></script>
   </body>

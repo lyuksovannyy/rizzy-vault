@@ -52,6 +52,15 @@ export const REQUIRED_RULES = [
 /** Runs axe over `page` and its frames, then the accessibility-tree check of its main frame;
  * fails on any violation, naming `screen`. */
 export async function expectAccessible(page: Page, screen: string): Promise<void> {
+  // The popup's entrance motion (packages/ui motion.css) starts from `opacity: 0`, and colour
+  // transitions pass through in-between colours; axe measures contrast on what is painted, so it
+  // waits until nothing is still running (the web vault's `settleAnimations`, apps/web/e2e/a11y.ts,
+  // for the same reason). Every one is finite and short.
+  await page.waitForFunction(
+    () => document.getAnimations().every((a) => a.playState !== "running"),
+    undefined,
+    { timeout: 5_000 },
+  );
   const results = await new AxeBuilder({ page }).withTags(AXE_TAGS).analyze();
   const evaluated = new Set(
     [...results.passes, ...results.violations, ...results.incomplete, ...results.inapplicable].map((r) => r.id),
