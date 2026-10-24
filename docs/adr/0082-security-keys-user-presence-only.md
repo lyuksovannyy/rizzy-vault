@@ -63,6 +63,15 @@ Under [ADR 0020](0020-partial-supersession.md) point 9, each named part of ADR 0
 - The module docs of `crates/rizzy-domain-auth/src/webauthn.rs` ("User verification (§7)") follow §1.
 - Firefox and Safari are not covered by the e2e and have not been tried. The implementation PR records any manual check it makes, with browser, version and key.
 
+### 4. On acceptance
+
+The owner's accepting change makes these edits (ADR 0020 points 4 and 9):
+1. ADR 0077's status line becomes "Partially superseded by [ADR 0082](0082-security-keys-user-presence-only.md) (§2 in part, §7, §9 entries 4, 5, 6, 9 and 13, §10 in part, owner answers at acceptance in part)", and its README row follows.
+2. [CRYPTO.md](../CRYPTO.md) §3, the WebAuthn row's feature list gains `danger-user-presence-only-security-keys`. §11.17: the "Enrolment" bullet says the creation options request `userVerification = "discouraged"` and no `credProtect`; the "Login" bullet's user-verification sentences become "User presence is required on every ceremony and user verification never is: assertions request `userVerification = "discouraged"` ([ADR 0082](adr/0082-security-keys-user-presence-only.md))."
+3. CLAUDE.md's status sentence and this ADR's README row: 0082 moves from Proposed to Accepted.
+
+No THREAT_MODEL.md invariant changes.
+
 ## Consequences
 
 ### Positive
