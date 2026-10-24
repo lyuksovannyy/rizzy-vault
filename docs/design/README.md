@@ -295,8 +295,26 @@ where the OS defines them.
 
 ## 10. Screenshots
 
-[`screenshots/`](screenshots/) holds the web vault's key screens in light and dark, before and
-after this design was applied, for review: `web-<screen>-<theme>-<before|after>.png`. Regenerate
+[`screenshots/`](screenshots/) holds the web vault's key screens in light and dark for review,
+named `web-<screen>-<theme>-<before|after>.png` (1180×760, about 1.9 MB in all). The "after"
+set covers login, onboarding, the vault with an item open, the editor, the new-item menu, the
+command palette, a confirm dialog and the unlock screen. To keep the folder small, the "before"
+set (the M1/M2 styling this design replaced) keeps the four screens that changed most: login,
+the vault with an item open, the command palette and the confirm dialog.
+
+| Screen | Before | After |
+|---|---|---|
+| Login (light) | [before](screenshots/web-login-light-before.png) | [after](screenshots/web-login-light-after.png) |
+| Login (dark) | [before](screenshots/web-login-dark-before.png) | [after](screenshots/web-login-dark-after.png) |
+| Item open (light) | [before](screenshots/web-vault-item-light-before.png) | [after](screenshots/web-vault-item-light-after.png) |
+| Item open (dark) | [before](screenshots/web-vault-item-dark-before.png) | [after](screenshots/web-vault-item-dark-after.png) |
+| Command palette (light) | [before](screenshots/web-palette-light-before.png) | [after](screenshots/web-palette-light-after.png) |
+| Command palette (dark) | [before](screenshots/web-palette-dark-before.png) | [after](screenshots/web-palette-dark-after.png) |
+| Confirm dialog (light) | [before](screenshots/web-dialog-light-before.png) | [after](screenshots/web-dialog-light-after.png) |
+| Confirm dialog (dark) | [before](screenshots/web-dialog-dark-before.png) | [after](screenshots/web-dialog-dark-after.png) |
+
+The extension popup has no screenshots yet (its Playwright harness loads the unpacked
+extension; adding a capture there is a follow-up). Regenerate
 the "after" set (against a built server, see `apps/web/e2e/server.ts`) with:
 
 ```sh
