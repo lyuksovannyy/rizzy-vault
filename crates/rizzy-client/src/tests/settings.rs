@@ -285,12 +285,13 @@ fn unknown_tags_survive_an_edit_and_an_unreadable_record_blocks_writes() {
     let mut server = Server::new(96);
     let (mut web, sk) = web_account(&mut server, &mut rng);
 
-    // A newer client wrote tag 0x0002, which this build does not know.
-    let newer: &[u8] = &[0, 1, 0, 1, 0, 2, 0, 0, 0, 3, b'n', b'e', b'w'];
+    // A newer client wrote tag 0x0003 (ADR 0081 Part B's contact pins), which this build does
+    // not know.
+    let newer: &[u8] = &[0, 1, 0, 1, 0, 3, 0, 0, 0, 3, b'n', b'e', b'w'];
     let (request, _) = seal_commit(&mut rng, &web.account, &web.unlocked, newer).unwrap();
     server.commit_settings(&request).unwrap();
     refresh(&server, &mut web);
-    assert_eq!(read(&web).unknown_tags().collect::<Vec<_>>(), [0x0002]);
+    assert_eq!(read(&web).unknown_tags().collect::<Vec<_>>(), [0x0003]);
     apply(
         &mut server,
         &mut rng,
@@ -299,10 +300,12 @@ fn unknown_tags_survive_an_edit_and_an_unreadable_record_blocks_writes() {
     );
     let other = web_login(&mut server, &mut rng, &sk);
     let record = read(&other);
-    assert_eq!(record.unknown_tags().collect::<Vec<_>>(), [0x0002]);
+    assert_eq!(record.unknown_tags().collect::<Vec<_>>(), [0x0003]);
     assert_eq!(record.matching().match_default(), MatchMode::Exact);
+    // ADR 0081 §A10: the first settings write of this build adds the vault directory.
+    assert!(record.vault_directory().is_some());
     let bytes = record.encode().unwrap();
-    assert!(bytes.ends_with(&[0, 2, 0, 0, 0, 3, b'n', b'e', b'w']));
+    assert!(bytes.ends_with(&[0, 3, 0, 0, 0, 3, b'n', b'e', b'w']));
 
     // A record of a later format_version is parked: no read, no write, no matching.
     let (request, _) = seal_commit(&mut rng, &web.account, &web.unlocked, &[0, 2, 0, 0]).unwrap();

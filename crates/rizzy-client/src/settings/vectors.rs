@@ -37,7 +37,7 @@ const POSITIVE: &[(&str, &str)] = &[
     ),
     (
         "unknown-tags",
-        "0001000300010000000600010000000000020000000268697ffe00000000",
+        "0001000300010000000600010000000000050000000268697ffe00000000",
     ),
 ];
 
@@ -183,7 +183,7 @@ fn the_typed_records_encode_to_the_positive_vectors() {
 #[test]
 fn unknown_tags_are_preserved_through_an_edit() {
     let mut record = AccountSettingsRecord::decode(&positive("unknown-tags")).unwrap();
-    assert_eq!(record.unknown_tags().collect::<Vec<_>>(), [0x0002, 0x7ffe]);
+    assert_eq!(record.unknown_tags().collect::<Vec<_>>(), [0x0005, 0x7ffe]);
     record.apply(&Edit::Default(MatchMode::Exact)).unwrap();
     let mut expected = positive("unknown-tags");
     // Only the match default changes: entry 1's value starts at byte 10.
@@ -205,7 +205,7 @@ fn every_negative_vector_fails_with_its_error() {
 #[test]
 fn an_oversize_entry_and_too_many_entries_are_rejected() {
     // One unknown entry of MAX_SETTINGS_ENTRY_LEN + 1 bytes.
-    let mut oversize = hex("0001 0001 0002");
+    let mut oversize = hex("0001 0001 0005");
     let len = u32::try_from(MAX_SETTINGS_ENTRY_LEN + 1).unwrap();
     oversize.extend_from_slice(&len.to_be_bytes());
     oversize.resize(oversize.len() + MAX_SETTINGS_ENTRY_LEN + 1, 0);
@@ -214,7 +214,7 @@ fn an_oversize_entry_and_too_many_entries_are_rejected() {
         ClientError::InvalidServerResponse
     );
     // Exactly MAX_SETTINGS_ENTRY_LEN is fine.
-    let mut largest = hex("0001 0001 0002");
+    let mut largest = hex("0001 0001 0005");
     let len = u32::try_from(MAX_SETTINGS_ENTRY_LEN).unwrap();
     largest.extend_from_slice(&len.to_be_bytes());
     largest.resize(largest.len() + MAX_SETTINGS_ENTRY_LEN, 0);

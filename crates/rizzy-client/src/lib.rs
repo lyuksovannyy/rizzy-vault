@@ -134,6 +134,7 @@ pub mod store;
 pub mod sync;
 pub mod two_factor;
 pub mod unlock;
+pub mod vaults;
 pub mod webauthn;
 mod wire;
 

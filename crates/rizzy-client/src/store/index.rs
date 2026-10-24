@@ -78,7 +78,7 @@ use std::collections::BTreeMap;
 
 use core::fmt;
 
-use rizzy_core::ids::ItemId;
+use rizzy_core::ids::{ItemId, VaultId};
 use rizzy_core::item::key::FieldKey;
 use rizzy_core::item::schema::{
     ATTR_KIND, ATTR_LABEL, ATTR_VALUE, CARD_BRAND, CARD_HOLDER, CustomFieldKind, IDENTITY_COMPANY,
@@ -109,14 +109,15 @@ pub const MAX_SEARCH_TEXT_LEN: usize = 1 << 20;
 /// The query a `SQLite` host runs for a search (module docs, "Search"). `?1` is
 /// [`like_pattern`] of the query, `?2` the most rows to return. Constant text with bound
 /// parameters (INV-53).
-pub const SEARCH: &str = "SELECT item_id FROM item_index \
+pub const SEARCH: &str = "SELECT vault_id, item_id FROM item_index \
      WHERE display_name LIKE ?1 ESCAPE '\\' OR search_text LIKE ?1 ESCAPE '\\' \
-     ORDER BY last_used_ms IS NULL, last_used_ms DESC, display_name, item_id LIMIT ?2";
+     ORDER BY last_used_ms IS NULL, last_used_ms DESC, display_name, item_id, vault_id LIMIT ?2";
 
 /// The query a `SQLite` host runs for the "recently used" list: the rows with a
 /// `last_used_ms`, most recent first. `?1` is the most rows to return.
-pub const RECENT: &str = "SELECT item_id FROM item_index WHERE last_used_ms IS NOT NULL \
-     ORDER BY last_used_ms DESC, display_name, item_id LIMIT ?1";
+pub const RECENT: &str = "SELECT vault_id, item_id FROM item_index \
+     WHERE last_used_ms IS NOT NULL \
+     ORDER BY last_used_ms DESC, display_name, item_id, vault_id LIMIT ?1";
 
 /// One row as [`project`] builds it: everything but the counters.
 #[derive(Clone, PartialEq, Eq)]
@@ -443,38 +444,57 @@ pub fn project_vault(vault: &VaultSync) -> BTreeMap<[u8; 16], IndexEntry> {
 
 /// The writes that take a table holding `before` to `after`: an [`Write::IndexPut`] for each
 /// new or changed entry, an [`Write::IndexDelete`] for each entry gone. Counters are untouched.
-pub(crate) fn diff(
-    before: &BTreeMap<[u8; 16], IndexEntry>,
-    after: &BTreeMap<[u8; 16], IndexEntry>,
+pub(crate) fn diff<K: Ord>(
+    before: &BTreeMap<K, IndexEntry>,
+    after: &BTreeMap<K, IndexEntry>,
 ) -> Vec<Write> {
     let mut writes = Vec::new();
-    for item_id in before.keys() {
-        if !after.contains_key(item_id) {
-            writes.push(Write::IndexDelete { item_id: *item_id });
+    for (key, entry) in before {
+        if !after.contains_key(key) {
+            writes.push(Write::IndexDelete {
+                vault_id: entry.vault_id,
+                item_id: entry.item_id,
+            });
         }
     }
-    for (item_id, entry) in after {
-        if before.get(item_id) != Some(entry) {
+    for (key, entry) in after {
+        if before.get(key) != Some(entry) {
             writes.push(Write::IndexPut(entry.clone()));
         }
     }
     writes
 }
 
+/// The key of an entry in the account-wide maps: `(vault_id, item_id)` (INV-103).
+type EntryKey = ([u8; 16], [u8; 16]);
+
 /// The stored rows, parsed; `None` if the table must be rebuilt (module docs, "Its own failure
 /// rule"): the host could not read it, a row does not parse, or two rows name one item.
-fn stored(rows: &CacheRows) -> Option<BTreeMap<[u8; 16], IndexEntry>> {
+fn stored(rows: &CacheRows) -> Option<BTreeMap<EntryKey, IndexEntry>> {
     if rows.item_index_unreadable {
         return None;
     }
     let mut out = BTreeMap::new();
     for row in &rows.item_index {
         let parsed = row.parse().ok()?;
-        if out.insert(parsed.entry.item_id, parsed.entry).is_some() {
+        let key = (parsed.entry.vault_id, parsed.entry.item_id);
+        if out.insert(key, parsed.entry).is_some() {
             return None;
         }
     }
     Some(out)
+}
+
+/// Every vault's projected rows, keyed by `(vault_id, item_id)`, with tracking turned on in
+/// each driver from its own rows.
+fn project_all(vaults: &mut [VaultSync]) -> BTreeMap<EntryKey, IndexEntry> {
+    let mut projected = BTreeMap::new();
+    for vault in vaults.iter_mut() {
+        let rows = project_vault(vault);
+        projected.extend(rows.values().map(|e| ((e.vault_id, e.item_id), e.clone())));
+        vault.track_index(rows);
+    }
+    projected
 }
 
 /// The index writes of a load (§4 "Built at load"): what makes the stored `item_index` equal to
@@ -486,12 +506,7 @@ fn stored(rows: &CacheRows) -> Option<BTreeMap<[u8; 16], IndexEntry>> {
 ///
 /// The host commits the result like any other changeset, before the first step.
 pub fn reconcile(rows: &CacheRows, vaults: &mut [VaultSync]) -> Changeset {
-    let mut projected = BTreeMap::new();
-    for vault in vaults.iter_mut() {
-        let rows = project_vault(vault);
-        vault.track_index(rows.clone());
-        projected.extend(rows);
-    }
+    let projected = project_all(vaults);
     match stored(rows) {
         Some(before) => diff(&before, &projected).into_iter().collect(),
         None => rebuilt(&projected),
@@ -499,7 +514,7 @@ pub fn reconcile(rows: &CacheRows, vaults: &mut [VaultSync]) -> Changeset {
 }
 
 /// The writes that drop and rebuild the table from `projected`.
-fn rebuilt(projected: &BTreeMap<[u8; 16], IndexEntry>) -> Changeset {
+fn rebuilt(projected: &BTreeMap<EntryKey, IndexEntry>) -> Changeset {
     let mut changeset = Changeset::new();
     changeset.push(Write::IndexReset);
     for entry in projected.values() {
@@ -518,13 +533,7 @@ pub fn track_new(vault: &mut VaultSync) {
 /// The writes of a user-triggered rebuild (§4, `rv cache reindex`): the table dropped and
 /// rebuilt from `vaults`, every counter lost. Tracking stays on, from the rebuilt rows.
 pub fn reindex(vaults: &mut [VaultSync]) -> Changeset {
-    let mut projected = BTreeMap::new();
-    for vault in vaults.iter_mut() {
-        let rows = project_vault(vault);
-        vault.track_index(rows.clone());
-        projected.extend(rows);
-    }
-    rebuilt(&projected)
+    rebuilt(&project_all(vaults))
 }
 
 /// The write that records one use of `item` at `now_ms` (§2: the user viewed it, copied a
@@ -533,6 +542,7 @@ pub fn reindex(vaults: &mut [VaultSync]) -> Changeset {
 pub fn record_use(vault: &VaultSync, item: ItemId, now_ms: u64) -> Option<Write> {
     project(vault, item)?;
     Some(Write::IndexUse {
+        vault_id: vault.vault_id().to_bytes(),
         item_id: item.to_bytes(),
         at_ms: now_ms,
     })
@@ -589,12 +599,14 @@ fn ordered(rows: &CacheRows) -> Vec<StoredEntry> {
             core::cmp::Reverse(a.last_used_ms),
             a.entry.display_name.as_bytes(),
             a.entry.item_id,
+            a.entry.vault_id,
         )
             .cmp(&(
                 b.last_used_ms.is_none(),
                 core::cmp::Reverse(b.last_used_ms),
                 b.entry.display_name.as_bytes(),
                 b.entry.item_id,
+                b.entry.vault_id,
             ))
     });
     parsed
@@ -602,7 +614,7 @@ fn ordered(rows: &CacheRows) -> Vec<StoredEntry> {
 
 /// [`SEARCH`] over `rows`: the ids of at most `limit` matching rows (module docs).
 #[must_use]
-pub fn search(rows: &CacheRows, query: &str, limit: usize) -> Vec<ItemId> {
+pub fn search(rows: &CacheRows, query: &str, limit: usize) -> Vec<(VaultId, ItemId)> {
     let term = normalize_query(query);
     ordered(rows)
         .into_iter()
@@ -611,17 +623,26 @@ pub fn search(rows: &CacheRows, query: &str, limit: usize) -> Vec<ItemId> {
                 || like_contains(&r.entry.search_text, &term)
         })
         .take(limit)
-        .map(|r| ItemId::from_bytes(r.entry.item_id))
+        .map(|r| key_of(&r.entry))
         .collect()
 }
 
-/// [`RECENT`] over `rows`: the ids of at most `limit` used rows, most recent first.
+/// The `(vault, item)` an entry names (INV-103).
+fn key_of(entry: &IndexEntry) -> (VaultId, ItemId) {
+    (
+        VaultId::from_bytes(entry.vault_id),
+        ItemId::from_bytes(entry.item_id),
+    )
+}
+
+/// [`RECENT`] over `rows`: the `(vault, item)` of at most `limit` used rows, most recent
+/// first.
 #[must_use]
-pub fn recent(rows: &CacheRows, limit: usize) -> Vec<ItemId> {
+pub fn recent(rows: &CacheRows, limit: usize) -> Vec<(VaultId, ItemId)> {
     ordered(rows)
         .into_iter()
         .filter(|r| r.last_used_ms.is_some())
         .take(limit)
-        .map(|r| ItemId::from_bytes(r.entry.item_id))
+        .map(|r| key_of(&r.entry))
         .collect()
 }

@@ -196,6 +196,20 @@ pub enum ClientError {
     /// ADR 0076 §2.3 W5: a custom field created or edited without a Display Name (its `label`
     /// would hold no non-whitespace character). Nothing was written.
     LabelRequired,
+    /// ADR 0081 §A7, INV-103: no vault this client holds open has this id (an unknown, deleted,
+    /// withheld or not-yet-supported vault). Nothing was written.
+    UnknownVault,
+    /// ADR 0081 §A1, INV-101: the Personal vault cannot be deleted, renamed or shared. Nothing
+    /// was written.
+    PersonalVaultProtected,
+    /// ADR 0081 §D: the account owns `MAX_OWNED_VAULTS` (64) vaults, or its vault directory
+    /// holds `MAX_DIRECTORY_ENTRIES` (128) entries. Nothing was written.
+    VaultLimitReached,
+    /// ADR 0081 §A2, INV-102: the server serves the account's vaults inconsistently with its
+    /// authenticated vault directory (a listed vault withheld, an unlisted one served, or two
+    /// vaults without a directory). The client raises an alarm and writes nothing to the vault
+    /// set.
+    VaultSetMismatch,
     /// An internal step failed that the inputs cannot cause: a sealing, signing, encoding or
     /// derivation call that is unreachable for valid state. No detail is kept on purpose.
     Internal,
@@ -257,6 +271,10 @@ impl ClientError {
             Self::AutocompleteDuplicate => "autocomplete_duplicate",
             Self::AutocompleteKind => "autocomplete_kind",
             Self::LabelRequired => "label_required",
+            Self::UnknownVault => "unknown_vault",
+            Self::PersonalVaultProtected => "personal_vault_protected",
+            Self::VaultLimitReached => "vault_limit_reached",
+            Self::VaultSetMismatch => "vault_set_mismatch",
             Self::Internal => "internal",
         }
     }
@@ -348,6 +366,10 @@ impl fmt::Display for ClientError {
             }
             Self::AutocompleteKind => "only text and hidden custom fields take an autocomplete id",
             Self::LabelRequired => "a custom field needs a display name",
+            Self::UnknownVault => "no such vault",
+            Self::PersonalVaultProtected => "the Personal vault cannot be deleted, renamed or shared",
+            Self::VaultLimitReached => "the account holds the most vaults allowed",
+            Self::VaultSetMismatch => "the server's vaults do not match the account's vault list",
             Self::Internal => "internal error",
         })
     }
@@ -418,6 +440,10 @@ mod tests {
             ClientError::AutocompleteDuplicate,
             ClientError::AutocompleteKind,
             ClientError::LabelRequired,
+            ClientError::UnknownVault,
+            ClientError::PersonalVaultProtected,
+            ClientError::VaultLimitReached,
+            ClientError::VaultSetMismatch,
             ClientError::Internal,
         ];
         let mut codes: Vec<&str> = all.iter().map(|e| e.code()).collect();

@@ -43,6 +43,7 @@ use std::time::Duration;
 
 use rizzy_client::ClientError;
 use rizzy_client::items::ItemId;
+use rizzy_client::rizzy_core::ids::VaultId;
 use rizzy_client::rizzy_proto::limits::{
     MAX_ACCOUNT_STATEMENT_LEN, MAX_ENVELOPE_LEN, MAX_KEY_ENVELOPE_LEN, MAX_OP_STATEMENT_LEN,
     MAX_SNAPSHOT_STATEMENT_LEN, MAX_UPLOAD_BODY_LEN,
@@ -52,8 +53,8 @@ use rizzy_client::store::index::{self, IndexRow, MAX_DISPLAY_NAME_LEN, MAX_SEARC
 use rizzy_client::store::record::MAX_DEVICE_STATE_LEN;
 use rizzy_client::store::rows::limits::{MAX_KEY_COLUMN_LEN, MAX_SELF_GRANT_JSON_LEN};
 use rizzy_client::store::rows::{
-    CACHE_FORMAT, CacheRows, Changeset, INDEX_RESET, MIGRATIONS, ObjectRow, OpRow, PRAGMAS, SCHEMA,
-    SnapshotRow, VaultRow, WrapRow, Write, kind, meta, own,
+    CACHE_FORMAT, CacheRows, Changeset, INDEX_RESET, MIGRATIONS, ObjectRow, OpRow, PRAGMAS,
+    PendingMoveRow, SCHEMA, SnapshotRow, VaultRow, WrapRow, Write, kind, meta, own,
 };
 use sqlx_client as sqlx;
 use sqlx_client::sqlite::{
@@ -206,18 +207,48 @@ const OVERSIZE_INDEX: &str = "SELECT COUNT(*) FROM item_index \
 /// Every `item_index` row; the text columns as their bytes, so a row that is not UTF-8 is
 /// `rizzy-client`'s to refuse, not the driver's.
 const SELECT_INDEX: &str = "SELECT item_id, vault_id, item_type, CAST(display_name AS BLOB), \
-     CAST(search_text AS BLOB), last_used_ms, use_count FROM item_index ORDER BY item_id";
-/// Inserts an `item_index` row, or replaces every column but the counters (ADR 0056 §4).
+     CAST(search_text AS BLOB), last_used_ms, use_count FROM item_index \
+     ORDER BY vault_id, item_id";
+/// Inserts an `item_index` row, or replaces every column but the key and the counters (ADR
+/// 0056 §4; keyed by `(vault_id, item_id)`, ADR 0081 §A7).
 const PUT_INDEX: &str = "INSERT INTO item_index(item_id, vault_id, item_type, display_name, \
-     search_text) VALUES(?1, ?2, ?3, ?4, ?5) ON CONFLICT(item_id) DO UPDATE SET \
-     vault_id = excluded.vault_id, item_type = excluded.item_type, \
+     search_text) VALUES(?1, ?2, ?3, ?4, ?5) ON CONFLICT(vault_id, item_id) DO UPDATE SET \
+     item_type = excluded.item_type, \
      display_name = excluded.display_name, search_text = excluded.search_text";
 /// Deletes an `item_index` row.
-const DELETE_INDEX: &str = "DELETE FROM item_index WHERE item_id = ?1";
+const DELETE_INDEX: &str = "DELETE FROM item_index WHERE vault_id = ?1 AND item_id = ?2";
 /// Records one use (ADR 0056 §2); the count saturates, as the reference's does.
-const USE_INDEX: &str = "UPDATE item_index SET last_used_ms = ?2, use_count = \
+const USE_INDEX: &str = "UPDATE item_index SET last_used_ms = ?3, use_count = \
      CASE WHEN use_count < 9223372036854775807 THEN use_count + 1 ELSE use_count END \
-     WHERE item_id = ?1";
+     WHERE vault_id = ?1 AND item_id = ?2";
+/// Copies one row's counters to another's (ADR 0081 §A6 step 1); nothing without both rows.
+const COPY_INDEX_USAGE: &str = "UPDATE item_index SET \
+     last_used_ms = (SELECT f.last_used_ms FROM item_index f WHERE f.vault_id = ?1 AND f.item_id = ?2), \
+     use_count = (SELECT f.use_count FROM item_index f WHERE f.vault_id = ?1 AND f.item_id = ?2) \
+     WHERE vault_id = ?3 AND item_id = ?4 \
+     AND EXISTS (SELECT 1 FROM item_index f WHERE f.vault_id = ?1 AND f.item_id = ?2)";
+/// The `pending_move` rows over the key-column cap (ADR 0081 §A7).
+const OVERSIZE_PENDING_MOVES: &str = "SELECT COUNT(*) FROM pending_move \
+     WHERE length(source_vault_id) > ?1 OR length(source_item_id) > ?1 \
+     OR length(target_vault_id) > ?1 OR length(target_item_id) > ?1";
+/// Every `pending_move` row (ADR 0081 §A7).
+const SELECT_PENDING_MOVES: &str = "SELECT source_vault_id, source_item_id, target_vault_id, \
+     target_item_id FROM pending_move ORDER BY source_vault_id, source_item_id";
+/// Inserts a `pending_move` row, or replaces the row of its source.
+const PUT_PENDING_MOVE: &str = "INSERT OR REPLACE INTO pending_move(source_vault_id, \
+     source_item_id, target_vault_id, target_item_id) VALUES(?1, ?2, ?3, ?4)";
+/// Deletes the `pending_move` row of a source item.
+const DELETE_PENDING_MOVE: &str =
+    "DELETE FROM pending_move WHERE source_vault_id = ?1 AND source_item_id = ?2";
+/// The statements of [`Write::DropVault`] (ADR 0081 §A5), each bound to the vault id.
+const DROP_VAULT: &[&str] = &[
+    "DELETE FROM wraps WHERE vault_id = ?1",
+    "DELETE FROM ops WHERE vault_id = ?1",
+    "DELETE FROM snapshots WHERE vault_id = ?1",
+    "DELETE FROM item_index WHERE vault_id = ?1",
+    "DELETE FROM pending_move WHERE source_vault_id = ?1 OR target_vault_id = ?1",
+    "DELETE FROM vaults WHERE vault_id = ?1",
+];
 
 /// A length as a bound `SQLite` integer.
 fn cap(len: usize) -> i64 {
@@ -460,7 +491,11 @@ impl Db {
     ///
     /// # Errors
     /// [`CliError::Database`] for a table that cannot be read.
-    pub async fn search(&mut self, query: &str, limit: usize) -> Result<Vec<ItemId>, CliError> {
+    pub async fn search(
+        &mut self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(VaultId, ItemId)>, CliError> {
         let pattern = index::like_pattern(query);
         let rows = sqlx::query(index::SEARCH)
             .bind(pattern.as_str())
@@ -475,7 +510,7 @@ impl Db {
     ///
     /// # Errors
     /// [`CliError::Database`] for a table that cannot be read.
-    pub async fn recent(&mut self, limit: usize) -> Result<Vec<ItemId>, CliError> {
+    pub async fn recent(&mut self, limit: usize) -> Result<Vec<(VaultId, ItemId)>, CliError> {
         let rows = sqlx::query(index::RECENT)
             .bind(cap(limit))
             .fetch_all(&mut self.conn)
@@ -513,14 +548,15 @@ impl Db {
     }
 }
 
-/// The item ids of a search's rows; a row whose id is not 16 bytes is skipped (the table is
-/// rebuilt at the next load).
-fn item_ids(rows: &[sqlx::sqlite::SqliteRow]) -> Result<Vec<ItemId>, CliError> {
+/// The `(vault_id, item_id)` of a search's rows (INV-103); a row whose ids are not 16 bytes is
+/// skipped (the table is rebuilt at the next load).
+fn item_ids(rows: &[sqlx::sqlite::SqliteRow]) -> Result<Vec<(VaultId, ItemId)>, CliError> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let id: Vec<u8> = row.try_get(0).map_err(|e| db_error(&e))?;
-        if let Ok(id) = ItemId::from_slice(&id) {
-            out.push(id);
+        let vault: Vec<u8> = row.try_get(0).map_err(|e| db_error(&e))?;
+        let item: Vec<u8> = row.try_get(1).map_err(|e| db_error(&e))?;
+        if let (Ok(vault), Ok(item)) = (VaultId::from_slice(&vault), ItemId::from_slice(&item)) {
+            out.push((vault, item));
         }
     }
     Ok(out)
@@ -711,6 +747,25 @@ async fn read_rows(conn: &mut SqliteConnection) -> Result<CacheRows, sqlx::Error
             key_wrap: row.try_get(5)?,
             own: row.try_get(6)?,
             sent_generation: row.try_get(7)?,
+        });
+    }
+
+    // ADR 0081 §A7: ids only, each a key column under its cap.
+    no_oversize(conn, OVERSIZE_PENDING_MOVES, &[key_cap]).await?;
+    for row in sqlx::query(SELECT_PENDING_MOVES)
+        .fetch_all(&mut *conn)
+        .await?
+    {
+        let id = |i: usize| -> Result<[u8; 16], sqlx::Error> {
+            let bytes: Vec<u8> = row.try_get(i)?;
+            <[u8; 16]>::try_from(bytes.as_slice())
+                .map_err(|_| sqlx::Error::Decode("a pending_move id is not 16 bytes".into()))
+        };
+        rows.pending_moves.push(PendingMoveRow {
+            source_vault_id: id(0)?,
+            source_item_id: id(1)?,
+            target_vault_id: id(2)?,
+            target_item_id: id(3)?,
         });
     }
 
@@ -973,18 +1028,34 @@ async fn apply(conn: &mut SqliteConnection, write: &Write) -> Result<(), sqlx::E
                 .await?;
             one_row(done.rows_affected())
         }
-        Write::IndexDelete { item_id } => {
+        Write::IndexDelete { vault_id, item_id } => {
             sqlx::query(DELETE_INDEX)
+                .bind(vault_id.as_slice())
                 .bind(item_id.as_slice())
                 .execute(&mut *conn)
                 .await?;
             Ok(())
         }
-        Write::IndexUse { item_id, at_ms } => {
+        Write::IndexUse {
+            vault_id,
+            item_id,
+            at_ms,
+        } => {
             let at = at_ms.to_be_bytes();
             sqlx::query(USE_INDEX)
+                .bind(vault_id.as_slice())
                 .bind(item_id.as_slice())
                 .bind(at.as_slice())
+                .execute(&mut *conn)
+                .await?;
+            Ok(())
+        }
+        Write::IndexCopyUsage { from, to } => {
+            sqlx::query(COPY_INDEX_USAGE)
+                .bind(from.0.as_slice())
+                .bind(from.1.as_slice())
+                .bind(to.0.as_slice())
+                .bind(to.1.as_slice())
                 .execute(&mut *conn)
                 .await?;
             Ok(())
@@ -992,6 +1063,36 @@ async fn apply(conn: &mut SqliteConnection, write: &Write) -> Result<(), sqlx::E
         Write::IndexReset => {
             for statement in INDEX_RESET {
                 sqlx::query(*statement).execute(&mut *conn).await?;
+            }
+            Ok(())
+        }
+        Write::PendingMovePut(row) => {
+            let done = sqlx::query(PUT_PENDING_MOVE)
+                .bind(row.source_vault_id.as_slice())
+                .bind(row.source_item_id.as_slice())
+                .bind(row.target_vault_id.as_slice())
+                .bind(row.target_item_id.as_slice())
+                .execute(&mut *conn)
+                .await?;
+            one_row(done.rows_affected())
+        }
+        Write::PendingMoveDelete {
+            source_vault_id,
+            source_item_id,
+        } => {
+            sqlx::query(DELETE_PENDING_MOVE)
+                .bind(source_vault_id.as_slice())
+                .bind(source_item_id.as_slice())
+                .execute(&mut *conn)
+                .await?;
+            Ok(())
+        }
+        Write::DropVault { vault_id } => {
+            for statement in DROP_VAULT {
+                sqlx::query(*statement)
+                    .bind(vault_id.as_slice())
+                    .execute(&mut *conn)
+                    .await?;
             }
             Ok(())
         }
@@ -1275,22 +1376,31 @@ mod tests {
                 Write::IndexPut(entry(1, "почта", "ivan\nпётр")),
                 Write::IndexPut(entry(2, "bank", "")),
                 Write::IndexUse {
+                    vault_id: VAULT,
                     item_id: id(1),
                     at_ms: 7,
                 },
                 Write::IndexUse {
+                    vault_id: VAULT,
                     item_id: id(1),
                     at_ms: 9,
                 },
                 Write::IndexUse {
+                    vault_id: VAULT,
                     item_id: id(3),
                     at_ms: 9,
                 },
             ],
             vec![
                 Write::IndexPut(entry(1, "почта 2", "")),
-                Write::IndexDelete { item_id: id(2) },
-                Write::IndexDelete { item_id: id(3) },
+                Write::IndexDelete {
+                    vault_id: VAULT,
+                    item_id: id(2),
+                },
+                Write::IndexDelete {
+                    vault_id: VAULT,
+                    item_id: id(3),
+                },
             ],
             vec![Write::IndexReset, Write::IndexPut(entry(4, "new", "x"))],
         ];
@@ -1393,10 +1503,12 @@ mod tests {
             ];
             let mut writes: Changeset = rows.iter().cloned().map(Write::IndexPut).collect();
             writes.push(Write::IndexUse {
+                vault_id: VAULT,
                 item_id: id(2),
                 at_ms: 50,
             });
             writes.push(Write::IndexUse {
+                vault_id: VAULT,
                 item_id: id(4),
                 at_ms: 70,
             });
@@ -1488,7 +1600,7 @@ mod tests {
             assert_eq!(migration.writes().len(), 1);
             v2.apply(&migration);
             assert_eq!(parts(migrated), parts(v2));
-            let empty: Vec<ItemId> = Vec::new();
+            let empty: Vec<(VaultId, ItemId)> = Vec::new();
             assert_eq!(db.search("", 10).await.unwrap(), empty);
         });
     }
@@ -1505,6 +1617,7 @@ mod tests {
             snapshots: rows.snapshots.clone(),
             item_index: rows.item_index.clone(),
             item_index_unreadable: rows.item_index_unreadable,
+            pending_moves: rows.pending_moves.clone(),
         }
     }
 

@@ -469,7 +469,7 @@ pub struct Device {
     /// The authors, for the vault's Fetch.
     authors: Authors,
     /// The personal vault (M1 has one vault per account).
-    vault: VaultSync,
+    vault: Box<VaultSync>,
     /// The alarms raised.
     alarms: BTreeSet<Alarm>,
     /// The device session of this run, once authenticated.
@@ -614,7 +614,7 @@ impl Device {
             revocations: loaded_account.revocations().to_vec(),
             held: HeldAccount::from_account(&loaded_account),
             authors,
-            vault,
+            vault: Box::new(vault),
             alarms,
             session: None,
             refreshed: false,
@@ -664,7 +664,7 @@ impl Device {
             certificates,
             revocations,
             authors,
-            vault,
+            vault: Box::new(vault),
             alarms: BTreeSet::new(),
             session: None,
             refreshed: false,
@@ -727,11 +727,17 @@ impl Device {
     /// # Errors
     /// [`CliError::Database`].
     pub async fn search(&mut self, query: &str) -> Result<Vec<ItemId>, CliError> {
-        self.db
+        let vault = self.vault.vault_id();
+        Ok(self
+            .db
             .as_mut()
             .ok_or(CliError::Client(ClientError::Internal))?
             .search(query, usize::MAX)
-            .await
+            .await?
+            .into_iter()
+            .filter(|(v, _)| *v == vault)
+            .map(|(_, item)| item)
+            .collect())
     }
 
     /// The items used on this device, most recent first, at most `limit` (ADR 0056 §2).
@@ -739,11 +745,17 @@ impl Device {
     /// # Errors
     /// [`CliError::Database`].
     pub async fn recent(&mut self, limit: usize) -> Result<Vec<ItemId>, CliError> {
-        self.db
+        let vault = self.vault.vault_id();
+        Ok(self
+            .db
             .as_mut()
             .ok_or(CliError::Client(ClientError::Internal))?
             .recent(limit)
-            .await
+            .await?
+            .into_iter()
+            .filter(|(v, _)| *v == vault)
+            .map(|(_, item)| item)
+            .collect())
     }
 
     /// Drops and rebuilds the `item_index` table from the vault (ADR 0056 §4, `rv cache
@@ -994,6 +1006,12 @@ impl Device {
     /// [`CliError::Alarm`] when an alarm is raised or detected; the flows' and the transport's
     /// errors.
     pub async fn online(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
+        // Boxed: the refresh holds the whole account answer, and every caller awaits it.
+        Box::pin(self.online_unboxed(ui)).await
+    }
+
+    /// [`Device::online`]'s body.
+    async fn online_unboxed(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
         if self.refreshed {
             return Ok(());
         }

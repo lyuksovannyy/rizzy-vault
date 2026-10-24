@@ -129,8 +129,8 @@ use rizzy_proto::vault::{
 };
 use rizzy_proto::wire::List;
 use rizzy_sync::causal::{
-    AuthorStatus, BodyStatus, CoverPlan, Report, RestoreGeneration, ServedOp, ServerView, VaultLog,
-    check_op_author, check_snapshot_author,
+    AuthorStatus, BodyStatus, CoverPlan, GapCause, Report, RestoreGeneration, ServedOp, ServerView,
+    VaultLog, check_op_author, check_snapshot_author,
 };
 use rizzy_sync::dot::Dot;
 use rizzy_sync::header::{ItemSchemaVersion, OpHeader, SnapshotHeader};
@@ -465,6 +465,54 @@ pub struct VaultSync {
     wraps_complete_at: Option<u32>,
     /// The own `device_seq`s of the healing request in flight, for its answer.
     healing: Option<heal::HealInFlight>,
+    /// The device's counters, shared with its other vaults' drivers ([`DeviceCounters`]).
+    counters: Option<DeviceCounters>,
+}
+
+/// The per-device counters, `device_seq` and the HLC, shared by every [`VaultSync`] of one
+/// device ([ADR 0081] §A7): "a device running several `VaultSync` drivers allocates
+/// `device_seq` from one per-device counter (today's cache meta `NEXT_DEVICE_SEQ`), and each
+/// driver sets `vault_prev_seq` from its own vault's chain".
+///
+/// Each driver keeps its own copy and merges it with the shared one (the larger value of each
+/// counter wins) before it allocates a `device_seq`, after it wrote an op or received an HLC,
+/// and before it journals the counters. Neither counter ever goes backwards, so no
+/// `device_seq` is allocated twice across vaults, and `device_seq` stays gap-free per device.
+/// Cloning shares the counters.
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+#[derive(Clone, Default)]
+pub struct DeviceCounters(std::sync::Arc<std::sync::Mutex<(u64, Hlc)>>);
+
+impl fmt::Debug for DeviceCounters {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DeviceCounters")
+    }
+}
+
+impl DeviceCounters {
+    /// New counters, before any driver joined them.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Merges `(next_seq, clock)` into the shared counters and returns the merged values.
+    fn merge(&self, next_seq: u64, clock: Hlc) -> (u64, Hlc) {
+        let mut shared = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        shared.0 = shared.0.max(next_seq);
+        shared.1 = shared.1.max(clock);
+        *shared
+    }
+
+    /// The next `device_seq` any driver of this device would allocate.
+    #[must_use]
+    pub fn next_device_seq(&self) -> u64 {
+        self.merge(0, Hlc::ZERO).0
+    }
 }
 
 impl fmt::Debug for VaultSync {
@@ -558,7 +606,59 @@ impl VaultSync {
             served_wraps: BTreeSet::new(),
             wraps_complete_at: None,
             healing: None,
+            counters: None,
         })
+    }
+
+    /// The revoked devices of the account this driver knows a cut-off for, other than its own,
+    /// each with its chain's head in this vault and its `last_accepted_device_seq`: the inputs
+    /// of the cross-vault missing-data check ([`crate::vaults::revoked_cutoff_gaps`]).
+    #[must_use]
+    pub fn revoked_heads(&self) -> Vec<(DeviceId, u64, u64)> {
+        self.log
+            .cutoffs()
+            .filter(|(device, _)| *device != self.device_id)
+            .map(|(device, cut)| (device, self.log.head(device), cut))
+            .collect()
+    }
+
+    /// The missing-data reports of a complete Fetch. ADR 0081 §0 item 2: with several vaults,
+    /// `device_seq` counts ops in every vault, so a revoked device's chain may end below its
+    /// cut-off in one vault; a driver that shares its counters leaves that check to the one
+    /// over every vault ([`crate::vaults::revoked_cutoff_gaps`]).
+    fn complete_fetch_reports(&self) -> Vec<Report> {
+        let several = self.counters.is_some();
+        self.log
+            .complete_fetch_reports()
+            .into_iter()
+            .filter(|r| {
+                !(several
+                    && matches!(
+                        r,
+                        Report::Gap {
+                            cause: GapCause::BelowCutoff { .. },
+                            ..
+                        }
+                    ))
+            })
+            .collect()
+    }
+
+    /// Joins the device's shared counters ([`DeviceCounters`], ADR 0081 §A7): from now on this
+    /// driver allocates `device_seq` and ticks the HLC from them, with every other driver that
+    /// joined the same counters.
+    pub fn share_counters(&mut self, counters: &DeviceCounters) {
+        self.counters = Some(counters.clone());
+        self.merge_counters();
+    }
+
+    /// Merges this driver's counters with the shared ones, if it joined any.
+    fn merge_counters(&mut self) {
+        if let Some(counters) = &self.counters {
+            let (next_seq, clock) = counters.merge(self.next_seq, self.clock);
+            self.next_seq = next_seq;
+            self.clock = clock;
+        }
     }
 
     /// Turns the cache journal on (ADR 0026 §4): from now on every step records the rows it
@@ -576,6 +676,7 @@ impl VaultSync {
     /// generation if they moved (ADR 0026 §4 steps 1–2 and 6). Empty when the journal is off
     /// or nothing changed.
     pub fn take_writes(&mut self) -> Changeset {
+        self.merge_counters();
         let Some(journal) = self.journal.as_mut() else {
             return Changeset::new();
         };
@@ -709,10 +810,13 @@ impl VaultSync {
         self.vault_id
     }
 
-    /// The next own `device_seq`, for the host to keep with the device.
+    /// The next own `device_seq`, for the host to keep with the device: the device's, across
+    /// every driver that shares its counters ([`DeviceCounters`]).
     #[must_use]
-    pub const fn next_device_seq(&self) -> u64 {
-        self.next_seq
+    pub fn next_device_seq(&self) -> u64 {
+        self.counters
+            .as_ref()
+            .map_or(self.next_seq, |c| c.next_device_seq().max(self.next_seq))
     }
 
     /// Whether writes are refused (see the module docs).
@@ -1151,7 +1255,7 @@ impl VaultSync {
         }
         self.keep_covers(&settled, &covers, &cover_records);
         if response.complete {
-            outcome.reports.extend(self.log.complete_fetch_reports());
+            outcome.reports.extend(self.complete_fetch_reports());
         }
         // Server behind (ADR 0021 §9).
         let heads = heads_vv(&response.heads);
@@ -1181,6 +1285,7 @@ impl VaultSync {
         }
         self.server_heads = Some(heads);
         self.prune_bodies();
+        self.merge_counters();
         Ok(outcome)
     }
 
@@ -1693,6 +1798,8 @@ impl VaultSync {
             Some(_) => None,
             None => Some(ItemKey::generate(rng, self.vault_key.epoch())),
         };
+        // ADR 0081 §A7: the next device_seq of the device, not of this vault alone.
+        self.merge_counters();
         let hlc = self.clock.tick(now_ms).map_err(|_| ClientError::Internal)?;
         let dot = Dot::new(self.device_id, self.next_seq).ok_or(ClientError::Internal)?;
         let schema = ItemSchemaVersion::new(ITEM_SCHEMA_VERSION).ok_or(ClientError::Internal)?;
@@ -1796,6 +1903,7 @@ impl VaultSync {
         }
         self.clock = hlc;
         self.next_seq = self.next_seq.checked_add(1).ok_or(ClientError::Internal)?;
+        self.merge_counters();
         self.synced = false;
         Ok(dot)
     }
@@ -2920,6 +3028,19 @@ impl VaultSync {
             };
             self.record(|| write);
         }
+    }
+
+    /// Whether the server acknowledged everything this driver wrote: no own op unacknowledged,
+    /// no own snapshot queued or due. What a move waits for on its target before it purges the
+    /// source ([ADR 0081] §A6 step 2, INV-104).
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    #[must_use]
+    pub fn fully_acknowledged(&self) -> bool {
+        self.log.unacknowledged().next().is_none()
+            && self.outbox.is_empty()
+            && self.pending_snapshots.is_empty()
+            && self.in_flight.is_empty()
     }
 
     /// How many own ops and own snapshots the server has not acknowledged: what removal of
