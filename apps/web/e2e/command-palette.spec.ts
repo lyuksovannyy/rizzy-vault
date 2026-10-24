@@ -63,12 +63,11 @@ test("command palette: search, keyboard nav, open, jump to a view, favorites-fir
   await expect(page.getByRole("option", { name: "Trash" })).toBeVisible();
 
   // Search by title: both banks match "Bank", favorite ("Zeta Bank") ranked first among the
-  // items. The sidebar's "Bank account" type filter (ADR 0055) matches "Bank" too, as a
-  // jump-to-a-view command listed before them.
+  // items. No "Bank account" type filter matches it: ADR 0078 retired that type.
   await combobox.fill("Bank");
-  await expect(page.getByRole("option", { name: "Bank account" })).toBeVisible();
-  const options = page.getByRole("option");
   await expect(page.getByRole("option", { name: /^Open — / }).first()).toHaveAccessibleName(/Open — Zeta Bank/);
+  await expect(page.getByRole("option", { name: "Bank account" })).toHaveCount(0);
+  const options = page.getByRole("option");
   const names = await options.allTextContents();
   const zetaIndex = names.findIndex((n) => n.includes("Zeta Bank"));
   const alphaIndex = names.findIndex((n) => n.includes("Alpha Bank"));

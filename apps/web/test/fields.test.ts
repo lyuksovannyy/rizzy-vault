@@ -41,8 +41,9 @@ function f(key: string, more: Partial<FieldView> = {}): FieldView {
   };
 }
 
-// ADR 0055 §1: the fixed keys of each M3 type, and the eight the core conceals (§4). The web
-// vault's `secret` flag picks the input a new value is typed in; it must match the core's list.
+// ADR 0055 §1: the fixed keys of each M3 type, and the six the core conceals (§4; ADR 0078 §7
+// retired the Bank account type and its two). The web vault's `secret` flag picks the input a
+// new value is typed in; it must match the core's list.
 const M3_KEYS: Readonly<Record<string, readonly (readonly [string, boolean])[]>> = {
   "ssh-key": [
     ["ssh.host", false],
@@ -69,17 +70,10 @@ const M3_KEYS: Readonly<Record<string, readonly (readonly [string, boolean])[]>>
     ["wifi.password", true],
     ["wifi.security_type", false],
   ],
-  "bank-account": [
-    ["bank.bank_name", false],
-    ["bank.account_holder", false],
-    ["bank.account_number", true],
-    ["bank.routing_number", true],
-    ["bank.account_type", false],
-  ],
 };
 
 describe("the M3 item types (ADR 0055)", () => {
-  it("are creatable, each with its own keys and the eight concealed ones typed as secrets", () => {
+  it("are creatable, each with its own keys and the six concealed ones typed as secrets", () => {
     expect(CREATABLE_TYPES.map((t) => t.type)).toEqual([
       "login",
       "note",
@@ -89,7 +83,6 @@ describe("the M3 item types (ADR 0055)", () => {
       "api-credential",
       "software-license",
       "wifi",
-      "bank-account",
     ]);
     let secrets = 0;
     for (const [type, keys] of Object.entries(M3_KEYS)) {
@@ -100,7 +93,7 @@ describe("the M3 item types (ADR 0055)", () => {
         secrets += secret ? 1 : 0;
       }
     }
-    expect(secrets).toBe(8);
+    expect(secrets).toBe(6);
     // Labels are unique within a type, so each input has its own accessible name.
     for (const fields of Object.values(FIXED_FIELDS)) {
       const labels = (fields ?? []).map((x) => x.label);
@@ -119,13 +112,22 @@ describe("the M3 item types (ADR 0055)", () => {
 
   it("show a type this build does not know generically, with no field edits (ADR 0018 §8, §11)", () => {
     expect(typeLabel("wifi")).toBe("Wi-Fi");
-    expect(typeLabel("bank-account")).toBe("Bank account");
     expect(typeLabel("unknown")).toBe(UNSUPPORTED_ITEM);
     // `passkey` is a name the core reserves but no type this build creates.
     expect(typeLabel("passkey")).toBe(UNSUPPORTED_ITEM);
     expect(canEditFields("ssh-key")).toBe(true);
     expect(canEditFields("unknown")).toBe(false);
     expect(canEditFields("passkey")).toBe(false);
+  });
+
+  it("no longer create or edit the Bank account type ADR 0078 retired", () => {
+    // The wasm names a `0x0009` item `unknown` (ADR 0078 §5), so it shows as unsupported.
+    expect(CREATABLE_TYPES.some((t) => (t.type as string) === "bank-account")).toBe(false);
+    expect(Object.keys(FIXED_FIELDS)).not.toContain("bank-account");
+    const keys = Object.values(FIXED_FIELDS).flatMap((fields) => (fields ?? []).map((x) => x.key));
+    expect(keys.filter((k) => k.startsWith("bank."))).toEqual([]);
+    expect(typeLabel("unknown")).toBe("Unsupported item, update rizzy-vault");
+    expect(canEditFields("unknown")).toBe(false);
   });
 
   it("order an item's fixed fields as the editor does, unknown keys last", () => {
@@ -233,8 +235,6 @@ describe("layout", () => {
         "api.secret",
         "license.key",
         "wifi.password",
-        "bank.account_number",
-        "bank.routing_number",
       ].sort(),
     );
   });

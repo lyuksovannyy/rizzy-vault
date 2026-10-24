@@ -39,15 +39,18 @@ TypeScript ([ADR 0014](../../docs/adr/0014-ui-stack.md)), served by the `web` ro
 
 ## The item editor
 
-`src/views/ItemEditor.tsx` creates and edits every M1 item type and the five M3 types of ADR 0055
-(SSH key, API credential, Software license, Wi-Fi, Bank account), with a full editor of its
+`src/views/ItemEditor.tsx` creates and edits every M1 item type and the four M3 types of ADR 0055
+(SSH key, API credential, Software license, Wi-Fi), with a full editor of its
 websites (URIs), custom fields (text, hidden, boolean) and tags, not only its fixed fields.
 
-- **The M3 types** (`src/fields.ts`): each type's keys in ADR 0055 §1's order; the eight keys
+- **The M3 types** (`src/fields.ts`): each type's keys in ADR 0055 §1's order; the six keys
   the core conceals (§4) are typed in the secret-field component, and an SSH private key in its
   multi-line form (a textarea, since an input would strip the key's line breaks). An SSH key
   without a port shows "22 (default)", never stored. An item of a type this build does not
-  know shows "Unsupported item, update rizzy-vault" and offers no Edit (ADR 0018 §8).
+  know shows "Unsupported item, update rizzy-vault" and offers no Edit (ADR 0018 §8). So does
+  a Bank account an older build wrote: ADR 0078 retired that type (`0x0009`), so it is no
+  longer created, and its `bank.` fields stay concealed, revealable and copyable, so the data
+  can be moved out by hand; trash, restore and purge work.
 
 - **Idempotent save.** Adding a website or custom field mints its element id on the client
   (`newElementId` of `@rizzy-vault/core`) the moment the row is added to the form, not when

@@ -640,7 +640,6 @@ export type ItemType =
   | "api-credential"
   | "software-license"
   | "wifi"
-  | "bank-account"
   | "passkey";
 
 /** One row of an item list: no concealed value. */

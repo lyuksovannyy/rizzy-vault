@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// The five item types of ADR 0055 as the web vault's end-to-end specs create them: the "New item"
+// The four item types of ADR 0055 (ADR 0078 retired the fifth, Bank account) as the web vault's
+// end-to-end specs create them: the "New item"
 // menu entry, the editor's heading, and a value for each field, by the field's label. Shared by
 // `item-types.spec.ts` (create, view, reveal, filter), `a11y.spec.ts` (the axe audit of each
 // editor and item view) and `keyboard-nav.spec.ts` (the keyboard-only walk).
@@ -75,20 +76,6 @@ export const M3_TYPES: readonly M3Type[] = [
     ],
     concealed: [{ label: "Wi-Fi password", key: "wifi.password", value: "wifi-password-value" }],
   },
-  {
-    menu: "Bank account",
-    heading: "New bank account",
-    title: "Salary account",
-    shown: [
-      { label: "Bank", key: "bank.bank_name", value: "Example Bank" },
-      { label: "Account holder", key: "bank.account_holder", value: "Alice Example" },
-      { label: "Account type", key: "bank.account_type", value: "Checking" },
-    ],
-    concealed: [
-      { label: "Account number", key: "bank.account_number", value: "DE89370400440532013000" },
-      { label: "Routing number", key: "bank.routing_number", value: "COBADEFFXXX" },
-    ],
-  },
 ];
 
 /** `t`'s fields in the editor's order (`FIXED_FIELDS` in `src/fields.ts`), so a keyboard walk
@@ -116,11 +103,6 @@ const EDITOR_ORDER = [
   "wifi.ssid",
   "wifi.password",
   "wifi.security_type",
-  "bank.bank_name",
-  "bank.account_holder",
-  "bank.account_number",
-  "bank.routing_number",
-  "bank.account_type",
 ];
 
 /** Fills the open editor for `t` with the pointer and saves it; waits for the item view. */
