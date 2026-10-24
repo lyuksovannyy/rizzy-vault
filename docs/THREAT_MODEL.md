@@ -222,7 +222,7 @@ This table is the source for the M3 transparency page ([ROADMAP §4.5](ROADMAP.m
 | Public keys: identity, encryption, devices (signed) | Stored | |
 | Encrypted vault snapshots | Stored | |
 | Encrypted op log | Stored, compacted into client-made snapshots; the signed op headers are kept for the life of the vault ([ADR 0012](adr/0012-sync-engine.md) §7) | |
-| Vault self-grants and item-key wraps | Stored | They reveal vault and item IDs |
+| Vault self-grants and item-key wraps; each vault's kind (Personal or owned, [ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) §A10); M9: `vault-membership` statements, members (role and state) and pending member grants (ADR 0081 §B11) | Stored | They reveal vault and item IDs and which vault is the Personal one; from M9 also the membership graph ([AR-29](#9-accepted-risks-and-out-of-scope)) |
 | Per-device version vectors and cursors | Stored | Reveal edit counts per device |
 | Item IDs, op counts, ciphertext sizes, timestamps | Visible | Padmé padding reduces sizes ([CRYPTO.md §8.5](CRYPTO.md#85-plaintext-framing-and-padding)) |
 | IPs, user agents, connection times | Logs | Retention is configurable ([ROADMAP §4.9](ROADMAP.md#49-server-self-hosting--ops-m1-onward)) |
@@ -714,7 +714,7 @@ Parked with On-device mode ([ADR 0022](adr/0022-server-mode-only.md)). The headi
 
 ### A17. Vault member (M9)
 
-**Capabilities.** A current or removed member of a shared vault ([ROADMAP §4.11](ROADMAP.md#411-families--enthusiasts-m9--wont-for-v10)). Every member holds the vault key and a valid device chain, whatever their role. A view-only member can therefore encrypt and sign well-formed ops for that vault. [CRYPTO.md §10.2](CRYPTO.md#102-ed25519-signatures-and-signed-statements) defines op signatures, which give *attribution*, but no signed membership or role statement, which would give *authorization*.
+**Capabilities.** A current or removed member of a shared vault ([ROADMAP §4.11](ROADMAP.md#411-families--enthusiasts-m9--wont-for-v10)). Every member holds the vault key and a valid device chain, whatever their role. A view-only member can therefore encrypt and sign well-formed ops for that vault. [CRYPTO.md §10.2](CRYPTO.md#102-ed25519-signatures-and-signed-statements) defines op signatures, which give *attribution*; *authorization* comes only from the signed `vault-membership` statement ([ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) §B3), and only in clients that check it.
 
 **What they obtain.**
 - Edits a view-only role should forbid, if other members' clients accept every validly signed op from any member. "View / edit / manage" is then enforced only by an honest server.
@@ -722,8 +722,8 @@ Parked with On-device mode ([ADR 0022](adr/0022-server-mode-only.md)). The headi
 
 **Mitigations.**
 - Ops are signed by device keys that chain to the member's identity, so every edit is attributable.
-- Clients accept an op only if a membership statement, signed by a vault manager and verified by the client, gives its author a role that allows it. The server's role check is a second layer ([INV-67](#8-security-invariants)). The statement format belongs to the M9 ADR.
-- Removing a member rotates the vault key ([CRYPTO.md §4.2](CRYPTO.md#42-key-inventory)), so later data is closed to them.
+- Clients accept an op only if a membership statement, signed by a vault manager and verified by the client, gives its author a role that allows it. The server's role check is a second layer ([INV-67](#8-security-invariants)). The statement is ADR 0081 §B3's `vault-membership`, verified as a chain from `seq = 1` and anchored in the reader's own pins ([INV-105](#8-security-invariants)); §B7 gives the acceptance rule, with role cuts for demoted and removed members.
+- Removing a member rotates the vault key ([CRYPTO.md §4.2](CRYPTO.md#42-key-inventory), ADR 0081 §B6), so later data is closed to them.
 
 **Residual risk.** A removed member keeps cached plaintext, the same as a revoked device ([A8](#a8-stolen-or-lost-device)).
 
@@ -777,12 +777,12 @@ Two pieces of prior work set the bar here. Palant (2023) showed that Bitwarden c
   - Any "approve this device" flow. A relayed public key is the classic MITM point. AliasVault's "Login with Mobile" relays an RSA public key through its server.
   - M5: nowhere for link shares, because they use fragment keys.
   - M6: the mail encryption key. Substituting it gains a fully malicious server nothing, since it reads mail at ingress anyway. An attacker who controls only `api` or the DB would gain the mail, which is why `smtp` pins each account's identity key ([CRYPTO.md §11.13](CRYPTO.md#1113-mail-ingress-m6)).
-  - M9: shared-vault and family keys.
+  - M9: shared-vault and family keys. The invite flow of [ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) §B4–§B5 is where a substituted key would be granted a vault key.
   - M10: org keys and the org recovery key.
 - **Attack.** The server returns its own public key in place of the recipient's, so the client wraps a vault key or account key to the attacker.
 - **Required client-side mitigations.**
   - Each user has an Ed25519 identity key. The X25519 encryption key and every device key are signed by it ([INV-16](#8-security-invariants)).
-  - Other users' identity keys are pinned on first use and have fingerprints the user can verify out of band. A changed pinned key blocks key wrapping until the user re-verifies ([INV-17](#8-security-invariants)).
+  - Other users' identity keys are pinned on first use and have fingerprints the user can verify out of band. A changed pinned key blocks key wrapping until the user re-verifies ([INV-17](#8-security-invariants)). The pins live in `ACCOUNT_SETTINGS` tag `0x0003` (ADR 0081 §B2); the inviter verifies or explicitly pins the invitee's key before any grant (§B4), and the invitee's client refuses an invite whose statement lists any key other than its own current identity keys, which detects a substitution at the inviter's lookup whenever the real invitee receives the invite (§B5).
   - Device-to-device transfers need SAS confirmation ([INV-29](#8-security-invariants)).
   - Key transparency (Proton publishes one design) is a post-1.0 candidate ([Q-8](#10-open-questions-for-the-owner)).
 - **Residual risk.** A server that substitutes keys on *first* contact beats users who never verify fingerprints (TOFU, [AR-6](#9-accepted-risks-and-out-of-scope)). 1Password's white paper states the same limitation for its own design (secondary source).
@@ -823,7 +823,7 @@ Two pieces of prior work set the bar here. Palant (2023) showed that Bitwarden c
 - **Required client-side mitigations.**
   - There is no escrow before M10 ([INV-18](#8-security-invariants)).
   - Recovery enrollment is always a client action after an explicit user decision. It wraps only to an org recovery key that is authenticated like a user key ([INV-17](#8-security-invariants)), and the user can see that it is on.
-  - Invite acceptance never sends key material to a key the user has not authenticated.
+  - Invite acceptance never sends key material to a key the user has not authenticated. For shared vaults, [ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) §B4–§B5: a grant goes only to a key the manager verified or explicitly pinned (§B2), the invitee checks that the signed statement lists its own keys and that the granted key matches the statement's `vault_key_id`, and acceptance wraps the vault key only under the invitee's own account key.
   - Emergency access (M9) uses the same rules plus the waiting period.
 - **Milestone.** M9/M10. The M1 data model must already carry signed identity keys ([ROADMAP §6.7](ROADMAP.md#6-risks--hard-truths)). **ETH class:** 1 and 3.
 
@@ -1188,6 +1188,10 @@ IDs INV-70 to INV-100 were allocated across the 2026-10-11 ADR batch in ADR-numb
 | INV-31 | Parked with On-device mode ([ADR 0022](adr/0022-server-mode-only.md)). | – | – |
 | INV-67 | In a shared vault, clients accept an op only if its author holds, in a membership statement signed by a vault manager and verified by the client, a role that allows that op. A view-only member's edits are rejected even when the server accepts them. The statement format belongs to the M9 ADR. | M9 | Test: an op signed by a view-only member's device is rejected by the other members' clients. |
 | INV-74 | A client holds, rather than finally reports, a `Refusal::PurgeAboveCut` for as long as the response sequence that served the cover could still deliver the claimed `purge_dot`'s own header to any device's chain in the vault log; it reports the gap, and withholds everything causally dependent on the held dot, only once that response sequence completes without delivering it ([ADR 0050](adr/0050-paged-fetch-tombstone-boundary.md)). | M1 | The deterministic two-page test of ADR 0050 §4, and its regression case: the response completes with the `purge_dot` never served, and the hold resolves to a final, reported refusal. |
+| INV-101 | The Personal vault exists exactly once per account, is never deleted, and never has a `vault-membership` statement or a member grant. Clients refuse to create either; the server refuses `vault_delete`, statements and grants for it ([ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) §A1, §A5, §B9). | M3 | Server integration tests for each refusal; client API tests. |
+| INV-102 | A client opens a vault only if the authenticated vault directory lists it, and raises an alarm when a listed vault's self-grant is missing (withholding) or an unlisted one is served (ADR 0081 §A2). | M3 | Malicious-server double tests. |
+| INV-103 | Clients identify items by `(vault_id, item_id)`; an `item_id` from one vault never addresses an item of another (ADR 0081 §A7). | M3 | A test with the same `item_id` in two vaults. |
+| INV-104 | A move purges the source only after the server has acknowledged the target copy with every attachment chunk (ADR 0081 §A6). | M3 | Fault-injection tests at each step. |
 
 ### 8.5 Sharing
 
@@ -1197,6 +1201,7 @@ IDs INV-70 to INV-100 were allocated across the 2026-10-11 ADR batch in ADR-numb
 | INV-33 | The recipient page fetches the ciphertext and counts a view only after an explicit user action. It loads no third-party resources and sends `Referrer-Policy: no-referrer`. | M5 | End-to-end test. |
 | INV-34 | At expiry, revoke or maximum views, the server deletes the share ciphertext, whether or not anyone visits. | M5 | Worker test. |
 | INV-35 | Untrusted rich content (share payloads, mail HTML) is rendered as text or in a sandboxed iframe without `allow-scripts` and `allow-same-origin`. It can never read the web vault's storage or keys. Remote mail content is blocked by default. Native clients render it as plain text and embed no web view (WebView2, WKWebView, QtWebEngine, Android WebView) without an ADR ([ADR 0019](adr/0019-native-clients.md) §5.1). | M5 / M6 | End-to-end test with XSS payloads; on native clients, a review-checklist item. |
+| INV-105 | A client accepts a vault key, an op or a snapshot of a shared vault only under a `vault-membership` chain it verified from `seq = 1` and anchored in its own pins, and never below its pinned `membership_seq` ([ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) §B3). | M9 | Negative tests: a non-manager signer, a broken chain, a fork, a rollback, a wrong `vault_key_id`. |
 
 ### 8.6 Autofill and URLs
 
@@ -1318,6 +1323,7 @@ The invariants above were stricter than some mechanisms as first written. This t
 | AR-26 | A faulty device can lie about the content of an op whose body the server has compacted. Replicas report the disagreement but cannot tell the lie from the truth, so they may not converge. | It is undecidable: two histories give byte-identical inputs ([ADR 0018](adr/0018-item-record-encoding.md), "Settled by the merge spike" item 4). Until M9 every device in a vault is the owner's own. The spike reports every case (`faulty-kinds`: 1,136 of 150,720 schedules; 319 random seeds) and loses no value silently. | Before M9 |
 | AR-27 | Two or more colluding faulty devices exceed the bound of the evidence merge ([ADR 0018](adr/0018-item-record-encoding.md) open question 14) with two-author covers ([ADR 0021](adr/0021-server-compaction.md) open question 1): they can supply both covers of an op and lose its value silently. | Until M9 every device in a vault is the owner's own. The spike found it in 340 of 2.6 million random seeds, 88 of them silent. | Before M9 (ADR 0021 Proposed) |
 | AR-28 | OS crash capture that a native client cannot fully disable ([ADR 0019](adr/0019-native-clients.md) §5; each U until confirmed in M3 or M7). Android: debuggerd re-enables the dumpable flag at crash time and writes a tombstone that includes memory near the registers; Play vitals receives crash reports. iOS and macOS: system crash reports and Xcode Organizer. Windows: Windows Error Reporting, LocalDumps and Partner Center crash data. With `panic = "abort"`, every core panic becomes such a crash. Store-console crash data is readable by anyone who holds an [AST-16](#2-assets) account. | The app cannot close these paths. Key-holding allocations stay short-lived and zeroized, and no crash SDK is linked ([INV-60](#8-security-invariants)). | M3 (desktop) and M7 (mobile), when each mechanism is confirmed |
+| AR-29 | The server sees the membership graph of shared vaults and the lookups behind it: which accounts share which vault, their roles, the times of invites, accepts, declines, departures and removals, which login names a user looked up, each member's write activity per vault, vault counts and sizes, and every member's public identity keys ([ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) §B9). It does not learn vault names, item contents or which item is which. | Every server-mediated sharing design has it. | – |
 
 **Explicitly out of scope:** everything in [§1.4](#14-non-goals); the security of the user's email provider and phone number, because no *data* recovery goes through them; and the security of third-party services we call (HIBP, DNS blocklists, APNs/FCM) beyond limiting what we send them. [ADR 0008](adr/0008-account-recovery.md) decision 8 allows no email-based reset of anything ([Q-16](#10-open-questions-for-the-owner)). If a login reset is ever added, [INV-66](#8-security-invariants) bounds what it may do, and whoever controls the user's mailbox or the instance's outbound mail is an attacker against it.
 
