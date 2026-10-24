@@ -86,7 +86,17 @@ jobs:
           $dir = @("C:\Program Files\OpenSSL", "C:\Program Files\OpenSSL-Win64") |
             Where-Object { Test-Path "$_\include\openssl\ssl.h" } | Select-Object -First 1
           if (-not $dir) { throw "OpenSSL headers not found" }
+          # The Chocolatey package (the Shining Light installer) keeps its import libraries in a
+          # subfolder such as lib\VC\x64\MD, not in lib\, where openssl-sys looks when only
+          # OPENSSL_DIR is set; so name the folder that really holds libssl.lib (ADR 0077).
+          $lib = Get-ChildItem -Path "$dir\lib" -Recurse -Filter libssl.lib |
+            Where-Object { $_.DirectoryName -match 'x64' -or $_.DirectoryName -eq "$dir\lib" } |
+            Sort-Object { if ($_.DirectoryName -match '\\MD$') { 0 } else { 1 } } |
+            Select-Object -First 1
+          if (-not $lib) { throw "libssl.lib not found under $dir\lib" }
           "OPENSSL_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENSSL_LIB_DIR=$($lib.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENSSL_INCLUDE_DIR=$dir\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "$dir\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
