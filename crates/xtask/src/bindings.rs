@@ -42,6 +42,9 @@
 //!   CLI whose version is not exactly the `wasm-bindgen` crate's in `Cargo.lock` ("the two
 //!   must match"), and prints the module's size for the size budget, which is set after this
 //!   first measurement (ADR 0013 §4 "Size budget"; reported).
+//! - Both `expand-bindings` and `build-wasm` also report the size of the identity generator's
+//!   embedded data file against its 384 KiB budget (ADR 0079 §5: "`cargo xtask expand-bindings`
+//!   reports it next to the module size"; `build-wasm` is where the module size is printed).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -498,9 +501,13 @@ pub(crate) fn expand_bindings(root: &Path, write: bool) -> Result<String, String
     let before = old_record
         .as_ref()
         .map_or_else(|| "none".to_owned(), |r| format!("{:?}", r.counts));
+    // ADR 0079 §5: the embedded identity data's size is reported next to the module's.
     let report = format!(
-        "expand-bindings: wasm-bindgen {}, {}\n  before: {before}\n  after:  {:?}",
-        record.wasm_bindgen, record.rustc, record.counts
+        "expand-bindings: wasm-bindgen {}, {}\n  before: {before}\n  after:  {:?}\n{}",
+        record.wasm_bindgen,
+        record.rustc,
+        record.counts,
+        crate::identity_data::data_size_line(root)
     );
     if write {
         std::fs::create_dir_all(&dir).map_err(|e| format!("creating {BASELINE_DIR}: {e}"))?;
@@ -576,7 +583,8 @@ pub(crate) fn build_wasm(root: &Path) -> Result<String, String> {
         .len();
     Ok(format!(
         "build-wasm: {PACKAGE_OUT}/{OUT_NAME}_bg.wasm is {size} bytes (wasm-bindgen {version}, \
-         release profile)"
+         release profile)\n{}",
+        crate::identity_data::data_size_line(root)
     ))
 }
 

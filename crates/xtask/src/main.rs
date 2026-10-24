@@ -14,6 +14,7 @@
 //! cargo xtask check-spdx [--fix]
 //! cargo xtask check-tables [--root <dir>]
 //! cargo xtask generate-tokens [--check]
+//! cargo xtask identity-data --faker <checkout> --cldr <checkout> [--check]
 //! ```
 //!
 //! `check-deps` enforces the crate-boundary rules of ADR 0016 (R1–R8) and the dependency rules
@@ -109,6 +110,13 @@
 //! file instead of writing it; wiring either mode into CI is, as with `check-spdx`, a separate
 //! change the owner has not asked for yet.
 //!
+//! `identity-data` compiles the identity generator's bundled name and address data from local
+//! checkouts of the pinned faker-js and Unicode CLDR tags, verifying every input file against
+//! the SHA-256 in `data/identity/SOURCES.md` first ([`mod@identity_data`], ADR 0079 §6).
+//! `--check` regenerates the data and the generated part of `SOURCES.md` and fails on any byte
+//! difference instead of writing. The checkouts are not committed, so CI cannot run it: a
+//! maintainer runs it by hand before a data change is merged, and the reviewer re-runs it.
+//!
 //! # How `check-deps` works
 //!
 //! 1. [`load`] gathers every input: `cargo metadata --all-features --locked` three times (all
@@ -143,6 +151,7 @@ mod bindings;
 mod check;
 mod equivalence_list;
 mod ext_manifest;
+mod identity_data;
 mod js;
 mod manifest;
 mod metadata;
@@ -220,6 +229,12 @@ COMMANDS:
     generate-tokens --check
                     Check that every generated file already matches the token source,
                     without writing; fails if any is stale or a contrast pair fails
+    identity-data --faker <checkout> --cldr <checkout> [--check]
+                    Compile crates/rizzy-client/src/identity_gen/identity-data-v1.txt from
+                    local checkouts of the pinned faker-js and CLDR tags, after checking
+                    every input file against data/identity/SOURCES.md, and rewrite that
+                    file's generated report (ADR 0079 §6). --check compares instead of
+                    writing and fails on any byte difference
 ";
 
 /// The second target the getrandom rule is checked on, besides the host (ADR 0016 R1).
@@ -264,6 +279,19 @@ fn main() -> ExitCode {
         ] => equivalence_list_command(source, key, list_version, published_at_ms),
         [Some("generate-tokens")] => report(tokens::run(&workspace_root(), true)),
         [Some("generate-tokens"), Some("--check")] => report(tokens::run(&workspace_root(), false)),
+        [
+            Some("identity-data"),
+            Some("--faker"),
+            Some(faker),
+            Some("--cldr"),
+            Some(cldr),
+            check @ ..,
+        ] if matches!(check, [] | [Some("--check")]) => report(identity_data::run(
+            &workspace_root(),
+            Path::new(faker),
+            Path::new(cldr),
+            !check.is_empty(),
+        )),
         [Some("-h" | "--help")] => {
             let _ = write!(io::stdout().lock(), "{USAGE}");
             ExitCode::SUCCESS
