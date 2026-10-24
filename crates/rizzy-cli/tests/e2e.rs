@@ -4365,8 +4365,11 @@ struct MitmState {
     log: Vec<MitmExchange>,
     /// While set, every JSON answer to this path is rewritten by the function before it is
     /// relayed (a lying server, not consumed: [`MitmProxy::rewrite`]).
-    rewrite: Option<(&'static str, fn(&mut serde_json::Value))>,
+    rewrite: Option<Rewrite>,
 }
+
+/// A path and the edit a [`MitmProxy`] makes to the JSON body of each answer to it.
+type Rewrite = (&'static str, fn(&mut serde_json::Value));
 
 /// A connection registered at a [`MitmOp::Rendezvous`] gate, waiting for its partner.
 struct Waiting {
@@ -4425,7 +4428,7 @@ impl MitmProxy {
 
     /// Rewrites the JSON body of every answer to `path` with `edit` from now on, or stops
     /// with `None`.
-    fn rewrite(&self, rule: Option<(&'static str, fn(&mut serde_json::Value))>) {
+    fn rewrite(&self, rule: Option<Rewrite>) {
         self.state.lock().unwrap().rewrite = rule;
     }
 
@@ -4788,6 +4791,30 @@ fn run_hostile_sync_rounds(
     (violations, want_items)
 }
 
+/// A lying server's edit: an invented pending recovery (ADR 0045), long past its wait.
+fn invent(view: &mut serde_json::Value) {
+    view["pending_recovery"] = serde_json::json!({
+        "opened_at_ms": 1_790_000_000_000_u64,
+        "available_at_ms": 1_790_259_200_000_u64,
+        "last_recovery_at_ms": 1_789_000_000_000_u64,
+    });
+}
+
+/// A lying server's edit: an invented notice on a signed state with one character changed.
+fn tamper(view: &mut serde_json::Value) {
+    invent(view);
+    let state = view["account_state"].as_str().unwrap().to_owned();
+    let mut chars: Vec<char> = state.chars().collect();
+    let mid = chars.len() / 2;
+    chars[mid] = if chars[mid] == 'A' { 'B' } else { 'A' };
+    view["account_state"] = chars.into_iter().collect::<String>().into();
+}
+
+/// A lying server's edit: a real notice withheld.
+fn hide(view: &mut serde_json::Value) {
+    view.as_object_mut().unwrap().remove("pending_recovery");
+}
+
 /// INV-70 (ADR 0045 point 7) through `rv`: a server that lies in the advisory
 /// `pending_recovery` notice cannot change what `rv` trusts. An invented notice is shown as
 /// the warning and in `account status`, and nothing else moves: the account state verifies,
@@ -4810,13 +4837,6 @@ fn a_lying_recovery_notice_changes_nothing_rv_trusts() {
     assert!(!honest.noted(warning));
 
     // An invented notice: shown, and only shown.
-    fn invent(view: &mut serde_json::Value) {
-        view["pending_recovery"] = serde_json::json!({
-            "opened_at_ms": 1_790_000_000_000_u64,
-            "available_at_ms": 1_790_259_200_000_u64,
-            "last_recovery_at_ms": 1_789_000_000_000_u64,
-        });
-    }
     proxy.rewrite(Some((paths::ACCOUNT_STATE, invent)));
     let lied = a.ok(&["account", "status"], &[]);
     assert_eq!(
@@ -4837,14 +4857,6 @@ fn a_lying_recovery_notice_changes_nothing_rv_trusts() {
 
     // A notice on a tampered signed state: the answer is refused exactly as without one, and
     // the notice never reaches the user.
-    fn tamper(view: &mut serde_json::Value) {
-        invent(view);
-        let state = view["account_state"].as_str().unwrap().to_owned();
-        let mut chars: Vec<char> = state.chars().collect();
-        let mid = chars.len() / 2;
-        chars[mid] = if chars[mid] == 'A' { 'B' } else { 'A' };
-        view["account_state"] = chars.into_iter().collect::<String>().into();
-    }
     proxy.rewrite(Some((paths::ACCOUNT_STATE, tamper)));
     let (outcome, refused) = a.try_run(&["account", "status"], &[], &[], &[]);
     assert!(
@@ -4866,9 +4878,6 @@ fn a_lying_recovery_notice_changes_nothing_rv_trusts() {
     );
     outcome.unwrap();
     assert!(a.ok(&["sync"], &[]).noted(warning));
-    fn hide(view: &mut serde_json::Value) {
-        view.as_object_mut().unwrap().remove("pending_recovery");
-    }
     proxy.rewrite(Some((paths::ACCOUNT_STATE, hide)));
     let hidden = a.ok(&["account", "status"], &[]);
     assert_eq!(hidden.printed("recovery:"), "none pending");

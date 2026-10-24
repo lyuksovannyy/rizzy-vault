@@ -516,8 +516,12 @@ impl Scenario {
             let _item = client.create(&mut rng, "seed-value");
             let rejected = client.sync(&server, &mut rng).await;
             assert!(rejected.is_empty(), "{name}: {rejected:?}");
-            let account_view = client.refresh(&server).await;
-            let vault_id = account_view.vault_ids().next().unwrap();
+            // Boxed, and the answer dropped at once: a verified account answer is large.
+            let vault_id = Box::pin(client.refresh(&server))
+                .await
+                .vault_ids()
+                .next()
+                .unwrap();
             let logged_in = login_named(&server, &mut rng, name, &sk, None).await;
             let bare_bearer = copy_token(logged_in.bearer_token());
 
