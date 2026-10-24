@@ -74,3 +74,141 @@ accepted as drafted: seed the signed global equivalence list from Vaultwarden's
   used beyond this attribution.
 - **Attribution text** (for notices screens): "Default site groups derived from the Bitwarden
   server's equivalent-domains list via Vaultwarden, AGPL-3.0."
+## faker-js locale data (`identity-data-v1.txt`)
+
+- **Used in:** `crates/rizzy-client/src/identity_gen/identity-data-v1.txt`, the identity
+  generator's bundled data ([ADR 0079](docs/adr/0079-identity-generator.md) §5, §6). It is compiled
+  into `rizzy-client` with `include_str!`, so it ships in every artifact that contains
+  `rizzy-client` (the web vault and extension through `rizzy-wasm`, and `rv`). Its first names,
+  last names, street and city lists, house-number ranges, address order and postcode patterns
+  come from faker-js's `src/locales/<locale>/person` and `/location` files.
+- **Source:** @faker-js/faker, <https://github.com/faker-js/faker>, tag `v10.6.0` (commit
+  `2cb04231a6ace91a59ebe577c653f4ec66478ca3`). `data/identity/SOURCES.md` lists every file used
+  with its SHA-256.
+- **Licence:** MIT. The notice below is `LICENSE` at that tag, verbatim (SHA-256
+  `8c0814c525426e67c04ca562f28364be477003697903d257160c081d14b271bf`).
+- **Changes:** selected, filtered, sampled and re-formatted by `cargo xtask identity-data`; street
+  and city names for some countries are generated from faker's own patterns. `SOURCES.md` records
+  every rule and drop.
+- **Obligation:** every artifact that contains `rizzy-client` must carry the notice below.
+
+    Faker - Copyright (c) 2022-2025
+
+    This software consists of voluntary contributions made by many individuals.
+    For exact contribution history, see the revision history
+    available at https://github.com/faker-js/faker
+
+    Permission is hereby granted, free of charge, to any person obtaining
+    a copy of this software and associated documentation files (the
+    "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject to
+    the following conditions:
+
+    The above copyright notice and this permission notice shall be
+    included in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+    NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+    LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+    OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+    WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+    ===
+
+    From: https://github.com/faker-js/faker/commit/a9f98046c7d5eeaabe12fc587024c06d683800b8
+    To: https://github.com/faker-js/faker/commit/29234378807c4141588861f69421bf20b5ac635e
+
+    Based on faker.js, copyright Marak Squires and contributor, what follows below is the original license.
+
+    ===
+
+    faker.js - Copyright (c) 2011-2020
+    Marak Squires
+    http://github.com/marak/faker.js/
+
+    faker.js was inspired by and has used data definitions from:
+
+     * https://github.com/stympy/faker/ - Copyright (c) 2007-2010 Benjamin Curtis
+     * http://search.cpan.org/~jasonk/Data-Faker-0.07/ - Copyright 2004-2005 by Jason Kohles
+
+    Permission is hereby granted, free of charge, to any person obtaining
+    a copy of this software and associated documentation files (the
+    "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject to
+    the following conditions:
+
+    The above copyright notice and this permission notice shall be
+    included in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+    NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+    LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+    OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+    WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+## Unicode CLDR (`identity-data-v1.txt`)
+
+- **Used in:** the same file, `crates/rizzy-client/src/identity_gen/identity-data-v1.txt`: the
+  English country names and the ISO 3166-2 subdivision codes and names (ADR 0079 §5, §6). It
+  ships wherever `rizzy-client` does.
+- **Source:** Unicode CLDR 49, <https://github.com/unicode-org/cldr>, tag `release-49` (commit
+  `96e54b273d2da4ec6fbad350ba19ff23fa24a588`): `common/main/en.xml`,
+  `common/supplemental/subdivisions.xml` and `common/subdivisions/{de,en,es,fr,it,nl,sv}.xml`, each
+  with its SHA-256 in `data/identity/SOURCES.md`.
+- **Licence:** Unicode License v3 (SPDX `Unicode-3.0`). The repository's `LICENSE` at that tag
+  (SHA-256 `65eb33419e22a297550a811b5b535f5e532f9a7e0114b516c0ea18afd53c3804`) opens with a paragraph about the UTS #35 specification text, which is not
+  used here, and then gives the licence of all other content, the data files included. That part
+  is reproduced verbatim below, after the file's own copyright line.
+- **Changes:** selected and re-formatted by `cargo xtask identity-data`; names that break the
+  data file's character rules are dropped (`SOURCES.md` lists them).
+- **Obligation:** every artifact that contains `rizzy-client` must carry the notice below.
+
+    COPYRIGHT AND PERMISSION NOTICE
+
+    Copyright © 2001–2026 Unicode, Inc.
+
+    All other content in this repo is released under UNICODE LICENSE V3
+
+    NOTICE TO USER: Carefully read the following legal agreement. BY
+    DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+    SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+    TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+    DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of data files and any associated documentation (the "Data Files") or
+    software and any associated documentation (the "Software") to deal in the
+    Data Files or Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, and/or sell
+    copies of the Data Files or Software, and to permit persons to whom the
+    Data Files or Software are furnished to do so, provided that either (a)
+    this copyright and permission notice appear with all copies of the Data
+    Files or Software, or (b) this copyright and permission notice appear in
+    associated Documentation.
+
+    THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+    KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+    THIRD PARTY RIGHTS.
+
+    IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+    BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+    OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+    WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+    ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+    FILES OR SOFTWARE.
+
+    Except as contained in this notice, the name of a copyright holder shall
+    not be used in advertising or otherwise to promote the sale, use or other
+    dealings in these Data Files or Software without prior written
+    authorization of the copyright holder.
+
+    SPDX-License-Identifier: Unicode-3.0
