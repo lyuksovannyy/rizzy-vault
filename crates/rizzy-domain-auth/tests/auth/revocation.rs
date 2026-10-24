@@ -131,6 +131,8 @@ fn rotation(
         device_revocations: List::empty(),
         device_grants: List::new(grants).unwrap(),
         vault_rotation: Some(vec![grant]),
+        vault_create: None,
+        vault_delete: None,
     };
     (old, change)
 }
@@ -382,6 +384,8 @@ fn revocation_rules() {
             device_revocations: List::new(vec![bytes(rev_wire)]).unwrap(),
             device_grants: List::empty(),
             vault_rotation: None,
+            vault_create: None,
+            vault_delete: None,
         };
         // No rotation and not a self-revocation: refused.
         assert!(matches!(

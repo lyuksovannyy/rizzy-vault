@@ -124,6 +124,8 @@ fn recovery_wait_cancel_release_and_commit() {
             device_revocations: List::empty(),
             device_grants: List::empty(),
             vault_rotation: None,
+            vault_create: None,
+            vault_delete: None,
         };
         assert!(matches!(
             env.svc

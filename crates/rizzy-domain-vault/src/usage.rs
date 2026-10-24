@@ -39,7 +39,7 @@
 //! [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
 //! [`ErrorCode::QuotaExceeded`]: rizzy_proto::error::ErrorCode::QuotaExceeded
 
-use rizzy_core::ids::AccountId;
+use rizzy_core::ids::{AccountId, VaultId};
 use rizzy_proto::limits::DEFAULT_UPLOAD_BODY_LEN;
 use rizzy_storage::quota::DEFAULT_QUOTA_BYTES;
 use rizzy_storage::{Conn, WriteTx};
@@ -151,6 +151,23 @@ pub async fn counted_bytes(mut conn: Conn<'_>, account_id: AccountId) -> Result<
     // implies, the figure `attachments/create` charged (crate::attachments).
     let attachments = crate::attachments::account_attachment_bytes(conn, account_id).await?;
     Ok(records.saturating_add(attachments))
+}
+
+/// The true counted bytes of one vault (ADR 0048 §2; [ADR 0081] §A5, §A9): [`counted_bytes`]'s
+/// unit over the vault's op, snapshot and attachment rows. What deleting the vault releases, and
+/// the per-vault figure of the account answer.
+///
+/// # Errors
+/// [`VaultError::Storage`]; [`VaultError::Corrupt`] for a negative count.
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+pub async fn vault_counted_bytes(conn: Conn<'_>, vault_id: VaultId) -> Result<u64, VaultError> {
+    let [ops, snapshots, attachments] = repo::vault_row_lengths(conn, vault_id).await?;
+    Ok([ops, snapshots].iter().fold(attachments.bytes, |total, t| {
+        total
+            .saturating_add(t.rows.saturating_mul(len(STATEMENT_FRAME)))
+            .saturating_add(t.bytes)
+    }))
 }
 
 /// Every account that owns a vault, ascending, on the caller's connection.

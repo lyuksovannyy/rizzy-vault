@@ -104,6 +104,16 @@ const USAGE_OPS: &str = include_str!("../queries/usage_ops.sql");
 const USAGE_SNAPSHOTS: &str = include_str!("../queries/usage_snapshots.sql");
 /// See `queries/usage_accounts.sql`.
 const USAGE_ACCOUNTS: &str = include_str!("../queries/usage_accounts.sql");
+/// See `queries/usage_vault_ops.sql`.
+const USAGE_VAULT_OPS: &str = include_str!("../queries/usage_vault_ops.sql");
+/// See `queries/usage_vault_snapshots.sql`.
+const USAGE_VAULT_SNAPSHOTS: &str = include_str!("../queries/usage_vault_snapshots.sql");
+/// See `queries/usage_vault_attachments.sql`.
+const USAGE_VAULT_ATTACHMENTS: &str = include_str!("../queries/usage_vault_attachments.sql");
+/// See `queries/vault_kinds.sql`.
+const VAULT_KINDS: &str = include_str!("../queries/vault_kinds.sql");
+/// See `queries/vault_delete.sql`.
+const VAULT_DELETE: &str = include_str!("../queries/vault_delete.sql");
 /// See `queries/ops_clear_wraps.sql`.
 const OPS_CLEAR_WRAPS: &str = include_str!("../queries/ops_clear_wraps.sql");
 /// See `queries/snapshots_clear_wraps.sql`.
@@ -138,6 +148,40 @@ pub(crate) struct VaultRow {
     pub(crate) vault_key_epoch: u32,
     /// The next store sequence to assign (ADR 0021 §2).
     pub(crate) next_store_seq: u64,
+    /// The server's record of the vault's kind (ADR 0081 §A10).
+    pub(crate) kind: VaultKind,
+}
+
+/// What a vault is to the server (ADR 0081 §A10, the `vault_vaults.kind` column): unsigned,
+/// never what a client trusts, which is its own vault directory (§A2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VaultKind {
+    /// The Personal vault signup creates (1): never deleted (INV-101).
+    Personal,
+    /// A vault the account created later with `vault_create` (2).
+    Owned,
+}
+
+impl VaultKind {
+    /// The column value.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Personal => 1,
+            Self::Owned => 2,
+        }
+    }
+
+    /// The kind of a column value.
+    fn of_sql(value: i64) -> Result<Self, VaultError> {
+        match value {
+            1 => Ok(Self::Personal),
+            2 => Ok(Self::Owned),
+            _ => Err(VaultError::Corrupt {
+                what: "vault_vaults.kind",
+            }),
+        }
+    }
 }
 
 /// The vault's row, if it exists.
@@ -145,21 +189,22 @@ pub(crate) async fn vault(
     conn: Conn<'_>,
     vault_id: VaultId,
 ) -> Result<Option<VaultRow>, VaultError> {
-    let row: Option<(Vec<u8>, i64, i64)> = on_engine!(conn, |c| {
+    let row: Option<(Vec<u8>, i64, i64, i64)> = on_engine!(conn, |c| {
         match sqlx::query(VAULT_GET)
             .bind(&vault_id.as_bytes()[..])
             .fetch_optional(&mut *c)
             .await?
         {
-            Some(r) => Some((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?)),
+            Some(r) => Some((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?, r.try_get(3)?)),
             None => None,
         }
     });
-    row.map(|(account, epoch, next)| {
+    row.map(|(account, epoch, next, kind)| {
         Ok(VaultRow {
             account_id: AccountId::from_bytes(id16(&account, "vault_vaults.account_id")?),
             vault_key_epoch: sql_to_u32(epoch, "vault_vaults.vault_key_epoch")?,
             next_store_seq: sql_to_u64(next, "vault_vaults.next_store_seq")?,
+            kind: VaultKind::of_sql(kind)?,
         })
     })
     .transpose()
@@ -171,6 +216,7 @@ pub(crate) async fn insert_vault(
     vault_id: VaultId,
     account_id: AccountId,
     vault_key_epoch: u32,
+    kind: VaultKind,
     now_ms: i64,
 ) -> Result<(), VaultError> {
     on_engine!(conn, |c| sqlx::query(VAULT_INSERT)
@@ -178,6 +224,7 @@ pub(crate) async fn insert_vault(
         .bind(&account_id.as_bytes()[..])
         .bind(u32_to_sql(vault_key_epoch))
         .bind(now_ms)
+        .bind(i64::from(kind.code()))
         .execute(&mut *c)
         .await
         .map(|_| ()))?;
@@ -196,6 +243,67 @@ pub(crate) async fn list_vaults(
     rows.iter()
         .map(|id| Ok(VaultId::from_bytes(id16(id, "vault_vaults.id")?)))
         .collect()
+}
+
+/// The vaults of an account with their kinds, by id (ADR 0081 §A3, §A11).
+pub(crate) async fn vault_kinds(
+    conn: Conn<'_>,
+    account_id: AccountId,
+) -> Result<Vec<(VaultId, VaultKind)>, VaultError> {
+    let rows: Vec<(Vec<u8>, i64)> = on_engine!(conn, |c| {
+        let mut out = Vec::new();
+        for row in sqlx::query(VAULT_KINDS)
+            .bind(&account_id.as_bytes()[..])
+            .fetch_all(&mut *c)
+            .await?
+        {
+            out.push((row.try_get(0)?, row.try_get(1)?));
+        }
+        out
+    });
+    rows.iter()
+        .map(|(id, kind)| {
+            Ok((
+                VaultId::from_bytes(id16(id, "vault_vaults.id")?),
+                VaultKind::of_sql(*kind)?,
+            ))
+        })
+        .collect()
+}
+
+/// Deletes a vault row; every row keyed by it goes by `ON DELETE CASCADE` (ADR 0081 §A5).
+pub(crate) async fn delete_vault(conn: Conn<'_>, vault_id: VaultId) -> Result<(), VaultError> {
+    on_engine!(conn, |c| sqlx::query(VAULT_DELETE)
+        .bind(&vault_id.as_bytes()[..])
+        .execute(&mut *c)
+        .await
+        .map(|_| ()))?;
+    Ok(())
+}
+
+/// One vault's op rows, snapshot rows and attachments, in that order (ADR 0048 §2; ADR 0081
+/// §A5, §A9): their numbers and summed counted lengths.
+pub(crate) async fn vault_row_lengths(
+    mut conn: Conn<'_>,
+    vault_id: VaultId,
+) -> Result<[RowLengths; 3], VaultError> {
+    let mut out = [RowLengths::default(); 3];
+    for (slot, query) in out.iter_mut().zip([
+        USAGE_VAULT_OPS,
+        USAGE_VAULT_SNAPSHOTS,
+        USAGE_VAULT_ATTACHMENTS,
+    ]) {
+        let (rows, bytes): (i64, i64) = on_engine!(reborrow(&mut conn), |c| sqlx::query(query)
+            .bind(&vault_id.as_bytes()[..])
+            .fetch_one(&mut *c)
+            .await
+            .and_then(|row| Ok::<_, sqlx::Error>((row.try_get(0)?, row.try_get(1)?))))?;
+        *slot = RowLengths {
+            rows: sql_to_u64(rows, "a counted row number")?,
+            bytes: sql_to_u64(bytes, "a counted length")?,
+        };
+    }
+    Ok(out)
 }
 
 /// The highest `vault_key_epoch` among the vault's stored op and snapshot headers (signed

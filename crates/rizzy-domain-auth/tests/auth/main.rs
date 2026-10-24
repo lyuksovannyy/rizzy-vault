@@ -44,5 +44,6 @@ mod sessions;
 mod setups;
 mod single_use;
 mod state;
+mod vaults;
 mod webauthn;
 mod window;

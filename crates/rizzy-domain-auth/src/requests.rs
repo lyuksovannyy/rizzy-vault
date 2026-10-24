@@ -61,6 +61,10 @@ fn account_change<V: VaultPort>(
         device_revocations: req.device_revocations,
         device_grants: req.device_grants,
         vault_rotation: req.vault_rotation.map(V::rotation_from_wire),
+        vault_create: req.vault_create,
+        vault_delete: req
+            .vault_delete
+            .map(|id| rizzy_core::ids::VaultId::from_bytes(id.to_bytes())),
     })
 }
 

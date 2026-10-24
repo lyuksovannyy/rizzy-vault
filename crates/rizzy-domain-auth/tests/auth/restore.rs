@@ -71,6 +71,8 @@ pub(crate) async fn reregister(
         device_revocations: List::empty(),
         device_grants: List::empty(),
         vault_rotation: None,
+        vault_create: None,
+        vault_delete: None,
     };
     env.svc.commit_change(session, &change, env.now).await?;
     client.adopt(next);

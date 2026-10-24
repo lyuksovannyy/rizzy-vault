@@ -221,6 +221,10 @@ pub mod types {
         export::MAX_DATA_FIELD_LEN, kdf::KdfId, rng::CryptoRng, secret::SecretBytes,
     };
 
+    /// The per-vault summary of the account answer and the vault id a `vault_delete` names,
+    /// which [`crate::VaultPort`] takes from and hands to the vault domain (ADR 0081 §A11).
+    pub use rizzy_core::ids::VaultId;
+    pub use rizzy_proto::account::VaultSummary;
     /// `/api/v1` errors and `/api/meta` (ADR 0002 point 3).
     pub use rizzy_proto::error::{ErrorCode, ErrorResponse};
     /// `/api/meta` and the `Rizzy-Client` header (ADR 0002 point 3, as ADR 0022 amends it; ADR
