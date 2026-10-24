@@ -336,7 +336,14 @@ fn block(faker: &Path, cldr: &Path) -> String {
                 if p.is_dir() {
                     stack.push(p);
                 } else {
-                    let rel = p.strip_prefix(root).unwrap().to_str().unwrap().to_owned();
+                    // The manifest names files with `/` on every platform, as the tool reads them.
+                    let rel = p
+                        .strip_prefix(root)
+                        .unwrap()
+                        .components()
+                        .map(|c| c.as_os_str().to_str().unwrap())
+                        .collect::<Vec<_>>()
+                        .join("/");
                     lines.push(format!("{id} {rel} {}", hex_sha256(&fs::read(&p).unwrap())));
                 }
             }
