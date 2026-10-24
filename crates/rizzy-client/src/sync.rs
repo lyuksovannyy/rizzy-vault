@@ -135,7 +135,7 @@ use rizzy_sync::causal::{
 use rizzy_sync::dot::Dot;
 use rizzy_sync::header::{ItemSchemaVersion, OpHeader, SnapshotHeader};
 use rizzy_sync::hlc::Hlc;
-use rizzy_sync::merge::{AbsorbOutcome, ItemMerge, OpInput, SnapshotInput};
+use rizzy_sync::merge::{AbsorbOutcome, ItemLifecycle, ItemMerge, OpInput, SnapshotInput};
 use rizzy_sync::record::{parse_op, parse_snapshot};
 use rizzy_sync::vv::VersionVector;
 
@@ -1668,7 +1668,9 @@ impl VaultSync {
     ///   rebuilds the item from it exactly; an absorbed cover is another author's claim
     ///   (ADR 0018 §3 "Snapshots are claims"), which the in-memory merge folds the op into
     ///   before dropping it but a load from the snapshot alone could not, so it never lets a
-    ///   body go. The snapshot row is `own = 2`, which the load reads as a cover.
+    ///   body go. The snapshot row is `own = 2`, which the load reads as a cover;
+    /// - is not an op of a purged item: the load cannot take a tombstone's cover before the own
+    ///   chain puts its Purge back, so such a body is never let go either.
     fn prune_bodies(&mut self) {
         let mut keep: BTreeSet<Dot> = self
             .items
@@ -1687,11 +1689,17 @@ impl VaultSync {
             })
             .filter(|(dot, _)| {
                 self.log.header(**dot).is_some_and(|header| {
-                    self.held_covers.iter().any(|(cover, _)| {
-                        cover.author == own_device
-                            && cover.item_id == header.item_id
-                            && cover.covered.covers(**dot)
-                    })
+                    // Not under a tombstone: its cover records this device's own Purge, whose
+                    // header the load puts back only after the covers (the own chain comes
+                    // last), so the load holds that cover (`PurgeAboveCut`) instead of taking
+                    // it, the op stays unsettled without its body, and the own Trash and Purge
+                    // ops whose context names it no longer load.
+                    self.item_lifecycle(header.item_id) != ItemLifecycle::Purged
+                        && self.held_covers.iter().any(|(cover, _)| {
+                            cover.author == own_device
+                                && cover.item_id == header.item_id
+                                && cover.covered.covers(**dot)
+                        })
                 })
             })
             .map(|(dot, _)| *dot)
