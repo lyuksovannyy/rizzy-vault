@@ -206,9 +206,36 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
       - Options: a scoped `deny.toml` ignore with removal condition "next opaque-ke release" (recommended), moving to the prerelease (ADR 0009 checklist), or waiting.
       - Until then every gate's two deny steps fail on this one finding, and tracks were integrated with only that failure.
   - **Proposed, awaiting the owner:** ADR 0081 (multiple vaults: Personal plus user vaults in M3, shared vaults in M9; 11 open questions).
+- **2026-10-24 (owner: "A" for security keys, "you decide" for the advisory, ADR 0081 "okay"):**
+  - **ADR 0082 (accepted): touch-only security keys.**
+    - The `danger-user-presence-only-security-keys` feature plus the builder call `.danger_set_user_presence_only_security_keys(true)`; the feature alone changes nothing.
+    - Real Chromium enrolment, login and removal pass in e2e, including a UV-capable key logging in with a touch.
+    - The Add-key form says a key may ask for its PIN once (owner answer).
+    - Keys enrolled under the old "preferred" policy that did UV keep needing UV. Only dev rows can be like that.
+  - **RUSTSEC-2026-0387:** a scoped `deny.toml` ignore for crypto-bigint 0.5.5, reachable only through opaque-ke 4.0.1's unused NIST-curve generics. It carries the ADR 0009 rule's id, reason, path and expiry: remove at the next stable opaque-ke, and by M3.
+  - **ADR 0081 Part A (accepted): multiple vaults.**
+    - Migration 0009, backup schema_version 9, tag 0x0002 vault directory, cache format 4, shared `device_seq` allocator, move/copy with `pending_move`.
+    - Vault switcher, management and pickers in web, extension and rv.
+  - **Part A gaps closed:**
+    - inline menu rows show their vault;
+    - late edits name the target vault;
+    - rv keeps a finished move's `pending_move` row as its record (lead decision A; at most 1,024 completed rows);
+    - tests for rv attachment move/copy, crash-resume, stale-session delete and per-vault export.
+  - **Not raised:** min client versions (release act).
+  - **Pre-existing cache bug fixed:** a purge of an item another device edited made the next load CacheCorrupt. Op bodies of purged items are now never pruned. Caches already broken by older builds stay unloadable; there is no load-side repair.
+  - **Windows CI, for the first time past rizzy-cli:**
+    - test server spawners keep `SystemRoot` (Winsock) and `PATH` (the OpenSSL DLL);
+    - the Chocolatey OpenSSL step sets `OPENSSL_LIB_DIR` (`lib\VC\x64\MD`);
+    - an fsutil test checks the never-"outside" property per platform;
+    - xtask scratch dirs have no colon.
+    - Extension e2e profile dirs are now removed on teardown (the /tmp leak).
+  - **CI is triggered by workflow_dispatch on the working branch** (`gh workflow run ci.yml --ref claude/password-manager-planning-2gg9yc`).
 - **What is left for agents:**
-  - The "On acceptance" doc edits of 0077/0079/0080 that the owner didn't make (CRYPTO §11.17, THREAT_MODEL INV-39/INV-75/A6, ADR 0042 tag-0x0004 amendment).
-  - After the owner's call: the WebAuthn credProtect fix, ADR 0081, and the 0060 admin screens (new ADRs).
+  - Whatever the next Windows CI run still finds.
+  - The 0060 admin screens (new ADRs needed).
+  - 0073 (supply-chain approval records).
+  - ADR 0081 Part B (M9) and masked email (M6), both after v1.0.
+  - The open owner items above (the ADR 0042 tag-0x0004 amendment approval, the 0071 `plaintext_len` sentence, 0074 Q4).
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
