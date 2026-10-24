@@ -142,6 +142,9 @@ pub struct RateLimits {
     /// rate limiting to the caller). Only a client that verified KE3 or holds a fresh OPAQUE
     /// session reaches a check, so this bounds guessing by someone who knows the password.
     pub totp_per_account: RateRule,
+    /// Security-key assertions per account at `webauthn/login/finish` (CRYPTO.md §11.17). Only
+    /// a client that verified KE3 reaches one; cleared by a successful assertion.
+    pub webauthn_per_account: RateRule,
 }
 
 impl Default for RateLimits {
@@ -162,6 +165,7 @@ impl Default for RateLimits {
             recovery_per_name_source: backoff(5, 60 * 60_000),
             recovery_per_name: backoff(20, 60 * 60_000),
             totp_per_account: backoff(10, 15 * 60_000),
+            webauthn_per_account: backoff(10, 15 * 60_000),
         }
     }
 }

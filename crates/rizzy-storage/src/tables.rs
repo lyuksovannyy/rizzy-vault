@@ -11,7 +11,7 @@
 //! row with `$1 … $n`; both list the columns in the order of [`TableSpec::columns`].
 //!
 //! **Not backed up** (the conservative reading of "every table as rows"; see the crate docs):
-//! - `auth_sessions`, `auth_login_states`, `auth_device_challenges` and the WebAuthn
+//! - `auth_sessions`, `auth_login_states`, `auth_device_challenges` and the `WebAuthn`
 //!   `auth_webauthn_pending`/`auth_webauthn_challenges` rows (ADR 0077 §2): a restore must not
 //!   revive sessions that were ended after the backup (for example those of a device revoked
 //!   since, INV-59), and 60 s login state and challenges mean nothing after a restore. Every

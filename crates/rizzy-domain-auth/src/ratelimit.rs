@@ -52,6 +52,8 @@ pub(crate) enum BucketKind {
     SignupNameSource = 8,
     /// Signup attempts per login name from every source (INV-7).
     SignupName = 9,
+    /// Security-key assertions per account (ADR 0058, CRYPTO.md §11.17).
+    Webauthn = 10,
 }
 
 /// A bucket key: the kind byte and `SHA-256` over the fields, each length-prefixed.

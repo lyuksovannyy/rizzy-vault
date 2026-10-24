@@ -165,6 +165,7 @@ mod store;
 mod totp;
 mod trust;
 mod view;
+mod webauthn;
 
 use std::sync::Arc;
 
@@ -182,6 +183,8 @@ pub use recovery::{RecoveryPending, RecoveryRelease};
 pub use secrets::{ServerSecrets, StartupCheckError};
 pub use session::{Session, SessionKind};
 pub use totp::TotpEnrolment;
+#[doc(hidden)]
+pub use webauthn::fuzz_stored_json;
 
 pub mod types {
     //! The `rizzy-core` and `rizzy-proto` items that [`crate::AuthService`]'s public API is
@@ -263,6 +266,9 @@ pub struct AuthService<V> {
     config: AuthConfig,
     /// The vault domain's side of the cross-domain flows.
     vault: V,
+    /// The `WebAuthn` relying party for `config.server_origin`; `None` when its host cannot be
+    /// an RP ID (an IP address), and then no `WebAuthn` endpoint is served (`webauthn` module).
+    webauthn: Option<webauthn_rs::Webauthn>,
 }
 
 impl<V: VaultPort> AuthService<V> {
@@ -278,11 +284,13 @@ impl<V: VaultPort> AuthService<V> {
         vault: V,
     ) -> Result<Self, ConfigError> {
         config.validate()?;
+        let webauthn = webauthn::relying_party(&config.server_origin);
         Ok(Self {
             db,
             secrets,
             config,
             vault,
+            webauthn,
         })
     }
 
@@ -347,6 +355,8 @@ pub(crate) const fn is_refusal(e: &AuthError) -> bool {
             | AuthError::InvalidRequest
             | AuthError::SecondFactorRequired
             | AuthError::CredentialsStale
+            | AuthError::KeyAlgorithm
+            | AuthError::PossibleClone
             | AuthError::RateLimited { .. }
     )
 }

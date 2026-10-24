@@ -131,6 +131,18 @@ pub mod paths {
     pub const TOTP_ENROL_CONFIRM: &str = "/api/v1/totp/enrol/confirm";
     /// TOTP removal.
     pub const TOTP_DISABLE: &str = "/api/v1/totp/disable";
+    /// `WebAuthn` security-key enrolment start (ADR 0058 point 2).
+    pub const WEBAUTHN_ENROL_START: &str = "/api/v1/webauthn/enrol/start";
+    /// `WebAuthn` security-key enrolment confirmation (ADR 0058 point 2).
+    pub const WEBAUTHN_ENROL_CONFIRM: &str = "/api/v1/webauthn/enrol/confirm";
+    /// The account's security keys.
+    pub const WEBAUTHN_LIST: &str = "/api/v1/webauthn/list";
+    /// Removes one security key.
+    pub const WEBAUTHN_REMOVE: &str = "/api/v1/webauthn/remove";
+    /// A login's security-key challenge, after `second_factor_required` (ADR 0058 point 3).
+    pub const WEBAUTHN_LOGIN_CHALLENGE: &str = "/api/v1/webauthn/login/challenge";
+    /// A login's security-key assertion, which issues the session (ADR 0058 point 3).
+    pub const WEBAUTHN_LOGIN_FINISH: &str = "/api/v1/webauthn/login/finish";
     /// The account's live sessions (ADR 0075 §2, R1).
     pub const SESSIONS_LIST: &str = "/api/v1/sessions/list";
     /// Sign-out: ends the caller's own session (ADR 0075 R2).
@@ -173,7 +185,7 @@ pub mod paths {
     pub const ICONS_PREFIX: &str = "/api/v1/icons/";
 
     /// Every `/api/v1` path, in the order above.
-    pub const ALL: [&str; 36] = [
+    pub const ALL: [&str; 42] = [
         REGISTER_START,
         REGISTER_FINISH,
         LOGIN_START,
@@ -198,6 +210,12 @@ pub mod paths {
         TOTP_ENROL_START,
         TOTP_ENROL_CONFIRM,
         TOTP_DISABLE,
+        WEBAUTHN_ENROL_START,
+        WEBAUTHN_ENROL_CONFIRM,
+        WEBAUTHN_LIST,
+        WEBAUTHN_REMOVE,
+        WEBAUTHN_LOGIN_CHALLENGE,
+        WEBAUTHN_LOGIN_FINISH,
         SESSIONS_LIST,
         SESSIONS_CURRENT_END,
         SESSIONS_END,
@@ -247,7 +265,7 @@ mod tests {
         let mut sorted = paths::ALL.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 36);
+        assert_eq!(sorted.len(), 42);
         for path in paths::ALL {
             assert!(path.starts_with(API_V1_PREFIX), "{path}");
             // Nothing a proxy or a URL library would rewrite, and no query.
