@@ -23,7 +23,7 @@ impl Server {
     /// `account/commit` of a settings-only change: compare-and-swap on `state_seq`, then
     /// `settings_seq + 1` with an envelope that hashes to the new `settings_hash`. A
     /// byte-identical repeat succeeds.
-    fn commit_settings(&mut self, req: &CommitChangeRequest) -> Result<(), ErrorCode> {
+    pub(super) fn commit_settings(&mut self, req: &CommitChangeRequest) -> Result<(), ErrorCode> {
         let s = self.stored();
         if req.account_state.as_slice() == s.state.as_slice() {
             return Ok(());
@@ -58,7 +58,7 @@ impl Server {
 }
 
 /// A web-vault signup and one web session of it, plus the Secret Key for more sessions.
-fn web_account(server: &mut Server, rng: &mut ChaCha20Rng) -> (WebSession, String) {
+pub(super) fn web_account(server: &mut Server, rng: &mut ChaCha20Rng) -> (WebSession, String) {
     let input = SignupInput {
         server_origin: ORIGIN,
         login_name: "Alice",
@@ -93,7 +93,7 @@ fn apply(server: &mut Server, rng: &mut ChaCha20Rng, web: &mut WebSession, chang
 }
 
 /// The session's account re-fetched and verified (what a sync's `account/state` step does).
-fn refresh(server: &Server, web: &mut WebSession) {
+pub(super) fn refresh(server: &Server, web: &mut WebSession) {
     let view = server.view_since(&web_account_query(&web.account));
     web.account = verify_web_refresh(&web.account, &web.unlocked, &view).unwrap();
 }

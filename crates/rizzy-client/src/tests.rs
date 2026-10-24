@@ -113,6 +113,10 @@ struct Server {
     snapshots: Vec<(SnapshotHeader, SnapshotRecord)>,
     /// The item of every stored op, by device and `device_seq`, for compaction.
     op_items: BTreeMap<([u8; 16], u64), ItemId>,
+    /// The vault of every stored op, by device and `device_seq` (ADR 0081: one op stream per
+    /// vault; `device_seq` is per device across vaults). An op without an entry belongs to
+    /// every vault, as the single-vault tests that insert ops directly expect.
+    op_vaults: BTreeMap<([u8; 16], u64), [u8; 16]>,
     /// Serve like a compacted server (ADR 0021): ops a stored snapshot covers go bodiless,
     /// with those snapshots as covers.
     compact: bool,
@@ -150,6 +154,7 @@ impl Server {
             wraps: Vec::new(),
             snapshots: Vec::new(),
             op_items: BTreeMap::new(),
+            op_vaults: BTreeMap::new(),
             compact: false,
             page_len: 0,
             generation: [7; 16],
@@ -430,6 +435,10 @@ impl Server {
                                 (header.dot.device_id().to_bytes(), header.dot.seq()),
                                 header.item_id,
                             );
+                            self.op_vaults.insert(
+                                (header.dot.device_id().to_bytes(), header.dot.seq()),
+                                header.vault_id.to_bytes(),
+                            );
                             UploadResult::Stored
                         }
                     }
@@ -599,14 +608,25 @@ impl Server {
         })
     }
 
+    /// Whether the op at `(device, seq)` is in `vault` (or in every vault: no entry).
+    fn in_vault(&self, device: [u8; 16], seq: u64, vault: [u8; 16]) -> bool {
+        self.op_vaults
+            .get(&(device, seq))
+            .is_none_or(|v| *v == vault)
+    }
+
     fn fetch(&self, req: &FetchRequest) -> FetchResponse {
         self.capture(serde_json::to_vec(req));
+        let vault = req.vault_id.to_bytes();
         let mut ops = Vec::new();
         let mut covers: Vec<SnapshotRecord> = Vec::new();
         let mut complete = true;
         'devices: for (device, chain) in &self.ops {
             let have = req.cursor.get(&Id::from_bytes(*device));
             for (&seq, record) in chain.range(have + 1..) {
+                if !self.in_vault(*device, seq, vault) {
+                    continue;
+                }
                 if self.page_len > 0 && ops.len() == self.page_len {
                     complete = false;
                     break 'devices;
@@ -631,12 +651,47 @@ impl Server {
                 ops.push(record);
             }
         }
+        // The vault's own heads, and the wraps of items that have no op in another vault.
+        let heads = SeqVector::new(
+            self.ops
+                .iter()
+                .filter_map(|(d, chain)| {
+                    let seq = chain.keys().rev().find(|s| self.in_vault(*d, **s, vault))?;
+                    Some(SeqEntry {
+                        device_id: Id::from_bytes(*d),
+                        seq: *seq,
+                    })
+                })
+                .collect(),
+        )
+        .unwrap();
+        let elsewhere: std::collections::BTreeSet<ItemId> = self
+            .op_vaults
+            .iter()
+            .filter(|(_, v)| **v != vault)
+            .filter_map(|(k, _)| self.op_items.get(k).copied())
+            .collect();
+        let wraps: Vec<WireItemKeyWrap> = self
+            .wraps
+            .iter()
+            .filter(|w| !elsewhere.contains(&ItemId::from_bytes(w.item_id.to_bytes())))
+            .cloned()
+            .collect();
+        let covers: Vec<SnapshotRecord> = covers
+            .into_iter()
+            .filter(|c| {
+                self.snapshots
+                    .iter()
+                    .find(|(_, r)| r == c)
+                    .is_none_or(|(h, _)| h.vault_id.to_bytes() == vault)
+            })
+            .collect();
         let response = FetchResponse {
             restore_generation: Fixed::from_bytes(self.generation),
-            heads: self.heads(),
+            heads,
             ops: List::new(ops).unwrap(),
             covers: List::new(covers).unwrap(),
-            item_key_wraps: List::new(self.wraps.clone()).unwrap(),
+            item_key_wraps: List::new(wraps).unwrap(),
             complete,
         };
         self.capture(serde_json::to_vec(&response));
@@ -2184,6 +2239,7 @@ mod retention;
 mod rotation;
 mod settings;
 mod store;
+mod vaults;
 
 /// ADR 0018 §6 "List elements", "List order": URIs and custom fields of an existing item are
 /// added after the last element, edited by key, and removed by clearing every attribute the
