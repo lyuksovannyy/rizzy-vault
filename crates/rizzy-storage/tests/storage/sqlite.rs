@@ -719,11 +719,10 @@ fn pre_migration_copy() {
         let last = MIGRATIONS.last().unwrap().version;
         let mut w = db.begin_write().await.unwrap();
         on_engine!(w.conn(), |c| {
-            // Undo the last migration (0008: the three WebAuthn tables).
+            // Undo the last migration (0009: the vault kind and its index).
             for undo in [
-                "DROP TABLE auth_webauthn_challenges",
-                "DROP TABLE auth_webauthn_pending",
-                "DROP TABLE auth_webauthn_credentials",
+                "DROP INDEX vault_vaults_personal",
+                "ALTER TABLE vault_vaults DROP COLUMN kind",
             ] {
                 sqlx::query(undo).execute(&mut *c).await.unwrap();
             }
@@ -757,6 +756,29 @@ fn pre_migration_copy() {
     });
 }
 
+/// Migration 0009's vault kinds (ADR 0081 §A10) on SQLite; the PostgreSQL suite runs the same
+/// helper, so the partial unique index is checked on both engines.
+#[test]
+fn vault_kinds_keep_one_personal_vault_per_account() {
+    block_on(async {
+        let dir = TempDir::new();
+        let db = open(&dir, "db.sqlite").await;
+        db.restore(&fixture(), RestoreGeneration([6; 16]), 0)
+            .await
+            .unwrap();
+        crate::common::exercise_vault_kinds(&db).await;
+        db.close().await;
+        drop(db);
+        let path = dir.join("db.sqlite");
+        let lock = WriterLock::acquire(&path).unwrap();
+        let db = Database::open_sqlite(&SqliteOptions::new(&path), lock)
+            .await
+            .unwrap();
+        crate::common::finish_vault_kinds(&db).await;
+        db.close().await;
+    });
+}
+
 /// Runs one statement on the writer and commits it.
 #[expect(
     clippy::unwrap_used,
@@ -786,9 +808,8 @@ fn schema_must_match_this_release() {
         db.restore(&fixture(), RestoreGeneration([5; 16]), 0)
             .await
             .unwrap();
-        exec(&db, "DROP TABLE auth_webauthn_challenges").await;
-        exec(&db, "DROP TABLE auth_webauthn_pending").await;
-        exec(&db, "DROP TABLE auth_webauthn_credentials").await;
+        exec(&db, "DROP INDEX vault_vaults_personal").await;
+        exec(&db, "ALTER TABLE vault_vaults DROP COLUMN kind").await;
         exec(
             &db,
             "DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM \

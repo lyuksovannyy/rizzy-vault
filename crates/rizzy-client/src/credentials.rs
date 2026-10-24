@@ -572,6 +572,8 @@ impl PlainChange {
                 device_grants: List::empty(),
                 recovery_rewrap: None,
                 vault_rotation: None,
+                vault_create: None,
+                vault_delete: None,
             },
             e_srv,
             session_token,

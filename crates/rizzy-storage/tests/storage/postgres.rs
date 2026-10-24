@@ -155,6 +155,10 @@ fn postgres_migrate_restore_dump_and_lock() {
 
         debug_hides_row_values(&db).await;
         crate::common::exercise_quota(&db).await;
+        crate::common::exercise_vault_kinds(&db).await;
+        db.close().await;
+        let db = open_handle().await;
+        crate::common::finish_vault_kinds(&db).await;
         db.close().await;
     });
 }

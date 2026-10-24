@@ -225,7 +225,7 @@ pub(crate) fn fixture() -> Dump {
         ),
         (
             "vault_vaults",
-            vec![vec![v1(), a1(), int(0), int(2), int(27)]],
+            vec![vec![v1(), a1(), int(0), int(2), int(27), int(1)]],
         ),
         (
             "vault_self_grants",
@@ -436,4 +436,130 @@ pub(crate) async fn exercise_quota(db: &rizzy_storage::Database) {
     let mut r = db.begin_read().await.unwrap();
     assert_eq!(accounts(r.conn()).await.unwrap(), vec![a1, a2]);
     r.finish().await.unwrap();
+}
+
+/// Runs one statement in its own write transaction; `Err` when the engine refuses it.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a test helper: a failure fails the test, which CLAUDE.md allows in test code"
+)]
+async fn try_exec(
+    db: &rizzy_storage::Database,
+    statement: &'static str,
+    bytes: &[[u8; 16]],
+) -> bool {
+    let mut w = db.begin_write().await.unwrap();
+    let ok = on_engine!(w.conn(), |c| {
+        let mut q = sqlx::query(statement);
+        for b in bytes {
+            q = q.bind(&b[..]);
+        }
+        q.execute(&mut *c).await.is_ok()
+    });
+    if ok {
+        w.commit().await.unwrap();
+    } else {
+        w.rollback().await.unwrap();
+    }
+    ok
+}
+
+/// The vault kinds of migration 0009 (ADR 0081 §A10), on either engine: the partial unique
+/// index keeps one Personal vault per account and allows any number of owned ones, the CHECK
+/// refuses another kind, and the migration itself fails loudly on an account that already has
+/// two vaults. Needs `fixture()` restored (`ACCOUNT_1` owns vault `0xb1…` as kind 1) and every
+/// migration applied. Leaves migration 9 pending and the second vault in place: the caller
+/// closes this handle (sqlx keeps PostgreSQL's migration advisory lock on the connection of a
+/// failed run) and calls [`finish_vault_kinds`] on a new one.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a test helper: a failure fails the test, which CLAUDE.md allows in test code"
+)]
+pub(crate) async fn exercise_vault_kinds(db: &rizzy_storage::Database) {
+    let (a1, a2) = (id(ACCOUNT_1), id(ACCOUNT_2));
+    let insert = "INSERT INTO vault_vaults (id, account_id, vault_key_epoch, created_at_ms) \
+                  VALUES ($1, $2, 0, 1)";
+    let insert_kind = |kind: u8| match kind {
+        0 => {
+            "INSERT INTO vault_vaults (id, account_id, vault_key_epoch, created_at_ms, kind) \
+              VALUES ($1, $2, 0, 1, 0)"
+        }
+        2 => {
+            "INSERT INTO vault_vaults (id, account_id, vault_key_epoch, created_at_ms, kind) \
+              VALUES ($1, $2, 0, 1, 2)"
+        }
+        _ => {
+            "INSERT INTO vault_vaults (id, account_id, vault_key_epoch, created_at_ms, kind) \
+              VALUES ($1, $2, 0, 1, 3)"
+        }
+    };
+    // A second Personal vault (the default kind) for the same account is refused.
+    assert!(!try_exec(db, insert, &[id(0xc1), a1]).await);
+    // Owned vaults: any number.
+    assert!(try_exec(db, insert_kind(2), &[id(0xc2), a1]).await);
+    assert!(try_exec(db, insert_kind(2), &[id(0xc3), a1]).await);
+    // Another account's Personal vault is its own.
+    assert!(try_exec(db, insert, &[id(0xc4), a2]).await);
+    // Kind 3 (joined) is Part B's and has no row; 0 is invalid.
+    assert!(!try_exec(db, insert_kind(3), &[id(0xc5), a1]).await);
+    assert!(!try_exec(db, insert_kind(0), &[id(0xc6), a1]).await);
+    // An owned vault cannot become a second Personal vault.
+    assert!(
+        !try_exec(
+            db,
+            "UPDATE vault_vaults SET kind = 1 WHERE id = $1",
+            &[id(0xc2)]
+        )
+        .await
+    );
+    for v in [0xc2, 0xc3, 0xc4] {
+        assert!(try_exec(db, "DELETE FROM vault_vaults WHERE id = $1", &[id(v)]).await);
+    }
+
+    // The migration on a database where one account has two vaults fails and changes nothing.
+    let last = crate::common::last_migration();
+    assert_eq!(last, 9, "the vault-kinds migration is the last one");
+    for undo in [
+        "DROP INDEX vault_vaults_personal",
+        "ALTER TABLE vault_vaults DROP COLUMN kind",
+        "DELETE FROM _sqlx_migrations WHERE version = 9",
+    ] {
+        assert!(try_exec(db, undo, &[]).await, "{undo}");
+    }
+    assert!(try_exec(db, insert, &[id(0xc1), a1]).await);
+    assert!(db.migrate().await.is_err());
+    assert_eq!(db.pending_migrations().await.unwrap(), vec![9]);
+}
+
+/// The second half of [`exercise_vault_kinds`], on a fresh handle: without the second vault
+/// the migration applies, and the existing vault becomes the Personal vault.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a test helper: a failure fails the test, which CLAUDE.md allows in test code"
+)]
+pub(crate) async fn finish_vault_kinds(db: &rizzy_storage::Database) {
+    let a1 = id(ACCOUNT_1);
+    assert_eq!(db.pending_migrations().await.unwrap(), vec![9]);
+    assert!(try_exec(db, "DELETE FROM vault_vaults WHERE id = $1", &[id(0xc1)]).await);
+    db.migrate().await.unwrap();
+    assert!(db.pending_migrations().await.unwrap().is_empty());
+    let mut r = db.begin_read().await.unwrap();
+    let kind: i64 = on_engine!(r.conn(), |c| sqlx::query_scalar(
+        "SELECT kind FROM vault_vaults WHERE account_id = $1"
+    )
+    .bind(&a1[..])
+    .fetch_one(&mut *c)
+    .await
+    .unwrap());
+    r.finish().await.unwrap();
+    assert_eq!(kind, 1, "an existing vault becomes the Personal vault");
+}
+
+/// The version of the last embedded migration.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a test helper: a failure fails the test, which CLAUDE.md allows in test code"
+)]
+pub(crate) fn last_migration() -> i64 {
+    rizzy_storage::migrate::MIGRATIONS.last().unwrap().version
 }

@@ -117,6 +117,7 @@ pub(crate) async fn build<V: VaultPort>(
         vault_self_grants: List::new(grants).map_err(over_limit)?,
         bytes_used,
         quota_bytes,
+        vaults: List::empty(),
     })
 }
 

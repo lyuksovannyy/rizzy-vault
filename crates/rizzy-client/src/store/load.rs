@@ -278,6 +278,8 @@ fn account_view(rows: &CacheRows) -> Result<AccountView, ClientError> {
         account_settings,
         identity_secret_keys,
         vault_self_grants: List::new(grants).map_err(|_| corrupt)?,
+        // The per-vault summaries (ADR 0081 §A11) are the server's live figures too.
+        vaults: List::empty(),
     })
 }
 

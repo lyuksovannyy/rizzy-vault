@@ -247,6 +247,7 @@ impl Server {
             vault_self_grants: List::new(s.grants.clone()).unwrap(),
             bytes_used: 4_096,
             quota_bytes: 5 << 30,
+            vaults: List::empty(),
         };
         self.capture(serde_json::to_vec(&view));
         view
