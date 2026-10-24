@@ -5338,3 +5338,498 @@ fn vault_names_ids_and_delete_with_items() {
     );
     assert_eq!(listed(&a, &[]).len(), 1);
 }
+
+// --- Moves with attachments, and interrupted moves (ADR 0081 §A6) ----------------------------
+
+/// A second client of the account, driven through `rizzy-client` directly: `rv` has no command
+/// that adds an attachment, so these tests add one (and read the copies back) the way the web
+/// vault does, as an ephemeral web device over the OPAQUE session's bearer token (CRYPTO.md
+/// §11.4; ADR 0054).
+mod web_client {
+    use rizzy_cli::http::{Auth, Http};
+    use rizzy_cli::sys::{OsRng, now_ms, os_rng};
+    use rizzy_cli::tls::Trust;
+    use rizzy_client::items::{ItemId, ItemLifecycle};
+    use rizzy_client::login::{LoginInput, WebSession, start_login};
+    use rizzy_client::rizzy_proto::attachments::{DownloadChunkResponse, GetAttachmentResponse};
+    use rizzy_client::rizzy_proto::auth::{LoginFinishResponse, LoginStartResponse};
+    use rizzy_client::rizzy_proto::http::paths;
+    use rizzy_client::rizzy_proto::vault::{FetchResponse, UploadResponse};
+    use rizzy_client::sync::{Authors, DeviceCounters, VaultSync};
+    use rizzy_core::ids::{AttachmentId, VaultId};
+
+    /// 16 bytes from 32 hex digits.
+    pub(super) fn id16(hex: &str) -> [u8; 16] {
+        assert_eq!(hex.len(), 32, "{hex}");
+        let mut out = [0_u8; 16];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
+        }
+        out
+    }
+
+    /// One attachment as a vault lists it: its id, name and size.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(super) struct Listed {
+        pub(super) id: [u8; 16],
+        pub(super) name: String,
+        pub(super) size: u64,
+    }
+
+    /// The web session and a driver of every vault it was served.
+    pub(super) struct WebClient {
+        http: Http,
+        web: WebSession,
+        authors: Authors,
+        vaults: Vec<VaultSync>,
+        rng: OsRng,
+    }
+
+    impl WebClient {
+        /// Logs in as a web session (OPAQUE, then the ephemeral certificate) and fetches every
+        /// vault.
+        pub(super) async fn log_in(
+            origin: &str,
+            login_name: &str,
+            secret_key: &str,
+            password: &str,
+        ) -> Self {
+            let http = Http::new(origin, &Trust::default()).unwrap();
+            let mut rng = os_rng();
+            let input = LoginInput {
+                server_origin: origin,
+                login_name,
+                secret_key,
+                password,
+            };
+            let (started, request) = start_login(&mut rng, &input).unwrap();
+            let answer: LoginStartResponse = http
+                .post(paths::LOGIN_START, &request, Auth::None)
+                .await
+                .unwrap();
+            let (awaiting, finish) = started.finish(&mut rng, &answer, None).unwrap();
+            let finished: LoginFinishResponse = http
+                .post(paths::LOGIN_FINISH, &finish, Auth::None)
+                .await
+                .unwrap();
+            let (mut web, certificate) = awaiting
+                .complete(finished)
+                .unwrap()
+                .web_device(&mut rng, now_ms())
+                .unwrap();
+            http.post_empty(
+                paths::DEVICES_WEB_CERTIFICATE,
+                &certificate,
+                Auth::Bearer(&web.session_token),
+            )
+            .await
+            .unwrap();
+            let authors = Authors::from_account(&web.account).unwrap();
+            let counters = DeviceCounters::new();
+            let mut vaults = Vec::new();
+            for vault_id in web.account.served_vault_ids() {
+                let key = web.account.take_vault_key(vault_id).unwrap();
+                let mut vault = VaultSync::new(key, &web.unlocked, 1).unwrap();
+                vault.share_counters(&counters);
+                vaults.push(vault);
+            }
+            let mut client = Self {
+                http,
+                web,
+                authors,
+                vaults,
+                rng,
+            };
+            client.fetch().await;
+            client
+        }
+
+        /// Fetches every vault until complete.
+        pub(super) async fn fetch(&mut self) {
+            for vault in &mut self.vaults {
+                loop {
+                    let request = vault.fetch_request().unwrap();
+                    let response: FetchResponse = self
+                        .http
+                        .post(
+                            paths::VAULT_FETCH,
+                            &request,
+                            Auth::Bearer(&self.web.session_token),
+                        )
+                        .await
+                        .unwrap();
+                    let complete = response.complete;
+                    vault
+                        .apply_fetch(&self.authors, &response, now_ms())
+                        .unwrap();
+                    if complete {
+                        break;
+                    }
+                }
+            }
+        }
+
+        /// The driver of `vault`.
+        fn vault(&mut self, vault: &str) -> &mut VaultSync {
+            let id = VaultId::from_bytes(id16(vault));
+            self.vaults.iter_mut().find(|v| v.vault_id() == id).unwrap()
+        }
+
+        /// Adds an attachment to `item` of `vault`: the item op uploaded, then the blob
+        /// (ADR 0054 §7, the op first).
+        pub(super) async fn attach(
+            &mut self,
+            vault: &str,
+            item: &str,
+            name: &str,
+            mime: &str,
+            data: &[u8],
+        ) {
+            let id = VaultId::from_bytes(id16(vault));
+            let driver = self.vaults.iter_mut().find(|v| v.vault_id() == id).unwrap();
+            let upload = driver
+                .add_attachment(
+                    &mut self.rng,
+                    &self.web.unlocked,
+                    ItemId::from_bytes(id16(item)),
+                    name,
+                    mime,
+                    data,
+                    now_ms(),
+                )
+                .unwrap();
+            while let Some(request) = driver
+                .upload_request(&mut self.rng, &self.web.unlocked)
+                .unwrap()
+            {
+                let response: UploadResponse = self
+                    .http
+                    .post(
+                        paths::VAULT_UPLOAD,
+                        &request,
+                        Auth::Bearer(&self.web.session_token),
+                    )
+                    .await
+                    .unwrap();
+                let outcome = driver.apply_upload_response(&response).unwrap();
+                assert!(outcome.rejected.is_empty(), "{:?}", outcome.rejected);
+            }
+            let bearer = || Auth::Bearer(&self.web.session_token);
+            self.http
+                .post_empty(
+                    paths::ATTACHMENTS_CREATE,
+                    &upload.create_request(),
+                    bearer(),
+                )
+                .await
+                .unwrap();
+            for index in 0..upload.chunk_count() {
+                let request = upload.chunk_request(index).unwrap();
+                self.http
+                    .post_empty(paths::ATTACHMENTS_UPLOAD_CHUNK, &request, bearer())
+                    .await
+                    .unwrap();
+            }
+        }
+
+        /// The attachments `item` of `vault` lists, by name.
+        pub(super) fn attachments(&mut self, vault: &str, item: &str) -> Vec<Listed> {
+            let mut listed: Vec<Listed> = self
+                .vault(vault)
+                .attachments(ItemId::from_bytes(id16(item)))
+                .into_iter()
+                .map(|a| Listed {
+                    id: a.attachment_id.to_bytes(),
+                    name: a.name.as_str().to_owned(),
+                    size: a.size,
+                })
+                .collect();
+            listed.sort_by(|a, b| a.name.cmp(&b.name));
+            listed
+        }
+
+        /// Whether `item` of `vault` is purged.
+        pub(super) fn purged(&mut self, vault: &str, item: &str) -> bool {
+            self.vault(vault)
+                .item_lifecycle(ItemId::from_bytes(id16(item)))
+                == ItemLifecycle::Purged
+        }
+
+        /// Downloads and opens one attachment, under `vault`'s keys (ADR 0054).
+        pub(super) async fn download(
+            &mut self,
+            vault: &str,
+            item: &str,
+            attachment: [u8; 16],
+        ) -> Vec<u8> {
+            let id = VaultId::from_bytes(id16(vault));
+            let driver = self.vaults.iter().find(|v| v.vault_id() == id).unwrap();
+            let mut download = driver
+                .begin_download(
+                    ItemId::from_bytes(id16(item)),
+                    AttachmentId::from_bytes(attachment),
+                )
+                .unwrap();
+            let bearer = || Auth::Bearer(&self.web.session_token);
+            let answer: GetAttachmentResponse = self
+                .http
+                .post(paths::ATTACHMENTS_GET, &download.get_request(), bearer())
+                .await
+                .unwrap();
+            driver
+                .accept_attachment_key(&mut download, &answer)
+                .unwrap();
+            for index in 0..download.chunk_count() {
+                let request = download.chunk_request(index).unwrap();
+                let chunk: DownloadChunkResponse = self
+                    .http
+                    .post(paths::ATTACHMENTS_DOWNLOAD_CHUNK, &request, bearer())
+                    .await
+                    .unwrap();
+                download.accept_response(index, &chunk).unwrap();
+            }
+            download.finish().unwrap().to_vec()
+        }
+    }
+}
+
+/// The id of the vault `vault list` prints under `label`.
+fn vault_id_of(rv: &Rv, label: &str) -> String {
+    rv.ok(&["vault", "list"], &[])
+        .out
+        .iter()
+        .find_map(|line| {
+            let (id, rest) = line.split_once("  ")?;
+            rest.starts_with(&format!("{label}  "))
+                .then(|| id.to_owned())
+        })
+        .unwrap_or_else(|| panic!("no vault {label}"))
+}
+
+/// The ids of the items titled `name` that `item list --vault <vault>` prints.
+fn ids_named(rv: &Rv, vault: &str, name: &str) -> Vec<String> {
+    listed(rv, &["--vault", vault])
+        .into_iter()
+        .filter(|(_, rest)| rest.contains(name))
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// Two files: one short, one over a chunk, so the copy re-seals several chunks.
+fn files() -> [(&'static str, &'static str, Vec<u8>); 2] {
+    let big: Vec<u8> = (0..600_000_u32).map(|i| (i % 251) as u8).collect();
+    [
+        ("big.bin", "application/octet-stream", big),
+        (
+            "notes.txt",
+            "text/plain",
+            b"the attachment's own bytes".to_vec(),
+        ),
+    ]
+}
+
+/// ADR 0081 §A6 step 1 with attachments: `item copy` and `item move` download each attachment,
+/// open it, and upload it again under a new attachment id and key in the target vault, so the
+/// copies open under the target vault's keys, byte for byte, and share no attachment id with the
+/// original. The move purges the original only after that. Then §A6 step 2: another device,
+/// offline, edits the moved item; its edit is a late op on the purged source, and `rv sync` on
+/// the device that made the move names the vault the item went to (the device recorded the
+/// move), while the other device's notice, which recorded none, is the plain one.
+#[test]
+fn moves_and_copies_carry_attachments_under_the_target_vault() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("vatt-a");
+    let (secret_key, _) = sign_up(&a, &origin, "alice");
+    let work = a.ok(&["vault", "create", "Work"], &[]).out[0].clone();
+    let personal = vault_id_of(&a, "Personal");
+    let item = create_note(&a, "With files");
+
+    // The files go in through a web session (rv adds none), then reach rv with a sync.
+    let mut web = a.runtime.block_on(web_client::WebClient::log_in(
+        &origin,
+        "alice",
+        &secret_key,
+        PASSWORD,
+    ));
+    for (name, mime, data) in files() {
+        a.runtime
+            .block_on(web.attach(&personal, &item, name, mime, &data));
+    }
+    let originals = web.attachments(&personal, &item);
+    assert_eq!(originals.len(), 2);
+    a.ok(&["sync"], &[]);
+    // A second rv device holds the item before the move.
+    let b = Rv::new("vatt-b");
+    log_in(&b, &origin, "alice", &secret_key);
+    assert_eq!(ids_named(&b, "Personal", "With files"), vec![item.clone()]);
+
+    let copy = a.ok(&["item", "copy", &item, "--to", "Work"], &[]).out[0].clone();
+    let moved = a.ok(&["item", "move", &item, "--to", "Work"], &[]).out[0].clone();
+    assert!(ids_named(&a, "Personal", "With files").is_empty());
+    let mut in_work = ids_named(&a, "Work", "With files");
+    in_work.sort();
+    let mut expected = vec![copy.clone(), moved.clone()];
+    expected.sort();
+    assert_eq!(in_work, expected);
+
+    a.runtime.block_on(web.fetch());
+    assert!(
+        web.purged(&personal, &item),
+        "the original is purged once the copy is stored"
+    );
+    for target in [&copy, &moved] {
+        let carried = web.attachments(&work, target);
+        assert_eq!(
+            carried
+                .iter()
+                .map(|c| (c.name.clone(), c.size))
+                .collect::<Vec<_>>(),
+            originals
+                .iter()
+                .map(|o| (o.name.clone(), o.size))
+                .collect::<Vec<_>>(),
+        );
+        for (c, o) in carried.iter().zip(&originals) {
+            assert_ne!(c.id, o.id, "a new attachment id in the target");
+        }
+        for ((name, _, data), c) in files().iter().zip(&carried) {
+            assert_eq!(&c.name, name);
+            let opened = a.runtime.block_on(web.download(&work, target, c.id));
+            assert!(
+                opened == *data,
+                "{name}: the copy opens under the target vault, byte for byte"
+            );
+        }
+    }
+    let copy_ids: Vec<[u8; 16]> = web.attachments(&work, &copy).iter().map(|c| c.id).collect();
+    let moved_ids: Vec<[u8; 16]> = web
+        .attachments(&work, &moved)
+        .iter()
+        .map(|c| c.id)
+        .collect();
+    assert!(copy_ids.iter().all(|id| !moved_ids.contains(id)));
+
+    // §A6 step 2: B edits the item it still holds; the edit arrives after the purge.
+    b.ok(
+        &[
+            "item",
+            "edit",
+            &item,
+            "--field",
+            "item.notes=edited offline",
+        ],
+        &[],
+    );
+    let synced = a.ok(&["sync"], &[]);
+    assert!(
+        synced.notes.iter().any(|n| n.contains(&format!(
+            "arrived for an item you moved to the vault \"Work\" ({item}). Restore it as a new item?"
+        ))),
+        "{:?}",
+        synced.notes
+    );
+    assert!(
+        ids_named(&a, "Personal", "With files").is_empty(),
+        "the late edit brings nothing back"
+    );
+    assert_eq!(a.field(&moved, "item.name"), "With files");
+    // B recorded no move: whatever it says names no vault.
+    let other = b.ok(&["sync"], &[]);
+    assert!(
+        !other.notes.iter().any(|n| n.contains("you moved to")),
+        "{:?}",
+        other.notes
+    );
+}
+/// ADR 0081 §A6 step 3 (INV-104) in `rv`: a move interrupted after its `pending_move` row was
+/// written resumes at the next `rv sync`. Interrupted while an attachment's chunk is on its way,
+/// the source is untouched; the resume does not create the copy again, carries the attachment
+/// the server does not hold, and only then purges the source. Interrupted when the target's
+/// upload reached the server but its answer was lost, the resume finds the copy stored, sends
+/// it again without a duplicate, and purges the source. Either way: one copy, nothing lost.
+#[test]
+fn an_interrupted_move_resumes_without_a_loss_or_a_duplicate() {
+    use rizzy_client::rizzy_proto::http::paths;
+
+    let (proxy, server) = Proxy::start();
+    let origin = server.origin();
+    let a = Rv::new("vresume-a");
+    let (secret_key, _) = sign_up(&a, &origin, "alice");
+    let work = a.ok(&["vault", "create", "Work"], &[]).out[0].clone();
+    let personal = vault_id_of(&a, "Personal");
+    let first = create_note(&a, "First");
+    let second = create_note(&a, "Second");
+    let mut web = a.runtime.block_on(web_client::WebClient::log_in(
+        &origin,
+        "alice",
+        &secret_key,
+        PASSWORD,
+    ));
+    let data = b"carried across an interruption".to_vec();
+    a.runtime
+        .block_on(web.attach(&personal, &first, "file.txt", "text/plain", &data));
+    a.ok(&["sync"], &[]);
+
+    // Interrupted mid-carry: the chunk never reaches the server.
+    proxy.arm(paths::ATTACHMENTS_UPLOAD_CHUNK, Fault::NeverSent);
+    let (outcome, script) = a.try_run(
+        &["item", "move", &first, "--to", "Work"],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(outcome.is_err(), "{:?}", script.notes);
+    assert!(proxy.fired());
+    assert_eq!(
+        ids_named(&a, "Personal", "First"),
+        vec![first.clone()],
+        "the source is untouched"
+    );
+    a.ok(&["sync"], &[]);
+    assert!(ids_named(&a, "Personal", "First").is_empty());
+    let moved = ids_named(&a, "Work", "First");
+    assert_eq!(moved.len(), 1, "one copy: {moved:?}");
+    a.runtime.block_on(web.fetch());
+    assert!(web.purged(&personal, &first));
+    let carried = web.attachments(&work, &moved[0]);
+    assert_eq!(
+        carried.len(),
+        1,
+        "the half-carried attachment was replaced, not kept: {carried:?}"
+    );
+    assert!(
+        a.runtime
+            .block_on(web.download(&work, &moved[0], carried[0].id))
+            == data
+    );
+
+    // Interrupted after the target's upload reached the server: its answer is lost.
+    proxy.arm(paths::VAULT_UPLOAD, Fault::AnswerLost);
+    let (outcome, script) = a.try_run(
+        &["item", "move", &second, "--to", "Work"],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(outcome.is_err(), "{:?}", script.notes);
+    assert!(proxy.fired());
+    assert_eq!(
+        ids_named(&a, "Personal", "Second"),
+        vec![second.clone()],
+        "the source is untouched"
+    );
+    a.ok(&["sync"], &[]);
+    assert!(ids_named(&a, "Personal", "Second").is_empty());
+    assert_eq!(ids_named(&a, "Work", "Second").len(), 1);
+    // The server holds one copy: a fresh device sees exactly one, and no original.
+    let b = Rv::new("vresume-b");
+    log_in(&b, &origin, "alice", &secret_key);
+    assert_eq!(ids_named(&b, "Work", "Second").len(), 1);
+    assert_eq!(ids_named(&b, "Work", "First"), moved);
+    assert!(ids_named(&b, "Personal", "First").is_empty());
+    assert!(ids_named(&b, "Personal", "Second").is_empty());
+    // The finished moves are not resumed again: a later sync says nothing about waiting moves.
+    let quiet = a.ok(&["sync"], &[]);
+    assert!(!quiet.noted("item moves wait"), "{:?}", quiet.notes);
+}
