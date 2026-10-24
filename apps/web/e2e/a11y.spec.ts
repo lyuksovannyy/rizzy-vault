@@ -178,6 +178,8 @@ test("a11y: signup, login, the guide, the vault, its dialogs and settings", asyn
   // The third-party notices (THIRD_PARTY_NOTICES.md; ADR 0080 owner answer 5).
   const notices = page.getByRole("region", { name: "Third-party notices" });
   await expect(notices).toContainText("EFF's Long Wordlist");
+  await expect(notices).toContainText("faker-js");
+  await expect(notices).toContainText("Unicode CLDR");
   await expect(notices).toContainText(
     "Default site groups derived from the Bitwarden server's equivalent-domains list via Vaultwarden, AGPL-3.0.",
   );
