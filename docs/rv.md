@@ -72,7 +72,7 @@ A refused handshake names the server and the reason (unknown CA, expired, wrong 
 ```sh
 rv unlock                      # checks the password, syncs, says where the device stands
 rv sync
-rv item list                   # --trash lists the trash
+rv item list                   # --trash lists the trash; --vault <vault> only that vault
 rv item show 3fa2              # ids may be shortened to a unique prefix; --reveal shows secrets
 rv item create --type login --field item.name=Example --field login.username=alice \
                --secret login.password --uri https://example.org --tag work
@@ -92,6 +92,8 @@ rv item search ивана           # name, username, websites, tags, text custo
 rv item recent                 # the items you viewed here, most recent first; --limit <n>
 rv cache reindex               # rebuilds the search index, forgets the use history
 ```
+
+The commands for several vaults are under [Vaults](#vaults) below.
 
 Every command asks for the master password: nothing unlocked outlives the process. A command that changes something writes it to the local file first and then uploads it. If the server is not reachable the change stays queued and the next `rv sync` sends it.
 
@@ -139,6 +141,32 @@ The M3 types have their own keys ([ADR 0055](adr/0055-m3-item-type-field-keys.md
 
 Generated details are random and may match real people or places: don't use them where you must give your real details. No identity number (SSN, passport, driver's licence) is ever generated. `rv` takes today's date in UTC, so within a few hours of midnight an exact age's birthday window can be one day off your local date.
 
+## Vaults
+
+Every account has a **Personal** vault, and you can create more vaults of your own to keep items apart ([ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) Part A). Vaults are not shared with other accounts in this build.
+
+```sh
+rv vault list                               # Personal first, then your vaults by name
+rv vault create Work                        # prints the new vault's id
+rv vault rename Work "Work 2026"
+rv item create --type login --vault Work --field item.name=VPN --secret login.password
+rv item list --vault Work                   # also: rv item search vpn --vault Work
+rv item move 3fa2 --to Personal             # copy into Personal, then remove the original
+rv item copy 3fa2 --to Work                 # a new item in Work; the original stays
+rv vault delete Work --name alice           # moves Work's items to Personal, then deletes it
+rv vault delete Work --name alice --with-items   # deletes the vault and its items
+```
+
+- **Naming a vault.** `<vault>` is `Personal`, a vault's name, or its id (or a unique prefix of the id) as `rv vault list` prints it. A name that two vaults share is refused with both ids listed; use an id then.
+- **`rv vault list`** prints one line per vault: the id, the name (`Personal`; `Untitled vault` for a vault without a name), the number of items (the trash not counted), the bytes the server counts for it when it said, and a state when the vault is not open: `withheld` (the account lists it but the server did not send its key: read-only, as this device last saw it), `needs-update` (it needs a newer rizzy-vault: read-only and not synced; the other vaults go on syncing) or `read-only`.
+- **Where new items go.** `rv item create` and `rv import` write into the Personal vault unless `--vault` names another, and `rv export` exports the Personal vault unless `--vault` names another (one export file holds one vault). There is no remembered "last used" vault: Personal is the default every time.
+- **Lists and search** span every vault. Each `item list`, `item search` and `item recent` row shows its vault between the type and the name, and `item show` prints a `vault:` line. `--vault` on `item list` and `item search` keeps one vault.
+- **Item ids** are looked up in every vault. An id prefix that matches items in two vaults is refused with each match's vault and id; give more of the id.
+- **The Personal vault** cannot be renamed or deleted; it is always shown as `Personal`. A vault name is at most 64 characters.
+- **Move and copy.** An item never changes vault: `item copy` makes a new item (a new id) in the other vault with the same fields, history, tags, passkeys and one-time-code secret, and uploads each attachment again under the other vault's key; a trashed item stays trashed in the copy. `item move` does the same, then, only after the server has stored the copy and every attachment, puts the original in the trash and purges it. The move is written down on this device first: if `rv` is interrupted, the next `rv sync` finishes it, so an interrupted move can leave a copy behind but never loses the item. A moved item arrives active, also from the trash.
+- **Deleting a vault** shows how many items it holds and asks you to type the vault's name at the terminal. It then logs in again with your master password (`--name` is your login name), because the server only deletes a vault right after a password login. By default every item of the vault, the trash included, is first moved to Personal; if a move cannot finish, nothing is deleted. With `--with-items` the items are deleted with the vault. The delete is immediate and cannot be undone; other devices drop the vault at their next sync, and changes to it they had not sent yet are discarded, with a note saying how many.
+- **Creating a vault** works over this device's session; if the answer is lost, the vault may exist without its name: it then shows as `Untitled vault`, and `rv vault rename` names it.
+
 ## Export and import
 
 ```sh
@@ -149,6 +177,8 @@ rv export --out keys.rizzy  --name alice --format cxf    # passkeys only, CXF, e
 rv import --in vault.rizzy                               # the format is recognised from the file
 rv import --in passkeys.json                             # a CXF passkey file of another manager
 rv import --in export.csv --format chrome-csv            # name the format when it is not
+rv export --out work.rizzy --name alice --vault Work     # one vault per file; Personal by default
+rv import --in vault.rizzy --vault Work                  # into Work instead of Personal
 ```
 
 - **Every export asks for your master password again** and checks it with the server (an OPAQUE login with this device's Secret Key, as for a password change), so an export needs the server. A wrong password ends the export and writes nothing. `--name` is your login name.
