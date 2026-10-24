@@ -819,6 +819,9 @@ fn plaintext_csv_is_rfc_4180_and_counts_its_losses() {
             "identity.ssn",
             "identity.passport_number",
             "identity.drivers_license",
+            // ADR 0079 §1, added under ADR 0018 §7, so ADR 0027 §4 lists them in table order.
+            "identity.sex",
+            "identity.birthday",
         ]
     );
     // The login (custom field, password history) and the card (unknown keys, unsupported
@@ -878,20 +881,20 @@ fn plaintext_csv_is_rfc_4180_and_counts_its_losses() {
             format!(
                 "card\",\"Visa\",{},\"4111111111111111\",{}",
                 empty(8),
-                empty(23).strip_suffix('"').unwrap()
+                empty(25).strip_suffix('"').unwrap()
             ),
             format!(
                 "identity\",\"Me\",{},\"Alice\",{},\"000-00-0000\",{}",
                 empty(15),
                 empty(13),
-                empty(2).strip_suffix('"').unwrap()
+                empty(4).strip_suffix('"').unwrap()
             ),
             // Every field quoted, `"` doubled, the CRLF inside the password kept, and the
             // formula-like custom field not in CSV at all.
             format!(
                 "login\",\"Bank \"\"main\"\"\",\"\",\"true\",\"work\",\"https://bank.example\",\
                  \"alice\",\"p3,\r\n\"\"q\"\"\",\"JBSWY3DPEHPK3PXP\",{}",
-                empty(25).strip_suffix('"').unwrap()
+                empty(27).strip_suffix('"').unwrap()
             ),
         ]
     );

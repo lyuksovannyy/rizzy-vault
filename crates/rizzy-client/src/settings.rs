@@ -16,8 +16,10 @@
 //!   bytes(value)                 u32(len) ‖ value; len ≤ MAX_SETTINGS_ENTRY_LEN (1 MiB)
 //! ```
 //!
-//! - **Tags.** `0x0000` is invalid; `0x0001` is the matching section; `0x0002`–`0xFFFE` are
-//!   unassigned; `0xFFFF` is reserved and never assigned, so no valid record holds it and it is
+//! - **Tags.** `0x0000` is invalid; `0x0001` is the matching section; `0x0004` is the identity
+//!   generator's defaults ([`crate::identity_gen::IdentityDefaults`], ADR 0079 Open question 7;
+//!   `0x0002` and `0x0003` are reserved by the Proposed ADR 0081); every other tag up to
+//!   `0xFFFE` is unassigned; `0xFFFF` is reserved and never assigned, so no valid record holds it and it is
 //!   rejected like `0x0000`.
 //! - **Absent object or absent tag.** While `settings_seq = 0` there is no envelope, and a record
 //!   without tag `0x0001` has the default matching settings (ADR 0037 §6: *Base domain*, nothing
@@ -72,6 +74,7 @@ use zeroize::Zeroizing;
 use crate::account::{AccountPin, VerifiedAccount};
 use crate::device::UnlockedDevice;
 use crate::error::{ClientError, internal};
+use crate::identity_gen::{IdentityDefaults, TAG_IDENTITY_DEFAULTS};
 use crate::wire::bytes;
 
 /// The only `format_version` this build reads and writes (ADR 0042 §2).
@@ -98,6 +101,9 @@ pub struct AccountSettingsRecord {
     /// Whether tag `0x0001` is present (so a record that holds the default section explicitly
     /// re-encodes to the same bytes as it decoded from).
     matching_present: bool,
+    /// The identity generator's defaults, tag `0x0004` (ADR 0079 Open question 7); absent until
+    /// first set.
+    identity_defaults: Option<IdentityDefaults>,
     /// Every unrecognised entry, sorted by tag, value verbatim.
     unknown: Vec<(u16, Zeroizing<Vec<u8>>)>,
 }
@@ -107,6 +113,7 @@ impl fmt::Debug for AccountSettingsRecord {
         f.debug_struct("AccountSettingsRecord")
             .field("matching", &self.matching)
             .field("matching_present", &self.matching_present)
+            .field("identity_defaults", &self.identity_defaults.is_some())
             .field("unknown_entries", &self.unknown.len())
             .finish()
     }
@@ -117,6 +124,12 @@ impl AccountSettingsRecord {
     #[must_use]
     pub const fn matching(&self) -> &MatchingSettings {
         &self.matching
+    }
+
+    /// The identity generator's defaults (tag `0x0004`), if set (ADR 0079 Open question 7).
+    #[must_use]
+    pub const fn identity_defaults(&self) -> Option<&IdentityDefaults> {
+        self.identity_defaults.as_ref()
     }
 
     /// The tags of the entries this build does not know, in order.
@@ -152,6 +165,10 @@ impl AccountSettingsRecord {
                 record.matching = MatchingSettings::decode(value)
                     .map_err(|_| ClientError::InvalidServerResponse)?;
                 record.matching_present = true;
+            } else if tag == TAG_IDENTITY_DEFAULTS {
+                record.identity_defaults = Some(
+                    IdentityDefaults::decode(value).ok_or(ClientError::InvalidServerResponse)?,
+                );
             } else {
                 record.unknown.push((tag, Zeroizing::new(value.to_vec())));
             }
@@ -180,6 +197,13 @@ impl AccountSettingsRecord {
         if let Some(m) = &matching {
             entries.push((TAG_MATCHING, m.as_slice()));
         }
+        let identity = match &self.identity_defaults {
+            Some(d) => Some(Zeroizing::new(d.encode().map_err(internal)?)),
+            None => None,
+        };
+        if let Some(i) = &identity {
+            entries.push((TAG_IDENTITY_DEFAULTS, i.as_slice()));
+        }
         entries.sort_by_key(|(tag, _)| *tag);
         let n = u16::try_from(entries.len()).map_err(|_| ClientError::SettingsLimitReached)?;
         if n > MAX_SETTINGS_ENTRIES {
@@ -198,8 +222,12 @@ impl AccountSettingsRecord {
         Ok(out)
     }
 
-    /// Applies one resolved edit to the matching section.
+    /// Applies one resolved edit: to the matching section, or the identity defaults.
     fn apply(&mut self, edit: &Edit) -> Result<(), ClientError> {
+        if let Edit::IdentityDefaults(d) = edit {
+            self.identity_defaults = Some(d.clone());
+            return Ok(());
+        }
         let m = &mut self.matching;
         match edit {
             Edit::Default(mode) => m.set_match_default(*mode).map_err(edit_error)?,
@@ -220,6 +248,7 @@ impl AccountSettingsRecord {
                     return Err(ClientError::InvalidInput);
                 }
             }
+            Edit::IdentityDefaults(_) => return Ok(()),
         }
         self.matching_present = true;
         Ok(())
@@ -345,6 +374,8 @@ pub enum SettingsEdit {
     DisableGlobalGroup(GroupId),
     /// Enables the global group with this id again.
     EnableGlobalGroup(GroupId),
+    /// Sets the identity generator's defaults, tag `0x0004` (ADR 0079 Open question 7).
+    SetIdentityDefaults(IdentityDefaults),
 }
 
 /// A [`SettingsEdit`] with its random parts drawn, so a restart redoes exactly the same edit.
@@ -360,6 +391,8 @@ enum Edit {
     Disable(GroupId),
     /// Enable the global group.
     Enable(GroupId),
+    /// Set the identity generator's defaults.
+    IdentityDefaults(IdentityDefaults),
 }
 
 impl fmt::Debug for Edit {
@@ -371,6 +404,7 @@ impl fmt::Debug for Edit {
             Self::Remove(_) => "Edit::Remove",
             Self::Disable(_) => "Edit::Disable",
             Self::Enable(_) => "Edit::Enable",
+            Self::IdentityDefaults(_) => "Edit::IdentityDefaults",
         })
     }
 }
@@ -392,6 +426,7 @@ impl Edit {
             SettingsEdit::RemoveUserGroup(id) => Self::Remove(id),
             SettingsEdit::DisableGlobalGroup(id) => Self::Disable(id),
             SettingsEdit::EnableGlobalGroup(id) => Self::Enable(id),
+            SettingsEdit::SetIdentityDefaults(d) => Self::IdentityDefaults(d),
         })
     }
 }
