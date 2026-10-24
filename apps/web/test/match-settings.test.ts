@@ -6,7 +6,21 @@
 import type { ItemSummary, MatchDecisionResult } from "@rizzy-vault/core";
 import { describe, expect, it } from "vitest";
 
-import { ACCOUNT_DEFAULT_OPTIONS, checkedItems, groupLabel, parseGroupDomains } from "../src/match-settings.ts";
+import { readFileSync } from "node:fs";
+
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+
+import {
+  ACCOUNT_DEFAULT_OPTIONS,
+  GROUP_LABEL_MAX_DOMAINS,
+  checkedItems,
+  groupLabel,
+  groupSummary,
+  leadDomain,
+  parseGroupDomains,
+} from "../src/match-settings.ts";
+import { GlobalGroupRow, GroupDomains } from "../src/views/MatchingPane.tsx";
 import { MAX_GROUP_DOMAINS, METHODS, isSettingsChange } from "../src/protocol.ts";
 
 function item(id: string, title: string): ItemSummary {
@@ -81,6 +95,85 @@ describe("checkedItems", () => {
 
   it("labels a group by its domains", () => {
     expect(groupLabel(["example.com", "example.net"])).toBe("example.com, example.net");
+  });
+});
+
+/** The committed default site groups (ADR 0080, `data/equivalence/groups.txt`): what the pane
+ * will list once the owner signs a list from them. No list ships in this build, so the e2e test
+ * cannot show them; these render the pane's rows from the real seed instead. */
+function seedGroups(): string[][] {
+  const text = readFileSync(new URL("../../../data/equivalence/groups.txt", import.meta.url), "utf8");
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !line.startsWith("#"))
+    .map((line) =>
+      (line.split("|")[2] ?? "")
+        .split(",")
+        .map((d) => d.trim())
+        .filter((d) => d !== "")
+        .sort(),
+    );
+}
+
+describe("long group labels (ADR 0080)", () => {
+  const airbnb = seedGroups().find((g) => g.includes("airbnb.com")) ?? [];
+
+  it("names a short group in full and a long one by its lead domain and a count", () => {
+    expect(groupSummary(["apple.com", "icloud.com"])).toEqual({ label: "apple.com, icloud.com", hidden: 0 });
+    const three = ["a.example", "b.example", "c.example"];
+    expect(three).toHaveLength(GROUP_LABEL_MAX_DOMAINS);
+    expect(groupSummary(three).hidden).toBe(0);
+    expect(airbnb).toHaveLength(53);
+    expect(groupSummary(airbnb)).toEqual({ label: "airbnb.com and 52 more", hidden: 52 });
+  });
+
+  it("leads with the brand's .com when most members share its name, else the first domain", () => {
+    expect(leadDomain(airbnb)).toBe("airbnb.com");
+    expect(leadDomain(["ebay.co.uk", "ebay.com", "ebay.de", "other.example"])).toBe("ebay.com");
+    // No shared name, or no .com of it: the first domain, as the list sorts them.
+    expect(leadDomain(["bing.com", "live.com", "xbox.com", "msn.com"])).toBe("bing.com");
+    expect(leadDomain(["shop.de", "shop.fr", "zz.example", "yy.example"])).toBe("shop.de");
+    expect(leadDomain([])).toBe("");
+  });
+
+  it("gives every committed default group a distinct label, so every switch has its own name", () => {
+    const groups = seedGroups();
+    expect(groups).toHaveLength(22);
+    const labels = groups.map((g) => groupSummary(g).label);
+    expect(new Set(labels).size).toBe(labels.length);
+  });
+
+  it("renders a long group as one line plus a disclosure listing every site", () => {
+    const html = renderToStaticMarkup(createElement(GroupDomains, { domains: airbnb }));
+    expect(html).toContain("<span>airbnb.com and 52 more</span>");
+    expect(html).toMatch(/<details><summary aria-label="All 53 sites in the group airbnb.com and 52 more">/);
+    expect(html).not.toMatch(/<details open/);
+    expect(html).toContain('aria-label="Sites in the group airbnb.com and 52 more"');
+    expect(html.match(/<li>/g)).toHaveLength(53);
+    for (const domain of ["airbnb.com", "airbnb.co.uk", "airbnb.de"]) {
+      expect(html).toContain(`<li>${domain}</li>`);
+    }
+  });
+
+  it("renders a short group with no disclosure", () => {
+    const html = renderToStaticMarkup(createElement(GroupDomains, { domains: ["apple.com", "icloud.com"] }));
+    expect(html).toBe("<span>apple.com, icloud.com</span>");
+  });
+
+  it("names each switch after the group's label, on and off", () => {
+    const row = (disabled: boolean) =>
+      renderToStaticMarkup(
+        createElement(GlobalGroupRow, {
+          group: { id: "ab", domains: airbnb, disabled },
+          busy: false,
+          onChange: () => undefined,
+        }),
+      );
+    expect(row(false)).toContain('aria-label="Turn off the group airbnb.com and 52 more"');
+    expect(row(true)).toContain('aria-label="Turn on the group airbnb.com and 52 more"');
+    expect(row(true)).toContain('class="group-domains muted"');
+    expect(row(false)).toContain('class="group-domains"');
   });
 });
 

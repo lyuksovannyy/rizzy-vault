@@ -80,7 +80,15 @@ test("a user group changes a match, the account default narrows it, and both per
   await expect(await check(pane, "https://www.example.com/")).toContainText("No item would be offered");
 
   // Global groups: this build ships no signed list (gap G1), so there is nothing to turn off.
+  // The default site groups of ADR 0080 are committed in data/equivalence/groups.txt but stay
+  // unsigned until the owner signs them offline, and no build can inject a test-key list (the
+  // list and its key are compile-time constants of rizzy-match). Until a list ships, the pane's
+  // rows for them (long labels, the disclosure, the switches' names) are checked by rendering
+  // them from the committed seed in test/match-settings.test.ts; ADR 0080 §8's e2e cases (on by
+  // default, a turned-off group stays off across a reload and stops an equivalence-only offer,
+  // the warning) are added here in the change that ships the list.
   await expect(pane.getByText("This build ships no signed global list yet")).toBeVisible();
+  await expect(pane.getByRole("list", { name: "Global equivalence groups" })).toHaveCount(0);
 
   // A new login reads the same settings from the server.
   await page.reload();

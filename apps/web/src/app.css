@@ -1304,6 +1304,29 @@ button.sidebar-item .sidebar-item-count {
   padding: var(--space-1) 0;
 }
 
+/* A long group (ADR 0080): "airbnb.com and 52 more", then a disclosure listing every site. */
+.matching-list .group-domains {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.matching-list .group-domains ul {
+  list-style: none;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  columns: 12rem auto;
+}
+
+.matching-list .group-domains li {
+  display: block;
+  padding: 0;
+}
+
+/* Settings → Third-party notices (@rizzy-vault/ui ThirdPartyNotices): long URLs wrap. */
+.third-party-notices li {
+  overflow-wrap: anywhere;
+}
+
 /* The breach check (PasswordHealth.tsx; ADR 0053): the result line under the check button, and
    the report's list of breached items. A found result is marked by its words, not by colour
    alone; the danger colour only reinforces them. */
