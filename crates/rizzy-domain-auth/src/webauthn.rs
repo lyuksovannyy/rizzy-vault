@@ -31,8 +31,14 @@
 //!   row's `sign_count`, never the copy inside the state. A refused counter, by the crate or by
 //!   INV-83, is [`AuthError::PossibleClone`]: `rizzy-server` records it as a security event; the
 //!   credential stays enrolled (ADR 0058 owner answer 4).
-//! - **User verification** (§7): the facade's security-key policy. UP always; UV preferred, and
-//!   required at assertion exactly when the key performed UV at enrolment.
+//! - **User verification** (ADR 0082, replacing ADR 0077 §7): security keys are touch-only. The
+//!   relying party is built with `danger_set_user_presence_only_security_keys(true)`, so both
+//!   ceremonies ask for user verification `"discouraged"` and enrolment sends no credProtect
+//!   extension (Chromium refuses the facade's default, credProtect `userVerificationRequired`
+//!   with UV `"preferred"`). UP is required on every ceremony; UV is never required, not even
+//!   from a key that performed it at enrolment. (The crate decides this from the policy stored in
+//!   each `SecurityKey`: a row enrolled under the earlier `"preferred"` policy by a key that did
+//!   UV would keep needing UV. No release ever enrolled one.)
 //! - **2FA gates server access only.** It never enters key derivation, and recovery does not
 //!   require it (ADR 0008 owner decision 2), as for TOTP.
 //!
@@ -99,6 +105,8 @@ pub(crate) fn relying_party(origin: &ServerOrigin) -> Option<Webauthn> {
     WebauthnBuilder::new(&host, &url)
         .ok()?
         .timeout(Duration::from_millis(CEREMONY_TTL_MS))
+        // Touch-only security keys (module docs, ADR 0082).
+        .danger_set_user_presence_only_security_keys(true)
         .build()
         .ok()
 }

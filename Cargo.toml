@@ -59,11 +59,13 @@ unicode-normalization = { version = "=0.1.25", default-features = false }
 # The WebAuthn relying-party ceremony for the server-side security-key second factor (ADR 0058,
 # ADR 0059 as amended by ADR 0077 §2, CRYPTO.md §11.17), in `rizzy-domain-auth` only. Pulls
 # `openssl`/`openssl-sys` under the scoped `deny.toml` exception (ADR 0009 owner decision 1,
-# INV-85). `danger-allow-state-serialisation` is the one `danger-*` feature: it only derives serde
-# on the in-progress ceremony state, kept in `auth_` rows (ADR 0077 §2). Never
-# `resident-key-support`, `conditional-ui`, `workaround-google-passkey-specific-issues` or any
-# other `danger-*` feature.
-webauthn-rs = { version = "=0.5.5", default-features = false, features = ["attestation", "danger-allow-state-serialisation"] }
+# INV-85). Two `danger-*` features: `danger-allow-state-serialisation` only derives serde on the
+# in-progress ceremony state, kept in `auth_` rows (ADR 0077 §2);
+# `danger-user-presence-only-security-keys` only adds the builder switch that makes security keys
+# touch-only, user presence with no UV and no credProtect (ADR 0082, owner decision of
+# 2026-10-24: Chromium refuses the default options). Never `resident-key-support`,
+# `conditional-ui`, `workaround-google-passkey-specific-issues` or any other `danger-*` feature.
+webauthn-rs = { version = "=0.5.5", default-features = false, features = ["attestation", "danger-allow-state-serialisation", "danger-user-presence-only-security-keys"] }
 zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 
 # URL parsing and matching for `rizzy-match` (ADR 0037, ADR 0038). Not cryptography: ordinary
