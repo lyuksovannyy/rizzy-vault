@@ -2,9 +2,11 @@
 
 // The popup's top-level view (ADR 0036 §4 "Popup... unlock, search, item list and detail with
 // copy, generator, lock, open web vault" — ROADMAP §4.4 wording).
+import { RecoveryNoticeBanner } from "@rizzy-vault/ui";
 import { useEffect, useState } from "react";
 
 import type { ExtensionClient } from "../core/client.ts";
+import type { PopupRecoveryNotice } from "../messaging/contract.ts";
 import { EnrolView } from "./views/Enrol.tsx";
 import { GeneratorView } from "./views/Generator.tsx";
 import { ItemsView } from "./views/Items.tsx";
@@ -32,12 +34,17 @@ export function App({ client, openTab }: AppProps) {
   // would remount it) keeps showing "No items." forever after a sync that pulled or pushed real
   // items, even while the popup's own "Synced." message says the sync succeeded.
   const [itemsRevision, setItemsRevision] = useState(0);
+  // ADR 0045: the server's advisory pending-recovery notice of the last account answer, for the
+  // banner only (INV-70). Replaced by every status and sync answer, so it goes with the first
+  // answer that has none (point 3).
+  const [recoveryNotice, setRecoveryNotice] = useState<PopupRecoveryNotice | undefined>(undefined);
 
   const refreshStatus = () => {
     void client
       .status()
       .then((status) => {
         setServerOrigin(status.serverOrigin);
+        setRecoveryNotice(status.locked ? undefined : status.recoveryNotice);
         setView(!status.enrolled ? "enrol" : status.locked ? "locked" : "items");
       })
       .catch((e: unknown) => {
@@ -55,7 +62,8 @@ export function App({ client, openTab }: AppProps) {
     setSyncMessage(undefined);
     void client
       .sync()
-      .then(() => {
+      .then((notice) => {
+        setRecoveryNotice(notice);
         setSyncMessage("Synced.");
         setItemsRevision((r) => r + 1);
       })
@@ -86,6 +94,9 @@ export function App({ client, openTab }: AppProps) {
     <main>
       <h1>rizzy-vault</h1>
       {error !== undefined ? <p role="alert">{error}</p> : undefined}
+      {unlocked && recoveryNotice !== undefined ? (
+        <RecoveryNoticeBanner notice={recoveryNotice} nowMs={Date.now()} />
+      ) : undefined}
       {view === "enrol" ? <EnrolView client={client} onEnrolled={refreshStatus} /> : undefined}
       {view === "locked" ? <LockedView client={client} onUnlocked={refreshStatus} /> : undefined}
       {view === "items" ? <ItemsView client={client} revision={itemsRevision} /> : undefined}

@@ -57,6 +57,7 @@ import type {
   OfferCandidate,
   PasskeyCandidateSummary,
   PasskeyResultPayload,
+  PopupRecoveryNotice,
   PopupRequest,
   PopupResponse,
 } from "../messaging/contract.ts";
@@ -897,6 +898,20 @@ function mapFields(fields: readonly { key: string; kind: ItemFieldSummary["kind"
   return fields.map((f) => ({ key: f.key, kind: f.kind, concealed: f.concealed, value: f.value }));
 }
 
+/** The pending-recovery notice of `s`'s last account answer, for the popup's banner (ADR
+ * 0045): advisory only (INV-70), never read by anything but the banner. */
+function recoveryNoticeOf(s: DurableSession | undefined): PopupRecoveryNotice | undefined {
+  const notice = s?.recoveryNotice;
+  if (notice === undefined) {
+    return undefined;
+  }
+  return {
+    openedAtMs: notice.openedAtMs,
+    availableAtMs: notice.availableAtMs,
+    ...(notice.lastRecoveryAtMs !== undefined ? { lastRecoveryAtMs: notice.lastRecoveryAtMs } : {}),
+  };
+}
+
 /** Handles one popup/options request (ADR 0036 §4: "coarse, one-call-per-action messages").
  * `ext` is used for the `"lock"` branch's `storage.session` clear and the auto-lock timer's
  * start; the account-config read/write (`account-config.ts`) needs no `ext` — it is IndexedDB,
@@ -910,11 +925,13 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
       // non-secret fact `account-config.ts` saves at enrolment (the server origin), from its own
       // small IndexedDB database — not the durable-device cache, and not `chrome.storage`.
       const { serverOrigin } = await readAccountConfig();
+      const notice = recoveryNoticeOf(session);
       return {
         type: "status",
         locked: session === undefined,
         enrolled: serverOrigin !== undefined,
         ...(serverOrigin !== undefined ? { serverOrigin } : {}),
+        ...(notice !== undefined ? { recoveryNotice: notice } : {}),
       };
     }
     case "enrol": {
@@ -965,7 +982,8 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
       }
       try {
         await session.sync();
-        return { type: "synced" };
+        const notice = recoveryNoticeOf(session);
+        return { type: "synced", ...(notice !== undefined ? { recoveryNotice: notice } : {}) };
       } catch (e) {
         return { type: "error", code: errorCode(e, "sync_failed") };
       }

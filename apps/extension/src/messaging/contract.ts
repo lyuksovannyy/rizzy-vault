@@ -1089,6 +1089,14 @@ export interface ItemFieldSummary {
   readonly value: string | undefined;
 }
 
+/** The server's pending-recovery notice as it crosses to the popup (ADR 0045): advisory,
+ * unsigned and server-set (INV-70), for the banner only. Unix milliseconds. */
+export interface PopupRecoveryNotice {
+  readonly openedAtMs: number;
+  readonly availableAtMs: number;
+  readonly lastRecoveryAtMs?: number;
+}
+
 export type PopupResponse =
   | {
       readonly type: "status";
@@ -1097,11 +1105,14 @@ export type PopupResponse =
       /** The saved server origin (not secret), only once enrolled — so the popup can offer
        * "open web vault" without a separate round trip. */
       readonly serverOrigin?: string;
+      /** While unlocked: the notice of the session's last account answer, if it had one. */
+      readonly recoveryNotice?: PopupRecoveryNotice;
     }
   | { readonly type: "enrolled" }
   | { readonly type: "unlocked" }
   | { readonly type: "locked" }
-  | { readonly type: "synced" }
+  /** `recoveryNotice`: the notice of the sync's account answer, if it had one (ADR 0045). */
+  | { readonly type: "synced"; readonly recoveryNotice?: PopupRecoveryNotice }
   | { readonly type: "items"; readonly items: readonly ItemSummary[] }
   /** `item_icon`'s answer: the PNG as base64 (`messaging/bytes.ts`), or `null` for none. */
   | { readonly type: "icon"; readonly png: string | null }

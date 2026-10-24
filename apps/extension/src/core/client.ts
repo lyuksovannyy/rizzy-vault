@@ -13,11 +13,27 @@
 // (`messaging/contract.ts`) `core-context.ts` answers with. If the owner wants the literal
 // `packages/core`-relocation, moving this file there later is a pure move, since it already
 // depends on nothing extension-specific beyond the injected `transport`.
-import type { PopupRequest, PopupResponse } from "../messaging/contract.ts";
+import type { PopupRecoveryNotice, PopupRequest, PopupResponse } from "../messaging/contract.ts";
 import { ENSURE_CORE_MESSAGE } from "../background/ensure-core.ts";
 import { base64ToBytes } from "../messaging/bytes.ts";
 
 export type Transport = (request: PopupRequest) => Promise<PopupResponse>;
+
+/** A pending-recovery notice from a response, or `undefined` for none or one of the wrong
+ * shape (ADR 0045; it only ever feeds the banner, INV-70). */
+export function recoveryNotice(value: unknown): PopupRecoveryNotice | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const v = value as Record<string, unknown>;
+  const opened = v["openedAtMs"];
+  const available = v["availableAtMs"];
+  const last = v["lastRecoveryAtMs"];
+  if (typeof opened !== "number" || typeof available !== "number" || (last !== undefined && typeof last !== "number")) {
+    return undefined;
+  }
+  return { openedAtMs: opened, availableAtMs: available, ...(typeof last === "number" ? { lastRecoveryAtMs: last } : {}) };
+}
 
 export class ClientError extends Error {
   readonly code: string;
@@ -37,15 +53,22 @@ export class ExtensionClient {
     this.#transport = transport;
   }
 
-  async status(): Promise<{ locked: boolean; enrolled: boolean; serverOrigin?: string }> {
+  async status(): Promise<{
+    locked: boolean;
+    enrolled: boolean;
+    serverOrigin?: string;
+    recoveryNotice?: PopupRecoveryNotice;
+  }> {
     const response = await this.#transport({ type: "get_status" });
     if (response.type !== "status") {
       throw this.#unexpected(response);
     }
+    const notice = recoveryNotice(response.recoveryNotice);
     return {
       locked: response.locked,
       enrolled: response.enrolled,
       ...(response.serverOrigin !== undefined ? { serverOrigin: response.serverOrigin } : {}),
+      ...(notice !== undefined ? { recoveryNotice: notice } : {}),
     };
   }
 
@@ -76,11 +99,14 @@ export class ExtensionClient {
     }
   }
 
-  async sync(): Promise<void> {
+  /** Syncs; returns the pending-recovery notice of the sync's account answer, if it had one
+   * (ADR 0045; advisory only, INV-70). */
+  async sync(): Promise<PopupRecoveryNotice | undefined> {
     const response = await this.#transport({ type: "sync" });
     if (response.type !== "synced") {
       throw this.#unexpected(response);
     }
+    return recoveryNotice(response.recoveryNotice);
   }
 
   async listItems(): Promise<

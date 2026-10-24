@@ -93,6 +93,21 @@ input:not([type="checkbox"], [type="radio"]):focus-visible {
   font-weight: var(--font-weight-semibold);
 }
 
+/* The pending-recovery banner (ADR 0045; packages/ui RecoveryNoticeBanner): a warning, not an
+   error, so it keeps the warning colours the generic alert rule above would replace. */
+.recovery-banner[role="alert"] {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+  font-weight: var(--font-weight-regular);
+  padding: var(--space-3);
+  border-radius: var(--radius-2);
+  border-left: 4px solid var(--color-warning-text);
+}
+
+.recovery-banner p {
+  margin: 0 0 var(--space-2);
+}
+
 /* ---- The popup (popup/index.html; no page can frame it, so it uses the entrance motion). ---- */
 
 body.popup {
