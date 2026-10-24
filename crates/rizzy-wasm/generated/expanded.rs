@@ -31552,6 +31552,10 @@ mod login {
         #[doc =
         " On `\"needs_security_key\"`: the request options and whether TOTP is offered too."]
         security_key: Option<(String, bool)>,
+        #[doc =
+        " Whether this login was offered a security key already (a later `not_found` is then an"]
+        #[doc = " expired pending login, not a TOTP-only account)."]
+        security_key_seen: bool,
         #[doc = " Session or re-authentication."]
         purpose: Purpose,
         #[doc = " Where the flow is."]
@@ -33217,6 +33221,7 @@ mod login {
                     input,
                     totp,
                     security_key: None,
+                    security_key_seen: false,
                     purpose,
                     stage: Stage::Spent,
                     pending: None,
@@ -33291,8 +33296,12 @@ mod login {
                         };
                     match SecondFactor::from_challenge(answer).map_err(CoreError::server)?
                         {
+                        SecondFactor::Totp if self.security_key_seen => {
+                            return Err(CoreError::new(SECURITY_KEY_REFUSED));
+                        }
                         SecondFactor::Totp => self.stage = Stage::NeedsTotp,
                         SecondFactor::SecurityKey { options, totp } => {
+                            self.security_key_seen = true;
                             self.security_key = Some((options, totp));
                             self.stage = Stage::NeedsSecurityKey(awaiting, login_id);
                         }
