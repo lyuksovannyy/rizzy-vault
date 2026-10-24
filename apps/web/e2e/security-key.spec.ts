@@ -132,6 +132,8 @@ test("security key: enrol, log in with it, remove it", async ({ page }) => {
   await expect(section.getByText("No security key yet.")).toBeVisible();
   await audit(page, "settings: security keys (none)");
   const { cdp, authenticatorId } = await virtualKey(page);
+  // ADR 0082 owner answer: enrolment tells the user a key may ask for its PIN once.
+  await expect(section.getByLabel("Name for the new key")).toHaveAccessibleDescription(/ask for their PIN or fingerprint once/);
   await section.getByLabel("Name for the new key").fill("Desk key");
   await section.getByRole("button", { name: "Add security key" }).click();
   await expect(section.getByText('Security key "Desk key" added.')).toBeVisible();

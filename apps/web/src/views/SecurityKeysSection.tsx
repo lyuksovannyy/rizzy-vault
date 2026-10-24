@@ -106,8 +106,13 @@ export function SecurityKeysSection(props: { readonly ctx: VaultContext }) {
       {available ? (
         <form onSubmit={add}>
           <label htmlFor="security-key-label">Name for the new key</label>
+          <p id="security-key-pin-hint" className="muted">
+            Logging in needs only a touch of the key. While you add it, some keys ask for their PIN
+            or fingerprint once; that is the key&apos;s own check, not rizzy-vault&apos;s.
+          </p>
           <input
             id="security-key-label"
+            aria-describedby="security-key-pin-hint"
             autoComplete="off"
             spellCheck={false}
             required
