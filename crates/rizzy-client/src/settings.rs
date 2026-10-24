@@ -551,6 +551,8 @@ pub(crate) fn seal_commit<R: CryptoRng + ?Sized>(
         device_grants: List::empty(),
         recovery_rewrap: None,
         vault_rotation: None,
+        vault_create: None,
+        vault_delete: None,
     };
     let pin = AccountPin {
         bundle: account.pin.bundle.clone(),

@@ -632,6 +632,8 @@ impl Reregistering {
             } else {
                 Some(VaultRotationUpload::new(rotations).map_err(internal)?)
             },
+            vault_create: None,
+            vault_delete: None,
         };
         let pin = AccountPin {
             bundle: account.pin.bundle.clone(),

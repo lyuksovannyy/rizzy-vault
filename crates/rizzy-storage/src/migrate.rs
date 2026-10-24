@@ -115,6 +115,15 @@ pub const MIGRATIONS: &[MigrationFile] = &[
         sqlite: include_str!("../migrations/sqlite/0008_auth_webauthn.sql"),
         postgres: include_str!("../migrations/postgres/0008_auth_webauthn.sql"),
     },
+    // ADR 0081 §A10: the vault kind and the one-Personal-vault-per-account index. Its ADR names
+    // it `0008`, which the WebAuthn tables took first, so it is the next free number. Raises the
+    // backup `schema_version` to 9.
+    MigrationFile {
+        version: 9,
+        description: "vault_kinds",
+        sqlite: include_str!("../migrations/sqlite/0009_vault_kinds.sql"),
+        postgres: include_str!("../migrations/postgres/0009_vault_kinds.sql"),
+    },
 ];
 
 /// This release's schema version: the last migration's version. A logical backup is stamped

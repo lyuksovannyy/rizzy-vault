@@ -116,9 +116,23 @@ pub const MAX_BUNDLES: usize = 1024;
 /// this is set well above a personal account's device count.
 pub const MAX_DEVICE_STATEMENTS: usize = 4096;
 
-/// Count limit (this crate's choice): vault self-grants in one message. One vault per account
-/// in M1 (ADR 0021 §9), several from M9.
+/// Count limit (this crate's choice): vault self-grants in one message, and vault summaries
+/// in one account answer ([ADR 0081] §A11).
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
 pub const MAX_VAULT_GRANTS: usize = 1024;
+
+/// Count limit ([ADR 0081] §D): the vaults one account owns, its Personal vault included
+/// (directory kinds 1 and 2). The server refuses a `vault_create` beyond it.
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+pub const MAX_OWNED_VAULTS: usize = 64;
+
+/// Count limit ([ADR 0081] §A2, §D): entries of the vault directory (`ACCOUNT_SETTINGS` tag
+/// `0x0002`), owned, joined and unknown kinds together. Enforced by the client parser.
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+pub const MAX_DIRECTORY_ENTRIES: usize = 128;
 
 /// Count limit (this crate's choice): pending device grants in one response or request, one
 /// per rotation the device has not acknowledged (CRYPTO.md §10.1).

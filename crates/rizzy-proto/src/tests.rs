@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 use crate::account::{
     AccountStateQuery, AccountView, AckDeviceGrantsRequest, DeviceGrantsResponse,
     EnrolDeviceRequest, PublishAccountStateRequest, PublishBundlesRequest, PublishGrantsRequest,
-    UploadWebDeviceCertificateRequest,
+    UploadWebDeviceCertificateRequest, VaultSummary,
 };
 use crate::attachments::{
     AttachmentRequest, CreateAttachmentRequest, DownloadChunkRequest, DownloadChunkResponse,
@@ -94,6 +94,11 @@ fn account_view() -> AccountView {
         vault_self_grants: l(vec![vault_self_grant()]),
         bytes_used: 1_234,
         quota_bytes: 5_368_709_120,
+        vaults: l(vec![VaultSummary {
+            vault_id: id(0x11),
+            kind: 1,
+            bytes_used: 1_000,
+        }]),
     }
 }
 
@@ -895,6 +900,8 @@ fn bare_commit(state: &[u8]) -> CommitChangeRequest {
         device_grants: List::empty(),
         recovery_rewrap: None,
         vault_rotation: None,
+        vault_create: None,
+        vault_delete: None,
     }
 }
 
@@ -1006,6 +1013,70 @@ fn rotation_fields_round_trip_and_are_left_out_when_absent() {
     let explicit = r#"{"account_state":"Zm9v","device_certificates":[],"device_revocations":[],"device_grants":[],"retired_secret_keys":[]}"#;
     let parsed: CommitChangeRequest = serde_json::from_str(explicit).unwrap();
     assert_eq!(serde_json::to_string(&parsed).unwrap(), plain);
+}
+
+#[test]
+fn vault_create_and_delete_round_trip_and_are_left_out_when_absent() {
+    // ADR 0081 §A11: two optional fields, absent from every other commit.
+    let mut create = bare_commit(b"foo");
+    create.vault_create = Some(self_grant(9));
+    let text = round_trip(&create);
+    assert!(text.contains("\"vault_create\""), "{text}");
+    assert!(!text.contains("\"vault_delete\""), "{text}");
+    let mut delete = bare_commit(b"foo");
+    delete.vault_delete = Some(id(9));
+    let text = round_trip(&delete);
+    assert!(
+        text.contains("\"vault_delete\":\"CQkJCQkJCQkJCQkJCQkJCQ\""),
+        "{text}"
+    );
+    // Unknown fields inside the new grant are refused.
+    let mut extra = serde_json::to_value(&create).unwrap();
+    extra["vault_create"]["kind"] = 2.into();
+    assert!(serde_json::from_value::<CommitChangeRequest>(extra).is_err());
+}
+
+#[test]
+fn regrants_are_empty_by_default_ordered_and_sent() {
+    // ADR 0081 §0 item 3, §A12: a Part A client sends and accepts an empty `regrants`.
+    let upload = VaultRotationUpload::new(vec![vault_rotation(3)]).unwrap();
+    assert!(upload.regrants().is_empty());
+    let text = serde_json::to_string(&upload).unwrap();
+    assert!(text.contains("\"regrants\":[]"), "{text}");
+    // An older sender's form without the field parses as the empty list.
+    let mut old = serde_json::to_value(&upload).unwrap();
+    old.as_object_mut().unwrap().remove("regrants");
+    let parsed: VaultRotationUpload = serde_json::from_value(old).unwrap();
+    assert_eq!(parsed, upload);
+    // Strictly ascending by vault id, both ways.
+    assert_eq!(
+        VaultRotationUpload::with_regrants(vec![], vec![self_grant(4), self_grant(3)]),
+        Err(WireError::NotCanonical)
+    );
+    assert_eq!(
+        VaultRotationUpload::with_regrants(vec![], vec![self_grant(3), self_grant(3)]),
+        Err(WireError::NotCanonical)
+    );
+    let two =
+        VaultRotationUpload::with_regrants(vec![], vec![self_grant(3), self_grant(4)]).unwrap();
+    let mut swapped = serde_json::to_value(&two).unwrap();
+    swapped["regrants"].as_array_mut().unwrap().reverse();
+    assert!(serde_json::from_value::<VaultRotationUpload>(swapped).is_err());
+    let text = round_trip(&two);
+    assert_eq!(
+        serde_json::from_str::<VaultRotationUpload>(&text).unwrap(),
+        two
+    );
+}
+
+#[test]
+fn account_view_vaults_default_to_empty() {
+    // ADR 0081 §A11: a response field, absent from an older server.
+    let mut view = serde_json::to_value(account_view()).unwrap();
+    assert_eq!(view["vaults"][0]["kind"], 1);
+    view.as_object_mut().unwrap().remove("vaults");
+    let parsed: AccountView = serde_json::from_value(view).unwrap();
+    assert!(parsed.vaults.is_empty());
 }
 
 #[test]

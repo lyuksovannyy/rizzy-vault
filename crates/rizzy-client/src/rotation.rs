@@ -714,6 +714,8 @@ pub(crate) fn start_rotation_with<R: CryptoRng + ?Sized>(
             device_grants: List::empty(),
             recovery_rewrap: None,
             vault_rotation: None,
+            vault_create: None,
+            vault_delete: None,
         },
         rebuilds: 0,
         prepared: None,
@@ -1102,6 +1104,8 @@ impl PendingRotation {
             device_grants: List::new(self.account.grants.clone()).map_err(internal)?,
             recovery_rewrap: self.built.recovery_rewrap.clone(),
             vault_rotation: Some(VaultRotationUpload::new(self.vaults.clone()).map_err(internal)?),
+            vault_create: None,
+            vault_delete: None,
         };
         Ok(())
     }

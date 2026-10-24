@@ -29,7 +29,7 @@ use crate::limits::{MAX_BUNDLES, MAX_DEVICE_GRANTS, MAX_DEVICE_STATEMENTS, MAX_V
 use crate::objects::{
     AccountSettings, AccountStatement, DeviceGrant, IdentitySecretKeys, VaultSelfGrant,
 };
-use crate::wire::List;
+use crate::wire::{Id, List};
 
 /// The signed account objects and account-level wraps a client verifies (CRYPTO.md §11.2
 /// step 6, §11.3 step 2.4): the answer to [`AccountStateQuery`] and part of
@@ -62,6 +62,29 @@ pub struct AccountView {
     /// §5). An upload record that would push `bytes_used` past it plus the upload limit is
     /// refused [`ErrorCode::QuotaExceeded`](crate::error::ErrorCode).
     pub quota_bytes: u64,
+    /// One summary per vault of the account, ascending by id ([ADR 0081] §A9, §A11):
+    /// informational and unsigned. A client tells the Personal vault apart by its own
+    /// authenticated vault directory, never by this list. Absent from an older server.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    #[serde(default)]
+    pub vaults: List<VaultSummary, MAX_VAULT_GRANTS>,
+}
+
+/// The server's unsigned view of one vault ([ADR 0081] §A11): its id, the kind the server
+/// stored (1 Personal, 2 owned) and its counted bytes (ADR 0048 §2's unit). For display only.
+///
+/// A response type: unknown fields are ignored.
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultSummary {
+    /// The vault.
+    pub vault_id: Id,
+    /// The stored kind: 1 Personal, 2 owned.
+    pub kind: u8,
+    /// The vault's counted bytes.
+    pub bytes_used: u64,
 }
 
 /// What an enrolled device already holds, so the server can leave out what has not changed

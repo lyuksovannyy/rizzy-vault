@@ -284,6 +284,7 @@ pub const TABLES: &[TableSpec] = &[
             col("vault_key_epoch", Kind::Integer, false),
             col("next_store_seq", Kind::Integer, false),
             col("created_at_ms", Kind::Integer, false),
+            col("kind", Kind::Integer, false),
         ],
     },
     TableSpec {
