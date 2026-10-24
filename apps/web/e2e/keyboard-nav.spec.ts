@@ -454,3 +454,68 @@ test("keyboard only: the identity generator and its settings (ADR 0079 §10)", a
   await expect(page.getByRole("heading", { name: "Typed persona" })).toBeVisible();
   expect(problems).toEqual([]);
 });
+
+test("keyboard only: the vault switcher, the vault screen, its dialogs and Move to… (ADR 0081 §A8)", async ({ page }) => {
+  const { problems } = watch(page);
+  const kb = page.keyboard;
+  const button = (name: string | RegExp) => page.getByRole("button", { name, exact: typeof name === "string" });
+  await signUp(page, server.origin, "keyboardvaults");
+
+  // The vault screen: create a vault.
+  await tabTo(page, button("Manage vaults"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { level: 1, name: "Vaults" })).toBeVisible();
+  await tabTo(page, page.locator(".vaults-pane").getByLabel("Name", { exact: true }));
+  await kb.type("Work");
+  await kb.press("Enter");
+  await expect(page.locator(".vaults-pane tbody tr", { hasText: "Work" })).toBeVisible();
+
+  // Rename it in its dialog.
+  await tabTo(page, button("Rename Work"));
+  await kb.press("Enter");
+  const rename = page.getByRole("dialog", { name: "Rename vault" });
+  await expect(rename.getByLabel("Name", { exact: true })).toBeFocused();
+  await kb.press("Control+A");
+  await kb.type("Office");
+  await kb.press("Enter");
+  await expect(rename).toHaveCount(0);
+  await expect(page.locator(".vaults-pane tbody tr", { hasText: "Office" })).toBeVisible();
+
+  // The delete dialog: the first choice is preselected; Escape closes it.
+  await tabTo(page, button("Delete Office"));
+  await kb.press("Enter");
+  const del = page.getByRole("dialog", { name: "Delete vault Office" });
+  await tabTo(page, del.getByLabel("Type the vault's name to confirm"));
+  await kb.press("Escape");
+  await expect(del).toHaveCount(0);
+
+  // A new item in Personal (the picker's default), then Move to… Office.
+  await tabTo(page, button("All items"));
+  await kb.press("Enter");
+  await tabTo(page, button(/New item/));
+  await kb.press("Enter");
+  await tabTo(page, page.getByRole("menuitem", { name: "Login" }));
+  await kb.press("Enter");
+  await tabTo(page, page.getByLabel("Title"));
+  await kb.type("Desk");
+  await tabTo(page, button("Save"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Desk" })).toBeVisible();
+  await tabTo(page, button("Move to…"));
+  await kb.press("Enter");
+  const move = page.getByRole("dialog", { name: "Move to another vault" });
+  await expect(move.getByLabel("Target vault")).toBeFocused();
+  await tabTo(page, move.getByRole("button", { name: "Move", exact: true }));
+  await kb.press("Enter");
+  await expect(move).toHaveCount(0);
+  await expect(page.getByRole("list", { name: "Items" }).locator(".row-vault")).toHaveText(["Office"]);
+
+  // The switcher: Office, then All vaults.
+  await tabTo(page, button("Office"), { backwards: true });
+  await kb.press("Enter");
+  await expect(button("Office")).toHaveAttribute("aria-pressed", "true");
+  await tabTo(page, button("All vaults"), { backwards: true });
+  await kb.press("Enter");
+  await expect(button("All vaults")).toHaveAttribute("aria-pressed", "true");
+  expect(problems).toEqual([]);
+});
