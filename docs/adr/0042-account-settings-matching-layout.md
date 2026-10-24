@@ -264,3 +264,34 @@ the pattern of ADRs 0018 and 0038:
 - Code read 2026-10-08 (V): `rizzy-core/src/{envelope/purpose.rs, sign/statements.rs,
   test_vectors/envelopes.rs}`, `rizzy-proto/src/{objects,change}.rs`,
   `rizzy-client/src/{rotation,account,store/load}.rs`, `rizzy-match/src/{equivalence,error}.rs`
+
+## Amendments
+
+### 2026-10-24: tag `0x0004`, identity-generator defaults ([ADR 0079](0079-identity-generator.md))
+
+[ADR 0079](0079-identity-generator.md) was accepted on 2026-10-23 with the recommendation of its
+Open question 7, (a): the identity generator's defaults are synced in `ACCOUNT_SETTINGS` as a tag
+of this ADR's registry, and its "On acceptance" item 5 asks for this entry. §2's "Tag registry."
+bullet (in the text [ADR 0081](0081-multiple-vaults-personal-and-shared.md) §0 entry 6 gave it,
+which assigns `0x0002` and `0x0003`) provides that "a new setting gets a line here by ADR
+amendment, **no version bump**". This entry adds that line and changes nothing else:
+
+- `0x0004` = identity-generator defaults ([ADR 0079](0079-identity-generator.md) Open question 7).
+  Layout:
+
+  ```text
+  identity_defaults
+    u8 sex_default        0 = random, 1 = male, 2 = female
+    [2] country           ASCII A–Z, or 0x0000 = none
+    u8 age_min            18 <= age_min <= age_max <= 99
+    u8 age_max
+    u8 email_style        1 = name and birthday, 2 = nickname
+    str(email_domain)     empty = unset, else ADR 0079 §3's syntax, at most 253 bytes
+  ```
+
+  Any other value is a violation inside a recognised tag, rejected as §2 says. The age mode is
+  not stored; a client derives it from `age_min` and `age_max` (ADR 0079 §10).
+
+`0x0004`, not the lowest free tag, because `0x0002` and `0x0003` were reserved for ADR 0081
+(then Proposed) when the generator was implemented (`crates/rizzy-client/src/identity_gen/defaults.rs`,
+`TAG_IDENTITY_DEFAULTS`, V). `0x0005`–`0xFFFE` stay unassigned.
