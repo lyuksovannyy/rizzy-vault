@@ -10,7 +10,21 @@ all-features = true
 version = 2
 yanked = "deny"
 unmaintained = "workspace"
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0387 (crypto-bigint: secret-dependent branches in subtraction, division and
+    # Montgomery multiplication; patched in 0.7.6). Ignored for crypto-bigint 0.5.5 only; the 0.7
+    # line we use through p256 0.14 is on 0.7.6.
+    # - Reason: no 0.5.x release fixes it, and no stable opaque-ke drops elliptic-curve 0.13.
+    # - Affected code path: opaque-ke =4.0.1 -> elliptic-curve 0.13.8 -> crypto-bigint 0.5.5.
+    #   opaque-ke reaches elliptic-curve only from its generic NIST-curve key-exchange code
+    #   (key_exchange/group/elliptic_curve.rs, key_exchange/sigma_i/ecdsa.rs), which is
+    #   instantiated only for curve types. Our OPAQUE suite is Ristretto255 (rizzy-core
+    #   opaque/ksf.rs: OprfCs = opaque_ke::Ristretto255), so no crypto-bigint 0.5 arithmetic is
+    #   compiled into our code.
+    # - Expiry: remove at the first stable opaque-ke release off elliptic-curve 0.13, and no
+    #   later than M3. Owner decision 2026-10-24 ("you decide what's better in this case").
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 only via opaque-ke 4.0.1's unused NIST-curve generics; Ristretto255 suite; remove at next opaque-ke release, by M3" },
+]
 
 [licenses]
 version = 2
