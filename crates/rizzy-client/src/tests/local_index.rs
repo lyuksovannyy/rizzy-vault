@@ -291,7 +291,8 @@ const OTHER_FIELDS: usize = 16;
 
 /// The first `n` never-indexed writes: concealed fields, imported password history,
 /// `identity.drivers_license`, `item.notes`, custom fields of every kind but text (label
-/// included), one without a kind, a key no schema knows, and keys of the ADR 0055 types. Every
+/// included), one without a kind, a key no schema knows, a key of an ADR 0055 type, and a key
+/// under the `bank.` prefix ADR 0078 §2 retired (reserved, never on the allow-list). Every
 /// value is an ASCII marker.
 fn other_writes(rng: &mut ChaCha20Rng, n: usize) -> Vec<(String, Value)> {
     let mut out: Vec<(String, Value)> = Vec::new();

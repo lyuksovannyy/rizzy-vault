@@ -14,6 +14,19 @@
 //! The JSON reader is also run on its own, at the importer's cap, so inputs that are valid
 //! JSON but not a rizzy-vault export still exercise every JSON path.
 //!
+//! Seed for the retired Bank account type (ADR 0078 §3: an own-format read-back skips a
+//! `0x0009` entry and counts it), an item an integration build between ADR 0055 and ADR 0078
+//! could have exported:
+//!
+//! ```text
+//! {"format":"rizzy-vault-plaintext-export","version":1,"exported_at":0,"items":[
+//! {"id":"00112233445566778899aabbccddeeff","type":9,"trashed":false,"fields":[
+//! {"key":"bank.account_number","value":{"text":"DE89370400440532013000"}},
+//! {"key":"bank.routing_number","value":{"text":"COBADEFFXXX"}},
+//! {"key":"item.name","value":{"text":"Salary"}},
+//! {"key":"item.type","value":{"enum":9}}]}]}
+//! ```
+//!
 //! ```text
 //! cargo +nightly fuzz run import_rizzy_json
 //! ```

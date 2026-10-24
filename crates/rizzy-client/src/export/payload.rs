@@ -78,8 +78,11 @@
 //!   `ssh.host` on a Login, a `card.number` on an Identity) **skips the whole item**, like any
 //!   other per-item write failure ([ADR 0055] owner answer 4, option (a): ADR 0027 §2 step 4,
 //!   "Per-item refusals do not refuse the file"). Since ADR 0055 assigned the `ssh.`, `api.`,
-//!   `license.`, `wifi.` and `bank.` keys, they are known keys of their own types, so this
-//!   now covers them too; before, they were reserved and carried on any type.
+//!   `license.` and `wifi.` keys, they are known keys of their own types, so this now covers
+//!   them too; before, they were reserved and carried on any type. The `bank.` keys ADR 0055
+//!   also assigned are reserved again since [ADR 0078] §2 retired them, so they are carried
+//!   on any type, byte for byte; an item of the retired type itself (`0x0009`, ADR 0078 §1) is
+//!   unsupported, so the whole item is skipped and counted (ADR 0078 §3).
 //! - **A key this client never writes** (`share/<id>/secret`, M5's; `check_carried` refuses
 //!   it with `NotWritable`). Such a register is left out and counted
 //!   ([`PayloadImport::fields_not_carried`]); the item is still imported. `rizzy-core` treats
@@ -96,6 +99,7 @@
 //!
 //! [ADR 0027]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0027-export-payload.md
 //! [ADR 0055]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0055-m3-item-type-field-keys.md
+//! [ADR 0078]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0078-retire-bank-account-item-type.md
 
 use core::fmt;
 

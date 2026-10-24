@@ -381,7 +381,11 @@ fn type_named(text: &str) -> Result<ItemType, CliError> {
 /// No `"passkey"` entry: `0x000A` (the standalone-passkey candidate ADR 0018 reserved) was
 /// released back to unassigned by ADR 0039 §1, which puts passkeys on the `passkey/<id>/…` list
 /// of an existing Login item instead (`rizzy-core`'s `item::schema::LIST_PASSKEY`).
-const TYPES: [(&str, ItemType); 9] = [
+///
+/// No `"bank-account"` entry either: ADR 0078 §1 retired `0x0009`, so `--type bank-account` is
+/// refused and a Bank account an older build wrote shows as type `unknown`, its `bank.` keys
+/// concealed unless `--reveal` (ADR 0078 §2: reserved keys are concealed).
+const TYPES: [(&str, ItemType); 8] = [
     ("login", ItemType::LOGIN),
     ("note", ItemType::SECURE_NOTE),
     ("card", ItemType::CARD),
@@ -390,7 +394,6 @@ const TYPES: [(&str, ItemType); 9] = [
     ("api-credential", ItemType::API_CREDENTIAL),
     ("software-license", ItemType::SOFTWARE_LICENSE),
     ("wifi", ItemType::WIFI),
-    ("bank-account", ItemType::BANK_ACCOUNT),
 ];
 
 /// A displayed value as text for the terminal. Bytes and sort keys are described, not dumped.
@@ -1696,4 +1699,46 @@ async fn device_forget(env: &mut Env<'_>) -> Result<(), CliError> {
     delete_account_files(env, &account, lock)?;
     env.ui.note("Removed.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ADR 0078 §1, §5: `--type bank-account` is refused, and a Bank account an older build
+    /// wrote (`0x0009`) shows as type `unknown`, like any type this build does not support.
+    #[test]
+    fn the_retired_bank_account_type_is_not_named() {
+        assert!(matches!(
+            type_named("bank-account"),
+            Err(CliError::Usage(_))
+        ));
+        assert_eq!(type_name(Some(ItemType::RETIRED_BANK_ACCOUNT)), "unknown");
+        assert_eq!(type_name(Some(ItemType::from_id(0x000B))), "unknown");
+        for (name, item_type) in TYPES {
+            assert_eq!(type_named(name).unwrap(), item_type);
+            assert_eq!(type_name(Some(item_type)), name);
+            assert!(item_type.supported().is_some(), "{name}");
+        }
+    }
+
+    /// ADR 0078 §2: every `bank.` key is reserved, so `item show` prints it as `********`
+    /// unless `--reveal`; the keys ADR 0055 showed included.
+    #[test]
+    fn retired_bank_keys_are_concealed() {
+        for key in [
+            "bank.bank_name",
+            "bank.account_holder",
+            "bank.account_number",
+            "bank.routing_number",
+            "bank.account_type",
+            "bank.other",
+        ] {
+            assert!(
+                concealed(&FieldKey::parse(key.as_bytes()).unwrap()),
+                "{key}"
+            );
+        }
+        assert!(!concealed(&FieldKey::parse(b"item.name").unwrap()));
+    }
 }

@@ -26,12 +26,13 @@
 //! | `api.name`, `.key`, `.secret`, `.endpoint` | Text | API credential | any | `key`, `secret` |
 //! | `license.name`, `.key`, `.seats`, `.expires` | Text | Software license | any | `key` |
 //! | `wifi.ssid`, `.password`, `.security_type` | Text | Wi-Fi | any | `password` |
-//! | `bank.bank_name`, `.account_holder`, `.account_number`, `.routing_number`, `.account_type` | Text | Bank account | any | `account_number`, `routing_number` |
 //! | `vault.name`, `vault.icon` | Text | Vault settings | any | no |
 //!
-//! The `ssh.`, `api.`, `license.`, `wifi.` and `bank.` rows are [ADR 0055] §1's (Accepted
+//! The `ssh.`, `api.`, `license.` and `wifi.` rows are [ADR 0055] §1's (Accepted
 //! 2026-10-22), added the way §7 adds a key: "a line in the ADR that ships it, never a version
-//! bump". Every one is Text, "stored as entered": `ssh.port`, `license.seats` and
+//! bump". ADR 0055 §1 also had a `bank.` row for the Bank account type; [ADR 0078] §2 (Accepted
+//! 2026-10-23) retired it with the type: every key under `bank.` is now
+//! [`ReservedFor::Retired`], carried byte for byte and never assigned again. Every one is Text, "stored as entered": `ssh.port`, `license.seats` and
 //! `license.expires` follow `card.exp_month`'s precedent, not U64. `ssh.port` absent means
 //! [`SSH_DEFAULT_PORT`] (`22`), a display default and not a stored value.
 //!
@@ -41,8 +42,8 @@
 //!
 //! Keys under the reserved prefixes (`passkey.`, `attachment/` attributes ADR 0054 does not
 //! assign, `share/` attributes other than
-//! `secret`, and every key under `ssh.`, `api.`, `license.`, `wifi.` or `bank.` that ADR 0055
-//! does not assign) are [`KeyClass::Reserved`]; every other grammar key is [`KeyClass::Unknown`], and so is a
+//! `secret`, every key under `ssh.`, `api.`, `license.` or `wifi.` that ADR 0055 does not
+//! assign, and every key under the retired `bank.` prefix, ADR 0078 §2) are [`KeyClass::Reserved`]; every other grammar key is [`KeyClass::Unknown`], and so is a
 //! `tag/<hex>` key whose hex is not a name [`super::tag::tag_key`] could have produced
 //! (ADR 0018 §7: UTF-8, NFC, no Cc; see [`super::tag`]). Both are carried byte for byte by the
 //! record layer and exported unchanged (ADR 0018 §11). An M1 writer never invents a value for
@@ -54,7 +55,8 @@
 //! `card.code`, `card.pin`, `identity.ssn`, `identity.passport_number`, hidden custom fields and
 //! `share/…`; extended, as ADR 0039 did for `passkey/<id>/private_key`, by ADR 0055 §4 (owner
 //! answer 1) with `ssh.private_key`, `ssh.passphrase`, `api.key`, `api.secret`, `license.key`,
-//! `wifi.password`, `bank.account_number` and `bank.routing_number`. The same fields are left out of an M5 share unless chosen. The list does not name
+//! `wifi.password`, and by ADR 0078 §2 with every key under the retired `bank.` prefix (the
+//! clients conceal every key that is not [`KeyClass::Known`]). The same fields are left out of an M5 share unless chosen. The list does not name
 //! `pwhist/<id>/value`, the imported password history, so this registry does not conceal it;
 //! that omission is reported to the owner rather than decided here.
 //!
@@ -111,6 +113,7 @@
 //! [ADR 0037]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0037-url-matching-and-autofill-rules.md
 //! [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
 //! [ADR 0055]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0055-m3-item-type-field-keys.md
+//! [ADR 0078]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0078-retire-bank-account-item-type.md
 //!
 //! **`uri/<id>/match` is writable from M2** (ADR 0037, Accepted, assigns its enum values
 //! `0x0000`–`0x0006`; unassigned values above that are still accepted here, as any other Enum
@@ -233,16 +236,6 @@ pub const WIFI_SSID: &str = "wifi.ssid";
 pub const WIFI_PASSWORD: &str = "wifi.password";
 /// `wifi.security_type`: Text, as entered (for example "WPA2"); no enum is defined.
 pub const WIFI_SECURITY_TYPE: &str = "wifi.security_type";
-/// `bank.bank_name`: Text, the institution (distinct from `item.name`; ADR 0055 §1).
-pub const BANK_NAME: &str = "bank.bank_name";
-/// `bank.account_holder`: Text.
-pub const BANK_ACCOUNT_HOLDER: &str = "bank.account_holder";
-/// `bank.account_number`: Text, as entered (an IBAN or a local number). Concealed.
-pub const BANK_ACCOUNT_NUMBER: &str = "bank.account_number";
-/// `bank.routing_number`: Text, as entered (a routing number, sort code or BIC). Concealed.
-pub const BANK_ROUTING_NUMBER: &str = "bank.routing_number";
-/// `bank.account_type`: Text, as entered (for example "Checking"); no enum is defined.
-pub const BANK_ACCOUNT_TYPE: &str = "bank.account_type";
 
 /// What an absent `ssh.port` displays as: `22` (ADR 0055 §1). A display default only: no
 /// writer stores it on the user's behalf, and a create op leaves the field out when the user
@@ -547,14 +540,12 @@ const API: Applies = Applies::Only(SupportedType::ApiCredential);
 const LICENSE: Applies = Applies::Only(SupportedType::SoftwareLicense);
 /// Wi-Fi-only (ADR 0055 §1).
 const WIFI: Applies = Applies::Only(SupportedType::Wifi);
-/// Bank-account-only (ADR 0055 §1).
-const BANK: Applies = Applies::Only(SupportedType::BankAccount);
 /// Vault-settings-only.
 const VAULT: Applies = Applies::Only(SupportedType::VaultSettings);
 
-/// Every fixed key of the schema, with its entry: ADR 0018 §7's 35, and ADR 0055 §1's 22 for
-/// the M3 types (8 of them concealed, ADR 0055 §3–§4).
-pub const FIXED_KEYS: [(&str, KeySpec); 57] = [
+/// Every fixed key of the schema, with its entry: ADR 0018 §7's 35, and ADR 0055 §1's 17 for
+/// the M3 types (6 of them concealed, ADR 0055 §3–§4, as ADR 0078 §7 amends them).
+pub const FIXED_KEYS: [(&str, KeySpec); 52] = [
     (
         ITEM_TYPE,
         spec(
@@ -629,27 +620,30 @@ pub const FIXED_KEYS: [(&str, KeySpec); 57] = [
     (WIFI_SSID, text(WIFI)),
     (WIFI_PASSWORD, secret_text(WIFI)),
     (WIFI_SECURITY_TYPE, text(WIFI)),
-    (BANK_NAME, text(BANK)),
-    (BANK_ACCOUNT_HOLDER, text(BANK)),
-    (BANK_ACCOUNT_NUMBER, secret_text(BANK)),
-    (BANK_ROUTING_NUMBER, secret_text(BANK)),
-    (BANK_ACCOUNT_TYPE, text(BANK)),
     (VAULT_NAME, text(VAULT)),
     (VAULT_ICON, text(VAULT)),
 ];
 
 /// The namespaces reserved for the M3 item types (ADR 0018 §7, "Reserved prefixes"): fixed
-/// keys `ssh.…`, `api.…`, `license.…`, `wifi.…` and `bank.…`. ADR 0055 §1 assigns 22 keys
-/// under them ([`FIXED_KEYS`]); every other key under these prefixes (a later `ssh.key_type`,
-/// say) stays reserved (ADR 0055 §2).
-const M3_TYPE_NAMESPACES: [&str; 5] = ["ssh", "api", "license", "wifi", "bank"];
+/// keys `ssh.…`, `api.…`, `license.…` and `wifi.…`. ADR 0055 §1 assigns 17 keys under them
+/// ([`FIXED_KEYS`]); every other key under these prefixes (a later `ssh.key_type`, say) stays
+/// reserved (ADR 0055 §2).
+const M3_TYPE_NAMESPACES: [&str; 4] = ["ssh", "api", "license", "wifi"];
+
+/// The namespaces of retired item types (ADR 0078 §2): `bank.…`, the keys of the Bank account
+/// type (`0x0009`) ADR 0055 assigned and ADR 0078 retired. Every key under them is
+/// [`ReservedFor::Retired`]: carried byte for byte and never assigned again, so the bytes an
+/// older build stored there never change meaning.
+const RETIRED_NAMESPACES: [&str; 1] = ["bank"];
 
 /// What a reserved key is reserved for (ADR 0018 §7, "Reserved prefixes").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ReservedFor {
-    /// `ssh.`, `api.`, `license.`, `wifi.`, `bank.`: the M3 item types, for every key under
-    /// them that ADR 0055 §1 does not assign.
+    /// `ssh.`, `api.`, `license.`, `wifi.`: the M3 item types, for every key under them that
+    /// ADR 0055 §1 does not assign.
     M3Types,
+    /// `bank.`: keys of a retired item type (ADR 0078 §2): carried, never assigned again.
+    Retired,
     /// `attachment/` attributes other than the four ADR 0054 §4 assigns (`name`, `mime`,
     /// `size`, `order`), and `attachment/<id>` itself.
     M3Attachments,
@@ -693,6 +687,8 @@ pub fn classify(key: FieldKeyRef<'_>) -> KeyClass {
             let namespace = key.namespace();
             if M3_TYPE_NAMESPACES.contains(&namespace) {
                 KeyClass::Reserved(ReservedFor::M3Types)
+            } else if RETIRED_NAMESPACES.contains(&namespace) {
+                KeyClass::Reserved(ReservedFor::Retired)
             } else if namespace == "passkey" {
                 KeyClass::Reserved(ReservedFor::PasskeyDotKeys)
             } else {

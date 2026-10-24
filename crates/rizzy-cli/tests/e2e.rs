@@ -3307,9 +3307,9 @@ fn rv_reaches_the_server_through_a_tls_proxy() {
 /// of `login.password`"): concealed unless `--reveal`, newest first, never through the
 /// generic field loop.
 /// ADR 0055: `item create` makes an item of each M3 type with its own keys, a concealed key
-/// only from a prompt, and `item show` conceals the eight keys of §4 unless `--reveal`. An
+/// only from a prompt, and `item show` conceals the six keys of §4 unless `--reveal`. An
 /// SSH key without `ssh.port` shows the default port 22 (§1), which is never stored. A key of
-/// another type is refused.
+/// another type is refused, and so is the Bank account type ADR 0078 §1 retired.
 /// One M3 type for `item_create_and_show_the_m3_types`: its `--type` name, its `--field`
 /// arguments, and each concealed key with the value its prompt is answered with.
 type M3Case<'a> = (&'a str, &'a [&'a str], &'a [(&'a str, &'a str)]);
@@ -3317,14 +3317,14 @@ type M3Case<'a> = (&'a str, &'a [&'a str], &'a [(&'a str, &'a str)]);
 #[test]
 #[expect(
     clippy::too_many_lines,
-    reason = "one server and account for all five types; a test per type would start five servers"
+    reason = "one server and account for all four types; a test per type would start four servers"
 )]
 fn item_create_and_show_the_m3_types() {
     let server = Server::start();
     let origin = server.origin();
     let a = Rv::new("m3types");
     sign_up(&a, &origin, "alice");
-    let cases: [M3Case<'_>; 5] = [
+    let cases: [M3Case<'_>; 4] = [
         (
             "ssh-key",
             &[
@@ -3361,18 +3361,6 @@ fn item_create_and_show_the_m3_types() {
             "wifi",
             &["wifi.ssid=home-net", "wifi.security_type=WPA2"],
             &[("wifi.password", "wifi-password")],
-        ),
-        (
-            "bank-account",
-            &[
-                "bank.bank_name=Example Bank",
-                "bank.account_holder=Alice",
-                "bank.account_type=Checking",
-            ],
-            &[
-                ("bank.account_number", "DE8937040044"),
-                ("bank.routing_number", "COBADEFFXXX"),
-            ],
         ),
     ];
     for (kind, shown, secrets) in cases {
@@ -3455,6 +3443,38 @@ fn item_create_and_show_the_m3_types() {
         );
         assert!(outcome.is_err(), "{bad}");
     }
+    // ADR 0078 §1, §5: the retired Bank account type is no longer a type `rv` creates, and a
+    // `bank.` key is reserved on every other type, so nothing is written.
+    let before = a.items().len();
+    let (outcome, _) = a.try_run(
+        &[
+            "item",
+            "create",
+            "--type",
+            "bank-account",
+            "--field",
+            "item.name=Salary",
+        ],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(matches!(outcome, Err(CliError::Usage(_))), "{outcome:?}");
+    let (outcome, _) = a.try_run(
+        &[
+            "item",
+            "create",
+            "--type",
+            "note",
+            "--field",
+            "bank.bank_name=Example Bank",
+        ],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(outcome.is_err(), "{outcome:?}");
+    assert_eq!(a.items().len(), before);
 }
 
 #[test]

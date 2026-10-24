@@ -729,7 +729,8 @@ fn item_type_registry() {
             ItemTypeClass::Supported(SupportedType::SoftwareLicense),
         ),
         (0x0008, ItemTypeClass::Supported(SupportedType::Wifi)),
-        (0x0009, ItemTypeClass::Supported(SupportedType::BankAccount)),
+        // ADR 0078 §1: the Bank account type ADR 0055 assigned is retired, never reassigned.
+        (0x0009, ItemTypeClass::Retired),
         (0x000A, ItemTypeClass::Unassigned),
         (0x000B, ItemTypeClass::Unassigned),
         (0xEFFF, ItemTypeClass::Unassigned),
@@ -754,7 +755,6 @@ fn item_type_registry() {
         SupportedType::ApiCredential,
         SupportedType::SoftwareLicense,
         SupportedType::Wifi,
-        SupportedType::BankAccount,
         SupportedType::VaultSettings,
     ] {
         assert_eq!(t.item_type().supported(), Some(t));
@@ -765,7 +765,6 @@ fn item_type_registry() {
         (ItemType::API_CREDENTIAL, 0x0006),
         (ItemType::SOFTWARE_LICENSE, 0x0007),
         (ItemType::WIFI, 0x0008),
-        (ItemType::BANK_ACCOUNT, 0x0009),
     ] {
         assert_eq!(t.id(), id);
         assert!(t.supported().is_some_and(SupportedType::is_user_item));
@@ -873,7 +872,8 @@ fn fixed_keys_belong_to_their_types() {
         .filter(|(k, _)| k.starts_with("identity."))
         .count();
     assert_eq!((card, identity), (7, 18));
-    // ADR 0055 §3: 6 ssh + 4 api + 4 license + 3 wifi + 5 bank = 22, and 57 keys in all.
+    // ADR 0055 §3 as ADR 0078 §7 amends it: 6 ssh + 4 api + 4 license + 3 wifi = 17, and 52
+    // keys in all; the retired `bank.` prefix has none (ADR 0078 §2).
     let count = |prefix: &str| {
         FIXED_KEYS
             .iter()
@@ -888,9 +888,9 @@ fn fixed_keys_belong_to_their_types() {
             count("wifi."),
             count("bank.")
         ],
-        [6, 4, 4, 3, 5]
+        [6, 4, 4, 3, 0]
     );
-    assert_eq!(FIXED_KEYS.len(), 57);
+    assert_eq!(FIXED_KEYS.len(), 52);
     for (k, s) in FIXED_KEYS {
         let expected = match k.split('.').next() {
             Some("card") => Applies::Only(SupportedType::Card),
@@ -899,7 +899,6 @@ fn fixed_keys_belong_to_their_types() {
             Some("api") => Applies::Only(SupportedType::ApiCredential),
             Some("license") => Applies::Only(SupportedType::SoftwareLicense),
             Some("wifi") => Applies::Only(SupportedType::Wifi),
-            Some("bank") => Applies::Only(SupportedType::BankAccount),
             Some("vault") => Applies::Only(SupportedType::VaultSettings),
             Some("login") => Applies::Only(SupportedType::Login),
             _ => Applies::All,
@@ -935,15 +934,14 @@ fn concealed_by_default_is_the_adr_list() {
             schema::CARD_PIN,
             schema::IDENTITY_SSN,
             schema::IDENTITY_PASSPORT_NUMBER,
-            // ADR 0055 §4: the eight concealed keys join the list.
+            // ADR 0055 §4: the six concealed keys join the list (ADR 0078 §7; the `bank.`
+            // keys are reserved now, and the clients conceal every non-Known key).
             schema::SSH_PRIVATE_KEY,
             schema::SSH_PASSPHRASE,
             schema::API_KEY,
             schema::API_SECRET,
             schema::LICENSE_KEY,
             schema::WIFI_PASSWORD,
-            schema::BANK_ACCOUNT_NUMBER,
-            schema::BANK_ROUTING_NUMBER,
         ]
     );
     let field_value = element_key("field", "value");
@@ -1126,8 +1124,8 @@ fn keys_outside_the_m1_schema_are_classified() {
             element_key("attachment", "wrap"),
             KeyClass::Reserved(ReservedFor::M3Attachments),
         ),
-        // ADR 0055 §2: a key under the five M3 prefixes that §1 does not assign stays reserved
-        // (its own example: a later `ssh.key_type`); the 22 it assigns are `Known` (below).
+        // ADR 0055 §2: a key under the four M3 prefixes that §1 does not assign stays reserved
+        // (its own example: a later `ssh.key_type`); the 17 it assigns are `Known` (below).
         (
             "ssh.key_type".to_owned(),
             KeyClass::Reserved(ReservedFor::M3Types),
@@ -1144,9 +1142,10 @@ fn keys_outside_the_m1_schema_are_classified() {
             "wifi.hidden".to_owned(),
             KeyClass::Reserved(ReservedFor::M3Types),
         ),
+        // ADR 0078 §2: every key under the retired `bank.` prefix is reserved, never known.
         (
             "bank.iban".to_owned(),
-            KeyClass::Reserved(ReservedFor::M3Types),
+            KeyClass::Reserved(ReservedFor::Retired),
         ),
         ("login.passkey_hint".to_owned(), KeyClass::Unknown),
         ("item.color".to_owned(), KeyClass::Unknown),
@@ -2368,8 +2367,9 @@ fn a_newer_clients_key_and_value_are_carried() {
 // ADR 0055: the M3 item types and their field keys
 // ---------------------------------------------------------------------------------------------
 
-/// ADR 0055 §1: each M3 type, its own keys, and which of them are concealed.
-const M3_TYPES: [(ItemType, &[(&str, bool)]); 5] = [
+/// ADR 0055 §1 (as ADR 0078 §7 amends it): each M3 type, its own keys, and which of them are
+/// concealed.
+const M3_TYPES: [(ItemType, &[(&str, bool)]); 4] = [
     (
         ItemType::SSH_KEY,
         &[
@@ -2407,20 +2407,10 @@ const M3_TYPES: [(ItemType, &[(&str, bool)]); 5] = [
             (schema::WIFI_SECURITY_TYPE, false),
         ],
     ),
-    (
-        ItemType::BANK_ACCOUNT,
-        &[
-            (schema::BANK_NAME, false),
-            (schema::BANK_ACCOUNT_HOLDER, false),
-            (schema::BANK_ACCOUNT_NUMBER, true),
-            (schema::BANK_ROUTING_NUMBER, true),
-            (schema::BANK_ACCOUNT_TYPE, false),
-        ],
-    ),
 ];
 
-/// ADR 0055 §1, §3: the 22 keys, by name, each Text, `Applies::Only` its own type, written by
-/// anyone; the 8 of §4 concealed and the other 14 shown.
+/// ADR 0055 §1, §3 (as ADR 0078 §7 amends them): the 17 keys, by name, each Text,
+/// `Applies::Only` its own type, written by anyone; the 6 of §4 concealed and the other 11 shown.
 #[test]
 fn m3_keys_are_adr_0055s_table() {
     let names: Vec<&str> = M3_TYPES
@@ -2447,11 +2437,6 @@ fn m3_keys_are_adr_0055s_table() {
             "wifi.ssid",
             "wifi.password",
             "wifi.security_type",
-            "bank.bank_name",
-            "bank.account_holder",
-            "bank.account_number",
-            "bank.routing_number",
-            "bank.account_type",
         ]
     );
     let mut concealed = 0;
@@ -2477,7 +2462,7 @@ fn m3_keys_are_adr_0055s_table() {
             assert_eq!(key(k).kind(), KeyKind::Fixed);
         }
     }
-    assert_eq!((names.len(), concealed), (22, 8));
+    assert_eq!((names.len(), concealed), (17, 6));
 }
 
 /// ADR 0055 §1 "Every key applies only to its own item type": a writer may write each key on
@@ -2495,7 +2480,6 @@ fn m3_keys_stay_inside_their_type() {
         ItemType::API_CREDENTIAL,
         ItemType::SOFTWARE_LICENSE,
         ItemType::WIFI,
-        ItemType::BANK_ACCOUNT,
     ];
     for (own, keys) in M3_TYPES {
         for (k, _) in keys {
@@ -2555,7 +2539,7 @@ fn m3_keys_stay_inside_their_type() {
     }
 }
 
-/// ADR 0055 §2: every key under the five M3 prefixes that §1 does not assign stays reserved, so
+/// ADR 0055 §2: every key under the four M3 prefixes that §1 does not assign stays reserved, so
 /// an entered value is refused on every type while a carried one is kept byte for byte.
 #[test]
 fn unassigned_m3_prefix_keys_stay_reserved() {
@@ -2565,10 +2549,9 @@ fn unassigned_m3_prefix_keys_stay_reserved() {
         "api.token",
         "license.vendor",
         "wifi.hidden",
-        "bank.iban",
     ] {
         assert_eq!(classify(key(k)), KeyClass::Reserved(ReservedFor::M3Types));
-        for t in [ItemType::LOGIN, ItemType::SSH_KEY, ItemType::BANK_ACCOUNT] {
+        for t in [ItemType::LOGIN, ItemType::SSH_KEY, ItemType::WIFI] {
             assert_eq!(
                 check_write(t, WriteMode::Edit, k.as_bytes(), TEXT),
                 Err(WriteError::ReservedKey),
@@ -2650,7 +2633,7 @@ fn an_older_client_shows_a_newer_type_generically() {
             Err(WriteError::UnsupportedItemType)
         );
     }
-    // Every M3 key is a fixed key of the §7 grammar under one of the five prefixes an M1
+    // Every M3 key is a fixed key of the §7 grammar under one of the four prefixes an M1
     // client held as reserved (`KeyClass::Reserved(ReservedFor::M3Types)`), the class an
     // unassigned key under them still has here.
     for (_, keys) in M3_TYPES {
@@ -2659,7 +2642,7 @@ fn an_older_client_shows_a_newer_type_generically() {
             assert_eq!(parsed.as_bytes(), k.as_bytes());
             assert!(matches!(
                 key(k).namespace(),
-                "ssh" | "api" | "license" | "wifi" | "bank"
+                "ssh" | "api" | "license" | "wifi"
             ));
         }
     }
@@ -2683,5 +2666,137 @@ fn m3_types_never_print() {
         let out = format!("{t:?} {:?} {:?}", t.class(), t.supported());
         assert!(!out.contains("Ssh") && !out.contains("Bank") && !out.contains("Wifi"));
         assert_eq!(out.matches("[REDACTED]").count(), 3, "{out}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0078: the retired Bank account type (`0x0009`) and its `bank.` keys
+// ---------------------------------------------------------------------------------------------
+
+/// The five keys ADR 0055 §1 assigned under `bank.`, which ADR 0078 §2 retired, plus one it
+/// never assigned.
+const RETIRED_BANK_KEYS: [&str; 6] = [
+    "bank.bank_name",
+    "bank.account_holder",
+    "bank.account_number",
+    "bank.routing_number",
+    "bank.account_type",
+    "bank.other",
+];
+
+/// ADR 0078 §1: `0x0009` is retired, not supported and not unassigned; it keeps a named
+/// constant for tests only.
+#[test]
+fn the_bank_account_type_is_retired() {
+    let retired = ItemType::RETIRED_BANK_ACCOUNT;
+    assert_eq!(retired.id(), 0x0009);
+    assert_eq!(retired, ItemType::from_id(0x0009));
+    assert_eq!(retired.class(), ItemTypeClass::Retired);
+    assert_eq!(retired.supported(), None);
+    // Its neighbours keep their classes: Wi-Fi below, the released `0x000A` above.
+    assert_eq!(
+        ItemType::from_id(0x0008).class(),
+        ItemTypeClass::Supported(SupportedType::Wifi)
+    );
+    assert_eq!(ItemType::from_id(0x000A).class(), ItemTypeClass::Unassigned);
+    // `Debug` prints no part of the class either (ADR 0018 §2).
+    let out = format!("{retired:?} {:?}", retired.class());
+    assert!(!out.contains("Retired") && !out.contains("Bank") && !out.contains('9'));
+}
+
+/// ADR 0078 §1 with ADR 0018 §8 "Unknown type": no writer creates a `0x0009` item, and no
+/// field write to one is accepted, entered or carried; it is unsupported like an unassigned id.
+#[test]
+fn a_retired_item_is_never_created_or_edited() {
+    use WriteMode::{Create, Edit, Import};
+    let retired = ItemType::RETIRED_BANK_ACCOUNT;
+    let type_value = [0x05, 0x00, 0x09];
+    // A create of it: `check_create`, as `create_item` calls it, refuses.
+    assert_eq!(
+        check_create(
+            retired,
+            Create,
+            [
+                (
+                    WriteSource::Entered,
+                    schema::ITEM_TYPE.as_bytes(),
+                    type_value.as_slice()
+                ),
+                (WriteSource::Entered, schema::ITEM_NAME.as_bytes(), TEXT),
+                (
+                    WriteSource::Entered,
+                    b"bank.account_number".as_slice(),
+                    TEXT
+                ),
+            ]
+        ),
+        Err(WriteError::UnsupportedItemType)
+    );
+    for mode in [Create, Import, Edit] {
+        for k in [schema::ITEM_TYPE, schema::ITEM_NAME, schema::ITEM_NOTES]
+            .into_iter()
+            .chain(RETIRED_BANK_KEYS)
+        {
+            let value = if k == schema::ITEM_TYPE {
+                type_value.as_slice()
+            } else {
+                TEXT
+            };
+            assert_eq!(
+                check_write(retired, mode, k.as_bytes(), value),
+                Err(WriteError::UnsupportedItemType),
+                "{k}"
+            );
+            assert_eq!(
+                check_carried(retired, mode, k.as_bytes(), value),
+                Err(WriteError::UnsupportedItemType),
+                "{k}"
+            );
+        }
+    }
+    // Not even a Cleared edit: field edits are not offered on an unsupported item.
+    assert_eq!(
+        check_write(retired, Edit, b"bank.account_number", CLEARED),
+        Err(WriteError::UnsupportedItemType)
+    );
+}
+
+/// ADR 0078 §2: every key under `bank.`, the five ADR 0055 assigned and any other, is
+/// `Reserved(Retired)`, never `Known`; like every reserved key it is never entered, and is
+/// written only as Cleared in an edit or copied verbatim (`check_carried`).
+#[test]
+fn bank_keys_are_retired_and_reserved() {
+    use WriteMode::{Create, Edit, Import};
+    for k in RETIRED_BANK_KEYS {
+        assert_eq!(
+            classify(key(k)),
+            KeyClass::Reserved(ReservedFor::Retired),
+            "{k}"
+        );
+        assert!(!FIXED_KEYS.iter().any(|(f, _)| *f == k), "{k}");
+        for t in [
+            ItemType::LOGIN,
+            ItemType::SECURE_NOTE,
+            ItemType::SSH_KEY,
+            ItemType::WIFI,
+        ] {
+            for mode in [Create, Import, Edit] {
+                assert_eq!(
+                    check_write(t, mode, k.as_bytes(), TEXT),
+                    Err(WriteError::ReservedKey),
+                    "{k}"
+                );
+                // A verbatim copy, as restore and duplicate make it (ADR 0018 §11).
+                assert_eq!(check_carried(t, mode, k.as_bytes(), TEXT), Ok(()), "{k}");
+            }
+            // Cleared in an edit (ADR 0018 §6 element removal), entered or carried.
+            assert_eq!(check_write(t, Edit, k.as_bytes(), CLEARED), Ok(()), "{k}");
+            assert_eq!(check_carried(t, Edit, k.as_bytes(), CLEARED), Ok(()), "{k}");
+            assert_eq!(
+                check_write(t, Create, k.as_bytes(), CLEARED),
+                Err(WriteError::BlankInCreate),
+                "{k}"
+            );
+        }
     }
 }

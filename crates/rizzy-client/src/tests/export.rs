@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 use rizzy_core::item::key::ElementId;
 use rizzy_core::item::schema::{
     API_ENDPOINT, API_KEY, API_NAME, API_SECRET, ATTR_KIND, ATTR_LABEL, ATTR_ORDER, ATTR_VALUE,
-    BANK_ACCOUNT_HOLDER, BANK_ACCOUNT_NUMBER, BANK_ACCOUNT_TYPE, BANK_NAME, BANK_ROUTING_NUMBER,
     CARD_NUMBER, IMPORT_CREATED_MS, ITEM_FAVORITE, ITEM_NAME, ITEM_NOTES, ITEM_TYPE,
     LICENSE_EXPIRES, LICENSE_KEY, LICENSE_NAME, LICENSE_SEATS, LIST_FIELD, LIST_URI, LOGIN_TOTP,
     SSH_HOST, SSH_PASSPHRASE, SSH_PORT, SSH_PRIVATE_KEY, SSH_PUBLIC_KEY, SSH_USERNAME, VAULT_NAME,
@@ -190,8 +189,9 @@ fn without_import_keys(fields: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, V
 /// The vault every round trip exports: a login with a password history, a URI, a tag, a
 /// hidden custom field and a favourite flag; a trashed note; a card with an unknown key, a
 /// reserved key and an unsupported value (as a newer client would leave them); an identity;
-/// one item of each M3 type of ADR 0055, every key of its type set; the vault-settings item
-/// and a purged item, neither of which is exported.
+/// one item of each M3 type of ADR 0055, every key of its type set; a Bank account of the type
+/// ADR 0078 retired, as an older build wrote it ([`create_retired_bank_account`]); the
+/// vault-settings item and a purged item, neither of which is exported.
 fn populated(seed: u64) -> (Fixture, ItemId) {
     let mut f = fixture(seed);
     let uri = ElementId::generate(&mut f.rng);
@@ -278,6 +278,7 @@ fn populated(seed: u64) -> (Fixture, ItemId) {
         T0 + 30,
     );
     create_m3_items(&mut f);
+    create_retired_bank_account(&mut f, T0 + 36);
     f.create(
         ItemType::VAULT_SETTINGS,
         &[(&k(VAULT_NAME), &text("Personal"))],
@@ -310,9 +311,9 @@ fn create_m3_items(f: &mut Fixture) {
     }
 }
 
-/// One item of each M3 type (ADR 0055 §1): its type, title, and every key of the type with a
-/// value, the concealed ones included.
-fn m3_items() -> [M3Item; 5] {
+/// One item of each M3 type (ADR 0055 §1, as ADR 0078 §7 amends it): its type, title, and every
+/// key of the type with a value, the concealed ones included.
+fn m3_items() -> [M3Item; 4] {
     [
         (
             ItemType::SSH_KEY,
@@ -358,18 +359,144 @@ fn m3_items() -> [M3Item; 5] {
                 (WIFI_SECURITY_TYPE, "WPA2"),
             ],
         ),
-        (
-            ItemType::BANK_ACCOUNT,
-            "Bank account",
-            vec![
-                (BANK_NAME, "Example Bank"),
-                (BANK_ACCOUNT_HOLDER, "Alice"),
-                (BANK_ACCOUNT_NUMBER, "DE89370400440532013000"),
-                (BANK_ROUTING_NUMBER, "COBADEFFXXX"),
-                (BANK_ACCOUNT_TYPE, "Checking"),
-            ],
-        ),
     ]
+}
+
+/// The title of the item [`create_retired_bank_account`] writes.
+const RETIRED_BANK_TITLE: &str = "Bank account";
+
+/// The five `bank.` keys ADR 0055 §1 assigned and ADR 0078 §2 retired, each with a value.
+const RETIRED_BANK_FIELDS: [(&str, &str); 5] = [
+    ("bank.bank_name", "Example Bank"),
+    ("bank.account_holder", "Alice"),
+    ("bank.account_number", "DE89370400440532013000"),
+    ("bank.routing_number", "COBADEFFXXX"),
+    ("bank.account_type", "Checking"),
+];
+
+/// Writes a Bank account (`0x0009`) with its five `bank.` keys, as an integration build between
+/// ADR 0055 and ADR 0078 did. This client never creates one (ADR 0078 §1: `create_item` refuses
+/// the type), so the op is written past its schema checks, as an older client's would be.
+fn create_retired_bank_account(f: &mut Fixture, at: u64) -> ItemId {
+    let item_type = Value::enumeration(ItemType::RETIRED_BANK_ACCOUNT.id());
+    let name = text(RETIRED_BANK_TITLE);
+    let values: Vec<(&str, Value)> = RETIRED_BANK_FIELDS
+        .iter()
+        .map(|(key, value)| (*key, text(value)))
+        .collect();
+    let mut writes: Vec<(&str, &[u8])> = vec![
+        (ITEM_TYPE, item_type.expose_secret()),
+        (ITEM_NAME, name.expose_secret()),
+    ];
+    writes.extend(
+        values
+            .iter()
+            .map(|(key, value)| (*key, value.expose_secret())),
+    );
+    // `create_item` refuses it, before anything is written.
+    let edits: Vec<(SchemaKey, Value)> = RETIRED_BANK_FIELDS
+        .iter()
+        .map(|(key, value)| (k(key), text(value)))
+        .collect();
+    let edits: Vec<FieldEdit<'_>> = edits
+        .iter()
+        .map(|(key, value)| FieldEdit { key, value })
+        .collect();
+    let before = f.vault.next_device_seq();
+    assert_eq!(
+        f.vault
+            .create_item(
+                &mut f.rng,
+                &f.unlocked,
+                ItemType::RETIRED_BANK_ACCOUNT,
+                &edits,
+                at
+            )
+            .unwrap_err(),
+        ClientError::InvalidEdit
+    );
+    assert_eq!(f.vault.next_device_seq(), before);
+    let item = ItemId::generate(&mut f.rng);
+    f.vault
+        .write_op(
+            &mut f.rng,
+            &f.unlocked,
+            item,
+            &crate::sync::OwnChange {
+                lifecycle: rizzy_sync::record::Lifecycle::Active,
+                writes: &writes,
+            },
+            at,
+        )
+        .unwrap();
+    item
+}
+
+/// Checks that `fields` are the retired Bank account's, byte for byte.
+fn assert_retired_bank_account(fields: &BTreeMap<String, Vec<u8>>) {
+    assert_eq!(
+        fields[ITEM_TYPE],
+        Value::enumeration(0x0009).expose_secret()
+    );
+    for (key, value) in RETIRED_BANK_FIELDS {
+        assert_eq!(fields[key], text(value).expose_secret(), "{key}");
+    }
+}
+
+/// ADR 0078 §1, §3 with ADR 0018 §8 "Unknown type": a retired Bank account an older build wrote
+/// is shown with its fields, refuses every field edit, and can be trashed, restored and purged.
+#[test]
+fn a_retired_bank_account_is_unsupported_but_trashable() {
+    let mut f = fixture(61);
+    let item = create_retired_bank_account(&mut f, T0 + 1);
+    assert_eq!(
+        f.vault.item_type(item),
+        Some(ItemType::RETIRED_BANK_ACCOUNT)
+    );
+    assert_eq!(f.vault.item_type(item).and_then(ItemType::supported), None);
+    // Its fields stay displayed (concealment is the clients' display rule, ADR 0078 §2).
+    assert_retired_bank_account(&displayed(&f.vault)[RETIRED_BANK_TITLE].1);
+    // No field edit, not even of `item.name` or a Cleared `bank.` key.
+    let before = f.vault.next_device_seq();
+    for (key, value) in [
+        (k(ITEM_NAME), text("Renamed")),
+        (k("bank.account_number"), text("1")),
+        (k("bank.account_number"), Value::cleared()),
+    ] {
+        assert_eq!(
+            f.vault
+                .edit_item(
+                    &mut f.rng,
+                    &f.unlocked,
+                    item,
+                    &[FieldEdit {
+                        key: &key,
+                        value: &value
+                    }],
+                    T0 + 2
+                )
+                .unwrap_err(),
+            ClientError::InvalidEdit
+        );
+    }
+    assert_eq!(f.vault.next_device_seq(), before);
+    // Trash, restore and purge work.
+    f.vault
+        .trash_item(&mut f.rng, &f.unlocked, item, T0 + 3)
+        .unwrap();
+    assert_eq!(f.vault.item_lifecycle(item), ItemLifecycle::Trashed);
+    f.vault
+        .restore_item(&mut f.rng, &f.unlocked, item, T0 + 4)
+        .unwrap();
+    assert_eq!(f.vault.item_lifecycle(item), ItemLifecycle::Active);
+    f.vault
+        .trash_item(&mut f.rng, &f.unlocked, item, T0 + 5)
+        .unwrap();
+    f.vault
+        .purge_item(&mut f.rng, &f.unlocked, item, T0 + 6)
+        .unwrap();
+    assert_eq!(f.vault.item_lifecycle(item), ItemLifecycle::Purged);
+    assert_eq!(f.sync(), 5);
 }
 
 /// Checks that vault `b`, which imported an export of vault `a`, displays what `a` displays.
@@ -378,13 +505,16 @@ fn assert_same_vault(a: &Fixture, b: &Fixture, bank: ItemId) {
     // Neither the vault settings nor the purged item is exported.
     let settings = exported.remove("(unnamed)").unwrap();
     assert!(settings.1.contains_key(VAULT_NAME));
+    // The retired Bank account is exported, and skipped on import (ADR 0078 §3).
+    let retired = exported.remove(RETIRED_BANK_TITLE).unwrap();
+    assert_retired_bank_account(&retired.1);
     let imported = displayed(&b.vault);
+    assert!(!imported.contains_key(RETIRED_BANK_TITLE));
     assert_eq!(
         exported.keys().collect::<Vec<_>>(),
         [
             "API",
             "Bank \"main\"",
-            "Bank account",
             "License",
             "Me",
             "Old note",
@@ -456,9 +586,36 @@ fn encrypted_export_round_trips_into_a_new_vault() {
         .vault
         .export_encrypted(&mut a.rng, test_auth().0, "export pw", T0 + 100)
         .unwrap();
-    // The four M1 items and the five M3 items of ADR 0055.
+    // The four M1 items, the four M3 items of ADR 0055 and the retired Bank account.
     assert_eq!(export.items, 9);
     assert!(export.unresolved.is_empty());
+    // The payload carries the retired Bank account byte for byte (ADR 0078 §3, ADR 0027 §1).
+    let payload = a.vault.export_payload().unwrap();
+    let entries = parse_payload(payload.expose_secret()).unwrap();
+    assert_eq!(entries.len(), 9);
+    let retired: Vec<BTreeMap<String, Vec<u8>>> = entries
+        .iter()
+        .map(|e| {
+            e.snapshot()
+                .registers()
+                .iter()
+                .filter(|r| !r.key().is_lifecycle())
+                .map(|r| {
+                    assert_eq!(r.entries().len(), 1);
+                    (
+                        r.key().expose_secret().to_owned(),
+                        r.entries()[0].value().expose_secret().to_vec(),
+                    )
+                })
+                .collect()
+        })
+        .filter(|fields: &BTreeMap<String, Vec<u8>>| {
+            fields.get(ITEM_TYPE).map(Vec::as_slice) == Some(&[0x05, 0x00, 0x09])
+        })
+        .collect();
+    assert_eq!(retired.len(), 1);
+    assert_retired_bank_account(&retired[0]);
+    assert_eq!(retired[0].len(), 7);
     // One vault state gives one payload.
     assert_eq!(
         a.vault.export_payload().unwrap().expose_secret(),
@@ -491,22 +648,25 @@ fn encrypted_export_round_trips_into_a_new_vault() {
         .vault
         .import_encrypted(&mut b.rng, &b.unlocked, &export.file, "export pw", T0 + 200)
         .unwrap();
-    assert_eq!(report.imported.len(), 9);
+    // The retired Bank account is skipped and counted, like any unsupported type (ADR 0078 §3,
+    // ADR 0027 §2 step 4).
+    assert_eq!(report.imported.len(), 8);
     assert_eq!(
         report,
         PayloadImport {
             imported: report.imported.clone(),
+            skipped_items: 1,
             ..PayloadImport::default()
         }
     );
     // New item ids, and ops of the importing device only.
     let old: Vec<ItemId> = a.vault.item_ids();
     assert!(report.imported.iter().all(|id| !old.contains(id)));
-    assert_eq!(b.vault.item_ids().len(), 9);
+    assert_eq!(b.vault.item_ids().len(), 8);
     assert_same_vault(&a, &b, bank);
-    // Nine create ops and the trash op, all stored by the server.
-    assert_eq!(b.vault.next_device_seq(), 11);
-    assert_eq!(b.sync(), 10);
+    // Eight create ops and the trash op, all stored by the server.
+    assert_eq!(b.vault.next_device_seq(), 10);
+    assert_eq!(b.sync(), 9);
     // Exporting the importing vault again gives the same displayed values.
     let again = b
         .vault
@@ -552,7 +712,7 @@ fn plaintext_json_round_trips_into_a_new_vault() {
     )));
     assert!(doc.ends_with("]}\n]}\n"));
     assert!(!doc.contains('\r'));
-    // The head, nine items (four M1, five M3) and the tail.
+    // The head, nine items (four M1, four M3, the retired Bank account) and the tail.
     assert_eq!(doc.lines().count(), 11);
     for piece in [
         r#""type":5,"#,
@@ -562,8 +722,13 @@ fn plaintext_json_round_trips_into_a_new_vault() {
         r#""type":7,"#,
         r#""type":8,"#,
         r#"{"key":"wifi.password","value":{"text":"correct horse"}}"#,
+        // The retired Bank account, every key as an older build wrote it (ADR 0078 §3).
         r#""type":9,"#,
+        r#"{"key":"bank.bank_name","value":{"text":"Example Bank"}}"#,
+        r#"{"key":"bank.account_holder","value":{"text":"Alice"}}"#,
+        r#"{"key":"bank.account_number","value":{"text":"DE89370400440532013000"}}"#,
         r#"{"key":"bank.routing_number","value":{"text":"COBADEFFXXX"}}"#,
+        r#"{"key":"bank.account_type","value":{"text":"Checking"}}"#,
     ] {
         assert!(doc.contains(piece), "{piece}");
     }
@@ -586,17 +751,28 @@ fn plaintext_json_round_trips_into_a_new_vault() {
 
     let mut b = fixture(42);
     let read = import(Format::RizzyPlaintextJson, json.expose_secret(), &mut b.rng).unwrap();
-    assert_eq!(read.warnings, []);
-    assert_eq!(read.counts, rizzy_import::Counts::default());
-    assert_eq!(read.items.len(), 9);
+    // The retired Bank account is skipped and counted on read-back (ADR 0078 §3).
+    assert_eq!(read.warnings.len(), 1);
+    assert_eq!(
+        read.warnings[0].kind,
+        rizzy_import::WarningKind::UnsupportedItemType
+    );
+    assert_eq!(
+        read.counts,
+        rizzy_import::Counts {
+            skipped_items: 1,
+            ..rizzy_import::Counts::default()
+        }
+    );
+    assert_eq!(read.items.len(), 8);
     let done = b
         .vault
         .import_items(&mut b.rng, &b.unlocked, &read.items, T0 + 200)
         .unwrap();
-    assert_eq!(done.imported.len(), 9);
+    assert_eq!(done.imported.len(), 8);
     assert!(done.skipped.is_empty());
     assert_same_vault(&a, &b, bank);
-    assert_eq!(b.sync(), 10);
+    assert_eq!(b.sync(), 9);
 }
 
 #[test]
@@ -646,8 +822,9 @@ fn plaintext_csv_is_rfc_4180_and_counts_its_losses() {
         ]
     );
     // The login (custom field, password history) and the card (unknown keys, unsupported
-    // values) lose data; the trashed note and the five M3 items (ADR 0027 §4: "other types
-    // are left out of CSV") are left out; the identity is complete.
+    // values) lose data; the trashed note, the four M3 items (ADR 0027 §4: "other types are
+    // left out of CSV") and the retired Bank account (ADR 0078 §3) are left out; the identity
+    // is complete.
     let loss = a.vault.csv_export_loss().unwrap();
     assert_eq!(
         loss,
@@ -1156,7 +1333,7 @@ fn payload_refusal_vectors() {
 #[test]
 #[expect(
     clippy::too_many_lines,
-    reason = "five hand-built exported states, then what the import makes of each"
+    reason = "hand-built exported states, then what the import makes of each"
 )]
 fn payload_import_flattens_conflicts_and_reports_what_it_left() {
     let vv = covered(&[(1, 4), (2, 2)]);
@@ -1170,7 +1347,7 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
         text("x"),
     );
     let card = text("4111");
-    let bank = text("Bank");
+    let wifi = text("Home");
     let share_secret = [[0x02].as_slice(), &[0x5a; 32]].concat();
     let entries = [
         // A Login: a conflict on `item.name`, a password history with a cleared entry, the
@@ -1258,12 +1435,23 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
             ],
             Vec::new(),
         ),
-        // A Bank account (ADR 0055): imported with its concealed field.
+        // A Wi-Fi item (ADR 0055): imported with its concealed field.
+        LiveSnapshot::new(
+            vec![
+                lifecycle(&[0x01]),
+                register(ITEM_NAME, vec![entry(1, 1, 5_000, &wifi)]),
+                register(ITEM_TYPE, vec![entry(1, 1, 5_000, &[0x05, 0x00, 0x08])]),
+                register(WIFI_PASSWORD, vec![entry(1, 1, 5_000, &card)]),
+            ],
+            Vec::new(),
+        ),
+        // A Bank account (`0x0009`) an older build wrote: the type ADR 0078 §1 retired is
+        // skipped and counted like any unsupported type (ADR 0078 §3).
         LiveSnapshot::new(
             vec![
                 lifecycle(&[0x01]),
                 register("bank.account_number", vec![entry(1, 1, 5_000, &card)]),
-                register(ITEM_NAME, vec![entry(1, 1, 5_000, &bank)]),
+                register(ITEM_NAME, vec![entry(1, 1, 5_000, &x)]),
                 register(ITEM_TYPE, vec![entry(1, 1, 5_000, &[0x05, 0x00, 0x09])]),
             ],
             Vec::new(),
@@ -1289,7 +1477,7 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
         preview_payload(payload.expose_secret(), &mut ChaCha20Rng::seed_from_u64(1)).unwrap(),
         PayloadPreview {
             importable: 3,
-            skipped_items: 5,
+            skipped_items: 6,
             collapsed_fields: 1,
             history_not_carried: 2,
             fields_not_carried: 1,
@@ -1305,7 +1493,7 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
         report,
         PayloadImport {
             imported: report.imported.clone(),
-            skipped_items: 5,
+            skipped_items: 6,
             collapsed_fields: 1,
             // The history of `item.name`, and the cleared password entry.
             history_not_carried: 2,
@@ -1338,11 +1526,8 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
         [("old2".to_owned(), 7_000), ("old1".to_owned(), 5_000)]
     );
     assert_eq!(shown["x"].0, ItemLifecycle::Trashed);
-    assert_eq!(shown["Bank"].1["bank.account_number"], card);
-    assert_eq!(
-        f.vault.item_type(report.imported[2]),
-        Some(ItemType::BANK_ACCOUNT)
-    );
+    assert_eq!(shown["Home"].1[WIFI_PASSWORD], card);
+    assert_eq!(f.vault.item_type(report.imported[2]), Some(ItemType::WIFI));
     // The new item has no conflict: one create op of this device.
     assert!(!f.vault.field_conflicts(report.imported[0], ITEM_NAME));
     assert_eq!(f.vault.next_device_seq(), 5);

@@ -19,9 +19,11 @@
 //! - a create of each M1 type (Login, Secure Note, Card, Identity, and the Vault-settings
 //!   system type), the Login create writing `login.username`, `login.password` and
 //!   `login.totp` to pin the §4 key order;
-//! - a create of each M3 type of ADR 0055 (SSH key, API credential, Software license, Wi-Fi,
-//!   Bank account; ADR 0055 §5, CRYPTO.md §15 item 1 "added in the milestone that ships them"),
-//!   each writing every key of its type, so every concealed key of ADR 0055 §4 is in one, and an
+//! - a create of each M3 type of ADR 0055 (SSH key, API credential, Software license, Wi-Fi;
+//!   ADR 0055 §5, CRYPTO.md §15 item 1 "added in the milestone that ships them"; ADR 0078 §4
+//!   deleted the Bank-account create with the type it retired, `0x0009`, and left every other
+//!   vector byte for byte), each writing every key of its type, so every concealed key of
+//!   ADR 0055 §4 is in one, and an
 //!   SSH-key create without `ssh.port` (absent means 22, a display default that is never
 //!   stored: the vector pins that no such write is made);
 //! - a list edit (a custom field and a tag added, a URI removed by writing Cleared to its
@@ -286,20 +288,6 @@ fn op_vectors() -> Vec<OpVector> {
                 w("wifi.ssid", text("home-net")),
             ],
             hex: HEX_CREATE_WIFI,
-        },
-        OpVector {
-            name: "create Bank account",
-            lifecycle: Lifecycle::Active,
-            writes: vec![
-                w("bank.account_holder", text("Alice Example")),
-                w("bank.account_number", text("DE89370400440532013000")),
-                w("bank.account_type", text("Checking")),
-                w("bank.bank_name", text("Example Bank")),
-                w("bank.routing_number", text("COBADEFFXXX")),
-                w("item.name", text("Salary")),
-                w("item.type", enumv(0x0009)),
-            ],
-            hex: HEX_CREATE_BANK_ACCOUNT,
         },
         OpVector {
             name: "list edit",
@@ -590,7 +578,6 @@ fn the_m3_create_vectors_fit_the_schema() {
         ("create API credential", ItemType::API_CREDENTIAL),
         ("create Software license", ItemType::SOFTWARE_LICENSE),
         ("create Wi-Fi", ItemType::WIFI),
-        ("create Bank account", ItemType::BANK_ACCOUNT),
     ] {
         let v = vectors.iter().find(|v| v.name == name).unwrap();
         let writes = v
@@ -620,8 +607,6 @@ fn the_m3_create_vectors_fit_the_schema() {
         [
             "api.key",
             "api.secret",
-            "bank.account_number",
-            "bank.routing_number",
             "license.key",
             "ssh.passphrase",
             "ssh.private_key",
@@ -1254,14 +1239,6 @@ const HEX_CREATE_WIFI: &str = "\
     00080000000d776966692e70617373776f72640000000e01636f727265637420686f72736500000012776966\
     692e73656375726974795f7479706500000005015750413200000009776966692e737369640000000901686f\
     6d652d6e6574";
-/// "create Bank account" (ADR 0055 §5).
-const HEX_CREATE_BANK_ACCOUNT: &str = "\
-    010100070000001362616e6b2e6163636f756e745f686f6c6465720000000e01416c696365204578616d706c\
-    650000001362616e6b2e6163636f756e745f6e756d6265720000001701444538393337303430303434303533\
-    323031333030300000001162616e6b2e6163636f756e745f747970650000000901436865636b696e67000000\
-    0e62616e6b2e62616e6b5f6e616d650000000d014578616d706c652042616e6b0000001362616e6b2e726f75\
-    74696e675f6e756d6265720000000c01434f424144454646585858000000096974656d2e6e616d6500000007\
-    0153616c617279000000096974656d2e7479706500000003050009";
 /// "list edit".
 const HEX_LIST_EDIT: &str = "\
     010100070000002b6669656c642f306630653064306330623061303930383037303630353034303330323031\
