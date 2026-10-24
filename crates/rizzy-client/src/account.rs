@@ -163,6 +163,10 @@ pub struct VerifiedAccount {
     pub(crate) served: ServedObjects,
     /// The account's storage usage as the server reported it (ADR 0048 §5), if it did.
     pub(crate) usage: Option<StorageUsage>,
+    /// The server's per-vault counted bytes ([ADR 0081] §A9): unsigned, for display only.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    pub(crate) vault_bytes: Vec<(VaultId, u64)>,
 }
 
 /// The account's storage usage as the server reports it with every account answer (ADR 0048
@@ -282,6 +286,18 @@ impl VerifiedAccount {
     /// The vaults this account holds a self-grant for.
     pub fn vault_ids(&self) -> impl Iterator<Item = VaultId> + '_ {
         self.vault_keys.iter().map(VaultKey::vault_id)
+    }
+
+    /// The counted bytes the server reported for `vault_id` with this answer ([ADR 0081] §A9):
+    /// unverified, for display only; `None` when it reported none.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    #[must_use]
+    pub fn vault_bytes_used(&self, vault_id: VaultId) -> Option<u64> {
+        self.vault_bytes
+            .iter()
+            .find(|(v, _)| *v == vault_id)
+            .map(|(_, b)| *b)
     }
 
     /// The vaults whose self-grants this answer served, ascending by id: what the vault
@@ -507,6 +523,12 @@ pub(crate) fn verify_account_view(
     Ok(VerifiedAccount {
         served,
         usage: StorageUsage::of_view(view),
+        vault_bytes: view
+            .vaults
+            .as_slice()
+            .iter()
+            .map(|v| (VaultId::from_bytes(v.vault_id.to_bytes()), v.bytes_used))
+            .collect(),
         account_id,
         pin: AccountPin {
             bundle: public.bundle,
