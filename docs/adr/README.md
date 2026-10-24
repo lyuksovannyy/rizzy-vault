@@ -138,6 +138,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0079 | [Identity generator: pre-filled new identities, the `identity.sex` and `identity.birthday` keys, bundled name and address data, and the masked-email seam](0079-identity-generator.md) | Accepted | M3 / M6 |
 | 0080 | [Default site groups: seeding the signed global equivalence list from Vaultwarden's `global_domains.json`](0080-default-site-groups-vaultwarden-seed.md) | Accepted | M2 |
 | 0081 | [Multiple vaults per account: the Personal vault, user-created vaults, and sharing a vault with other users](0081-multiple-vaults-personal-and-shared.md) | Accepted | M3 (Part A) / M9 (Part B) |
+| 0082 | [Security keys: user presence only (`danger-user-presence-only-security-keys`)](0082-security-keys-user-presence-only.md) | Proposed | M3 |
 
 ## Gates
 
