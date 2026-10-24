@@ -393,7 +393,11 @@ impl Session {
     /// `locked`.
     #[wasm_bindgen(getter, js_name = pendingRecoveryOpenedAtMs)]
     pub fn pending_recovery_opened_at_ms(&self) -> Result<Option<u64>, CoreError> {
-        Ok(self.inner()?.account.recovery_notice().map(|n| n.opened_at_ms))
+        Ok(self
+            .inner()?
+            .account
+            .recovery_notice()
+            .map(|n| n.opened_at_ms))
     }
 
     /// When that pending recovery's wait ends (ADR 0045), in Unix milliseconds; `undefined`
@@ -403,7 +407,11 @@ impl Session {
     /// `locked`.
     #[wasm_bindgen(getter, js_name = pendingRecoveryAvailableAtMs)]
     pub fn pending_recovery_available_at_ms(&self) -> Result<Option<u64>, CoreError> {
-        Ok(self.inner()?.account.recovery_notice().map(|n| n.available_at_ms))
+        Ok(self
+            .inner()?
+            .account
+            .recovery_notice()
+            .map(|n| n.available_at_ms))
     }
 
     /// When the account's previous recovery committed, as that notice says (ADR 0045 point 6);
@@ -413,7 +421,11 @@ impl Session {
     /// `locked`.
     #[wasm_bindgen(getter, js_name = pendingRecoveryLastAtMs)]
     pub fn pending_recovery_last_at_ms(&self) -> Result<Option<u64>, CoreError> {
-        Ok(self.inner()?.account.recovery_notice().and_then(|n| n.last_recovery_at_ms))
+        Ok(self
+            .inner()?
+            .account
+            .recovery_notice()
+            .and_then(|n| n.last_recovery_at_ms))
     }
 
     /// Whether a sync is running.

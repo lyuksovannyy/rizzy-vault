@@ -856,7 +856,9 @@ impl DeviceSession {
     #[wasm_bindgen(getter, js_name = pendingRecoveryLastAtMs)]
     #[must_use]
     pub fn pending_recovery_last_at_ms(&self) -> Option<u64> {
-        self.account.recovery_notice().and_then(|n| n.last_recovery_at_ms)
+        self.account
+            .recovery_notice()
+            .and_then(|n| n.last_recovery_at_ms)
     }
 
     /// Whether a sync is running.
