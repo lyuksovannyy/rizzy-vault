@@ -29,10 +29,11 @@ const BIN: &str = env!("CARGO_BIN_EXE_rizzy-vault");
 /// `%SystemRoot%\System32\mswsock.dll`, so a process without the variable cannot create a
 /// socket (`WSAEPROVIDERFAILEDINIT`, error 10106) and `rizzy-vault` exits 1 when it binds its
 /// listener. Go's `os/exec` adds `SYSTEMROOT` to every child's environment for this reason;
-/// Rust's `env_clear` does not. Nothing else is needed: system DLLs load from the system
-/// directory, not through `PATH`, and the temporary directory falls back from `TMP`, `TEMP`
-/// and `USERPROFILE` to the Windows directory.
-const OS_ENV: &[&str] = if cfg!(windows) { &["SystemRoot"] } else { &[] };
+/// Rust's `env_clear` does not. Also `PATH` on Windows: `rizzy-vault` links OpenSSL as a DLL
+/// (webauthn-rs, ADR 0077), and a non-system DLL is found through `PATH`; without it the process
+/// cannot load (`STATUS_DLL_NOT_FOUND`) and writes nothing. Nothing else is needed: the
+/// temporary directory falls back from `TMP`, `TEMP` and `USERPROFILE` to the Windows directory.
+const OS_ENV: &[&str] = if cfg!(windows) { &["SystemRoot", "PATH"] } else { &[] };
 
 /// Clears `command`'s environment, so no `RIZZY_*` variable of the developer leaks in, and
 /// puts back [`OS_ENV`] from this process's.
