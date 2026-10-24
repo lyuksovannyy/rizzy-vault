@@ -26,6 +26,7 @@ import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText } from "./common.tsx";
 import { ItemEditor } from "./ItemEditor.tsx";
 import { ItemView } from "./ItemView.tsx";
+import { inVault, vaultLabelOf } from "../vaults.ts";
 
 /** What the right-hand side shows. */
 type Detail =
@@ -109,6 +110,8 @@ export function ItemsPane(props: {
   readonly ctx: VaultContext;
   readonly trash: boolean;
   readonly scope: Scope;
+  /** The vault switcher's choice (ADR 0081 §A8): `undefined` is "All vaults". */
+  readonly vaultFilter?: string | undefined;
   readonly newItemSignal: number;
   readonly openItemId?: string | undefined;
   readonly openItemNonce?: number | undefined;
@@ -174,7 +177,7 @@ export function ItemsPane(props: {
     // above.
   }, [openItemNonce]);
 
-  const inFilter = items.filter((i) => inScope(i, scope));
+  const inFilter = items.filter((i) => inScope(i, scope) && inVault(i, props.vaultFilter));
   const shown = inFilter.filter((i) => matches(i, query)).sort(compareFavoriteFirst);
   const empty = emptyState(scope, trash, items.length > 0, inFilter.length > 0, query !== "");
 
@@ -284,6 +287,7 @@ export function ItemsPane(props: {
                   <span className="row-text">
                     <span className="row-title">{i.title === "" ? "(untitled)" : i.title}</span>
                     <span className="row-sub">{i.username ?? typeLabel(i.itemType)}</span>
+                    <span className="row-sub row-vault">{vaultLabelOf(ctx.vaults, i.vaultId)}</span>
                   </span>
                   {i.favorite ? (
                     <span className="row-favorite" aria-label="favorite">
@@ -322,6 +326,7 @@ export function ItemsPane(props: {
                 id={detail.id}
                 onEdit={() => setDetail({ kind: "edit", id: detail.id })}
                 onWritten={(gone) => written(gone ? { kind: "none" } : detail)}
+                onMoved={(newId) => written({ kind: "view", id: newId })}
               />
             )}
             {detail.kind === "edit" && (

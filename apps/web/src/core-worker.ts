@@ -336,7 +336,16 @@ async function run(m: CallMessage): Promise<unknown> {
     fields: () => current().fields(str(a[0])),
     customFieldAutofill: () => current().customFieldAutofill(str(a[0])),
     reveal: () => current().reveal(str(a[0]), str(a[1])),
-    createItem: () => current().createItem(str(a[0]) as never, a[1] as never),
+    createItem: () => current().createItem(str(a[0]), str(a[1]) as never, a[2] as never),
+    vaults: () => current().vaults(),
+    personalVaultId: () => current().personalVaultId,
+    vaultAlarms: () => current().vaultAlarms(),
+    takeDiscardedChanges: () => current().takeDiscardedChanges(),
+    createVault: () => current().createVault(str(a[0])),
+    renameVault: () => current().renameVault(str(a[0]), str(a[1])),
+    deleteVault: () => current().deleteVault(str(a[0]), bool(a[1])),
+    copyItem: () => current().copyItem(str(a[0]), str(a[1])),
+    moveItem: () => current().moveItem(str(a[0]), str(a[1])),
     editItem: () => current().editItem(str(a[0]), a[1] as never),
     trashItem: () => current().trashItem(str(a[0])),
     restoreItem: () => current().restoreItem(str(a[0])),
@@ -383,30 +392,30 @@ async function run(m: CallMessage): Promise<unknown> {
       current();
       return checkPasswordBreach(transport, bytes(a[0]));
     },
-    exportEncrypted: () => current().exportEncrypted(bytes(a[0])),
-    exportBlockers: () => current().exportBlockers(),
-    csvExportWarning: () => current().csvExportWarning(),
+    exportEncrypted: () => current().exportEncrypted(str(a[0]), bytes(a[1])),
+    exportBlockers: () => current().exportBlockers(str(a[0])),
+    csvExportWarning: () => current().csvExportWarning(str(a[0])),
     reauthenticate: () => current().reauthenticate(bytes(a[0]), bytes(a[1]), prompts(m.id)),
     reauthFresh: () => current().reauthFresh(),
     plaintextWarningShown: () => current().plaintextWarningShown(),
     exportPlaintext: () => {
-      const format = str(a[0]);
+      const format = str(a[1]);
       if (format !== "json" && format !== "csv") {
         throw new CoreError("unknown_format");
       }
-      return current().exportPlaintext(format, str(a[1]));
+      return current().exportPlaintext(str(a[0]), format, str(a[2]));
     },
     // Recognition needs no session: the file is read here and never leaves the Worker.
     detectImportFormat: () => detectImportFormat(bytes(a[0])),
-    importFile: () => current().importFile(str(a[0]) as never, bytes(a[1])),
+    importFile: () => current().importFile(str(a[0]), str(a[1]) as never, bytes(a[2])),
     attachments: () => current().attachments(str(a[0])),
     addAttachment: () => current().addAttachment(str(a[0]), str(a[1]), str(a[2]), bytes(a[3])),
     downloadAttachment: () => current().downloadAttachment(str(a[0]), str(a[1])),
     deleteAttachment: () => current().deleteAttachment(str(a[0]), str(a[1])),
-    importEncrypted: () => current().importEncrypted(bytes(a[0]), bytes(a[1])),
-    cxfExportPasskeys: () => current().cxfExportPasskeys(),
-    exportCxf: () => current().exportCxf(str(a[0]), bytes(a[1])),
-    importCxfEncrypted: () => current().importCxfEncrypted(bytes(a[0]), bytes(a[1])),
+    importEncrypted: () => current().importEncrypted(str(a[0]), bytes(a[1]), bytes(a[2])),
+    cxfExportPasskeys: () => current().cxfExportPasskeys(str(a[0])),
+    exportCxf: () => current().exportCxf(str(a[0]), str(a[1]), bytes(a[2])),
+    importCxfEncrypted: () => current().importCxfEncrypted(str(a[0]), bytes(a[1]), bytes(a[2])),
     devices: () => current().devices(),
     sessions: () => current().sessions(),
     endSession: () => current().endSession(str(a[0])),

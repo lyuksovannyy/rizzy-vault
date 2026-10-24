@@ -13,6 +13,7 @@ import { type Scope, emptyState, inScope } from "../src/views/ItemsPane.tsx";
 function item(over: Partial<ItemSummary>): ItemSummary {
   return {
     id: "1",
+    vaultId: "v",
     itemType: "login",
     title: "Example",
     username: undefined,

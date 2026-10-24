@@ -82,7 +82,7 @@ describe("CoreClient", () => {
     const { port, sent, reply } = fakePort();
     const client = new CoreClient(port);
     const secret = new TextEncoder().encode("pw");
-    const first = client.call("exportEncrypted", secret);
+    const first = client.call("exportEncrypted", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", secret);
     const second = client.call("items", false);
     expect(sent.map((s) => s.message.kind)).toEqual(["call", "call"]);
     expect(sent[0]?.transfer).toEqual([secret.buffer]);

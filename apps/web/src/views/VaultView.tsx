@@ -14,7 +14,8 @@
 // It locks itself after `IDLE_LOCK_MS` without input (`autolock.ts`). When changes are still
 // unsent then, it first tries one sync, bounded by `FINAL_SYNC_MS`, and locks in any case;
 // changes that still did not reach the server are counted in the lock notice.
-import type { DeviceView, ItemType, Notice } from "@rizzy-vault/core";
+import type { DeviceView, ItemType, Notice, VaultAlarm, VaultInfo } from "@rizzy-vault/core";
+import { t } from "@rizzy-vault/i18n";
 import {
   ConfirmDialog,
   IconAccount,
@@ -55,6 +56,8 @@ import { PasswordHealthPane } from "./PasswordHealth.tsx";
 import { SettingsView } from "./SettingsView.tsx";
 import { ShortcutsHelp } from "./ShortcutsHelp.tsx";
 import { TransferPane } from "./TransferPane.tsx";
+import { VaultAlarms, VaultsPane } from "./VaultsPane.tsx";
+import { vaultLabel, vaultStatusText } from "../vaults.ts";
 import { ErrorText } from "./common.tsx";
 
 /** How often the vault syncs on its own. */
@@ -89,7 +92,7 @@ const OTHER_SECTIONS = [
 
 /** "guide" is the getting-started guide (`OnboardingView.tsx`): opened after signup and from
  * Settings, with no sidebar entry of its own. */
-type Section = "items" | "trash" | "settings" | "guide" | (typeof OTHER_SECTIONS)[number]["id"];
+type Section = "items" | "trash" | "settings" | "guide" | "vaults" | (typeof OTHER_SECTIONS)[number]["id"];
 
 /** What the views below the header use. */
 export interface VaultContext {
@@ -107,6 +110,12 @@ export interface VaultContext {
   /** Item icons from the server's `icons` role, for this unlocked session (packages/ui
    * `itemIcons.ts`). */
   readonly icons: IconLoader | undefined;
+  /** Every vault of the account, Personal first (ADR 0081 §A2, §A8). */
+  readonly vaults: readonly VaultInfo[];
+  /** The Personal vault, which every picker preselects (§A8). */
+  readonly personalVaultId: string | undefined;
+  /** The vault completeness check's alarms (INV-102). */
+  readonly vaultAlarms: readonly VaultAlarm[];
 }
 
 /** The vault (module docs). */
@@ -122,6 +131,13 @@ export function VaultView(props: {
   const [session, setSession] = useState(props.initialSession);
   const [section, setSection] = useState<Section>(props.startWithGuide === true ? "guide" : "items");
   const [scope, setScope] = useState<Scope>(ALL_SCOPE);
+  /** The vault switcher (ADR 0081 §A8): `undefined` is "All vaults". */
+  const [vaultFilter, setVaultFilter] = useState<string | undefined>(undefined);
+  const [vaults, setVaults] = useState<readonly VaultInfo[]>([]);
+  const [personalVaultId, setPersonalVaultId] = useState<string | undefined>(undefined);
+  const [vaultAlarms, setVaultAlarms] = useState<readonly VaultAlarm[]>([]);
+  /** Unsent changes discarded with vaults deleted elsewhere (reported once, §A5). */
+  const [discarded, setDiscarded] = useState(0);
   /** Narrow screens: the sidebar is a slide-over, closed by default (item 1, module docs). */
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -256,6 +272,36 @@ export function VaultView(props: {
     };
   }, [client, revision]);
 
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const [list, personal, alarms, lost] = await Promise.all([
+          client.call("vaults"),
+          client.call("personalVaultId"),
+          client.call("vaultAlarms"),
+          client.call("takeDiscardedChanges"),
+        ]);
+        if (!live) {
+          return;
+        }
+        setVaults(list);
+        setPersonalVaultId(personal);
+        setVaultAlarms(alarms);
+        if (lost > 0) {
+          setDiscarded((n) => n + lost);
+        }
+        // A vault deleted (here or elsewhere) is no longer a filter.
+        setVaultFilter((current) => (current !== undefined && !list.some((v) => v.id === current) ? undefined : current));
+      } catch {
+        // The vault list stays as it was; the sync error is shown by the header.
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, revision]);
+
   /** Lock-with-unsaved-changes now confirms through the accessible dialog (redesign slice 2,
    * item 2), not `window.confirm`. */
   const [confirmLock, setConfirmLock] = useState(false);
@@ -366,7 +412,28 @@ export function VaultView(props: {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [section, session.readOnly, shortcutsOpen, accountMenuOpen, sidebarOpen, paletteOpen]);
 
-  const ctx: VaultContext = { client, clipboard, session, afterWrite: sync, revision, generator, identity, icons };
+  const ctx: VaultContext = {
+    client,
+    clipboard,
+    session,
+    afterWrite: sync,
+    revision,
+    generator,
+    identity,
+    icons,
+    vaults,
+    personalVaultId,
+    vaultAlarms,
+  };
+
+  /** Chooses a vault in the switcher ("All vaults" is `undefined`) and shows its items. */
+  const chooseVault = (next: string | undefined) => {
+    setVaultFilter(next);
+    if (section !== "trash") {
+      setSection("items");
+    }
+    setSidebarOpen(false);
+  };
 
   /** Chooses an item filter and switches to the item list. */
   const chooseScope = (next: Scope) => {
@@ -442,6 +509,49 @@ export function VaultView(props: {
             onClick={() => chooseSection("trash")}
           >
             <IconTrash /> Trash
+          </button>
+        </div>
+        <div className="sidebar-group" role="group" aria-labelledby="sidebar-vaults-label">
+          <div className="sidebar-group-label" id="sidebar-vaults-label">
+            {t("vaults.section")}
+          </div>
+          <button
+            type="button"
+            className={vaultFilter === undefined ? "sidebar-item active" : "sidebar-item"}
+            aria-pressed={vaultFilter === undefined}
+            onClick={() => chooseVault(undefined)}
+          >
+            <IconAllItems /> {t("vaults.all")}
+          </button>
+          {vaults.map((v) => {
+            const status = vaultStatusText(v);
+            return (
+              <button
+                key={v.id}
+                type="button"
+                className={vaultFilter === v.id ? "sidebar-item active" : "sidebar-item"}
+                aria-pressed={vaultFilter === v.id}
+                data-vault-id={v.id}
+                title={status}
+                onClick={() => chooseVault(v.id)}
+              >
+                <IconLock /> {vaultLabel(v)}
+                {status !== undefined && <span className="sr-only"> ({status})</span>}
+                {status !== undefined && (
+                  <span className="muted sidebar-item-count" aria-hidden="true">
+                    !
+                  </span>
+                )}
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            className={section === "vaults" ? "sidebar-item active" : "sidebar-item"}
+            aria-current={section === "vaults" ? "page" : undefined}
+            onClick={() => chooseSection("vaults")}
+          >
+            <IconSettings /> {t("vaults.manage")}
           </button>
         </div>
         {tags.length > 0 && (
@@ -542,6 +652,15 @@ export function VaultView(props: {
           </div>
         </header>
         <ErrorText code={syncError} />
+        <VaultAlarms alarms={vaultAlarms} />
+        {discarded > 0 && (
+          <p className="status" role="status">
+            {t("vaults.discarded", { count: String(discarded) })}{" "}
+            <button type="button" className="secondary small" onClick={() => setDiscarded(0)}>
+              {t("vaults.dismiss")}
+            </button>
+          </p>
+        )}
         <NoticesPanel
           ctx={ctx}
           notices={notices}
@@ -560,12 +679,16 @@ export function VaultView(props: {
               ctx={ctx}
               trash={false}
               scope={scope}
+              vaultFilter={vaultFilter}
               newItemSignal={newItemSignal}
               openItemId={openItemId}
               openItemNonce={openItemNonce}
             />
           )}
-          {section === "trash" && <ItemsPane ctx={ctx} trash scope={ALL_SCOPE} newItemSignal={0} />}
+          {section === "trash" && (
+            <ItemsPane ctx={ctx} trash scope={ALL_SCOPE} vaultFilter={vaultFilter} newItemSignal={0} />
+          )}
+          {section === "vaults" && <VaultsPane ctx={ctx} />}
           {section === "generator" && <GeneratorPane ctx={ctx} />}
           {section === "health" && <PasswordHealthPane ctx={ctx} onOpenItem={openItemFromPalette} />}
           {section === "transfer" && <TransferPane ctx={ctx} />}
