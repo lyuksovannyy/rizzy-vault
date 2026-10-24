@@ -1,7 +1,7 @@
 # ADR 0081: Multiple vaults per account: the Personal vault, user-created vaults, and sharing a vault with other users
 
-- Status: Proposed
-- Date: 2026-10-23
+- Status: Accepted
+- Date: 2026-10-23 (accepted 2026-10-24)
 - Deciders: project owner
 - Milestone: M3 (Part A: several vaults per account, no sharing) / M9 (Part B: shared vaults), both subject to open question 1
 - Supersedes: on acceptance, in part: [ADR 0012](0012-sync-engine.md) (§1 in part), [ADR 0021](0021-server-compaction.md) (§9 in part), [ADR 0025](0025-rotation-vault-half.md) (§1 in part, §3 in part), [ADR 0028](0028-api-v1-http-conventions.md) (item 1 in part), [ADR 0042](0042-account-settings-matching-layout.md) (§2 in part), [ADR 0056](0056-local-index-recently-used-search.md) (§3 in part). §0 names the parts ([ADR 0020](0020-partial-supersession.md) point 9).
@@ -51,6 +51,21 @@ The **key hierarchy and the storage model are already multi-vault**; the **clien
 - [ADR 0012](0012-sync-engine.md) §5: a `Purge` is allowed only on a trashed item; §6: a replica that holds an op it must not hold removes it and recomputes.
 
 ## Decision
+
+### Owner answers at acceptance (2026-10-24)
+
+The owner accepted this ADR as drafted. The recommendations of the "Open questions for the owner" stand:
+1. Part A in M3, Part B in M9 (recommendation a).
+2. "Selective creds sharing" from the Personal vault: move (default) or copy into a shared vault, plus M5 link shares (recommendation a).
+3. The Personal vault cannot be renamed; always shown as "Personal" (localised).
+4. No setting for default save target; Personal is preselected every time.
+5. Deleting a vault that has items defaults to "move items to Personal" with alternative "delete with items".
+6. `directory/lookup` rate-limited with `not_found` for unknown names (recommendation a).
+7. Invites to an unverified key are allowed with a visible persistent "not verified" badge.
+8. Ownership transfer is out of scope for this ADR.
+9. Limits (64 owned vaults, 32 active members, 255 statement entries) stand.
+10. The vault owner pays for a shared vault's quota bytes.
+11. Accepted as a whole.
 
 The decision has two parts with different milestones (open question 1). **Part A** gives one account several vaults, none shared; it needs no new cryptographic construction, no new envelope purpose and no new signed statement. **Part B** lets a vault other than Personal be shared with other accounts; it adds one signed statement type and puts the reserved `VAULT_KEY_MEMBER_GRANT` to use. Part A reserves, in its own wire and settings formats, the fields Part B needs, so that Part B stays additive after v1.0 (§A12, §B12).
 

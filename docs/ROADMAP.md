@@ -85,6 +85,7 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 | S | Attachments (encrypted, size-limited) | M3 |
 | S | Item types: SSH key, API credential, Software license, Wi-Fi (Bank account removed on 2026-10-23, ADR 0078) | M3 |
 | S | Identity generator: new identities open pre-filled (sex, country, age preset, custom range or exact age; names by country, birthday, email, username, address, phone from fictional ranges) with per-field regenerate; web vault and rv ([ADR 0079](adr/0079-identity-generator.md)) | M3 |
+| S | Multiple vaults per account: a Personal vault (created at signup, default save target, cannot be deleted or shared) plus vaults the user creates; rename, delete, move and copy items between vaults ([ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) Part A) | M3 |
 | S | Favorites, recently used, full-text search on decrypted index (client-side only) | M3 |
 | S | Item revision history (restore old versions) | M3 |
 | S | Scheduled encrypted backups to user-chosen storage (local folder, WebDAV, S3-compatible) | M8 |
@@ -187,6 +188,7 @@ Model: 1Password-style share links. The share is an **encrypted snapshot**, not 
 | S | Restrict to specific email addresses, verified by one-time code | M5 |
 | S | Optional extra passphrase on share (out-of-band) | M5 |
 | S | "Send"-style arbitrary text/file share (Bitwarden Send equivalent) | M5 |
+| S | Share one item from the Personal vault: link share (M5) or move/copy into a shared vault (M9) ([ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) §C) | M5 / M9 |
 | C | Recipient can "save to my rizzy-vault" in one click | M9 |
 | W | Live shared items between two personal accounts (that is what shared vaults in M9 are for) | M9 |
 
@@ -256,7 +258,7 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 
 | Item |
 |---|
-| Shared vaults with per-member permissions (view / edit / manage) |
+| Shared vaults with per-member permissions (view / edit / manage) ([ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) Part B; never the Personal vault) |
 | Family organization (up to N users), invites |
 | Emergency access (trusted contact can request access after a waiting period) |
 | Multiple / custom mail domains for aliases |

@@ -1,6 +1,6 @@
 # ADR 0042: ACCOUNT_SETTINGS plaintext: canonical layout and the M2 matching section
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0081](0081-multiple-vaults-personal-and-shared.md) (§2 in part)
 - Date: 2026-10-08 (accepted 2026-10-21)
 - Deciders: project owner
 - Milestone: M2

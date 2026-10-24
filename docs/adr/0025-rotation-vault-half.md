@@ -1,6 +1,6 @@
 # ADR 0025: Key rotation upload: the vault half and the rotation cut-off
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0081](0081-multiple-vaults-personal-and-shared.md) (§1 in part, §3 in part)
 - Date: 2026-09-29
 - Deciders: project owner
 - Milestone: M1
