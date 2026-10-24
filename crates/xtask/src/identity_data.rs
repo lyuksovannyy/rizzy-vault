@@ -19,7 +19,7 @@
 //!    counted, never repaired; lists over their cap keep a fixed-seed sample ([`SplitMix64`],
 //!    [`SEED`]); lists built from faker's patterns are expanded with the same generator.
 //! 4. **Output.** [`render`] writes the file in the format the `rizzy-client` parser reads,
-//!    [`validate`] re-checks it, and the generated section of [`SOURCES`] (sizes, SHA-256, drop
+//!    [`validate()`] re-checks it, and the generated section of [`SOURCES`] (sizes, SHA-256, drop
 //!    counts, decisions) is rewritten. `--check` regenerates both and fails on any byte
 //!    difference instead of writing. CI cannot run it, because the checkouts are not committed.
 
