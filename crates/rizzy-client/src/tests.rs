@@ -253,6 +253,7 @@ impl Server {
             bytes_used: 4_096,
             quota_bytes: 5 << 30,
             vaults: List::empty(),
+            pending_recovery: None,
         };
         self.capture(serde_json::to_vec(&view));
         view

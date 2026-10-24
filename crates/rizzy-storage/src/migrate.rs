@@ -124,6 +124,15 @@ pub const MIGRATIONS: &[MigrationFile] = &[
         sqlite: include_str!("../migrations/sqlite/0009_vault_kinds.sql"),
         postgres: include_str!("../migrations/postgres/0009_vault_kinds.sql"),
     },
+    // ADR 0045 points 1 and 6: when the account's last recovery committed, the advisory
+    // `last_recovery_at_ms` of the pending-recovery notice. Raises the backup `schema_version`
+    // to 10.
+    MigrationFile {
+        version: 10,
+        description: "auth_last_recovery",
+        sqlite: include_str!("../migrations/sqlite/0010_auth_last_recovery.sql"),
+        postgres: include_str!("../migrations/postgres/0010_auth_last_recovery.sql"),
+    },
 ];
 
 /// This release's schema version: the last migration's version. A logical backup is stamped

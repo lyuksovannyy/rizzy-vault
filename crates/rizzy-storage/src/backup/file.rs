@@ -713,6 +713,7 @@ mod tests {
                 Value::Blob(vec![0xa1; 16]),
                 Value::Text("alice".into()),
                 Value::Integer(1_000),
+                Value::Null,
             ]],
         );
         set(
@@ -774,10 +775,10 @@ mod tests {
             &KAT[40..42],
             &u16::try_from(TABLES.len()).unwrap().to_be_bytes()
         );
-        // The first table: `str("auth_accounts")`, 3 columns, `str("id")`, blob, not null.
+        // The first table: `str("auth_accounts")`, 4 columns, `str("id")`, blob, not null.
         assert_eq!(&KAT[42..46], &13u32.to_be_bytes());
         assert_eq!(&KAT[46..59], b"auth_accounts");
-        assert_eq!(&KAT[59..61], &3u16.to_be_bytes());
+        assert_eq!(&KAT[59..61], &4u16.to_be_bytes());
         assert_eq!(&KAT[61..67], b"\0\0\0\x02id");
         assert_eq!(&KAT[67..69], &[3, 0]);
         // The digest is SHA-256 of everything before it.
@@ -873,9 +874,9 @@ mod tests {
 
     #[test]
     fn huge_declared_counts_are_refused_before_allocating() {
-        // The first table's row count (after its 3 column descriptors) set to u64::MAX.
+        // The first table's row count (after its 4 column descriptors) set to u64::MAX.
         let mut body = KAT[..KAT.len() - DIGEST_LEN].to_vec();
-        let rows_at = 42 + 4 + 13 + 2 + (4 + 2 + 2) + (4 + 10 + 2) + (4 + 13 + 2);
+        let rows_at = 42 + 4 + 13 + 2 + (4 + 2 + 2) + (4 + 10 + 2) + (4 + 13 + 2) + (4 + 19 + 2);
         assert_eq!(&body[rows_at..rows_at + 8], &1u64.to_be_bytes());
         body[rows_at..rows_at + 8].copy_from_slice(&u64::MAX.to_be_bytes());
         let sum = digest(&body);
@@ -908,6 +909,7 @@ mod tests {
                 Value::Blob(vec![1; 16]),
                 Value::Text("a".repeat(MAX_TEXT_LEN + 1)),
                 Value::Integer(1),
+                Value::Null,
             ]],
         );
         assert_eq!(
@@ -928,6 +930,7 @@ mod tests {
                 Value::Blob(vec![1; MAX_BLOB_LEN + 1]),
                 Value::Text("a".into()),
                 Value::Integer(1),
+                Value::Null,
             ]],
         );
         assert!(matches!(write(&d, 0), Err(FileError::ValueTooLarge { .. })));
@@ -940,6 +943,7 @@ mod tests {
                 Value::Blob(vec![1; MAX_BLOB_LEN]),
                 Value::Text("é".repeat(MAX_TEXT_LEN / 2)),
                 Value::Integer(1),
+                Value::Null,
             ]],
         );
         assert_eq!(parse(&write(&d, 0).unwrap()).unwrap().dump, d);
@@ -971,6 +975,7 @@ mod tests {
                 Value::Blob(vec![1; 16]),
                 Value::Text(format!("secret-{}", "x".repeat(MAX_TEXT_LEN))),
                 Value::Integer(1),
+                Value::Null,
             ]],
         );
         let e = write(&d, 0).unwrap_err().to_string();

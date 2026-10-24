@@ -536,9 +536,14 @@ mod tests {
             Value::Blob(vec![1; 16]),
             Value::Text("alice".into()),
             Value::Integer(1),
+            Value::Null,
         ];
         assert_eq!(check_row(accounts, 0, &good), Ok(()));
-        assert!(check_row(accounts, 0, &good[..2]).is_err());
+        assert!(check_row(accounts, 0, &good[..3]).is_err());
+        // `last_recovery_at_ms` is nullable (ADR 0045), an integer when set.
+        let mut stamped = good.clone();
+        stamped[3] = Value::Integer(7);
+        assert_eq!(check_row(accounts, 0, &stamped), Ok(()));
         let mut null = good.clone();
         null[1] = Value::Null;
         assert_eq!(

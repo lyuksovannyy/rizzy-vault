@@ -366,6 +366,9 @@ impl<V: VaultPort> AuthService<V> {
             &devices,
             ViewScope::Current,
             self.config.account_quota_bytes,
+            // ADR 0045 point 4: a login always makes an OPAQUE session, even a re-authentication
+            // bound to a device, so it never gets the recovery notice.
+            false,
         )
         .await?;
         let wrap = server_wrap(credential, trust.state.account_key_epoch)?;

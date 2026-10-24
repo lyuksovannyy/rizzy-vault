@@ -30,6 +30,10 @@ queries! {
     ACCOUNT_BY_NAME = "account_by_name";
     /// The login name of an account.
     ACCOUNT_BY_ID = "account_by_id";
+    /// When an account's last recovery committed.
+    ACCOUNT_LAST_RECOVERY_GET = "account_last_recovery_get";
+    /// Records when an account's recovery committed.
+    ACCOUNT_LAST_RECOVERY_SET = "account_last_recovery_set";
     /// A stored OPAQUE setup's AKE public-key hash and retirement time.
     SETUP_GET = "setup_get";
     /// Records an OPAQUE setup's AKE public-key hash.

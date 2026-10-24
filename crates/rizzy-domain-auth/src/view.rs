@@ -36,7 +36,9 @@ pub(crate) enum ViewScope {
 }
 
 /// Builds the view of an account from a verified trust and its verified devices, with the
-/// account's counted bytes and the instance's `quota_bytes` (ADR 0048 §5).
+/// account's counted bytes and the instance's `quota_bytes` (ADR 0048 §5), and, when
+/// `recovery_notice` is set, the advisory notice of a pending recovery (ADR 0045 point 4: the
+/// caller passes it only for a session that could cancel the recovery).
 pub(crate) async fn build<V: VaultPort>(
     vault: &V,
     mut conn: Conn<'_>,
@@ -44,6 +46,7 @@ pub(crate) async fn build<V: VaultPort>(
     devices: &Devices,
     scope: ViewScope,
     quota_bytes: u64,
+    recovery_notice: bool,
 ) -> Result<AccountView, AuthError> {
     let bundles: Vec<Vec<u8>> = match scope {
         ViewScope::Current => vec![trust.head_wire()?.to_vec()],
@@ -92,6 +95,12 @@ pub(crate) async fn build<V: VaultPort>(
     let vaults = vault
         .vault_summaries(reborrow(&mut conn), trust.account_id)
         .await?;
+    // ADR 0045 points 3–5: the stored row, read on the same connection.
+    let pending_recovery = if recovery_notice {
+        crate::recovery::notice(reborrow(&mut conn), trust.account_id).await?
+    } else {
+        None
+    };
     Ok(AccountView {
         account_state: Bytes::new(trust.state_wire.clone()).map_err(over_limit)?,
         bundles: List::new(bundles).map_err(over_limit)?,
@@ -122,6 +131,7 @@ pub(crate) async fn build<V: VaultPort>(
         bytes_used,
         quota_bytes,
         vaults: List::new(vaults).map_err(over_limit)?,
+        pending_recovery,
     })
 }
 
@@ -132,7 +142,8 @@ impl<V: VaultPort> AuthService<V> {
     ///
     /// Any authenticated session of the account may read it: a device session, an OPAQUE
     /// session, or the recovery-only session (which covers the reads the recovery's rotation
-    /// needs, §11.9 step 3).
+    /// needs, §11.9 step 3). Only a device session of a usable durable device, the one that can
+    /// cancel a recovery, also gets the advisory `pending_recovery` notice (ADR 0045 point 4).
     ///
     /// # Errors
     /// [`AuthError::Unauthorized`] for an expired session; [`AuthError::Internal`] when a
@@ -144,9 +155,10 @@ impl<V: VaultPort> AuthService<V> {
         now_ms: u64,
     ) -> Result<AccountView, AuthError> {
         let mut tx = self.db.begin_read().await?;
-        crate::session::reload(tx.conn(), session, now_ms).await?;
+        let session = crate::session::reload(tx.conn(), session, now_ms).await?;
         let trust = AccountTrust::load(tx.conn(), session.account_id).await?;
         let devices = trust.devices(tx.conn()).await?;
+        let notice = crate::recovery::can_cancel(&session, &devices, now_ms);
         let view = build(
             &self.vault,
             tx.conn(),
@@ -154,6 +166,7 @@ impl<V: VaultPort> AuthService<V> {
             &devices,
             ViewScope::Since(query),
             self.config.account_quota_bytes,
+            notice,
         )
         .await?;
         tx.finish().await?;

@@ -167,8 +167,8 @@ fn populated(secrets_path: &Path) -> Dump {
         (
             "auth_accounts",
             vec![
-                vec![a1(), Value::Text("alice".into()), int(1_000)],
-                vec![a2(), Value::Text("bob".into()), int(2_000)],
+                vec![a1(), Value::Text("alice".into()), int(1_000), Value::Null],
+                vec![a2(), Value::Text("bob".into()), int(2_000), Value::Null],
             ],
         ),
         (

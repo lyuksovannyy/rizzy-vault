@@ -87,6 +87,7 @@ pub const TABLES: &[TableSpec] = &[
             col("id", Kind::Blob, false),
             col("login_name", Kind::Text, false),
             col("created_at_ms", Kind::Integer, false),
+            col("last_recovery_at_ms", Kind::Integer, true),
         ],
     },
     TableSpec {

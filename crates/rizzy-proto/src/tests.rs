@@ -14,8 +14,8 @@ use zeroize::Zeroizing;
 
 use crate::account::{
     AccountStateQuery, AccountView, AckDeviceGrantsRequest, DeviceGrantsResponse,
-    EnrolDeviceRequest, PublishAccountStateRequest, PublishBundlesRequest, PublishGrantsRequest,
-    UploadWebDeviceCertificateRequest, VaultSummary,
+    EnrolDeviceRequest, PendingRecoveryNotice, PublishAccountStateRequest, PublishBundlesRequest,
+    PublishGrantsRequest, UploadWebDeviceCertificateRequest, VaultSummary,
 };
 use crate::attachments::{
     AttachmentRequest, CreateAttachmentRequest, DownloadChunkRequest, DownloadChunkResponse,
@@ -99,6 +99,7 @@ fn account_view() -> AccountView {
             kind: 1,
             bytes_used: 1_000,
         }]),
+        pending_recovery: None,
     }
 }
 
@@ -540,6 +541,44 @@ fn responses_ignore_unknown_fields() {
     let mut view = serde_json::to_value(account_view()).unwrap();
     view["added_later"] = true.into();
     assert!(serde_json::from_value::<AccountView>(view).is_ok());
+}
+
+#[test]
+fn pending_recovery_notice_of_adr_0045() {
+    // Point 1: an optional, additive field, absent from the wire while `None`, so an older
+    // client's view is unchanged and an older server's answer still parses.
+    let view = serde_json::to_value(account_view()).unwrap();
+    assert!(view.get("pending_recovery").is_none());
+    let notice = PendingRecoveryNotice {
+        opened_at_ms: 1_000,
+        available_at_ms: 260_201_000,
+        last_recovery_at_ms: None,
+    };
+    let mut with = account_view();
+    with.pending_recovery = Some(notice);
+    let value = serde_json::to_value(&with).unwrap();
+    assert_eq!(
+        value["pending_recovery"],
+        serde_json::json!({"opened_at_ms": 1_000, "available_at_ms": 260_201_000_u64})
+    );
+    assert_eq!(serde_json::from_value::<AccountView>(value).unwrap(), with);
+    with.pending_recovery = Some(PendingRecoveryNotice {
+        last_recovery_at_ms: Some(500),
+        ..notice
+    });
+    round_trip(&with);
+    let value = serde_json::to_value(&with).unwrap();
+    assert_eq!(value["pending_recovery"]["last_recovery_at_ms"], 500);
+    // A response type: a member added later is ignored, and a malformed notice is refused,
+    // not read as absent.
+    let mut later = value.clone();
+    later["pending_recovery"]["added_later"] = true.into();
+    assert!(serde_json::from_value::<AccountView>(later).is_ok());
+    let mut bad = value;
+    bad["pending_recovery"]["opened_at_ms"] = (-1).into();
+    assert!(serde_json::from_value::<AccountView>(bad).is_err());
+    let missing = serde_json::json!({"available_at_ms": 1});
+    assert!(serde_json::from_value::<PendingRecoveryNotice>(missing).is_err());
 }
 
 #[test]

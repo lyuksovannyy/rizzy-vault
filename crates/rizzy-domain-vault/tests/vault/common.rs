@@ -440,11 +440,13 @@ pub(crate) fn accounts_dump() -> Dump {
                         Value::Blob(ACCOUNT.as_bytes().to_vec()),
                         Value::Text("alice".into()),
                         Value::Integer(1),
+                        Value::Null,
                     ],
                     vec![
                         Value::Blob(OTHER_ACCOUNT.as_bytes().to_vec()),
                         Value::Text("bob".into()),
                         Value::Integer(1),
+                        Value::Null,
                     ],
                 ]
             } else {

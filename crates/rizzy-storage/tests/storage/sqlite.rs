@@ -719,11 +719,8 @@ fn pre_migration_copy() {
         let last = MIGRATIONS.last().unwrap().version;
         let mut w = db.begin_write().await.unwrap();
         on_engine!(w.conn(), |c| {
-            // Undo the last migration (0009: the vault kind and its index).
-            for undo in [
-                "DROP INDEX vault_vaults_personal",
-                "ALTER TABLE vault_vaults DROP COLUMN kind",
-            ] {
+            // Undo the last migration (0010: the account's last recovery time).
+            for undo in ["ALTER TABLE auth_accounts DROP COLUMN last_recovery_at_ms"] {
                 sqlx::query(undo).execute(&mut *c).await.unwrap();
             }
             sqlx::query("DELETE FROM _sqlx_migrations WHERE version = $1")

@@ -643,6 +643,14 @@ impl<V: VaultPort> AuthService<V> {
         )
         .await?;
         if session.kind == SessionKind::Recovery {
+            // ADR 0045 point 6: only the recovery's own commit stamps the advisory time; every
+            // other rotation leaves it.
+            exec!(
+                tx.conn(),
+                sql::ACCOUNT_LAST_RECOVERY_SET,
+                &account.as_bytes()[..],
+                sql::u64_sql(now_ms, "last_recovery_at_ms")?
+            )?;
             session::end_all(tx.conn(), account).await?;
         } else if step.password_bumped {
             session::end_kind(tx.conn(), account, SessionKind::Opaque).await?;

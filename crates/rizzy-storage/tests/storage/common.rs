@@ -102,8 +102,8 @@ pub(crate) fn fixture() -> Dump {
         (
             "auth_accounts",
             vec![
-                vec![a1(), Value::Text("alice".into()), int(1_000)],
-                vec![a2(), Value::Text("bob".into()), int(2_000)],
+                vec![a1(), Value::Text("alice".into()), int(1_000), Value::Null],
+                vec![a2(), Value::Text("bob".into()), int(2_000), int(2_500)],
             ],
         ),
         (
@@ -517,9 +517,12 @@ pub(crate) async fn exercise_vault_kinds(db: &rizzy_storage::Database) {
     }
 
     // The migration on a database where one account has two vaults fails and changes nothing.
+    // Migration 10 (ADR 0045's `last_recovery_at_ms`) came after it; undo both, newest first.
     let last = crate::common::last_migration();
-    assert_eq!(last, 9, "the vault-kinds migration is the last one");
+    assert_eq!(last, 10, "the last-recovery migration is the last one");
     for undo in [
+        "ALTER TABLE auth_accounts DROP COLUMN last_recovery_at_ms",
+        "DELETE FROM _sqlx_migrations WHERE version = 10",
         "DROP INDEX vault_vaults_personal",
         "ALTER TABLE vault_vaults DROP COLUMN kind",
         "DELETE FROM _sqlx_migrations WHERE version = 9",
@@ -528,7 +531,7 @@ pub(crate) async fn exercise_vault_kinds(db: &rizzy_storage::Database) {
     }
     assert!(try_exec(db, insert, &[id(0xc1), a1]).await);
     assert!(db.migrate().await.is_err());
-    assert_eq!(db.pending_migrations().await.unwrap(), vec![9]);
+    assert_eq!(db.pending_migrations().await.unwrap(), vec![9, 10]);
 }
 
 /// The second half of [`exercise_vault_kinds`], on a fresh handle: without the second vault
@@ -539,7 +542,7 @@ pub(crate) async fn exercise_vault_kinds(db: &rizzy_storage::Database) {
 )]
 pub(crate) async fn finish_vault_kinds(db: &rizzy_storage::Database) {
     let a1 = id(ACCOUNT_1);
-    assert_eq!(db.pending_migrations().await.unwrap(), vec![9]);
+    assert_eq!(db.pending_migrations().await.unwrap(), vec![9, 10]);
     assert!(try_exec(db, "DELETE FROM vault_vaults WHERE id = $1", &[id(0xc1)]).await);
     db.migrate().await.unwrap();
     assert!(db.pending_migrations().await.unwrap().is_empty());

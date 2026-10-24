@@ -296,6 +296,8 @@ fn account_view(rows: &CacheRows) -> Result<AccountView, ClientError> {
         vault_self_grants: List::new(grants).map_err(|_| corrupt)?,
         // The per-vault summaries (ADR 0081 §A11) are the server's live figures too.
         vaults: List::empty(),
+        // The recovery notice (ADR 0045) is advisory and never cached (point 9).
+        pending_recovery: None,
     })
 }
 

@@ -24,18 +24,24 @@
 //! against the server (§11.9 step 3). 2FA is not required (ADR 0008 owner decision 2).
 //!
 //! **Notification** of every enrolled device and the account email (§11.9 steps 2 and 6) has
-//! no M1 channel (the `notify` role and mail are M3): [`RecoveryPending`] tells the server
-//! which account to notify when a notifier exists.
+//! no M1 push channel (the `notify` role and mail are M3): [`RecoveryPending`] tells the server
+//! which account to notify when a notifier exists. The device half is pulled instead ([ADR
+//! 0045]): while a recovery is pending, [`AuthService::account_view`] adds the advisory
+//! `pending_recovery` notice for a caller that could cancel it ([`can_cancel`], the gate of
+//! [`AuthService::recovery_cancel`]), and the recovery's commit stamps the account's
+//! `last_recovery_at_ms` the notice carries.
+//!
+//! [ADR 0045]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0045-recovery-pending-notification.md
 
 use rizzy_core::ids::AccountId;
 use rizzy_core::keys::RecoveryAuthToken;
 use rizzy_core::normalize::LoginName;
 use rizzy_core::rng::CryptoRng;
-use rizzy_proto::account::AccountView;
+use rizzy_proto::account::{AccountView, PendingRecoveryNotice};
 use rizzy_proto::objects::AccountKeyRecoveryWrap;
 use rizzy_proto::recovery::RecoveryVault;
 use rizzy_proto::wire::{Bytes, Id, SessionToken};
-use rizzy_storage::{WriteTx, lock_account};
+use rizzy_storage::{Conn, WriteTx, lock_account};
 
 use crate::error::AuthError;
 use crate::ports::VaultPort;
@@ -43,7 +49,7 @@ use crate::ratelimit::{self, BucketKind, bucket};
 use crate::session::{self, Session, SessionKind};
 use crate::sql::{self, exec, fetch_opt};
 use crate::store::{self, RecoveryRow};
-use crate::trust::AccountTrust;
+use crate::trust::{AccountTrust, Devices, reborrow};
 use crate::view::{self, ViewScope};
 use crate::{AuthService, over_limit};
 
@@ -96,8 +102,17 @@ pub(crate) async fn pending(
     tx: &mut WriteTx,
     account: AccountId,
 ) -> Result<Option<(u32, u64, u64)>, AuthError> {
+    pending_on(tx.conn(), account).await
+}
+
+/// [`pending`] on any connection: the read path's (ADR 0045 point 5, the same statement on
+/// the read transaction [`AuthService::account_view`] already holds).
+pub(crate) async fn pending_on(
+    conn: Conn<'_>,
+    account: AccountId,
+) -> Result<Option<(u32, u64, u64)>, AuthError> {
     let row: Option<(i64, i64, i64)> = fetch_opt!(
-        tx.conn(),
+        conn,
         (i64, i64, i64),
         sql::PENDING_RECOVERY_GET,
         &account.as_bytes()[..]
@@ -110,6 +125,46 @@ pub(crate) async fn pending(
         ))
     })
     .transpose()
+}
+
+/// Whether `session` (reloaded) may cancel a pending recovery, and so sees its notice: a
+/// device session of a usable durable device ([`AuthService::recovery_cancel`]; ADR 0045 point
+/// 4). Never an OPAQUE or a recovery-only session, and never a web-vault (kind 4) device.
+pub(crate) fn can_cancel(session: &Session, devices: &Devices, now_ms: u64) -> bool {
+    session.kind == SessionKind::Device
+        && session
+            .device_id
+            .is_some_and(|d| devices.usable_durable(d, now_ms).is_some())
+}
+
+/// The advisory notice of `account`'s pending recovery ([ADR 0045] points 1–3, 5): the
+/// opening and availability times of the stored row, and when the account's last recovery
+/// committed. `None` exactly while no row exists. Nothing new is computed.
+///
+/// [ADR 0045]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0045-recovery-pending-notification.md
+pub(crate) async fn notice(
+    mut conn: Conn<'_>,
+    account: AccountId,
+) -> Result<Option<PendingRecoveryNotice>, AuthError> {
+    let Some((_, opened_at_ms, available_at_ms)) = pending_on(reborrow(&mut conn), account).await?
+    else {
+        return Ok(None);
+    };
+    let last: Option<(Option<i64>,)> = fetch_opt!(
+        conn,
+        (Option<i64>,),
+        sql::ACCOUNT_LAST_RECOVERY_GET,
+        &account.as_bytes()[..]
+    )?;
+    let last_recovery_at_ms = last
+        .and_then(|(at,)| at)
+        .map(|at| sql::sql_u64(at, "last_recovery_at_ms"))
+        .transpose()?;
+    Ok(Some(PendingRecoveryNotice {
+        opened_at_ms,
+        available_at_ms,
+        last_recovery_at_ms,
+    }))
 }
 
 impl<V: VaultPort> AuthService<V> {
@@ -243,11 +298,7 @@ impl<V: VaultPort> AuthService<V> {
         let session = session::reload(tx.conn(), session, now_ms).await?;
         let trust = AccountTrust::load(tx.conn(), account).await?;
         let devices = trust.devices(tx.conn()).await?;
-        let usable = session.kind == SessionKind::Device
-            && session
-                .device_id
-                .is_some_and(|d| devices.usable_durable(d, now_ms).is_some());
-        if !usable {
+        if !can_cancel(&session, &devices, now_ms) {
             return Err(AuthError::Unauthorized);
         }
         let deleted = exec!(
@@ -314,6 +365,8 @@ impl<V: VaultPort> AuthService<V> {
             &devices,
             ViewScope::Chain,
             self.config.account_quota_bytes,
+            // ADR 0045 point 4: the recovering client knows of its own recovery.
+            false,
         )
         .await?;
         let vaults = self.vault.recovery_vaults(tx.conn(), account).await?;

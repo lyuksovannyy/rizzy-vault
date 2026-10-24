@@ -69,6 +69,39 @@ pub struct AccountView {
     /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
     #[serde(default)]
     pub vaults: List<VaultSummary, MAX_VAULT_GRANTS>,
+    /// The account's pending recovery ([ADR 0045] points 1–4): served only to a device session
+    /// of a usable durable device (the gate `recovery/cancel` uses), absent for an OPAQUE or
+    /// recovery-only session and while no recovery is pending. Absent from an older server.
+    ///
+    /// Advisory, unsigned and server-set (INV-70): a client shows it, and never treats its
+    /// presence, absence or content as proof of anything, nor in place of the `account-state`
+    /// verification of INV-25.
+    ///
+    /// [ADR 0045]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0045-recovery-pending-notification.md
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_recovery: Option<PendingRecoveryNotice>,
+}
+
+/// The server's unsigned notice of a pending account recovery ([ADR 0045] point 1): when the
+/// recovery opened, when its wait ends, and when the account's last recovery committed.
+///
+/// Every field is advisory (INV-70). A response type: unknown fields are ignored.
+///
+/// [ADR 0045]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0045-recovery-pending-notification.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRecoveryNotice {
+    /// When `recovery/start` opened the pending recovery, in Unix milliseconds.
+    pub opened_at_ms: u64,
+    /// When the server-enforced wait ends and `recovery/complete` is accepted, in Unix
+    /// milliseconds.
+    pub available_at_ms: u64,
+    /// When a recovery of this account last committed its rotation (CRYPTO.md §11.9 step 6),
+    /// in Unix milliseconds; absent if none did. Set only by a recovery commit, never by
+    /// another rotation ([ADR 0045] point 6).
+    ///
+    /// [ADR 0045]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0045-recovery-pending-notification.md
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_recovery_at_ms: Option<u64>,
 }
 
 /// The server's unsigned view of one vault ([ADR 0081] §A11): its id, the kind the server
