@@ -95,6 +95,9 @@ function installPasskeyRelay(): void {
       ...(answer.rpName !== undefined ? { rpName: answer.rpName } : {}),
       ...(answer.userName !== undefined ? { userName: answer.userName } : {}),
       ...(answer.candidates !== undefined ? { candidates: answer.candidates } : {}),
+      ...(answer.vaults !== undefined && answer.defaultVaultId !== undefined
+        ? { vaults: answer.vaults, defaultVaultId: answer.defaultVaultId }
+        : {}),
     });
   }
 

@@ -16,6 +16,12 @@
       <!-- Styled by ../surface.css (imported by main.ts), not inline style attributes. -->
       <h1 id="dialog-title"></h1>
       <p id="dialog-host"></p>
+      <!-- ADR 0081 §A8: the vault a new login goes to, the Personal vault preselected every
+           time; shown only when the account has two or more vaults to save to. -->
+      <div id="vault-row" hidden>
+        <label for="vault">Vault</label>
+        <select id="vault" name="vault"></select>
+      </div>
       <fieldset id="rows" hidden>
         <legend>Custom fields</legend>
       </fieldset>

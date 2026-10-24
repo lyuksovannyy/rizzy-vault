@@ -48,7 +48,11 @@ function render(offer: PasskeyConsentShowMessage): void {
   prompt.appendChild(heading);
 
   if (offer.kind === "create") {
-    prompt.appendChild(button(offer.rpName ?? offer.rpId, () => void respond(offer, approvedMessage(offer))));
+    // ADR 0081 §A8: a new login's vault, the Personal vault preselected every time.
+    const picker = vaultPicker(offer);
+    prompt.appendChild(
+      button(offer.rpName ?? offer.rpId, () => void respond(offer, approvedMessage(offer, undefined, picker?.value))),
+    );
   } else {
     for (const candidate of offer.candidates ?? []) {
       prompt.appendChild(
@@ -65,15 +69,39 @@ function render(offer: PasskeyConsentShowMessage): void {
   );
 }
 
+/** The vault picker of a `create` that saves a new login, appended to the prompt, or
+ * `undefined` when the offer has none (one vault, or a passkey added to an existing login). */
+function vaultPicker(offer: PasskeyConsentShowMessage): HTMLSelectElement | undefined {
+  if (prompt === null || offer.vaults === undefined || offer.vaults.length < 2) {
+    return undefined;
+  }
+  const label = document.createElement("label");
+  label.htmlFor = "consent-vault";
+  label.textContent = "Vault";
+  const select = document.createElement("select");
+  select.id = "consent-vault";
+  select.name = "vault";
+  for (const vault of offer.vaults) {
+    const option = document.createElement("option");
+    option.value = vault.id;
+    option.textContent = vault.label;
+    option.selected = vault.id === offer.defaultVaultId;
+    select.appendChild(option);
+  }
+  prompt.append(label, select);
+  return select;
+}
+
 /** Both tokens travel together, each its own check at the background: `instanceToken` (ADR 0043,
  * "is this the consent iframe the content script built") and `ceremonyToken` (ADR 0039 §2, "is
  * this the ceremony the background offered"), never one in place of the other (ADR 0043 point 6). */
-function approvedMessage(offer: PasskeyConsentShowMessage, chosenPasskeyRef?: string): PasskeyCeremonyMessage {
+function approvedMessage(offer: PasskeyConsentShowMessage, chosenPasskeyRef?: string, vaultId?: string): PasskeyCeremonyMessage {
   return {
     type: "passkey_ceremony_approved",
     instanceToken: offer.instanceToken,
     ceremonyToken: offer.ceremonyToken,
     ...(chosenPasskeyRef !== undefined ? { chosenPasskeyRef } : {}),
+    ...(vaultId !== undefined && vaultId !== "" ? { vaultId } : {}),
   };
 }
 

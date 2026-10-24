@@ -26,6 +26,8 @@ import {
   type MatchUriInput,
   type PasskeyAssertionResult,
   type PasskeyCandidateResult,
+  type VaultInfo,
+  CoreError,
   DurableSession,
   MatchMode,
   PASSKEY_ALG_ES256,
@@ -41,7 +43,7 @@ import {
   unlockDurableDevice,
 } from "@rizzy-vault/core";
 
-export type { CacheStore, Clock, CreatedPasskey, DurableSession, FieldView, ItemChange, ItemSummary, MatchCandidate, MatchFrameInfo, PasskeyAssertionResult };
+export type { CacheStore, Clock, CreatedPasskey, DurableSession, FieldView, ItemChange, ItemSummary, MatchCandidate, MatchFrameInfo, PasskeyAssertionResult, VaultInfo };
 export { MatchMode, PASSKEY_ALG_ES256, cacheStoreNames, decideMatchCandidates, newElementId, normalizePageUrl };
 
 /** `passkey/<id>/*` field-key parts (`crates/rizzy-core/src/item/schema.rs`'s `LIST_PASSKEY`/
@@ -283,18 +285,50 @@ export async function unlockDevice(
 /** The popup's `ItemSummary` shape, mapped from `@rizzy-vault/core`'s richer one
  * (`messaging/contract.ts`'s `ItemSummary`: title/username/itemId only, list views never carry
  * more, ADR 0013 §3 rule 3). */
-export function toContractItemSummary(item: ItemSummary): {
+export function toContractItemSummary(
+  item: ItemSummary,
+  vaults: readonly VaultInfo[] = [],
+): {
   itemId: string;
   title: string;
   username: string;
+  vault?: string;
   websiteHost?: string;
 } {
+  const vault = vaults.find((v) => v.id === item.vaultId);
   return {
     itemId: item.id,
     title: item.title,
     username: item.username ?? "",
+    ...(vault !== undefined ? { vault: vaultLabel(vault) } : {}),
     ...(item.websiteHost !== undefined ? { websiteHost: item.websiteHost } : {}),
   };
+}
+
+/** A vault's label (ADR 0081 §A1): "Personal" for the Personal vault, whatever `vault.name`
+ * holds; the name of an owned vault; "Untitled vault" for one without a name. The extension's
+ * own surfaces are English only for now, like the rest of its text. */
+export function vaultLabel(vault: VaultInfo): string {
+  if (vault.kind === "personal") {
+    return "Personal";
+  }
+  return vault.name ?? "Untitled vault";
+}
+
+/** The vaults a new item may be saved to (ADR 0081 §A8): open and writable, Personal first. */
+export function saveTargets(session: DurableSession): VaultInfo[] {
+  return session.vaults().filter((v) => v.status === "open" && !v.readOnly);
+}
+
+/** The vault a save goes to (ADR 0081 §A8): `picked` if it is one of the save targets, else the
+ * Personal vault (preselected every time; there is no "last used" memory). */
+export function saveVault(session: DurableSession, picked: string | undefined): string {
+  const targets = saveTargets(session);
+  const chosen = targets.find((v) => v.id === picked) ?? targets.find((v) => v.id === session.personalVaultId);
+  if (chosen === undefined) {
+    throw new CoreError("vault_set_mismatch");
+  }
+  return chosen.id;
 }
 
 /** The icon of an item's website host from `serverOrigin`'s `icons` role (ADR 0052 point 6):
