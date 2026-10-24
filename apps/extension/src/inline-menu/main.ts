@@ -4,6 +4,9 @@
 // like the content script, since this is a few buttons with no state worth a framework). Runs
 // at the extension's own origin, inside an iframe `content-script.ts` injects into an untrusted
 // page: see `protocol.ts` for exactly what that origin boundary does and does not guarantee.
+import "@rizzy-vault/ui/tokens.css";
+import "../surface.css";
+
 import { INLINE_MENU_PICK, isInlineMenuShowMessage, type InlineMenuCandidate } from "./protocol.ts";
 import { decideClick } from "./decide-click.ts";
 import { disclosureText } from "./disclosure.ts";

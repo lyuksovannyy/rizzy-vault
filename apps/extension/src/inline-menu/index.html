@@ -29,13 +29,15 @@
         max-height: calc(100% - 84px);
       }
       /* WCAG 2.2 SC 2.5.8 (target size, AA; e2e/a11y.spec.ts): the browser's default button is
-         about 21px tall; every button here is at least 24px. */
+         about 21px tall; every button here is at least 24px. (Kept here as well as in
+         ../surface.css, which main.ts imports, so the frame's layout never depends on a
+         stylesheet that has not loaded yet.) */
       button {
         min-height: 24px;
       }
     </style>
   </head>
-  <body>
+  <body class="inline-menu">
     <!-- The extension-origin inline-menu surface (ADR 0036 §4/§5, INV-36, INV-40): loaded by
          `content-script.ts` into an iframe it injects into the page. The embedding page has no
          same-origin access to this document — it cannot read or script its contents, only

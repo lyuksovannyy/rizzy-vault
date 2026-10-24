@@ -8,6 +8,9 @@
 //
 // It also carries the third-party notices (THIRD_PARTY_NOTICES.md; ADR 0080 owner answer 5),
 // shared with the web vault's Settings through `@rizzy-vault/ui`.
+import "@rizzy-vault/ui/tokens.css";
+import "../surface.css";
+
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 

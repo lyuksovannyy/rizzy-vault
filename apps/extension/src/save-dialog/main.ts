@@ -4,6 +4,9 @@
 // inline menu. It asks the long-lived context for the pending prompt's rows by the save-prompt
 // token (never trusting the page for them), lets the user tick rows and edit a new field's
 // Display Name (an empty one cannot be saved: W5), and answers on a trusted click only.
+import "@rizzy-vault/ui/tokens.css";
+import "../surface.css";
+
 import { SAVE_DIALOG_DONE, dialogTitle, isSaveDialogShowMessage, rowText } from "./protocol.ts";
 import type {
   SaveDialogChoicesMessage,

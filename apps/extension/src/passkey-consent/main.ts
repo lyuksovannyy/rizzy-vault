@@ -7,6 +7,9 @@
 // not guarantee, and `inline-menu/main.ts`'s own module docs for the general pattern this
 // mirrors (the same ADR 0040 "the privileged document asks the long-lived context directly"
 // rule, applied here to approving/declining a ceremony instead of choosing a fill).
+import "@rizzy-vault/ui/tokens.css";
+import "../surface.css";
+
 import { isPasskeyConsentShowMessage, PASSKEY_CONSENT_DONE, type PasskeyConsentShowMessage } from "./protocol.ts";
 import type { PasskeyCeremonyMessage, PasskeyCeremonyResponse } from "../messaging/contract.ts";
 

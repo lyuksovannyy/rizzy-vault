@@ -1,0 +1,362 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+
+/* The extension's own surfaces (ADR 0014 §3; docs/design/README.md "Extension"): the popup, the
+   options page, and the three documents the content script frames into a web page (the inline
+   menu, the save dialog, the passkey consent prompt). Static CSS, the shared tokens of
+   packages/ui (tokens.css), scoped by the class each page's <body> carries.
+
+   Security rule for the framed surfaces (docs/design/README.md "Motion on security surfaces"):
+   the inline menu, the save dialog and the passkey prompt never animate opacity, transform or
+   visibility. Their clickjacking gates (content/menu-visibility.ts, the inline menu's
+   IntersectionObserver v2 check, INV-36) judge what is visible; an entrance fade would make a
+   genuine menu read as "not visible" for its duration, and would teach users that a fading
+   frame is normal. They get colour transitions on hover and focus only. Only the popup, which no
+   page can frame, uses the entrance motion of motion.css. */
+
+body {
+  margin: 0;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--font-size-small);
+  line-height: var(--line-height-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2 {
+  margin: 0 0 var(--space-2);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  letter-spacing: -0.01em;
+}
+
+h1 {
+  font-size: var(--font-size-heading);
+}
+
+h2 {
+  font-size: var(--font-size-body);
+}
+
+/* WCAG 2.2 SC 2.5.8 (target size, AA; e2e/a11y.spec.ts): every button is at least 24px. */
+button {
+  min-height: 24px;
+  min-width: 24px;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-1);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-duration-fast) var(--motion-easing-standard),
+    border-color var(--motion-duration-fast) var(--motion-easing-standard);
+}
+
+button:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+input:not([type="checkbox"], [type="radio"]) {
+  box-sizing: border-box;
+  width: 100%;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-1);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  transition: border-color var(--motion-duration-fast) var(--motion-easing-standard);
+}
+
+input:not([type="checkbox"], [type="radio"]):focus-visible {
+  border-color: var(--color-focus);
+  outline-offset: 0;
+}
+
+[role="alert"] {
+  color: var(--color-danger);
+  font-weight: var(--font-weight-semibold);
+}
+
+/* ---- The popup (popup/index.html; no page can frame it, so it uses the entrance motion). ---- */
+
+body.popup {
+  width: 22rem;
+  background: var(--color-bg);
+}
+
+.popup main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  animation: rv-fade-in var(--motion-duration-base) var(--motion-easing-standard) backwards;
+}
+
+.popup main > h1 {
+  margin: 0;
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.popup form,
+.popup main > div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  animation: rv-rise-in var(--motion-duration-base) var(--motion-easing-emphasized) backwards;
+}
+
+.popup label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-weight: var(--font-weight-medium);
+}
+
+.popup form > button[type="submit"],
+.popup main > div > button:first-child {
+  align-self: flex-start;
+}
+
+.popup form > button[type="submit"] {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.popup form > button[type="submit"]:hover:not(:disabled) {
+  border-color: var(--color-accent-hover);
+  background: var(--color-accent-hover);
+}
+
+.popup ul {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Item rows: a flat list that tints on hover, like the web vault's item list. */
+.popup li > button:only-child {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border-color: transparent;
+  border-radius: var(--radius-2);
+  background: var(--color-surface);
+  text-align: left;
+  font-weight: var(--font-weight-regular);
+  box-shadow: var(--shadow-1);
+}
+
+.popup li > button:only-child:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+}
+
+/* An item's fields: label, value, action on one row. */
+.popup li:has(> span) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-2);
+  background: var(--color-surface);
+  overflow-wrap: anywhere;
+}
+
+.popup li > span:first-child {
+  color: var(--color-text-muted);
+}
+
+.popup nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+/* The current view's tab is the disabled one (popup/App.tsx): shown as selected, not greyed. */
+.popup nav button:disabled {
+  opacity: 1;
+  border-color: var(--color-accent);
+  background: var(--color-accent-subtle);
+  color: var(--color-text);
+}
+
+.popup [role="status"] {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+/* An item's site icon (ADR 0052; packages/ui ItemIcon), in line with the row's text. */
+.popup .item-favicon {
+  display: inline-block;
+  vertical-align: middle;
+  object-fit: contain;
+  border-radius: var(--radius-1);
+}
+
+/* ---- The options page. ---- */
+
+body.options {
+  max-width: 40rem;
+  padding: var(--space-6);
+  background: var(--color-bg);
+  font-size: var(--font-size-body);
+}
+
+/* ---- The inline menu (inline-menu/index.html: a fixed-size frame in the page). No entrance
+   motion (module docs). ---- */
+
+body.inline-menu {
+  background: var(--color-surface-raised);
+}
+
+.inline-menu main {
+  box-sizing: border-box;
+  padding: var(--space-2);
+}
+
+.inline-menu #page-host {
+  padding: 0 var(--space-1) var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-caption);
+  overflow-wrap: anywhere;
+}
+
+.inline-menu #step-note:not(:empty) {
+  padding: 0 var(--space-1) var(--space-1);
+  font-size: var(--font-size-caption);
+}
+
+.inline-menu #list > div {
+  margin-bottom: 2px;
+}
+
+.inline-menu #list button {
+  padding: var(--space-2);
+  border-color: transparent;
+  border-radius: var(--radius-1);
+  background: transparent;
+  font-weight: var(--font-weight-medium);
+}
+
+.inline-menu #list button:hover:not(:disabled),
+.inline-menu #list button:focus-visible {
+  background: var(--color-surface-hover);
+}
+
+.inline-menu .also-fills {
+  color: var(--color-text-muted);
+  font-weight: var(--font-weight-regular);
+}
+
+.inline-menu #generate {
+  padding-top: var(--space-1);
+  border-top: 1px solid var(--color-border);
+}
+
+/* ---- The save dialog (save-dialog/index.html). No entrance motion (module docs). ---- */
+
+body.save-dialog main {
+  padding: var(--space-3);
+}
+
+.save-dialog #dialog-title {
+  margin: 0 0 var(--space-1);
+  font-size: var(--font-size-body);
+}
+
+.save-dialog #dialog-host {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-caption);
+  overflow-wrap: anywhere;
+}
+
+.save-dialog #rows {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.save-dialog #rows legend {
+  margin-bottom: var(--space-1);
+  font-weight: var(--font-weight-medium);
+}
+
+.save-dialog #rows > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  padding: 2px 0;
+}
+
+.save-dialog #rows > div > input[type="text"] {
+  flex: 1 1 10rem;
+  width: auto;
+}
+
+.save-dialog #dialog-error {
+  margin: var(--space-2) 0 0;
+}
+
+.save-dialog #dialog-error:empty {
+  margin: 0;
+}
+
+.save-dialog .dialog-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.save-dialog #save {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.save-dialog #save:hover:not(:disabled) {
+  border-color: var(--color-accent-hover);
+  background: var(--color-accent-hover);
+}
+
+/* ---- The passkey consent prompt (passkey-consent/index.html). No entrance motion. ---- */
+
+body.passkey-consent {
+  padding: var(--space-3);
+}
+
+/* Forced colours: the selected popup tab and the primary buttons keep a visible system-colour
+   edge once the browser drops their fills. Nothing opts out of forced colours. */
+@media (forced-colors: active) {
+  .popup nav button:disabled,
+  .popup form > button[type="submit"],
+  .save-dialog #save {
+    border: 2px solid Highlight;
+  }
+}
