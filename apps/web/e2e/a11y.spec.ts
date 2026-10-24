@@ -384,3 +384,51 @@ test("a11y: a Secure Note rendered from Markdown, in light, dark, forced colours
   await expectAccessible(page, "item view: Secure Note rendered from Markdown (phone width)");
   expect(problems).toEqual([]);
 });
+
+test("a11y: the identity generator bar, both custom age modes, and its settings (ADR 0079 §10)", async ({ page }) => {
+  const { problems } = watch(page);
+  await signUp(page, server.origin, "a11yidentity");
+  await newItem(page, "Identity");
+  const bar = page.getByRole("group", { name: "Generated details" });
+  await expect(bar).toBeVisible();
+  await expect(page.locator('.item-editor [name="identity.first_name"]')).not.toHaveValue("");
+  await expectAccessible(page, "item editor (new identity, generator bar)");
+  // Custom range, with an invalid value and its error showing.
+  await bar.getByLabel("Age", { exact: true }).selectOption("custom");
+  await expect(bar.getByLabel("Min", { exact: true })).toBeVisible();
+  await expectAccessible(page, "identity generator: custom age range");
+  await bar.getByLabel("Min", { exact: true }).fill("60");
+  await bar.getByLabel("Max", { exact: true }).fill("30");
+  await expect(bar.getByText("Max must not be below Min.")).toBeVisible();
+  await expectAccessible(page, "identity generator: custom age range, invalid");
+  // Exact age, with an invalid value.
+  await bar.getByLabel("Age", { exact: true }).selectOption("exact");
+  await bar.getByLabel("Age (years)", { exact: true }).fill("12");
+  await expect(bar.getByText("Enter an age from 18 to 99.")).toBeVisible();
+  await expectAccessible(page, "identity generator: exact age, invalid");
+  await bar.getByLabel("Age (years)", { exact: true }).fill("40");
+  await page.getByRole("button", { name: "Regenerate first name" }).click();
+  await expect(bar.getByRole("status")).toHaveText("First name regenerated");
+  await expectAccessible(page, "identity generator: after a regeneration");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expectAccessible(page, "identity generator (dark)");
+  await page.emulateMedia({ colorScheme: "light", forcedColors: "active" });
+  await expectAccessible(page, "identity generator (forced colours)", { forcedColors: true });
+  await page.emulateMedia({ colorScheme: "light", forcedColors: "none" });
+  await page.getByRole("button", { name: "Cancel" }).click();
+
+  // Settings → Identity generator, both custom modes and a refused domain.
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const pane = page.getByRole("region", { name: "Identity generator" });
+  await expect(pane.getByLabel("Default sex")).toBeVisible();
+  await expectAccessible(page, "settings: identity generator");
+  await pane.getByLabel("Default age").selectOption("custom");
+  await expect(pane.getByLabel("Min", { exact: true })).toBeVisible();
+  await expectAccessible(page, "settings: identity generator, custom age range");
+  await pane.getByLabel("Default age").selectOption("exact");
+  await pane.getByLabel("Email domain for generated identities").fill("not a domain");
+  await pane.getByRole("button", { name: "Save identity defaults" }).click();
+  await expect(pane.getByText("Enter a domain name such as example.com.")).toBeVisible();
+  await expectAccessible(page, "settings: identity generator, exact age and a refused domain");
+  expect(problems).toEqual([]);
+});

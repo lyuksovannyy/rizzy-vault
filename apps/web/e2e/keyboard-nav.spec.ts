@@ -367,3 +367,90 @@ test("keyboard only: create, view and reveal each M3 item type (ADR 0055)", asyn
   }
   expect(problems).toEqual([]);
 });
+
+test("keyboard only: the identity generator and its settings (ADR 0079 §10)", async ({ page }) => {
+  const { problems } = watch(page);
+  const kb = page.keyboard;
+  const button = (name: string) => page.getByRole("button", { name, exact: true });
+  await signUp(page, server.origin, "keyboardidentity");
+
+  // Settings → Identity generator: a default sex, an exact age and a domain, saved.
+  await tabTo(page, button("Settings"));
+  await kb.press("Enter");
+  const pane = page.getByRole("region", { name: "Identity generator" });
+  await tabTo(page, pane.getByLabel("Default sex"));
+  await kb.press("ArrowDown");
+  await expect(pane.getByLabel("Default sex")).toHaveValue("male");
+  await tabTo(page, pane.getByLabel("Default age"));
+  await kb.type("Exact");
+  await expect(pane.getByLabel("Default age")).toHaveValue("exact");
+  await tabTo(page, pane.getByLabel("Age (years)", { exact: true }));
+  await kb.press("ControlOrMeta+a");
+  await kb.type("40");
+  await tabTo(page, pane.getByLabel("Email domain for generated identities"));
+  await kb.type("example.com");
+  await tabTo(page, pane.getByRole("button", { name: "Save identity defaults" }));
+  await kb.press("Enter");
+  await expect(pane.getByRole("status")).toHaveText("The identity generator defaults are saved.");
+
+  // New identity: every control of the generator bar, by keyboard.
+  await tabTo(page, button("All items"), { backwards: true });
+  await kb.press("Enter");
+  await tabTo(page, page.getByRole("button", { name: /New item/ }));
+  await kb.press("Enter");
+  await tabTo(page, page.getByRole("menuitem", { name: "Identity", exact: true }));
+  await kb.press("Enter");
+  const bar = page.getByRole("group", { name: "Generated details" });
+  const first = page.locator('.item-editor [name="identity.first_name"]');
+  await expect(first).not.toHaveValue("");
+  const live = bar.getByRole("status");
+  // The sex radio group: Tab reaches the checked radio, an arrow key picks the other.
+  await expect(bar.getByRole("radio", { name: "Male", exact: true })).toBeChecked();
+  await tabTo(page, bar.getByRole("radio", { name: "Male", exact: true }));
+  await kb.press("ArrowDown");
+  await expect(bar.getByRole("radio", { name: "Female", exact: true })).toBeChecked();
+  await expect(page.locator('.item-editor [name="identity.sex"]')).toHaveValue("female");
+  await tabTo(page, bar.getByLabel("Country", { exact: true }));
+  // The browser's en-US gives United States, the last bundled code; one up is Sweden.
+  await kb.press("ArrowUp");
+  await expect(bar.getByLabel("Country", { exact: true })).toHaveValue("SE");
+  await expect(page.locator('.item-editor [name="identity.country"]')).toHaveValue("SE");
+  // The age select with both custom modes open.
+  const age = bar.getByLabel("Age", { exact: true });
+  await expect(age).toHaveValue("exact");
+  await tabTo(page, age);
+  await kb.type("Custom");
+  await expect(age).toHaveValue("custom");
+  await tabTo(page, bar.getByLabel("Min", { exact: true }));
+  await kb.press("ControlOrMeta+a");
+  await kb.type("30");
+  await tabTo(page, bar.getByLabel("Max", { exact: true }));
+  await kb.press("ControlOrMeta+a");
+  await kb.type("35");
+  await tabTo(page, age, { backwards: true });
+  await kb.type("Exact");
+  await expect(age).toHaveValue("exact");
+  await tabTo(page, bar.getByLabel("Age (years)", { exact: true }));
+  await kb.press("ControlOrMeta+a");
+  await kb.type("50");
+  await tabTo(page, bar.getByRole("radio", { name: "Name + birthday" }));
+  await kb.press("ArrowDown");
+  await expect(bar.getByRole("radio", { name: "Nickname" })).toBeChecked();
+  await tabTo(page, bar.getByRole("button", { name: "Regenerate all" }));
+  await kb.press("Enter");
+  await expect(live).toContainText("All generated fields regenerated");
+  // A field's own Regenerate button.
+  await tabTo(page, button("Regenerate first name"));
+  await kb.press("Enter");
+  await expect(live).toHaveText("First name regenerated");
+  // Start blank, then Save with a title typed.
+  await tabTo(page, bar.getByRole("button", { name: "Start blank" }), { backwards: true });
+  await kb.press("Enter");
+  await expect(first).toHaveValue("");
+  await tabTo(page, page.getByLabel("Title", { exact: true }));
+  await kb.type("Typed persona");
+  await tabTo(page, button("Save"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Typed persona" })).toBeVisible();
+  expect(problems).toEqual([]);
+});
