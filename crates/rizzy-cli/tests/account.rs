@@ -68,7 +68,11 @@ fn temp_dir(tag: &str) -> PathBuf {
 /// (webauthn-rs, ADR 0077), and a non-system DLL is found through `PATH`; without it the process
 /// cannot load (`STATUS_DLL_NOT_FOUND`) and writes nothing. Nothing else is needed: the
 /// temporary directory falls back from `TMP`, `TEMP` and `USERPROFILE` to the Windows directory.
-const OS_ENV: &[&str] = if cfg!(windows) { &["SystemRoot", "PATH"] } else { &[] };
+const OS_ENV: &[&str] = if cfg!(windows) {
+    &["SystemRoot", "PATH"]
+} else {
+    &[]
+};
 
 /// Clears `command`'s environment, so no `RIZZY_*` variable of the developer leaks in, and
 /// puts back [`OS_ENV`] from this process's.
