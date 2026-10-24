@@ -14,6 +14,8 @@
 //! end with `rizzy-client` (`paged_fetch`, ADR 0050).
 //! Listing and ending sessions (`sessions`, ADR 0075): the gating and strict body of each route,
 //! the ended token's `401` byte for byte, a device ending web sessions, another account's id.
+//! `WebAuthn` security keys (`webauthn`, ADR 0058): enrolment and login with a software
+//! authenticator, the pending row, single use, the state never in a body, gating and strict bodies.
 //! Encrypted attachments (`attachments`, ADR 0054): upload, a second device's byte-identical
 //! download, retries and conflicts, exact chunk lengths and indices, another account's id, the
 //! 25 MiB cap and the quota answered `quota_exceeded`, and the counter released at delete.
@@ -50,4 +52,5 @@ mod rotation;
 mod sessions;
 mod setups;
 mod signing;
+mod webauthn;
 mod worker;

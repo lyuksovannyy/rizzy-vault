@@ -536,11 +536,11 @@ impl Endpoint {
             | Self::DeviceAuthStart
             | Self::DeviceAuthFinish
             | Self::RecoveryStart
-            | Self::RecoveryComplete => SessionNeed::None,
+            | Self::RecoveryComplete
+            | Self::WebauthnLoginChallenge => SessionNeed::None,
             Self::LoginStart | Self::LoginFinish | Self::WebauthnLoginFinish => {
                 SessionNeed::Optional
             }
-            Self::WebauthnLoginChallenge => SessionNeed::None,
             Self::AccountState
             | Self::EnrolDevice
             | Self::WebCertificate
@@ -726,7 +726,7 @@ fn parse<T: DeserializeOwned>(body: &[u8]) -> Result<T, ErrorCode> {
 
 /// The answer to an auth-domain error: its code and, for a rate limit, its retry time. A
 /// storage or internal failure is logged first. A security key's possible clone (INV-83) is
-/// logged as a security event: the per-account security event log (THREAT_MODEL R-row, INV-48)
+/// logged as a security event: the per-account security event log (threat model R-row, INV-48)
 /// is not built yet, so this log line is where ADR 0058 owner answer 4's signal goes for now.
 fn auth_code(endpoint: Endpoint, e: &AuthError) -> Failure {
     if let AuthError::PossibleClone { account_id } = e {
