@@ -177,6 +177,36 @@ queries! {
     TOTP_STALE_ACCOUNTS = "totp_stale_accounts";
     /// Replaces a TOTP row's sealed secret and data key id.
     TOTP_RESEAL = "totp_reseal";
+    /// The `WebAuthn` credentials of account $1, oldest first (ADR 0077 §4).
+    WEBAUTHN_LIST = "webauthn_list";
+    /// The number of `WebAuthn` credentials of account $1 (ADR 0058 point 3).
+    WEBAUTHN_COUNT = "webauthn_count";
+    /// Stores an enrolled security key (ADR 0058 point 2, ADR 0077 §4).
+    WEBAUTHN_INSERT = "webauthn_insert";
+    /// Writes a security key's updated `SecurityKey` JSON and counter of record after an assertion (ADR 0077 §4).
+    WEBAUTHN_UPDATE = "webauthn_update";
+    /// Removes one security key of account $1.
+    WEBAUTHN_DELETE = "webauthn_delete";
+    /// Demotes a verified login to a second-factor-pending row, 60 s TTL (ADR 0058 point 3).
+    WEBAUTHN_PENDING_INSERT = "webauthn_pending_insert";
+    /// The account of pending row $1, to take its lock first (ADR 0011).
+    WEBAUTHN_PENDING_PEEK = "webauthn_pending_peek";
+    /// Reads and deletes pending row $1 in one statement: it is used once (ADR 0058 point 3).
+    WEBAUTHN_PENDING_TAKE = "webauthn_pending_take";
+    /// Deletes pending row $1.
+    WEBAUTHN_PENDING_DELETE = "webauthn_pending_delete";
+    /// Deletes pending rows expired at $1 (ADR 0010 §5, worker).
+    WEBAUTHN_PENDING_DELETE_EXPIRED = "webauthn_pending_delete_expired";
+    /// Stores a ceremony state, unsealed, 60 s TTL (ADR 0077 §2).
+    WEBAUTHN_CHALLENGE_INSERT = "webauthn_challenge_insert";
+    /// Reads and deletes ceremony state $1 in one statement, so it is used at most once (ADR 0077 §2 rule 1).
+    WEBAUTHN_CHALLENGE_TAKE = "webauthn_challenge_take";
+    /// Deletes ceremony state $1.
+    WEBAUTHN_CHALLENGE_DELETE = "webauthn_challenge_delete";
+    /// Deletes account $1's ceremony states of purpose $2: a new enrolment replaces an unfinished one.
+    WEBAUTHN_CHALLENGES_DELETE_PURPOSE = "webauthn_challenges_delete_purpose";
+    /// Deletes ceremony states expired at $1 (ADR 0010 §5, worker).
+    WEBAUTHN_CHALLENGES_DELETE_EXPIRED = "webauthn_challenges_delete_expired";
     /// The unexpired sessions of an account, newest first, with a row limit (ADR 0075 R1).
     SESSIONS_LIST_ACCOUNT = "sessions_list_account";
     /// The kind and expiry of one session of an account, by `session_id` (ADR 0075 R3).

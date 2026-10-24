@@ -56,6 +56,7 @@
 //! | [`attachments`] | ADR 0054 §6 | Creating, uploading, downloading and deleting encrypted attachments |
 //! | [`session`] | CRYPTO.md §5.10; ADR 0075 | Listing and ending the account's sessions |
 //! | [`totp`] | CRYPTO.md §5.10, §5.11, §11.15 | Server-side 2FA enrolment and removal |
+//! | [`webauthn`] | CRYPTO.md §11.17; ADRs 0058, 0077 | Security keys as a server-side second factor: enrolment, list, removal, login |
 //! | [`vault`] | ADR 0012 §3, §7; ADR 0021 §2, §4, §9 | Upload, Fetch and the healing request |
 //!
 //! # The HTTP conventions
@@ -114,6 +115,7 @@ pub mod recovery;
 pub mod session;
 pub mod totp;
 pub mod vault;
+pub mod webauthn;
 pub mod wire;
 
 #[cfg(test)]

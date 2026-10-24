@@ -29,7 +29,8 @@ sqlx.workspace = true
 # this crate: rizzy-server never names it. The workspace's exact pin and feature set.
 webauthn-rs.workspace = true
 # The ceremony state and the stored `SecurityKey` as JSON in `auth_` rows (ADR 0077 §§2, 4).
-# Already in the workspace (rizzy-proto); no new crate.
+# Already in the workspace (rizzy-proto); no new crates.
+serde.workspace = true
 serde_json.workspace = true
 # Wipes the bearer token and the TOTP secret handed back to the caller (CLAUDE.md: secret
 # types zeroize). The version rizzy-core pins; no new crate.

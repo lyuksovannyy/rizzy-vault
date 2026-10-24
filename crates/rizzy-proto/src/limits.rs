@@ -143,6 +143,16 @@ pub const MAX_ITEM_KEY_WRAPS: usize = 65_536;
 /// [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md
 pub const MAX_SESSIONS_LISTED: usize = 256;
 
+/// Byte limit: a `WebAuthn` credential id. `WebAuthn` Level 3 §5.1 caps `rawId` at 1023 bytes.
+pub const MAX_WEBAUTHN_CREDENTIAL_ID_LEN: usize = 1023;
+
+/// Count limit (this crate's choice): security keys one account may enrol (ADR 0058). It bounds
+/// `excludeCredentials` and `allowCredentials`, and the list an account sees.
+pub const MAX_WEBAUTHN_CREDENTIALS: usize = 32;
+
+/// Byte limit (this crate's choice): a security key's label, UTF-8.
+pub const MAX_WEBAUTHN_LABEL_LEN: usize = 64;
+
 /// Byte limit (this crate's choice): the PNG of one re-encoded icon in an `icons/fetch` answer
 /// ([ADR 0052] point 4). An icon is at most 128×128 RGBA pixels, 64 KiB raw; a PNG of it is at
 /// most that plus its filter bytes, zlib's stored-block overhead and the chunk headers, well
@@ -290,6 +300,21 @@ impl TextRule for InviteTokenRule {
     const REDACT: bool = true;
     fn allowed(byte: u8) -> bool {
         byte.is_ascii_graphic()
+    }
+}
+
+/// `WebAuthn` options or a browser `PublicKeyCredential`, as JSON text (CRYPTO.md §11.17,
+/// [`crate::webauthn`]): printable ASCII and spaces, at most 64 KiB. Every binary value in it is
+/// base64url, so a well-formed one never needs another byte. Not redacted: it holds challenges,
+/// public keys, credential ids and signatures, no secret.
+#[derive(Debug)]
+pub enum WebauthnJsonRule {}
+
+impl TextRule for WebauthnJsonRule {
+    const MAX: usize = 64 * 1024;
+    const REDACT: bool = false;
+    fn allowed(byte: u8) -> bool {
+        byte == b' ' || byte.is_ascii_graphic()
     }
 }
 

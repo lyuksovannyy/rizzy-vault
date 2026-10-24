@@ -1967,6 +1967,7 @@ dependencies = [
  "rizzy-core",
  "rizzy-proto",
  "rizzy-storage",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "sqlx",

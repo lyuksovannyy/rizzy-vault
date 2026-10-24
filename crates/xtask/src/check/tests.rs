@@ -1172,7 +1172,12 @@ fn openssl_through_the_webauthn_rs_chain() {
     let client = t.member("rizzy-client");
     t.edge(client, ca, &[Kind::Normal]);
     let v = t.run();
-    assert_fires(&v, "ADR 0009 owner decision 1", "rizzy-client", "webauthn-attestation-ca");
+    assert_fires(
+        &v,
+        "ADR 0009 owner decision 1",
+        "rizzy-client",
+        "webauthn-attestation-ca",
+    );
 }
 
 // ---- ADR 0024: rustix ---------------------------------------------------------------------

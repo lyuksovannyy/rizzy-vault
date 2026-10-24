@@ -295,8 +295,43 @@ impl<V: VaultPort> AuthService<V> {
             .check_second_factor(tx, account_id, code, now_ms)
             .await?
         {
+            // ADR 0058 point 3: an account with a security key keeps this verified login as a
+            // 60 s, single-use second-factor-pending row named by its `login_id`, committed
+            // with the refusal. A TOTP-only miss restarts the whole OPAQUE login, as before.
+            crate::webauthn::demote_to_pending(tx, &req.login_id, account_id, now_ms).await?;
             return Err(AuthError::SecondFactorRequired);
         }
+        self.issue_login(
+            tx,
+            rng,
+            account_id,
+            &credential,
+            &trust,
+            source,
+            reauth,
+            now_ms,
+        )
+        .await
+    }
+
+    /// The end of a login once KE3 and the second factor verified (ADR 0058 point 3 shares it
+    /// with `webauthn/login/finish`): the stale-record check, the new OPAQUE session, the
+    /// rate-limit reset and the account view.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the verified login's account, record and trust, plus the request's context"
+    )]
+    pub(crate) async fn issue_login<R: CryptoRng + Send + ?Sized>(
+        &self,
+        tx: &mut WriteTx,
+        rng: &mut R,
+        account_id: rizzy_core::ids::AccountId,
+        credential: &Credential,
+        trust: &AccountTrust,
+        source: &[u8],
+        reauth: Option<&Session>,
+        now_ms: u64,
+    ) -> Result<LoginFinishResponse, AuthError> {
         if credential.lags(&trust.state) {
             // ADR 0032 §4: the record lags the signed state (a restore undid a credential change
             // or a rotation; a password the restore undid was refused above, INV-59). Answered
@@ -327,13 +362,13 @@ impl<V: VaultPort> AuthService<V> {
         let account = view::build(
             &self.vault,
             tx.conn(),
-            &trust,
+            trust,
             &devices,
             ViewScope::Current,
             self.config.account_quota_bytes,
         )
         .await?;
-        let wrap = server_wrap(&credential, trust.state.account_key_epoch)?;
+        let wrap = server_wrap(credential, trust.state.account_key_epoch)?;
         // ADR 0031 point 2: KE3 verified, so the flag tells nothing an unauthenticated prober
         // could not learn.
         let reregister = self.needs_reregistration(credential.setup_id);
