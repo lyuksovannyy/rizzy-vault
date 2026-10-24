@@ -82,6 +82,29 @@ function describeViolation(v: { id: string; help: string; nodes: { target: unkno
   return `${v.id}: ${v.help}\n${nodes}`;
 }
 
+/** Waits until no CSS animation or transition is still running on `page` (docs/design/README.md
+ * "Motion"): an entrance animation starts from `opacity: 0`, and a colour transition (a theme
+ * switch, a hover) passes through in-between colours, while axe measures colour contrast on what
+ * is painted, so a screen audited mid-motion would be judged on a frame the user never rests on.
+ * Every one of them is finite and short (`cargo xtask generate-tokens` caps them), so this
+ * settles within a fraction of a second. The one exception is not waited for: the TOTP ring's
+ * `stroke-dashoffset` countdown, which glides by one step every second for as long as the item
+ * is open. */
+export async function settleAnimations(page: Page): Promise<void> {
+  await page.waitForFunction(
+    () =>
+      document
+        .getAnimations()
+        .every(
+          (a) =>
+            a.playState !== "running" ||
+            (a instanceof CSSTransition && a.transitionProperty === "stroke-dashoffset"),
+        ),
+    undefined,
+    { timeout: 5_000 },
+  );
+}
+
 /** Runs axe over `page` (layer 1) and Chromium's accessibility tree check (layer 2), and fails
  * on any violation of either, naming `screen` in the message.
  *
@@ -94,6 +117,7 @@ function describeViolation(v: { id: string; help: string; nodes: { target: unkno
  * that no element sets `forced-color-adjust: none` (ADR 0014 §5: the components respect
  * `forced-colors`). */
 export async function expectAccessible(page: Page, screen: string, options: { forcedColors?: boolean } = {}): Promise<void> {
+  await settleAnimations(page);
   const forced = options.forcedColors === true;
   let builder = new AxeBuilder({ page }).withTags(AXE_TAGS);
   if (forced) {

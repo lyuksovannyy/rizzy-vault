@@ -4,6 +4,7 @@
 // holds the wasm instance and the keys (ADR 0013 §4) and renders the UI, which talks to the
 // Worker only through `CoreClient`.
 import "@rizzy-vault/ui/tokens.css";
+import "@rizzy-vault/ui/motion.css";
 import "./app.css";
 
 import { StrictMode } from "react";

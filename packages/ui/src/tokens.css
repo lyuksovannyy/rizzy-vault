@@ -11,7 +11,8 @@
    (--color-text, --color-surface-hover), (--color-text, --color-accent-subtle),
    (--color-text-muted, --color-bg), (--color-text-muted, --color-surface),
    (--color-text-muted, --color-surface-raised),
-   (--color-text-muted, --color-surface-hover), (--color-on-accent, --color-accent),
+   (--color-text-muted, --color-surface-hover),
+   (--color-text-muted, --color-accent-subtle), (--color-on-accent, --color-accent),
    (--color-on-accent, --color-accent-hover), (--color-accent, --color-surface),
    (--color-accent, --color-bg), (--color-accent, --color-accent-subtle),
    (--color-on-danger, --color-danger), (--color-danger, --color-bg),
@@ -20,7 +21,8 @@
    (--color-success, --color-bg), (--color-warning-text, --color-warning-bg),
    (--color-focus, --color-bg), (--color-focus, --color-surface),
    (--color-focus, --color-surface-raised), (--color-focus, --color-accent-subtle),
-   (--color-border-strong, --color-bg), (--color-border-strong, --color-surface) and
+   (--color-focus, --color-surface-hover), (--color-border-strong, --color-bg),
+   (--color-border-strong, --color-surface) and
    (--color-border-strong, --color-surface-raised). --color-border is not declared and not
    checked. */
 
