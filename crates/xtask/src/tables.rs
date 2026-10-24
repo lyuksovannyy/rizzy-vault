@@ -920,9 +920,11 @@ mod tests {
     /// A fresh scratch directory under the OS temp dir, removed by the caller.
     fn scratch_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "rizzy-xtask-tables-test-{name}-{}-{:?}",
+            "rizzy-xtask-tables-test-{name}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
         ));
         fs::create_dir_all(&dir).expect("create scratch dir");
         dir

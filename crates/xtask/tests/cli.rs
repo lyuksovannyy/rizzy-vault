@@ -67,9 +67,11 @@ fn check_tables_passes_on_the_repository() {
 #[test]
 fn check_tables_accepts_a_clean_fixture_and_rejects_a_cross_domain_one() {
     let root = std::env::temp_dir().join(format!(
-        "rizzy-xtask-cli-check-tables-{}-{:?}",
+        "rizzy-xtask-cli-check-tables-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
     ));
     let put = |rel: &str, text: &str| {
         let path = root.join(rel);
