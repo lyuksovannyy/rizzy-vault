@@ -111,6 +111,7 @@ pub mod session;
 mod signup;
 pub mod store;
 pub mod sync;
+pub mod vaults;
 
 pub use breach::{BreachCheck, BreachVerdict};
 pub use device::{DeviceSession, EnrolFlow};
@@ -134,6 +135,7 @@ pub use session::{
 };
 pub use signup::{EmergencyKit, SignupFlow};
 pub use store::{KvRow, cache_store_names};
+pub use vaults::{VaultAlarmView, VaultView};
 
 use wasm_bindgen::prelude::wasm_bindgen;
 

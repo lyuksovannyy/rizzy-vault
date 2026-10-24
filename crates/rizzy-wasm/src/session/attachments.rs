@@ -61,8 +61,18 @@ impl core::fmt::Debug for AttachmentView {
 }
 
 impl AttachmentView {
+    /// A copy, for a view handed out twice.
+    pub(crate) fn duplicate(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            mime: self.mime.clone(),
+            size: self.size,
+        }
+    }
+
     /// The view of a listed attachment.
-    fn of(info: &AttachmentInfo) -> Self {
+    pub(crate) fn of(info: &AttachmentInfo) -> Self {
         Self {
             id: hex(&info.attachment_id.to_bytes()),
             name: info.name.as_str().to_owned(),
@@ -110,10 +120,11 @@ impl Session {
     /// # Errors
     /// `locked`; `invalid_input` for a malformed id.
     pub fn attachments(&self, id: &str) -> Result<Vec<AttachmentView>, CoreError> {
-        let item = items::item_id(id)?;
+        let (vault, item) = items::parse_ref(id)?;
         Ok(self
             .inner()?
-            .vault
+            .vaults
+            .get(vault)?
             .attachments(item)
             .iter()
             .map(AttachmentView::of)
@@ -136,9 +147,9 @@ impl Session {
         data: &[u8],
         now_ms: u64,
     ) -> Result<String, CoreError> {
-        let item = items::item_id(id)?;
+        let (vault, item) = items::parse_ref(id)?;
         let inner = self.writable()?;
-        let upload = inner.vault.add_attachment(
+        let upload = inner.vaults.get_mut(vault)?.add_attachment(
             &mut inner.rng,
             &inner.unlocked,
             item,
@@ -185,6 +196,7 @@ impl Session {
             .downloads
             .get(&id)
             .ok_or(ClientError::InvalidInput)?
+            .1
             .chunk_count())
     }
 
@@ -234,12 +246,12 @@ impl Session {
         id: &str,
         attachment: &str,
     ) -> Result<u32, CoreError> {
-        let item = items::item_id(id)?;
+        let (vault, item) = items::parse_ref(id)?;
         let attachment = attachment_id(attachment)?;
         let inner = self.inner_mut()?;
-        let download = inner.vault.begin_download(item, attachment)?;
+        let download = inner.vaults.get(vault)?.begin_download(item, attachment)?;
         let count = download.chunk_count();
-        inner.downloads.insert(attachment, download);
+        inner.downloads.insert(attachment, (vault, download));
         Ok(count)
     }
 
@@ -256,7 +268,7 @@ impl Session {
             .ok_or(ClientError::InvalidInput)?;
         HttpRequest::post(
             paths::ATTACHMENTS_GET,
-            &download.get_request(),
+            &download.1.get_request(),
             Some(&inner.token),
         )
     }
@@ -276,11 +288,14 @@ impl Session {
         let id = attachment_id(attachment)?;
         let answer: GetAttachmentResponse = http::json(status, body)?;
         let inner = self.inner_mut()?;
-        let download = inner
+        let (vault, download) = inner
             .downloads
             .get_mut(&id)
             .ok_or(ClientError::InvalidInput)?;
-        inner.vault.accept_attachment_key(download, &answer)?;
+        inner
+            .vaults
+            .get(*vault)?
+            .accept_attachment_key(download, &answer)?;
         Ok(())
     }
 
@@ -301,7 +316,7 @@ impl Session {
             .ok_or(ClientError::InvalidInput)?;
         HttpRequest::post(
             paths::ATTACHMENTS_DOWNLOAD_CHUNK,
-            &download.chunk_request(index)?,
+            &download.1.chunk_request(index)?,
             Some(&inner.token),
         )
     }
@@ -326,7 +341,7 @@ impl Session {
             .downloads
             .get_mut(&id)
             .ok_or(ClientError::InvalidInput)?;
-        download.accept_response(index, &answer)?;
+        download.1.accept_response(index, &answer)?;
         Ok(())
     }
 
@@ -343,7 +358,7 @@ impl Session {
             .downloads
             .remove(&id)
             .ok_or(ClientError::InvalidInput)?;
-        let file = download.finish()?;
+        let file = download.1.finish()?;
         Ok(file.as_slice().to_vec())
     }
 
@@ -385,12 +400,16 @@ impl Session {
         attachment: &str,
         now_ms: u64,
     ) -> Result<(), CoreError> {
-        let item = items::item_id(id)?;
+        let (vault, item) = items::parse_ref(id)?;
         let attachment = attachment_id(attachment)?;
         let inner = self.writable()?;
-        inner
-            .vault
-            .remove_attachment(&mut inner.rng, &inner.unlocked, item, attachment, now_ms)?;
+        inner.vaults.get_mut(vault)?.remove_attachment(
+            &mut inner.rng,
+            &inner.unlocked,
+            item,
+            attachment,
+            now_ms,
+        )?;
         Ok(())
     }
 }

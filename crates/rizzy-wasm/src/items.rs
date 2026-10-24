@@ -55,6 +55,7 @@ use std::collections::HashMap;
 use rizzy_client::ClientError;
 use rizzy_client::items::{Dot, FieldKey, ItemId, ItemLifecycle, ItemType, Value};
 use rizzy_client::lists::{ListMove, ListPlace, MAX_WRITES_PER_OP};
+use rizzy_client::rizzy_core::ids::VaultId;
 use rizzy_client::rizzy_core::item::key::ElementId;
 use rizzy_client::rizzy_core::item::schema::{
     ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_DISCOVERABLE, ATTR_KIND, ATTR_LABEL,
@@ -156,6 +157,37 @@ pub(crate) fn item_id(text: &str) -> CoreResult<ItemId> {
     Ok(ItemId::from_bytes(parse_id(text)?))
 }
 
+/// The vault a hex id names.
+pub(crate) fn vault_id(text: &str) -> CoreResult<VaultId> {
+    Ok(VaultId::from_bytes(parse_id(text)?))
+}
+
+/// The item reference every export takes and hands out ([ADR 0081] §A7, INV-103: an item is
+/// named by `(vault_id, item_id)` everywhere): the vault's 32 hex digits, `:`, the item's 32
+/// hex digits, lowercase.
+///
+/// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+#[must_use]
+pub fn item_ref(vault: VaultId, item: ItemId) -> String {
+    let mut out = hex(vault.as_bytes());
+    out.push(':');
+    out.push_str(&hex(item.as_bytes()));
+    out
+}
+
+/// The `(vault, item)` an [`item_ref`] names, upper or lower case. Host input: bounded and
+/// parsed without panics; a bare item id (no vault) is refused, as nothing looks an item up by
+/// its id alone (INV-103).
+///
+/// # Errors
+/// `invalid_input` for anything but two 32-digit hex ids joined by `:`.
+pub fn parse_ref(text: &str) -> CoreResult<(VaultId, ItemId)> {
+    let (vault, item) = text
+        .split_once(':')
+        .ok_or(CoreError::from(ClientError::InvalidInput))?;
+    Ok((vault_id(vault)?, item_id(item)?))
+}
+
 /// The element id a hex id names.
 fn element_id_of(text: &str) -> CoreResult<ElementId> {
     Ok(ElementId::from_bytes(parse_id(text)?))
@@ -193,8 +225,10 @@ pub(crate) fn concealed(key: &FieldKey) -> bool {
 /// One row of an item list (module docs). Wiped when freed.
 #[wasm_bindgen]
 pub struct ItemSummary {
-    /// The item id, 32 hex digits.
+    /// The item reference ([`item_ref`]).
     id: String,
+    /// The item's vault, 32 hex digits.
+    vault_id: String,
     /// The type's name ([`TYPES`]).
     item_type: &'static str,
     /// `item.name`, or empty.
@@ -225,11 +259,18 @@ impl fmt::Debug for ItemSummary {
 
 #[wasm_bindgen]
 impl ItemSummary {
-    /// The item id, 32 lowercase hex digits.
+    /// The item reference, `<vault hex>:<item hex>` ([`item_ref`]): what every item call takes.
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn id(&self) -> String {
         self.id.clone()
+    }
+
+    /// The item's vault, 32 lowercase hex digits.
+    #[wasm_bindgen(getter, js_name = vaultId)]
+    #[must_use]
+    pub fn vault_id(&self) -> String {
+        self.vault_id.clone()
     }
 
     /// The type's name: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`,
@@ -309,7 +350,8 @@ pub(crate) fn summary(vault: &VaultSync, item: ItemId) -> Option<ItemSummary> {
         .field_value(item, LOGIN_TOTP)
         .is_some_and(|v| matches!(v.decode(), Ok(ValueRef::Text(t)) if !t.is_empty()));
     Some(ItemSummary {
-        id: hex(item.as_bytes()),
+        id: item_ref(vault.vault_id(), item),
+        vault_id: hex(vault.vault_id().as_bytes()),
         item_type: type_name(item_type),
         title: text_field(vault, item, ITEM_NAME).unwrap_or_default(),
         username: text_field(vault, item, LOGIN_USERNAME).filter(|u| !u.is_empty()),
@@ -500,9 +542,28 @@ fn kind_and_text(value: &Value) -> (&'static str, Option<Zeroizing<String>>) {
     }
 }
 
-/// The item that `id` names, if it is active or trashed.
+/// The item that the reference `id` ([`item_ref`]) names in `vault`, if it is active or
+/// trashed; `unknown_item` for a reference into another vault.
 pub(crate) fn visible_item(vault: &VaultSync, id: &str) -> CoreResult<ItemId> {
-    let item = item_id(id)?;
+    let (vault_id, item) = parse_ref(id)?;
+    if vault_id != vault.vault_id() {
+        return Err(ClientError::UnknownItem.into());
+    }
+    visible(vault, item)
+}
+
+/// The item the reference `id` names in `vault`, whatever its lifecycle; `unknown_item` for a
+/// reference into another vault.
+pub(crate) fn item_in(vault: &VaultSync, id: &str) -> CoreResult<ItemId> {
+    let (vault_id, item) = parse_ref(id)?;
+    if vault_id != vault.vault_id() {
+        return Err(ClientError::UnknownItem.into());
+    }
+    Ok(item)
+}
+
+/// `item` if it is active or trashed in `vault`.
+pub(crate) fn visible(vault: &VaultSync, item: ItemId) -> CoreResult<ItemId> {
     match vault.item_lifecycle(item) {
         ItemLifecycle::Active | ItemLifecycle::Trashed => Ok(item),
         _ => Err(ClientError::UnknownItem.into()),
@@ -1526,6 +1587,32 @@ pub(crate) fn writes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0081 §A7, INV-103: every item call names an item by vault and item.
+    #[test]
+    fn item_references_round_trip_and_refuse_a_bare_id() {
+        let vault = VaultId::from_bytes([0xab; 16]);
+        let item = ItemId::from_bytes([0x01; 16]);
+        let text = item_ref(vault, item);
+        assert_eq!(text.len(), 65);
+        assert_eq!(text, format!("{}:{}", "ab".repeat(16), "01".repeat(16)));
+        assert_eq!(parse_ref(&text).unwrap(), (vault, item));
+        assert_eq!(parse_ref(&text.to_uppercase()).unwrap(), (vault, item));
+        for bad in [
+            "",
+            ":",
+            &"01".repeat(16),
+            &format!("{}:", "ab".repeat(16)),
+            &format!(":{}", "01".repeat(16)),
+            &format!("{}:{}:", "ab".repeat(16), "01".repeat(16)),
+        ] {
+            assert_eq!(
+                parse_ref(bad).unwrap_err().as_str(),
+                "invalid_input",
+                "{bad}"
+            );
+        }
+    }
 
     #[test]
     fn hex_ids_round_trip() {

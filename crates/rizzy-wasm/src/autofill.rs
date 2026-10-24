@@ -25,7 +25,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 use zeroize::Zeroizing;
 
 use crate::error::{CoreError, CoreResult};
-use crate::items::{item_id, visible_item};
+use crate::items::{item_in, visible_item};
 
 /// What one custom field's autocomplete id does (ADR 0076 §2.4–§2.5, §3), for the editor.
 #[wasm_bindgen]
@@ -222,7 +222,7 @@ pub(crate) fn autofill_offer(
     id: &str,
     tokens: &[String],
 ) -> CoreResult<AutofillOffer> {
-    let item = item_id(id)?;
+    let item = item_in(vault, id)?;
     let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
     let custom = vault
         .custom_fill_offer(item, &tokens)
@@ -351,7 +351,7 @@ pub(crate) fn fill_plan(
     args: &FillArgs<'_>,
     now_ms: u64,
 ) -> CoreResult<FillValues> {
-    let item = item_id(id)?;
+    let item = item_in(vault, id)?;
     if args.tokens.len() != args.elements.len() {
         return Err(ClientError::InvalidInput.into());
     }
@@ -468,7 +468,7 @@ pub(crate) fn save_plan(
     values: &[Zeroizing<String>],
     masked: &[u8],
 ) -> CoreResult<Vec<SaveRowView>> {
-    let item = id.map(item_id).transpose()?;
+    let item = id.map(|id| item_in(vault, id)).transpose()?;
     if tokens.len() != values.len() || tokens.len() != masked.len() {
         return Err(ClientError::InvalidInput.into());
     }
