@@ -6,7 +6,10 @@
 // "What the server stores" group (ROADMAP §4.5) is `TransparencyPane.tsx`. The "Getting started"
 // group re-opens the guide shown after signup (`onboarding.ts`), which is remembered nowhere.
 // "Website matching" (`MatchingPane.tsx`) is the account match default and equivalence groups
-// (ADR 0042).
+// (ADR 0042). "Third-party notices" carries the attributions THIRD_PARTY_NOTICES.md requires
+// (the EFF wordlist; the default site groups, ADR 0080).
+import { ThirdPartyNotices } from "@rizzy-vault/ui";
+
 import { isTheme, useThemeContext } from "../theme.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { DevicesPane } from "./DevicesPane.tsx";
@@ -72,6 +75,7 @@ export function SettingsView(props: { readonly ctx: VaultContext; readonly onOpe
       <AppearanceGroup />
       <TransparencyPane ctx={props.ctx} />
       <GettingStartedGroup onOpenGuide={props.onOpenGuide} />
+      <ThirdPartyNotices className="panel narrow third-party-notices" />
     </div>
   );
 }

@@ -36,6 +36,7 @@ export {
   TypeIcon,
 } from "./icons.tsx";
 export { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog.tsx";
+export { THIRD_PARTY_ATTRIBUTIONS, ThirdPartyNotices } from "./ThirdPartyNotices.tsx";
 export { ItemIcon, useItemIcon } from "./ItemIcon.tsx";
 export {
   type IconFetcher,
