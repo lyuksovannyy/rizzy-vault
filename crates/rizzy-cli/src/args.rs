@@ -14,6 +14,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use rizzy_client::identity_gen::{AgeRange, CountryCode, EmailDomain, EmailStyle, SexChoice};
 use rizzy_core::generator::{CharSet, MAX_SET_TEXT_LEN};
 
 use crate::error::CliError;
@@ -33,6 +34,7 @@ USAGE:
     rv item show <item> [--reveal]
     rv item create --type <type> [--field <key>=<value>]... [--secret <key>]...
                    [--uri <uri>]... [--tag <name>]... [<custom field>]...
+                   [--generate [<identity option>]...]
     rv item edit <item> [--field <key>=<value>]... [--secret <key>]... [--clear <key>]...
                    [--tag <name>]... [--untag <name>]... [--uri <uri>]...
                    [--set-uri <id>=<uri>]... [--remove-uri <id>]... [<custom field>]...
@@ -43,6 +45,7 @@ USAGE:
     rv item restore-late <item> --type <type>
     rv generate [--length <n>] [--no-symbols | --symbols <chars>] [--no-ambiguous]
                 [--exclude <chars>] | --words <n> [--passphrase-number]
+    rv generate identity [<identity option>]... [--json]
     rv totp <item>
     rv cache reindex
     rv export --out <file> --name <login> [--format encrypted|json|csv|cxf]
@@ -77,6 +80,14 @@ a command exits.
 is asked for) or --custom-bool <label>=true|false. <id> is a URI's or custom field's element
 id as `item show` prints it in the field's key (uri/<id>/value), or a unique prefix of one.
 <place> is first, last, before:<id> or after:<id>.
+<identity option> is --sex male|female, --country <CC>, --age <min>-<max>|<n>|<preset>,
+--email-style name|nickname or --domain <domain> (ADR 0079). `generate identity` prints a
+synthetic identity (names, birthday, username, address, a phone from fictional ranges only);
+`item create --type identity --generate` saves one, and a --field of the same key wins. The
+age is in completed years, 18 to 99; presets: 18-27 (the default), 28-65, 21-25, 26-30, 31-35,
+36-40, 41-45, 46-50, 51-55, 56-60, 61-65, any (21-65); <n> alone is an exact age. Without
+--domain there is no email; without --sex the sex is drawn; without --country it is US.
+Generated details are random and may match real people or places.
 `item search` matches the query, in any case, within an item's name, username, websites, tag
 names, text custom fields, card holder and brand, and identity names; Secure Note bodies and
 concealed fields are never searched. Without a query it lists every item, most recently used
@@ -157,6 +168,9 @@ pub enum ImportFormat {
 /// The field changes of `item create` and `item edit`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FieldArgs {
+    /// `--generate` (create only, `--type identity`): pre-fill the identity from the generator
+    /// with these options (ADR 0079 §10). A `--field` of the same key wins.
+    pub generate: Option<IdentityArgs>,
     /// `--field key=value`: fields that are not concealed.
     pub fields: Vec<(String, String)>,
     /// `--secret key`: fields whose value is asked for.
@@ -215,6 +229,80 @@ pub enum Generate {
         /// `--passphrase-number`: one digit appended to one word.
         number: bool,
     },
+}
+
+/// The identity generator's options for `generate identity` and `item create --generate`
+/// (ADR 0079 §10). Unset options take the generator's first-time defaults: a drawn sex, 18–27,
+/// name and birthday, no email domain (so no email), and the country [`DEFAULT_IDENTITY_COUNTRY`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IdentityArgs {
+    /// `--sex male|female`; absent is a draw.
+    pub sex: SexChoice,
+    /// `--country CC`; checked against the bundled data when generating. Absent is
+    /// [`DEFAULT_IDENTITY_COUNTRY`].
+    pub country: Option<CountryCode>,
+    /// `--age MIN-MAX|N|PRESET`.
+    pub age: AgeRange,
+    /// `--email-style name|nickname`.
+    pub email_style: EmailStyle,
+    /// `--domain D`: the email domain; absent leaves the email empty (ADR 0079 §8).
+    pub domain: Option<EmailDomain>,
+}
+
+/// The country `rv` generates for without `--country`. `rv` does not read the synced
+/// generator defaults (tag `0x0004`), which the web vault keeps.
+pub const DEFAULT_IDENTITY_COUNTRY: &str = "US";
+
+impl IdentityArgs {
+    /// Reads one identity option into `self` if `option` is one; `Ok(false)` if it is not.
+    fn read(&mut self, option: &str, args: &mut Args) -> Result<bool, CliError> {
+        match option {
+            "--sex" => {
+                self.sex = match args.value("--sex")?.as_str() {
+                    "male" => SexChoice::Male,
+                    "female" => SexChoice::Female,
+                    _ => return Err(usage("--sex takes male or female")),
+                };
+            }
+            "--country" => {
+                let text = args.value("--country")?;
+                self.country = Some(
+                    CountryCode::parse(&text)
+                        .map_err(|_| usage("--country takes a two-letter country code"))?,
+                );
+            }
+            "--age" => {
+                let text = args.value("--age")?;
+                self.age = AgeRange::parse(&text).map_err(|_| {
+                    usage(
+                        "--age takes MIN-MAX or N (ages 18 to 99, minimum first) or a preset: \
+                         18-27, 28-65, 21-25, 26-30, 31-35, 36-40, 41-45, 46-50, 51-55, 56-60, \
+                         61-65, any",
+                    )
+                })?;
+            }
+            "--email-style" => {
+                self.email_style = match args.value("--email-style")?.as_str() {
+                    "name" => EmailStyle::NameAndBirthday,
+                    "nickname" => EmailStyle::Nickname,
+                    _ => return Err(usage("--email-style takes name or nickname")),
+                };
+            }
+            "--domain" => {
+                let text = args.value("--domain")?;
+                self.domain = Some(EmailDomain::parse(&text).map_err(|e| {
+                    usage(match e {
+                        rizzy_client::identity_gen::IdentityGenError::EmailDomainNotAscii => {
+                            "--domain takes the domain's ASCII (xn--) form"
+                        }
+                        _ => "--domain takes a domain name such as example.com",
+                    })
+                })?);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
 }
 
 /// How many items `item recent` lists without `--limit`.
@@ -322,6 +410,13 @@ pub enum Command {
     },
     /// `generate`.
     Generate(Generate),
+    /// `generate identity` (ADR 0079 §10).
+    GenerateIdentity {
+        /// The options.
+        options: IdentityArgs,
+        /// `--json`.
+        json: bool,
+    },
     /// `totp`.
     Totp(String),
     /// `export`.
@@ -841,9 +936,21 @@ fn field_args(
     item_type: &mut Option<String>,
 ) -> Result<FieldArgs, CliError> {
     let mut fields = FieldArgs::default();
+    let mut generate_flags = false;
+    let mut generate = false;
     while let Some(option) = args.next() {
+        generate |= option == "--generate";
         match option.as_str() {
             "--type" if create => *item_type = Some(args.value("--type")?),
+            "--generate" if create => {
+                fields.generate.get_or_insert_with(IdentityArgs::default);
+            }
+            "--sex" | "--country" | "--age" | "--email-style" | "--domain" if create => {
+                let mut options = fields.generate.take().unwrap_or_default();
+                options.read(&option, args)?;
+                fields.generate = Some(options);
+                generate_flags = true;
+            }
             "--field" => {
                 let pair = args.value("--field")?;
                 let (key, value) = pair
@@ -891,7 +998,30 @@ fn field_args(
             other => return Err(unknown(other)),
         }
     }
+    if generate_flags && !generate {
+        return Err(usage(
+            "--sex, --country, --age, --email-style and --domain need --generate",
+        ));
+    }
+    if !generate {
+        fields.generate = None;
+    }
     Ok(fields)
+}
+
+/// `generate identity [--sex male|female] [--country CC] [--age MIN-MAX|N|PRESET]
+/// [--email-style name|nickname] [--domain D] [--json]` (ADR 0079 §10).
+fn generate_identity(args: &mut Args) -> Result<Command, CliError> {
+    let mut options = IdentityArgs::default();
+    let mut json = false;
+    while let Some(option) = args.next() {
+        if option == "--json" {
+            json = true;
+        } else if !options.read(&option, args)? {
+            return Err(unknown(&option));
+        }
+    }
+    Ok(Command::GenerateIdentity { options, json })
 }
 
 /// The value of `option` split at its first `=`: `<a>=<b>` as `form` names it.
@@ -909,6 +1039,10 @@ fn pair(args: &mut Args, option: &str, form: &str) -> Result<(String, String), C
 /// `--passphrase-number` without it, are refused rather than ignored, as are `--symbols` with
 /// `--no-symbols`.
 fn generate(args: &mut Args) -> Result<Command, CliError> {
+    let mut first = args.next();
+    if first.as_deref() == Some("identity") {
+        return generate_identity(args);
+    }
     let (mut length, mut symbols, mut no_ambiguous, mut words) = (None, true, false, None);
     let (mut exclude, mut symbol_set, mut number) = (None, None, false);
     let count = |text: String, name: &str| {
@@ -922,7 +1056,7 @@ fn generate(args: &mut Args) -> Result<Command, CliError> {
             ))
         })
     };
-    while let Some(option) = args.next() {
+    while let Some(option) = first.take().or_else(|| args.next()) {
         match option.as_str() {
             "--length" => length = Some(count(args.value("--length")?, "--length")?),
             "--words" => words = Some(count(args.value("--words")?, "--words")?),
@@ -1464,5 +1598,98 @@ mod tests {
         // Too long to be a character set.
         let long = format!("generate --exclude {}", "a".repeat(MAX_SET_TEXT_LEN + 1));
         assert!(matches!(parsed(&long), Err(CliError::Usage(_))));
+    }
+
+    /// ADR 0079 §10: `generate identity` with every option, `--age` in its three forms, and the
+    /// values it refuses.
+    #[test]
+    fn generate_identity_options() {
+        assert_eq!(
+            command("generate identity"),
+            Command::GenerateIdentity {
+                options: IdentityArgs::default(),
+                json: false
+            }
+        );
+        assert_eq!(
+            command(
+                "generate identity --sex female --country de --age 28 --email-style nickname \
+                 --domain Mail.Example --json"
+            ),
+            Command::GenerateIdentity {
+                options: IdentityArgs {
+                    sex: SexChoice::Female,
+                    country: Some(CountryCode::parse("DE").unwrap()),
+                    age: AgeRange::exact(28).unwrap(),
+                    email_style: EmailStyle::Nickname,
+                    domain: Some(EmailDomain::parse("mail.example").unwrap()),
+                },
+                json: true
+            }
+        );
+        for (age, min, max) in [
+            ("18-27", 18, 27),
+            ("30-44", 30, 44),
+            ("any", 21, 65),
+            ("28-65", 28, 65),
+        ] {
+            let Command::GenerateIdentity { options, .. } =
+                command(&format!("generate identity --age {age}"))
+            else {
+                panic!("{age}");
+            };
+            assert_eq!((options.age.min(), options.age.max()), (min, max), "{age}");
+        }
+        for line in [
+            "generate identity --sex other",
+            "generate identity --country DEU",
+            "generate identity --age 17",
+            "generate identity --age 30-20",
+            "generate identity --age old",
+            "generate identity --email-style formal",
+            "generate identity --domain localhost",
+            "generate identity --domain bücher.example",
+            "generate identity --length 20",
+            "generate identity --age",
+        ] {
+            assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
+        }
+    }
+
+    /// ADR 0079 §10: `item create --generate` and its options, which need `--generate`.
+    #[test]
+    fn item_create_generate_options() {
+        let Command::ItemCreate { item_type, fields } = command(
+            "item create --type identity --generate --country FR --age 41-45 --field identity.city=Lyon",
+        ) else {
+            panic!("not a create");
+        };
+        assert_eq!(item_type, "identity");
+        let options = fields.generate.unwrap();
+        assert_eq!(options.country, Some(CountryCode::parse("FR").unwrap()));
+        assert_eq!(options.age, AgeRange::new(41, 45).unwrap());
+        assert_eq!(
+            fields.fields,
+            [("identity.city".to_owned(), "Lyon".to_owned())]
+        );
+        // The options may come before --generate.
+        let Command::ItemCreate { fields, .. } =
+            command("item create --sex male --generate --type identity")
+        else {
+            panic!("not a create");
+        };
+        assert_eq!(fields.generate.unwrap().sex, SexChoice::Male);
+        let Command::ItemCreate { fields, .. } = command("item create --type identity") else {
+            panic!("not a create");
+        };
+        assert_eq!(fields.generate, None);
+        for line in [
+            "item create --type identity --country DE",
+            "item create --type identity --generate --age 100",
+            "item edit ab --generate",
+            "item edit ab --country DE",
+        ] {
+            assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
+        }
     }
 }
