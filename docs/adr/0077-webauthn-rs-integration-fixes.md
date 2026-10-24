@@ -1,6 +1,6 @@
 # ADR 0077: webauthn-rs integration: deny wrappers, ceremony-state storage, RNG rule and stored credential shape
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0082](0082-security-keys-user-presence-only.md) (§2 in part, §7, §9 entries 4, 5, 6, 9 and 13, §10 in part, owner answers at acceptance in part)
 - Date: 2026-10-22 (accepted 2026-10-23)
 - Deciders: project owner
 - Milestone: M3 (`rizzy-domain-auth`, `rizzy-server`, `deny.toml`, `deploy/Containerfile`, CI images)

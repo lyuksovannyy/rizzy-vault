@@ -1,7 +1,7 @@
 # ADR 0082: Security keys: user presence only (`danger-user-presence-only-security-keys`)
 
-- Status: Proposed
-- Date: 2026-10-24
+- Status: Accepted
+- Date: 2026-10-24 (accepted 2026-10-24)
 - Deciders: project owner
 - Milestone: M3 (`rizzy-domain-auth`, `Cargo.toml` `[workspace.dependencies]`, `apps/web/e2e`)
 - Supersedes: [ADR 0077](0077-webauthn-rs-integration-fixes.md) (§2 in part, §7, §9 entries 4, 5, 6, 9 and 13, §10 in part, "Owner answers at acceptance" in part), on acceptance. §2 lists the exact parts and their replacement text.
@@ -21,6 +21,10 @@
 **Constraints.** [ADR 0059](0059-webauthn-rs-crate-approval.md) and ADR 0077 forbid every `danger-*` feature except `danger-allow-state-serialisation`, so enabling another one needs an Accepted ADR ([CLAUDE.md](../../CLAUDE.md), the ADR gate). Calling `webauthn-rs-core` directly to send `userVerificationOptionalWithCredentialIDList` was rejected by ADR 0059 and ADR 0077 B2 (b). `cargo xtask check-deps`'s ADR 0030 Decision 3 scan reports the word tokens `danger` and `dangerous` in first-party Rust; `danger_set_user_presence_only_security_keys` is one word token, so the call is not reported (V, `crates/xtask/src/unsafe_scan.rs` `word_tokens`/`is_word`, `crates/xtask/src/rules.rs` `DANGER_WORDS`). The crate's documentation warns that with this feature "newer keys will confusingly force a User Verification on registration, but will then not prompt for this during usage", and that the RP "MUST communicate to the user that the UV *may* occur on registration and then will not occur again" (V, `webauthn-rs` 0.5.5 `src/lib.rs` crate docs).
 
 ## Decision
+
+### Owner answers at acceptance (2026-10-24)
+
+The owner accepted this ADR as drafted. Open question 1 recommendation stands: tell users at enrolment that the key may ask for its PIN once ("Your key may ask for its PIN while it is being added. Signing in will only need a touch.").
 
 ### 1. User presence only
 
