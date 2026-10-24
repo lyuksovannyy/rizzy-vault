@@ -56,6 +56,14 @@ sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 sha2_010 = { package = "sha2", version = "=0.10.9", default-features = false }
 subtle = { version = "=2.6.1", default-features = false }
 unicode-normalization = { version = "=0.1.25", default-features = false }
+# The WebAuthn relying-party ceremony for the server-side security-key second factor (ADR 0058,
+# ADR 0059 as amended by ADR 0077 §2, CRYPTO.md §11.17), in `rizzy-domain-auth` only. Pulls
+# `openssl`/`openssl-sys` under the scoped `deny.toml` exception (ADR 0009 owner decision 1,
+# INV-85). `danger-allow-state-serialisation` is the one `danger-*` feature: it only derives serde
+# on the in-progress ceremony state, kept in `auth_` rows (ADR 0077 §2). Never
+# `resident-key-support`, `conditional-ui`, `workaround-google-passkey-specific-issues` or any
+# other `danger-*` feature.
+webauthn-rs = { version = "=0.5.5", default-features = false, features = ["attestation", "danger-allow-state-serialisation"] }
 zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 
 # URL parsing and matching for `rizzy-match` (ADR 0037, ADR 0038). Not cryptography: ordinary

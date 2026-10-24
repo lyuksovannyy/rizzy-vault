@@ -1144,6 +1144,37 @@ fn openssl_only_where_webauthn_lives() {
     );
 }
 
+/// INV-85 over the real webauthn-rs 0.5.5 shape (ADR 0077 §1): `openssl` and `openssl-sys` have
+/// three direct parents, `webauthn-rs-core`, `webauthn-attestation-ca` and (for `openssl-sys`)
+/// `openssl`. Through `rizzy-domain-auth` and `rizzy-server` that is allowed; any other member
+/// that reaches the chain, here through the attestation-CA crate, fires.
+#[test]
+fn openssl_through_the_webauthn_rs_chain() {
+    let mut t = Tree::current();
+    let auth = t.member("rizzy-domain-auth");
+    let server = t.id("rizzy-server");
+    let facade = t.external("webauthn-rs", "0.5.5");
+    let core = t.external("webauthn-rs-core", "0.5.5");
+    let ca = t.external("webauthn-attestation-ca", "0.5.5");
+    let openssl = t.external("openssl", "0.10.81");
+    let sys = t.external("openssl-sys", "0.9.117");
+    t.edge(server, auth, &[Kind::Normal]);
+    t.edge(auth, facade, &[Kind::Normal]);
+    t.edge(facade, core, &[Kind::Normal]);
+    t.edge(core, ca, &[Kind::Normal]);
+    t.edge(core, openssl, &[Kind::Normal]);
+    t.edge(core, sys, &[Kind::Normal]);
+    t.edge(ca, openssl, &[Kind::Normal]);
+    t.edge(ca, sys, &[Kind::Normal]);
+    t.edge(openssl, sys, &[Kind::Normal]);
+    assert_eq!(t.run(), []);
+
+    let client = t.member("rizzy-client");
+    t.edge(client, ca, &[Kind::Normal]);
+    let v = t.run();
+    assert_fires(&v, "ADR 0009 owner decision 1", "rizzy-client", "webauthn-attestation-ca");
+}
+
 // ---- ADR 0024: rustix ---------------------------------------------------------------------
 
 #[test]
