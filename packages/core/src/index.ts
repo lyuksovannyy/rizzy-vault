@@ -58,6 +58,14 @@ import initWasm, {
   generatePassphraseWithOptions as wasmGeneratePassphraseWithOptions,
   generatePasswordWithOptions as wasmGeneratePasswordWithOptions,
   generatorLimits as wasmGeneratorLimits,
+  agePresets as wasmAgePresets,
+  checkAgeRange as wasmCheckAgeRange,
+  generateIdentity as wasmGenerateIdentity,
+  identityCountries as wasmIdentityCountries,
+  normalizeEmailDomain as wasmNormalizeEmailDomain,
+  regenerateIdentityField as wasmRegenerateIdentityField,
+  IdentityDraft as WasmIdentityDraft,
+  type IdentityDefaultsView as WasmIdentityDefaultsView,
   initSync,
   metaRequest,
   normalizePageUrl as wasmNormalizePageUrl,
@@ -2071,6 +2079,13 @@ export class VaultSession {
     return matchSettingsOf(call(() => s.matchSettings()));
   }
 
+  /** The identity generator's synced defaults (ADR 0079 Open question 7), or `null` until first
+   * set; written with `changeMatchSettings({ kind: "identityDefaults", defaults })`. */
+  identityDefaults(): IdentityDefaults | null {
+    const s = this.#s();
+    return identityDefaultsOf(call(() => s.identityDefaults()));
+  }
+
   /** What the extension would offer on `pageUrl` (a top frame) among this vault's items, under
    * the account's settings: the settings screen's "check a website". */
   matchCandidates(pageUrl: string): MatchDecisionResult {
@@ -2462,6 +2477,201 @@ export function detectImportFormat(file: Uint8Array): DetectedImportFormat {
     default:
       return "unknown";
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The identity generator (ADR 0079): a new identity opens pre-filled. Over `rizzy-client`'s
+// `identity_gen` through `rizzy-wasm`'s `identity` module: the draw order, the bundled data,
+// the age presets and every check live in Rust; this wrapper only passes plain values.
+
+/** A stored sex value (ADR 0079 §1): writers that pick from the UI write exactly these. */
+export type IdentitySex = "male" | "female";
+/** The sex option: one of the two, or a draw (ADR 0079 §4 step 1). */
+export type IdentitySexChoice = IdentitySex | "random";
+/** How the email local part is built (ADR 0079 §4 step 10). */
+export type IdentityEmailStyle = "name" | "nickname";
+
+/** The generator's options (ADR 0079 §3). Title and phone are always on (Open questions 4, 5). */
+export interface IdentityGeneratorOptions {
+  readonly sex: IdentitySexChoice;
+  /** ISO 3166-1 alpha-2, one of {@link identityCountries}. */
+  readonly country: string;
+  /** Completed years, `18 <= ageMin <= ageMax <= 99`; an exact age `n` is `[n, n]`. */
+  readonly ageMin: number;
+  readonly ageMax: number;
+  readonly emailStyle: IdentityEmailStyle;
+  /** The user's email domain; empty or absent means none, and the email stays empty (§8). */
+  readonly emailDomain?: string | null;
+  /** Today in local time; defaults to now. */
+  readonly today?: Date;
+}
+
+/** One age preset (ADR 0079 §3), in the core's order; the label is the client's. */
+export interface AgePreset {
+  readonly id: string;
+  readonly min: number;
+  readonly max: number;
+}
+
+/** One bundled country. */
+export interface IdentityCountry {
+  readonly code: string;
+  /** The CLDR English name. */
+  readonly name: string;
+}
+
+/** The synced generator defaults (ACCOUNT_SETTINGS tag `0x0004`, ADR 0079 Open question 7). */
+export interface IdentityDefaults {
+  readonly sex: IdentitySexChoice;
+  readonly country: string | null;
+  readonly ageMin: number;
+  readonly ageMax: number;
+  readonly emailStyle: IdentityEmailStyle;
+  readonly emailDomain: string | null;
+}
+
+/** The first-time defaults (ADR 0079 §3): a drawn sex, 18–27, name and birthday, no domain. */
+export const DEFAULT_IDENTITY_DEFAULTS: IdentityDefaults = Object.freeze({
+  sex: "random",
+  country: null,
+  ageMin: 18,
+  ageMax: 27,
+  emailStyle: "name",
+  emailDomain: null,
+});
+
+/** The oldest and youngest ages a range may hold (ADR 0079 §3). */
+export const IDENTITY_MIN_AGE = 18;
+export const IDENTITY_MAX_AGE = 99;
+
+/** The `identity_*` codes as sentences for the UI. */
+export const IDENTITY_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
+  identity_unsupported_country: "This country is not supported.",
+  identity_age_range: `Enter an age from ${IDENTITY_MIN_AGE} to ${IDENTITY_MAX_AGE}, minimum first.`,
+  identity_email_domain: "Enter a domain name such as example.com.",
+  identity_email_domain_not_ascii: "Enter the domain in its ASCII form (xn--…).",
+  identity_date: "The date on this device is out of range.",
+  identity_unknown_field: "This field cannot be generated.",
+  identity_invalid_option: "These generator options are not valid.",
+});
+
+/** The sentence for an `identity_*` code. */
+export function identityErrorMessage(code: string): string {
+  return IDENTITY_ERROR_MESSAGES[code] ?? "The identity could not be generated.";
+}
+
+/** The age presets, in display order (ADR 0079 §3). */
+export function agePresets(): AgePreset[] {
+  ensureReady();
+  return mapFree(wasmAgePresets(), (p) => ({ id: p.id, min: p.min, max: p.max }));
+}
+
+/** The bundled countries, in code order. */
+export function identityCountries(): IdentityCountry[] {
+  ensureReady();
+  return mapFree(
+    call(() => wasmIdentityCountries()),
+    (c) => ({ code: c.code, name: c.name }),
+  );
+}
+
+/** Throws `identity_age_range` unless `18 <= min <= max <= 99` (whole numbers). */
+export function checkAgeRange(min: number, max: number): void {
+  ensureReady();
+  if (!Number.isInteger(min) || !Number.isInteger(max) || min < 0 || max < 0 || min > 255 || max > 255) {
+    throw new CoreError("identity_age_range");
+  }
+  call(() => wasmCheckAgeRange(min, max));
+}
+
+/** The email domain lower-cased; throws `identity_email_domain` or `…_not_ascii`. */
+export function normalizeEmailDomain(domain: string): string {
+  ensureReady();
+  return call(() => wasmNormalizeEmailDomain(domain));
+}
+
+/** The wasm arguments of the options, ending with today's local date. */
+function identityArgs(
+  o: IdentityGeneratorOptions,
+): [string, string, number, number, string, string | undefined, number, number, number] {
+  checkAgeRange(o.ageMin, o.ageMax);
+  const today = o.today ?? new Date();
+  return [
+    o.sex,
+    o.country,
+    o.ageMin,
+    o.ageMax,
+    o.emailStyle,
+    o.emailDomain === null || o.emailDomain === undefined || o.emailDomain === "" ? undefined : o.emailDomain,
+    today.getFullYear(),
+    today.getMonth() + 1,
+    today.getDate(),
+  ];
+}
+
+/**
+ * A generated identity (ADR 0079 §3): its field values by key, and the default item name.
+ * It holds the core's draw state so one field can be redrawn; call {@link free} when it is
+ * replaced.
+ */
+export class IdentityDraft {
+  readonly #inner: WasmIdentityDraft;
+  /** The filled fields, by ADR 0018 §7 key, in the core's order. */
+  readonly fields: Readonly<Record<string, string>>;
+  /** "First Last", the editor's default item name. */
+  readonly itemName: string;
+
+  /** @internal */
+  constructor(inner: WasmIdentityDraft) {
+    this.#inner = inner;
+    const fields: Record<string, string> = {};
+    for (const key of inner.keys) {
+      const value = inner.value(key);
+      if (value !== undefined) {
+        fields[key] = value;
+      }
+    }
+    this.fields = Object.freeze(fields);
+    this.itemName = inner.itemName;
+  }
+
+  /**
+   * Redraws `fieldKey` and the fields that depend on it under `options` (ADR 0079 §4). The new
+   * draft holds every field; the form writes only those the user has not edited, plus
+   * `fieldKey` itself. Picker changes are `identity.sex`, `identity.country`,
+   * `identity.birthday` (the age) and `identity.email` (the style or domain).
+   */
+  regenerate(fieldKey: string, options: IdentityGeneratorOptions): IdentityDraft {
+    const args = identityArgs(options);
+    return new IdentityDraft(call(() => wasmRegenerateIdentityField(this.#inner, fieldKey, ...args)));
+  }
+
+  /** Frees the core's copy. */
+  free(): void {
+    this.#inner.free();
+  }
+}
+
+/** Draws a new identity (ADR 0079 §3, §4); throws an `identity_*` {@link CoreError}. */
+export function generateIdentity(options: IdentityGeneratorOptions): IdentityDraft {
+  ensureReady();
+  const args = identityArgs(options);
+  return new IdentityDraft(call(() => wasmGenerateIdentity(...args)));
+}
+
+/** The defaults as a plain object, freed. */
+function identityDefaultsOf(view: WasmIdentityDefaultsView | undefined): IdentityDefaults | null {
+  if (view === undefined) {
+    return null;
+  }
+  return mapOne(view, (v) => ({
+    sex: v.sex as IdentitySexChoice,
+    country: v.country ?? null,
+    ageMin: v.ageMin,
+    ageMax: v.ageMax,
+    emailStyle: v.emailStyle as IdentityEmailStyle,
+    emailDomain: v.emailDomain ?? null,
+  }));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3243,7 +3453,8 @@ export type SettingsChange =
   | { readonly kind: "addUserGroup"; readonly domains: readonly string[] }
   | { readonly kind: "removeUserGroup"; readonly id: string }
   | { readonly kind: "disableGlobalGroup"; readonly id: string }
-  | { readonly kind: "enableGlobalGroup"; readonly id: string };
+  | { readonly kind: "enableGlobalGroup"; readonly id: string }
+  | { readonly kind: "identityDefaults"; readonly defaults: IdentityDefaults };
 
 /** A generated settings view as a plain object, freed. */
 function matchSettingsOf(view: WasmMatchSettingsView): MatchSettings {
@@ -3275,5 +3486,16 @@ function settingsRequest(s: Session, change: SettingsChange): HttpRequest {
       return s.disableGlobalGroupRequest(change.id);
     case "enableGlobalGroup":
       return s.enableGlobalGroupRequest(change.id);
+    case "identityDefaults": {
+      const d = change.defaults;
+      return s.setIdentityDefaultsRequest(
+        d.sex,
+        d.country ?? undefined,
+        d.ageMin,
+        d.ageMax,
+        d.emailStyle,
+        d.emailDomain ?? undefined,
+      );
+    }
   }
 }

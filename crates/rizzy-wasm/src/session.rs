@@ -102,6 +102,7 @@ use zeroize::Zeroizing;
 use crate::breach::BreachCheck;
 use crate::error::{CoreError, CoreResult, IMPORT_FAILED, LOCKED, UNKNOWN_FORMAT, WRONG_STATE};
 use crate::http::{self, HttpRequest};
+use crate::identity::{self, IdentityDefaultsView};
 use crate::items::{
     self, ConflictValueView, FieldHistoryView, FieldView, HistoryEntryView, ItemDraft, ItemSummary,
     hex, parse_id, type_from_name, visible_item,
@@ -1705,6 +1706,53 @@ impl Session {
         };
         let decision = decide_with_settings(page_url, &frame, &uris, record, &inner.global_groups)?;
         Ok(matching::decision_view(decision))
+    }
+
+    /// The identity generator's synced defaults (`ACCOUNT_SETTINGS` tag `0x0004`, ADR 0079 Open
+    /// question 7); `undefined` until first set.
+    ///
+    /// # Errors
+    /// As [`Session::match_settings`].
+    #[wasm_bindgen(js_name = identityDefaults)]
+    pub fn identity_defaults(&mut self) -> Result<Option<IdentityDefaultsView>, CoreError> {
+        let inner = self.inner_mut()?;
+        let record = inner.settings.get(&inner.account, &inner.unlocked)?;
+        Ok(record
+            .identity_defaults()
+            .cloned()
+            .map(IdentityDefaultsView::new))
+    }
+
+    /// Sets the identity generator's defaults: the commit request. `sex` is `male`, `female`
+    /// or `random`; `email_style` `name` or `nickname`; an empty or absent `country` or
+    /// `email_domain` means none.
+    ///
+    /// # Errors
+    /// The `identity_*` codes of the values (`crate::identity::identity_error`); as the private
+    /// `settings_change` (impl docs).
+    #[wasm_bindgen(js_name = setIdentityDefaultsRequest)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen passes an optional string by value"
+    )]
+    pub fn set_identity_defaults_request(
+        &mut self,
+        sex: &str,
+        country: Option<String>,
+        age_min: u8,
+        age_max: u8,
+        email_style: &str,
+        email_domain: Option<String>,
+    ) -> Result<HttpRequest, CoreError> {
+        let defaults = identity::identity_defaults(
+            sex,
+            country.as_deref(),
+            age_min,
+            age_max,
+            email_style,
+            email_domain.as_deref(),
+        )?;
+        self.settings_change(SettingsEdit::SetIdentityDefaults(defaults))
     }
 
     /// Sets the account-level match default (`0x0001`–`0x0006`): the commit request.
