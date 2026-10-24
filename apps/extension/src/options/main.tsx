@@ -5,8 +5,13 @@
 // (`core-host/core-context.ts`'s `startCoreContext` → `lifecycle.ts`'s `readAutoLockMs`), not
 // the hard-coded default. Not security-relevant on its own (the timeout is not secret), so it is
 // read from `storage.local`, not `storage.session`.
+//
+// It also carries the third-party notices (THIRD_PARTY_NOTICES.md; ADR 0080 owner answer 5),
+// shared with the web vault's Settings through `@rizzy-vault/ui`.
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+
+import { ThirdPartyNotices } from "@rizzy-vault/ui";
 
 import {
   AUTO_LOCK_MINUTES_STORAGE_KEY,
@@ -70,6 +75,7 @@ function OptionsPage() {
         Save
       </button>
       {saved ? <p>Saved.</p> : undefined}
+      <ThirdPartyNotices />
     </main>
   );
 }

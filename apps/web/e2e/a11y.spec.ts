@@ -175,7 +175,13 @@ test("a11y: signup, login, the guide, the vault, its dialogs and settings", asyn
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(page.getByRole("region", { name: "What the server stores" })).toBeVisible();
-  await expectAccessible(page, "settings (two-factor, devices, appearance, transparency, guide)");
+  // The third-party notices (THIRD_PARTY_NOTICES.md; ADR 0080 owner answer 5).
+  const notices = page.getByRole("region", { name: "Third-party notices" });
+  await expect(notices).toContainText("EFF's Long Wordlist");
+  await expect(notices).toContainText(
+    "Default site groups derived from the Bitwarden server's equivalent-domains list via Vaultwarden, AGPL-3.0.",
+  );
+  await expectAccessible(page, "settings (two-factor, devices, appearance, transparency, guide, notices)");
 
   // The trash, after a real trash.
   await page.getByRole("button", { name: "All items", exact: true }).click();

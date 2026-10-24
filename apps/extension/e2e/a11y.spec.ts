@@ -89,6 +89,12 @@ test("a11y: the popup's views, the options page and the inline menu", async ({ c
     const options = await context.newPage();
     await options.goto(`chrome-extension://${extensionId}/src/options/index.html`);
     await expect(options.getByRole("heading", { name: "rizzy-vault settings" })).toBeVisible();
+    // The third-party notices (THIRD_PARTY_NOTICES.md; ADR 0080 owner answer 5).
+    const notices = options.getByRole("region", { name: "Third-party notices" });
+    await expect(notices).toContainText("EFF's Long Wordlist");
+    await expect(notices).toContainText(
+      "Default site groups derived from the Bitwarden server's equivalent-domains list via Vaultwarden, AGPL-3.0.",
+    );
     await expectAccessible(options, "options page");
     await options.close();
 
