@@ -76,6 +76,9 @@
 #   client_account_settings rizzy-client's ACCOUNT_SETTINGS record parser and rizzy-match's
 #                      matching section (ADR 0042 §2-§4): arbitrary bytes, one encoding per
 #                      value, the bounds, and the host's edits on every record that parses
+#   client_vault_directory rizzy-client's vault directory, ACCOUNT_SETTINGS tag 0x0002 (ADR 0081
+#                      §A2): arbitrary bytes, one encoding per value, the shape, the host's
+#                      edits, and the completeness check against any served set (INV-102)
 #   import_bitwarden   rizzy-import's Bitwarden JSON importer and its JSON reader (ADR 0002
 #                      point 2; threat model A16)
 #   import_1pux        rizzy-import's 1PUX importer: the zip reader, the DEFLATE decoder and
@@ -571,6 +574,13 @@ bench = false
 [[bin]]
 name = "client_account_settings"
 path = "fuzz_targets/client_account_settings.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_vault_directory"
+path = "fuzz_targets/client_vault_directory.rs"
 test = false
 doc = false
 bench = false

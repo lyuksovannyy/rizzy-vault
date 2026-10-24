@@ -138,7 +138,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    for id in index::search(&rows, &query, limit)
+    for (_, id) in index::search(&rows, &query, limit)
         .into_iter()
         .chain(index::recent(&rows, limit))
     {
