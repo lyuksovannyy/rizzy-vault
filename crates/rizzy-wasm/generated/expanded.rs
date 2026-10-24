@@ -41805,6 +41805,7 @@ pub mod session {
     };
     use rizzy_client::sync::{Authors, VaultSync};
     use rizzy_client::two_factor::{TotpEnrolment, disable_request};
+    use rizzy_client::vaults::{PendingMove, late_edit};
     use wasm_bindgen::prelude::wasm_bindgen;
     use zeroize::Zeroizing;
     use crate::breach::BreachCheck;
@@ -46552,6 +46553,8 @@ pub mod session {
                 } else {
                     inner.vaults.forget(vault_id);
                     inner.moves.retain(|m| !m.involves(vault_id));
+                    inner.moved.retain(|m|
+                            m.source_vault != vault_id && m.target_vault != vault_id);
                     inner.vaults.set_catalog(catalog);
                     Ok(None)
                 }
@@ -47559,7 +47562,10 @@ pub mod session {
                             m.mv.target_vault) else { continue; };
                     match m.mv.finish(&mut inner.rng, &inner.unlocked, source,
                             target, !m.attachments_pending, now_ms) {
-                        Ok(MoveStep::SourcePurged) => done = done.saturating_add(1),
+                        Ok(MoveStep::SourcePurged) => {
+                            done = done.saturating_add(1);
+                            inner.moved.push(m.mv);
+                        }
                         Ok(MoveStep::AwaitTarget) => kept.push(m),
                         Err(e) => { first_error.get_or_insert(e); kept.push(m); }
                     }
@@ -49933,6 +49939,11 @@ pub mod session {
         /// session has no cache (CRYPTO.md §11.4), so they live in memory: a closed tab before
         /// the purge leaves the item in both vaults, a duplicate, never a loss.
         moves: Vec<WebMove>,
+        /// The moves of this session whose source was purged: this device's record of each move,
+        /// so a late edit that arrives for the purged source names the vault the item went to
+        /// (ADR 0081 §A6 step 2, [`late_edit`]). Memory only, like [`Inner::moves`]: the web
+        /// device is this session's, and so is what it recorded.
+        moved: Vec<PendingMove>,
         /// The sync step driver.
         sync: SyncDriver,
         /// The export gates: the re-authentication every export needs and the hold after the
@@ -50261,6 +50272,7 @@ pub mod session {
                                 vaults,
                                 vault_pending: None,
                                 moves: Vec::new(),
+                                moved: Vec::new(),
                                 sync: SyncDriver::default(),
                                 gate: ExportGate::new(),
                                 rng: os_rng(),
@@ -55277,14 +55289,15 @@ pub mod session {
             for vault in inner.vaults.all_mut() {
                 let vault_id = vault.vault_id();
                 for item in vault.item_ids() {
-                    let late = vault.late_edit_devices(item);
-                    if !late.is_empty() {
+                    if let Some(late) = late_edit(vault, item, &inner.moved) {
                         vault.mark_late_edits_surfaced(item);
                         out.push(Notice {
                                 kind: NOTICE_LATE_EDIT,
                                 item: item_ref(vault_id, item),
-                                devices: late.iter().map(|d| hex(d.as_bytes())).collect(),
+                                devices: late.devices.iter().map(|d|
+                                            hex(d.as_bytes())).collect(),
                                 conflict_id: None,
+                                moved_to: late.moved_to.map(|v| hex(v.as_bytes())),
                             });
                     }
                     if let Some(trash) = vault.concurrent_trash(item) &&
@@ -55297,6 +55310,7 @@ pub mod session {
                                                 hex(trash.edited_by.as_bytes())])),
                                 conflict_id: Some(concurrent_trash_conflict_id(trash.trashed_dot,
                                         trash.edited_dot)),
+                                moved_to: None,
                             });
                     }
                 }
@@ -65701,6 +65715,12 @@ pub mod session {
         " devices, not one op. Not a persistent or wire format (ADR 0018 §3 \"Surfacing\"):"]
         #[doc = " computed fresh for one in-memory host call, never stored."]
         conflict_id: Option<String>,
+        #[doc =
+        " For a late edit on an item this session moved to another vault and purged, that vault,"]
+        #[doc =
+        " hex (ADR 0081 §A6 step 2: \"the prompt names the target vault when this device recorded"]
+        #[doc = " the move\"). `None` otherwise."]
+        moved_to: Option<String>,
     }
     #[automatically_derived]
     impl ::core::clone::Clone for Notice {
@@ -65711,6 +65731,7 @@ pub mod session {
                 item: ::core::clone::Clone::clone(&self.item),
                 devices: ::core::clone::Clone::clone(&self.devices),
                 conflict_id: ::core::clone::Clone::clone(&self.conflict_id),
+                moved_to: ::core::clone::Clone::clone(&self.moved_to),
             }
         }
     }
@@ -65718,9 +65739,10 @@ pub mod session {
     impl ::core::fmt::Debug for Notice {
         #[inline]
         fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-            ::core::fmt::Formatter::debug_struct_field4_finish(f, "Notice",
+            ::core::fmt::Formatter::debug_struct_field5_finish(f, "Notice",
                 "kind", &self.kind, "item", &self.item, "devices",
-                &self.devices, "conflict_id", &&self.conflict_id)
+                &self.devices, "conflict_id", &self.conflict_id, "moved_to",
+                &&self.moved_to)
         }
     }
     #[automatically_derived]
@@ -66365,6 +66387,112 @@ pub mod session {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             self.conflict_id.clone()
+        }
+        #[doc =
+        " For `late-edit` only: the vault, 32 hex digits, this session moved the item to before"]
+        #[doc =
+        " its source was purged (ADR 0081 §A6 step 2); the host names it from"]
+        #[doc =
+        " [`Session::vaults`]. `undefined` for an item deleted permanently otherwise."]
+        #[must_use]
+        pub fn moved_to(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " For `late-edit` only: the vault, 32 hex digits, this session moved the item to before"]
+                    #[doc =
+                    " its source was purged (ADR 0081 §A6 step 2); the host names it from"]
+                    #[doc =
+                    " [`Session::vaults`]. `undefined` for an item deleted permanently otherwise."]
+                    #[must_use]
+                    #[export_name = "notice_movedTo_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Notice_movedTo(me:
+                            <Notice as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<Notice>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Notice>();
+                                            let me =
+                                                unsafe {
+                                                    <Notice as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.moved_to();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " For `late-edit` only: the vault, 32 hex digits, this session moved the item to before"]
+                    #[doc =
+                    " its source was purged (ADR 0081 §A6 step 2); the host names it from"]
+                    #[doc =
+                    " [`Session::vaults`]. `undefined` for an item deleted permanently otherwise."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_notice_movedTo_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x06Notice\x03V For `late-edit` only: the vault, 32 hex digits, this session moved the item to beforeE its source was purged (ADR 0081 \xc2\xa7A6 step 2); the host names it fromL [`Session::vaults`]. `undefined` for an item deleted permanently otherwise.\0\0\0\0\x07movedTo\x01\x01\0\0\0\0\x01\0\x02\x07movedTo\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.moved_to.clone()
         }
     }
     #[automatically_derived]
