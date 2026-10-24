@@ -58,6 +58,29 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// The variables a `rizzy-vault` process needs from the OS to run at all, kept when its
+/// environment is cleared ([`clear_env`]). None on Unix. On Windows, `SystemRoot`: Winsock
+/// loads its service provider from a registry path written as
+/// `%SystemRoot%\System32\mswsock.dll`, so a process without the variable cannot create a
+/// socket (`WSAEPROVIDERFAILEDINIT`, error 10106) and `rizzy-vault` exits 1 when it binds its
+/// listener. Go's `os/exec` adds `SYSTEMROOT` to every child's environment for this reason;
+/// Rust's `env_clear` does not. Nothing else is needed: system DLLs load from the system
+/// directory, not through `PATH`, and the temporary directory falls back from `TMP`, `TEMP`
+/// and `USERPROFILE` to the Windows directory.
+const OS_ENV: &[&str] = if cfg!(windows) { &["SystemRoot"] } else { &[] };
+
+/// Clears `command`'s environment, so no `RIZZY_*` variable of the developer leaks in, and
+/// puts back [`OS_ENV`] from this process's.
+fn clear_env(command: &mut Command) -> &mut Command {
+    command.env_clear();
+    for name in OS_ENV {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command
+}
+
 /// The `rizzy-vault` binary next to this test's executable, built through cargo (a no-op when
 /// it is fresh).
 fn server_binary() -> PathBuf {
@@ -191,8 +214,7 @@ impl Server {
                 .open(dir.join(STDERR_LOG))
                 .unwrap();
             let mut command = Command::new(server_binary());
-            command
-                .env_clear()
+            clear_env(&mut command)
                 .env(
                     "RIZZY_ORIGIN",
                     format!("http://127.0.0.1:{}", origin_port.unwrap_or(port)),

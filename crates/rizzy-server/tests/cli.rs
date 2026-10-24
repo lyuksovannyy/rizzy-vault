@@ -16,10 +16,33 @@ use std::process::{Command, Output};
 
 const BIN: &str = env!("CARGO_BIN_EXE_rizzy-vault");
 
-/// A command with an empty environment, so no `RIZZY_*` variable of the developer leaks in.
+/// The variables a `rizzy-vault` process needs from the OS to run at all, kept when its
+/// environment is cleared ([`clear_env`]). None on Unix. On Windows, `SystemRoot`: Winsock
+/// loads its service provider from a registry path written as
+/// `%SystemRoot%\System32\mswsock.dll`, so a process without the variable cannot create a
+/// socket (`WSAEPROVIDERFAILEDINIT`, error 10106) and `rizzy-vault` exits 1 when it binds its
+/// listener. Go's `os/exec` adds `SYSTEMROOT` to every child's environment for this reason;
+/// Rust's `env_clear` does not. Nothing else is needed: system DLLs load from the system
+/// directory, not through `PATH`, and the temporary directory falls back from `TMP`, `TEMP`
+/// and `USERPROFILE` to the Windows directory.
+const OS_ENV: &[&str] = if cfg!(windows) { &["SystemRoot"] } else { &[] };
+
+/// Clears `command`'s environment, so no `RIZZY_*` variable of the developer leaks in, and
+/// puts back [`OS_ENV`] from this process's.
+fn clear_env(command: &mut Command) -> &mut Command {
+    command.env_clear();
+    for name in OS_ENV {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command
+}
+
+/// A command with an empty environment ([`clear_env`]).
 fn rizzy(args: &[&str], env: &[(&str, &Path)]) -> Output {
     let mut command = Command::new(BIN);
-    command.env_clear().args(args);
+    clear_env(&mut command).args(args);
     for (k, v) in env {
         command.env(k, v);
     }
@@ -131,8 +154,7 @@ fn a_public_http_origin_is_a_configuration_error() {
 /// binary treats it as an unknown option.
 #[test]
 fn a_non_utf8_argument_is_a_usage_error_not_a_panic() {
-    let out = Command::new(BIN)
-        .env_clear()
+    let out = clear_env(&mut Command::new(BIN))
         .arg(not_utf8())
         .output()
         .unwrap();
@@ -258,8 +280,7 @@ fn migrate_creates_the_database() {
 fn rizzy_with_stdin(args: &[&str], env: &[(&str, &Path)], stdin: &[u8]) -> Output {
     use std::io::Write as _;
     use std::process::Stdio;
-    let mut child = Command::new(BIN)
-        .env_clear()
+    let mut child = clear_env(&mut Command::new(BIN))
         .args(args)
         .envs(env.iter().copied())
         .stdin(Stdio::piped())
