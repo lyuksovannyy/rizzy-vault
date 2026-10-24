@@ -48,7 +48,7 @@ Unique index on `(domain, local_part)`. Creation is `POST /api/v1/mail/aliases` 
 
 | Key | Value | Types | Notes |
 |---|---|---|---|
-| `alias.id` | Bytes, 16 | Login | The `alias_id` of the `mail_aliases` row this login's address was generated from. Absent when the login's address is not a generated alias |
+| `alias.id` | Bytes, 16 | Login, Identity | The `alias_id` of the `mail_aliases` row this item's address was generated from: a login's address, or a generated identity's email ([ADR 0079](0079-identity-generator.md) §9 item 1). Absent when the item's address is not a generated alias |
 
 This is the "linked by `alias_id` carried inside the item's encrypted fields" model: the server can route mail by `(account_id, local_part, domain, enabled)` without ever learning which item, or how many items, reference a given `alias_id`.
 
