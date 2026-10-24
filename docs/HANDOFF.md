@@ -198,7 +198,13 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
   - **Build environment:**
     - `env.sh` exports `OPENSSL_INCLUDE_DIR` and `OPENSSL_LIB_DIR` (this host has no pkg-config).
     - The CI workflow installs OpenSSL (the edit ADR 0077 authorises); its macOS and Windows steps have never run.
-  - **Advisories:** RUSTSEC-2026-0385 (ctutils → 0.4.5) and RUSTSEC-2026-0386 (tokio → 1.54.1), lockfile bumps.
+  - **Advisories:**
+    - RUSTSEC-2026-0385 (ctutils → 0.4.5), RUSTSEC-2026-0386 (tokio → 1.54.1) and RUSTSEC-2026-0387 (crypto-bigint 0.7.5 → 0.7.6, the copy under p256): all lockfile bumps.
+    - **`cargo deny` is still red (owner decision):** RUSTSEC-2026-0387 also matches **crypto-bigint 0.5.5**, which comes only through `opaque-ke =4.0.1` → `elliptic-curve 0.13.8`.
+      - It has no 0.5.x fix, and no stable opaque-ke drops elliptic-curve 0.13 (only 4.1.0-pre.2 is out).
+      - Our OPAQUE suite is Ristretto255, so that copy's arithmetic never runs.
+      - Options: a scoped `deny.toml` ignore with removal condition "next opaque-ke release" (recommended), moving to the prerelease (ADR 0009 checklist), or waiting.
+      - Until then every gate's two deny steps fail on this one finding, and tracks were integrated with only that failure.
   - **Proposed, awaiting the owner:** ADR 0081 (multiple vaults: Personal plus user vaults in M3, shared vaults in M9; 11 open questions).
 - **What is left for agents:**
   - The "On acceptance" doc edits of 0077/0079/0080 that the owner didn't make (CRYPTO §11.17, THREAT_MODEL INV-39/INV-75/A6, ADR 0042 tag-0x0004 amendment).
