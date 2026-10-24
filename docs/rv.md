@@ -85,6 +85,8 @@ rv item restore-late 77c0 --type login
 rv item history 3fa2           # every field's history; --reveal shows the old values
 rv item restore-history 3fa2 --field login.password --entry <id>
 rv generate --length 24        # or --words 6
+rv generate identity --country DE --age 18-27 --json
+rv item create --type identity --generate --country FR --age 28 --domain mail.example
 rv totp 3fa2
 rv item search ивана           # name, username, websites, tags, text custom fields; any case
 rv item recent                 # the items you viewed here, most recent first; --limit <n>
@@ -126,6 +128,16 @@ The M3 types have their own keys ([ADR 0055](adr/0055-m3-item-type-field-keys.md
 `api.name` and `license.name` name the service and the product; `item.name` stays the item's own title. An SSH key without `ssh.port` uses port 22: `item show` prints `ssh.port: 22 (default)`, and nothing is stored for it. A CSV export leaves items of these types out (the JSON export keeps them whole). An `rv` older than these types lists and shows such items but refuses to create or edit them, and keeps their fields as they are.
 
 **Bank account, retired** ([ADR 0078](adr/0078-retire-bank-account-item-type.md)). Builds between ADR 0055 and ADR 0078 also had a `bank-account` type. It is retired: `--type bank-account` is refused, and a Bank account such a build wrote is shown like any type this `rv` does not support, as `type:  unknown`, every `bank.` field printed as `********` unless `--reveal`, so you can copy the data out by hand. It cannot be edited; `item trash`, `item restore` and `item purge` work. Encrypted and JSON exports keep it as it is, a CSV export leaves it out and counts it, and importing an export skips it and counts it in the report.
+
+**Generated identities** ([ADR 0079](adr/0079-identity-generator.md)). `rv generate identity` prints a synthetic identity: sex, title, first and last name, birthday, username, address line, city, state or province, postcode and country, and a phone only where the country has a published fictional range. `--json` prints one object, `{"name": "First Last", "fields": {"identity.sex": "female", …}}`; without it, `key=value` lines. `rv item create --type identity --generate` saves one; a `--field` of the same key wins, and the item name defaults to "First Last". Both take:
+
+- `--sex male|female`: without it the sex is drawn.
+- `--country <CC>`: one of AT, AU, CA, CH, DE, ES, FR, GB, IE, IT, NL, SE, US; without it, US. `rv` does not read the defaults the web vault saves in the account settings.
+- `--age <min>-<max>`, `--age <n>` (an exact age) or `--age <preset>`: completed years, 18 to 99. The presets are `18-27` (the default), `28-65` ("28+"), `21-25`, `26-30`, `31-35`, `36-40`, `41-45`, `46-50`, `51-55`, `56-60`, `61-65` and `any` (21–65). The birthday is drawn so that the age today, in completed years, is in the range.
+- `--email-style name|nickname`: the email's local part from the name and the birth year or day (`anna.mueller98`), or the nickname that is also the username (two words and two digits).
+- `--domain <domain>`: the email domain, for example your own catch-all domain; enter an internationalized domain in its `xn--` form. Without it there is no email. A name-style address on a catch-all domain is easy to guess.
+
+Generated details are random and may match real people or places: don't use them where you must give your real details. No identity number (SSN, passport, driver's licence) is ever generated. `rv` takes today's date in UTC, so within a few hours of midnight an exact age's birthday window can be one day off your local date.
 
 ## Export and import
 
