@@ -35,6 +35,11 @@ export function Modal(props: {
   useEffect(() => {
     const previous = document.activeElement;
     setModalOpen(true);
+    // Focus starts inside the dialog: on its `autoFocus` control, else on the first control.
+    const dialog = ref.current;
+    if (dialog !== null && !dialog.contains(document.activeElement)) {
+      dialog.querySelector<HTMLElement>("input, select, textarea, button")?.focus();
+    }
     return () => {
       setModalOpen(false);
       if (previous instanceof HTMLElement) {
