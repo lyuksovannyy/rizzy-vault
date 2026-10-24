@@ -774,8 +774,8 @@ impl PendingMove {
     }
 
     /// Step 1 of the move, resumable: the copy under [`PendingMove::target_item`], unless the
-    /// target holds it already ("a target already stored is not created again"). The source
-    /// item's trash state is not carried: a moved item arrives active.
+    /// target holds it already ("a target already stored is not created again"). A trashed
+    /// source arrives in the target's trash (a vault delete moves its trash too, §A5).
     ///
     /// # Errors
     /// [`ClientError::UnknownVault`] for vaults that are not this move's; those of
@@ -798,7 +798,7 @@ impl PendingMove {
             self.source_item,
             target,
             self.target_item,
-            false,
+            true,
             now_ms,
         )
     }
