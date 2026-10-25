@@ -148,6 +148,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0095 | [The owner's answers to ADRs 0023–0028, recorded from their acceptance commits, and the ADR 0026, 0027 and 0028 text they contradict](0095-owner-answers-0023-0028-recorded.md) | Proposed | M1 |
 | 0096 | [Secrets that cross the client binding (ADR 0013 §3 rule 2, restated in full), and KeePass KDBX import inside the web vault's one core Worker](0096-binding-secrets-and-kdbx-worker.md) | Proposed | M1 / M3 |
 | 0097 | [Website matching corrections: the compared URL, the *Regex* mode, and reading ACCOUNT_SETTINGS independently of the reader's PSL](0097-website-matching-corrections.md) | Proposed | M2 |
+| 0098 | [Security keys: per-account and per-key limits, the six `webauthn` endpoints and `pending_id` (erratum to ADRs 0077 and 0028)](0098-security-key-limits-and-endpoints.md) | Proposed | M3 |
 
 ## Gates
 
