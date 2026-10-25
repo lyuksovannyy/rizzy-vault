@@ -156,21 +156,21 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0097 | [Website matching corrections: the compared URL, the *Regex* mode, and reading ACCOUNT_SETTINGS independently of the reader's PSL](0097-website-matching-corrections.md) | Proposed | M2 |
 | 0098 | [Security keys: per-account and per-key limits, the six `webauthn` endpoints and `pending_id` (erratum to ADRs 0077 and 0028)](0098-security-key-limits-and-endpoints.md) | Proposed | M3 |
 | 0099 | [Website icons: a per-account opt-in, off by default, and no request while the setting or the `icons` role is off (erratum to ADR 0052)](0099-website-icons-opt-in.md) | Proposed | M3 |
+| 0100 | [Notification mail: the account email address, the `worker` sender and its outbox, and the recovery notices of ADR 0008 decision 5](0100-notification-mail.md) | Proposed | M3 |
+| 0101 | [Native-client repository licensing: AGPL-3.0-only with two §7 permissions, store channels, the Windows App SDK, Qt LGPLv3, DCO and licence gates in the client repositories (partially supersedes ADR 0017)](0101-native-client-licensing.md) | Proposed | M3 |
+| 0102 | [Native client TLS: who terminates TLS per platform, the TLS 1.3 floor, trust anchors, a private CA through the core, and what the core checks regardless of TLS](0102-native-client-tls.md) | Proposed | M3 |
+| 0103 | [Disabled accounts: the `disabled_at_ms` state, what it refuses, the `account_disabled` code, and enabling again](0103-disable-user.md) | Proposed | M3 |
+| 0104 | [Metrics endpoint: `GET /metrics` on the admin listener, a closed Prometheus metric set, and an optional scrape token](0104-metrics-endpoint.md) | Proposed | M3 |
+| 0105 | [Secret Key QR: payload, encoding, display gate and scanner validation](0105-secret-key-qr.md) | Proposed | M3 / M7 |
 | 0106 | [AGPL §13 source link: `RIZZY_SOURCE_URL`, the `/api/meta` `source_url` member and the "Source" link (supersedes ADR 0028 item 14 and ADR 0048 §1 in part)](0106-agpl-source-url.md) | Proposed | M1 |
+| 0107 | [Backup-key retention: keys are kept until an explicit, evidence-gated `secrets backup-key retire` (supersedes ADR 0071 owner answer 3 and one restore sentence, and ADR 0047 restore step 4 in part)](0107-backup-key-retention.md) | Proposed | M8 |
+| 0108 | [An exit from an interrupted recovery whose new master password is lost: `rv recovery abandon` and one live recovery-only session per account (erratum to ADRs 0046 and 0028)](0108-interrupted-recovery-exit.md) | Proposed | M1 |
 | 0109 | [Sync cursor past a held header: derived, never stored, rewound on lapse (erratum to ADR 0050)](0109-sync-cursor-held-header.md) | Proposed | M1 |
 | 0110 | [Passkey user verification: the `UV` flag reflects a recent master-password verification, and `userVerification: "required"` gets one in the toolbar popup](0110-passkey-user-verification.md) | Proposed | M2 |
-| 0102 | [Native client TLS: who terminates TLS per platform, the TLS 1.3 floor, trust anchors, a private CA through the core, and what the core checks regardless of TLS](0102-native-client-tls.md) | Proposed | M3 |
-| 0101 | [Native-client repository licensing: AGPL-3.0-only with two §7 permissions, store channels, the Windows App SDK, Qt LGPLv3, DCO and licence gates in the client repositories (partially supersedes ADR 0017)](0101-native-client-licensing.md) | Proposed | M3 |
-| 0104 | [Metrics endpoint: `GET /metrics` on the admin listener, a closed Prometheus metric set, and an optional scrape token](0104-metrics-endpoint.md) | Proposed | M3 |
-| 0100 | [Notification mail: the account email address, the `worker` sender and its outbox, and the recovery notices of ADR 0008 decision 5](0100-notification-mail.md) | Proposed | M3 |
-| 0113 | [Breach-check endpoint: path, JSON shapes, error codes, size caps, caching and the `icons` settings (erratum to ADRs 0053 and 0048)](0113-breach-check-endpoint.md) | Proposed | M3 |
-| 0107 | [Backup-key retention: keys are kept until an explicit, evidence-gated `secrets backup-key retire` (supersedes ADR 0071 owner answer 3 and one restore sentence, and ADR 0047 restore step 4 in part)](0107-backup-key-retention.md) | Proposed | M8 |
 | 0111 | [Extension unlocked state: no `storage.session` fallback (a torn-down long-lived context is locked), idle and screen-lock auto-lock relayed by the Chromium service worker, Firefox on a persistent MV2 background page (erratum to ADRs 0036, 0013 and 0019)](0111-extension-session-and-idle-lock.md) | Proposed | M2 |
 | 0112 | [Core dumps and crash reports for `rv` on Windows and macOS: a panic-exit hook on every OS, `RLIMIT_CORE` on macOS, no Win32 call, and accepted risk AR-31 (supersedes ADR 0024 Decision 3 in part)](0112-core-dumps-windows-macos.md) | Proposed | M1 |
-| 0103 | [Disabled accounts: the `disabled_at_ms` state, what it refuses, the `account_disabled` code, and enabling again](0103-disable-user.md) | Proposed | M3 |
-| 0105 | [Secret Key QR: payload, encoding, display gate and scanner validation](0105-secret-key-qr.md) | Proposed | M3 / M7 |
+| 0113 | [Breach-check endpoint: path, JSON shapes, error codes, size caps, caching and the `icons` settings (erratum to ADRs 0053 and 0048)](0113-breach-check-endpoint.md) | Proposed | M3 |
 | 0114 | [One server settings register: the `RIZZY_*` names the shipped code reads, one rule for adding a name, and a CI check (supersedes ADR 0048 §1's last sentence)](0114-server-settings-list.md) | Proposed | M3 |
-| 0108 | [An exit from an interrupted recovery whose new master password is lost: `rv recovery abandon` and one live recovery-only session per account (erratum to ADRs 0046 and 0028)](0108-interrupted-recovery-exit.md) | Proposed | M1 |
 
 ## Gates
 
