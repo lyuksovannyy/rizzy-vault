@@ -38,7 +38,7 @@
 //!   server shows one anyway (`own_history_ahead`, `own_conflict`), the vault becomes read-only
 //!   and the sync ends with `device_state_outdated`, as in `rv`.
 //! - **Alarms of a durable device** (`crate::alarms`; ADR 0026 §4 step 4, ADR 0095 §C). The
-//!   extension's device ([`Ctx::alarms`] set) writes each alarm in the drain that carries the
+//!   extension's device (`Ctx::alarms` set) writes each alarm in the drain that carries the
 //!   answer that raised it, and every vault goes read-only: a rollback or fork of the account
 //!   answer (alarms 1 and 2, with the pinned and the served `account-state` as evidence), a
 //!   vault-key rollback or fork (no evidence, as `rv`), and an older copy of this device's

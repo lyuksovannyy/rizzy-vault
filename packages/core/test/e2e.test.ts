@@ -872,7 +872,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     const transport = fetchTransport(origin);
     const signup = await Signup.start(
       transport,
-      { origin, loginName: "Dave", password: PASSWORD, issueRecoveryCode: false },
+      { origin, loginName: "Heidi", password: PASSWORD, issueRecoveryCode: false },
       Date.now,
     );
     const kit = signup.emergencyKit();
@@ -881,7 +881,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     await signup.confirm(secretKey.split("-").at(-1) ?? "");
 
     const store = memoryCacheStore();
-    const session = await enrolDevice(transport, { origin, loginName: "dave", secretKey, password: PASSWORD }, store);
+    const session = await enrolDevice(transport, { origin, loginName: "heidi", secretKey, password: PASSWORD }, store);
     await session.authenticate();
     await session.sync();
     expect(session.alarms).toEqual([]);
