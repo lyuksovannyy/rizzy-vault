@@ -4,7 +4,7 @@
 - Date: 2026-10-24
 - Deciders: project owner
 - Milestone: M8 (`rizzy-server` `db_backup`; documentation only, no format or code change)
-- Supersedes: [ADR 0071](0071-encrypted-db-backup-format.md) ("Container (format_version 2)" in part: the second sentence of its "Ordering and completeness" paragraph), on acceptance. §3 below gives the exact part and its replacement.
+- Supersedes: [ADR 0071](0071-encrypted-db-backup-format.md) ("Container (format_version 2)" in part: the third sentence of its first paragraph, "Opening every chunk, concatenating in order and truncating to `plaintext_len` …", and the second sentence of its "Ordering and completeness" paragraph), on acceptance. §3 below gives the exact parts and their replacements.
 
 ## Context
 
@@ -53,15 +53,21 @@ A format_version 2 reader **must** accept exactly the files the writer produces.
 
 It then **must** derive every chunk's envelope length from `plaintext_len` alone: chunk *i* < `chunk_count − 1` is `CHUNK_LEN + 90` bytes, and the last chunk is `plaintext_len − (chunk_count − 1) × CHUNK_LEN + 90` bytes, with no chunk padded. It opens the chunks in order under their ctx, refuses the file at the first failure, and hands the concatenation, which is then exactly `plaintext_len` bytes, to the format_version 1 reader, which verifies its digest (ADR 0023 §2).
 
-A reader is **non-conforming** if it takes "the rest of the file" as the last chunk, tolerates trailing or missing bytes, finds chunk boundaries any other way, or relies on truncating a longer concatenation to `plaintext_len`. The words "truncating to `plaintext_len`" in ADR 0071's "Container" paragraph stay binding as written: under this reader the truncation removes nothing.
+A reader is **non-conforming** if it takes "the rest of the file" as the last chunk, tolerates trailing or missing bytes, finds chunk boundaries any other way, or relies on truncating a longer concatenation to `plaintext_len`. Reconstruction has no truncation step: the in-order concatenation of the exactly framed chunks *is* the format_version 1 file. ADR 0071's "Container" paragraph described reconstruction as "truncating to `plaintext_len`", which would leave a binding sentence telling a second reader to do what this section forbids, so §3 item 1 supersedes that sentence as well.
 
 `rizzy-server`'s `db_backup::parse_header` and `db_backup::open` are the reader, and they conform today (Context). Any later reader of the format, such as another restore tool or an implementation in another language, is held to the same rules and must replay the committed `db-backup` vectors with the same errors.
 
 ### 3. What this ADR supersedes
 
-One Accepted part ([ADR 0020](0020-partial-supersession.md) point 9). The rest of ADR 0071 stays binding unchanged, including the rest of its "Ordering and completeness" paragraph: the first sentence (the ctx) and the third ("A reader refuses a file where `chunk_count != ceil(plaintext_len / CHUNK_LEN)` before opening any chunk.").
+Two Accepted sentences, both in the same subsection ([ADR 0020](0020-partial-supersession.md) point 9: each part named exactly, each replacement written out in full). The rest of ADR 0071 stays binding unchanged, including the rest of the "Container (format_version 2)" first paragraph (the layout sentence, the `plaintext_len`/`chunk_count`/`CHUNK_LEN` sentence and the `backup_id` sentence) and the rest of its "Ordering and completeness" paragraph: the first sentence (the ctx) and the third ("A reader refuses a file where `chunk_count != ceil(plaintext_len / CHUNK_LEN)` before opening any chunk.").
 
-1. **[ADR 0071](0071-encrypted-db-backup-format.md) Decision, subsection "Container (format_version 2)", paragraph "Ordering and completeness", second sentence**, word for word: "Because `chunk_count` and `i` sit in every chunk's AAD, reordering, duplicating, dropping a chunk, or editing the clear `chunk_count`/`plaintext_len` fields fails every surviving chunk's commitment check, not only the edited one."
+1. **[ADR 0071](0071-encrypted-db-backup-format.md) Decision, subsection "Container (format_version 2)", first paragraph, third sentence**, word for word: "Opening every chunk, concatenating in order and truncating to `plaintext_len` reconstructs it byte for byte."
+
+   Replacement, in full:
+
+   > Opening every chunk in order, each at the exact envelope length the canonical reader derives from `plaintext_len` ([ADR 0083](0083-db-backup-plaintext-len-erratum.md) §2), and concatenating them reconstructs it byte for byte; the concatenation is exactly `plaintext_len` bytes, and there is no truncation step.
+
+2. **[ADR 0071](0071-encrypted-db-backup-format.md) Decision, subsection "Container (format_version 2)", paragraph "Ordering and completeness", second sentence**, word for word: "Because `chunk_count` and `i` sit in every chunk's AAD, reordering, duplicating, dropping a chunk, or editing the clear `chunk_count`/`plaintext_len` fields fails every surviving chunk's commitment check, not only the edited one."
 
    Replacement, in full:
 
@@ -69,13 +75,13 @@ One Accepted part ([ADR 0020](0020-partial-supersession.md) point 9). The rest o
 
 ### 4. Tests
 
-No new test is needed. `db-backup/reject/10` (a `plaintext_len` edit with `chunk_count` consistent), `db-backup/reject/11` (the same on a three-chunk file), `db-backup/reject/9` and the unit test `a_plaintext_len_edit_is_refused_by_the_framing_not_the_commitment` (the re-cut last envelope) already pin every clause of §1 and §2 (Context). They stay committed and replayed. Regenerating them stays deliberate (`cargo test -p rizzy-server --test db_backup -- --ignored generate`, then review the diff). A change that makes any of them fail with a different error, or with none, contradicts this ADR.
+No new test is needed. The positive vectors (`db-backup/single-chunk/0`, `/single-chunk/1`, `/three-chunk/0`), which `committed_vectors_replay` opens and compares with the payload, already pin that the in-order concatenation is exactly the format_version 1 file, with nothing to cut (§3 item 1). `db-backup/reject/10` (a `plaintext_len` edit with `chunk_count` consistent), `db-backup/reject/11` (the same on a three-chunk file), `db-backup/reject/9` and the unit test `a_plaintext_len_edit_is_refused_by_the_framing_not_the_commitment` (the re-cut last envelope) already pin every clause of §1 and §2 (Context). They stay committed and replayed. Regenerating them stays deliberate (`cargo test -p rizzy-server --test db_backup -- --ignored generate`, then review the diff). A change that makes any of them fail with a different error, or with none, contradicts this ADR.
 
 ## Consequences
 
 ### Positive
 
-- ADR 0071's Decision no longer contains a false security claim. The M8 audit (CRYPTO.md §1 rule 2, target 12) reviews a stated property that matches the code.
+- ADR 0071's Decision no longer contains a false security claim, nor a reconstruction rule ("truncating to `plaintext_len`") that a second reader could follow into the lax reader §2 forbids. The M8 audit (CRYPTO.md §1 rule 2, target 12) reviews a stated property that matches the code.
 - The reader's strictness becomes a requirement, so nobody can relax it as a "simplification" without a new ADR.
 - No format, vector, code or migration change. Every format_version 2 file written so far stays valid.
 
@@ -93,6 +99,7 @@ No new test is needed. `db-backup/reject/10` (a `plaintext_len` edit with `chunk
 - **Bind `plaintext_len` into every chunk's ctx.** That would make the original sentence true. The owner's words of 2026-10-24 rule it out ("rather than chunk AAD"). It is also a format change: new vectors, and either a new `format_version` or every existing format_version 2 file unreadable, for no gain over the exact framing the reader already enforces.
 - **Leave ADR 0071 as written, and rely on CRYPTO.md §9.8 and the code.** Rejected: an Accepted ADR wins over CRYPTO.md on a mechanism (CLAUDE.md), so the false sentence would stay the binding text, and the strict reader would stay an implementation detail.
 - **Supersede the whole "Ordering and completeness" paragraph.** Rejected: its first and third sentences are correct, and ADR 0020 point 9 asks for the smallest part that changes.
+- **Leave ADR 0071's "truncating to `plaintext_len`" sentence binding, read as "the truncation removes nothing"** (this draft's first version). Rejected after the 2026-10-25 gap review (G09-11): after acceptance one binding sentence would tell a reader to truncate and another would forbid relying on truncation, and an implementer of a second reader following the first builds exactly the reader §2 rules out.
 
 ## Open questions for the owner
 
@@ -103,13 +110,17 @@ None.
 The accepting change makes these edits; none is made now ([ADR 0020](0020-partial-supersession.md) point 9).
 
 1. **Status lines.** [ADR 0071](0071-encrypted-db-backup-format.md), now "Accepted": set to "Partially superseded by [ADR 0083](0083-db-backup-plaintext-len-erratum.md) (Container (format_version 2) in part)". Its [index](README.md) row follows, and this ADR's row and status line move to Accepted.
-2. **[CRYPTO.md §9.8](../CRYPTO.md#98-chunked-db-backup-format_version-2-m8), "Reader" bullet:** append "Any other reader is non-conforming: one that takes the rest of the file as the last chunk, tolerates trailing or missing bytes, or relies on truncating a longer concatenation to `plaintext_len` ([ADR 0083](adr/0083-db-backup-plaintext-len-erratum.md))." No other CRYPTO.md text changes: §9.8's "Ordering and completeness" bullet already names only `i` and `chunk_count`.
-3. **A code comment, no behaviour change.** In `crates/rizzy-server/src/db_backup.rs`, the module docs' "`plaintext_len` is in no AAD" bullet (lines 41–49) drops its quote of ADR 0071's superseded wording and its last sentence ("Whether `plaintext_len` should be bound in the ctx is a construction question for the owner, not answered here"), and cites this ADR instead.
+2. **[CRYPTO.md §9.8](../CRYPTO.md#98-chunked-db-backup-format_version-2-m8):**
+   - "Plaintext" bullet: its last sentence, "Opening every chunk, concatenating them in order and truncating to `plaintext_len` reconstructs the format_version 1 file byte for byte.", becomes "Opening every chunk in order, each at the exact length the reader below derives from `plaintext_len`, and concatenating them reconstructs the format_version 1 file byte for byte; there is no truncation step."
+   - "Reader" bullet: "and no chunk is padded, so the truncation to `plaintext_len` removes nothing" becomes "and no chunk is padded, so the concatenation is exactly `plaintext_len` bytes"; and append "Any other reader is non-conforming: one that takes the rest of the file as the last chunk, tolerates trailing or missing bytes, or relies on truncating a longer concatenation to `plaintext_len` ([ADR 0083](adr/0083-db-backup-plaintext-len-erratum.md))."
+
+   No other CRYPTO.md text changes: §9.8's "Ordering and completeness" bullet already names only `i` and `chunk_count`.
+3. **A code comment, no behaviour change.** In `crates/rizzy-server/src/db_backup.rs`, the module docs' "`plaintext_len` is in no AAD" bullet (lines 41–49) drops its quote of ADR 0071's superseded wording and its last sentence ("Whether `plaintext_len` should be bound in the ctx is a construction question for the owner, not answered here"), and cites this ADR instead; the module docs' plaintext bullet (lines 26–31) drops "(the truncation to `plaintext_len` of §9.8 removes nothing, since no chunk carries padding)", since §9.8 no longer describes a truncation.
 4. **[docs/HANDOFF.md](../HANDOFF.md):** the open item "the 0071 `plaintext_len` sentence" is closed.
 
 ## References
 
-- [ADR 0071](0071-encrypted-db-backup-format.md): the superseded sentence; "Container", "Size", "Commands and restore".
+- [ADR 0071](0071-encrypted-db-backup-format.md): the two superseded sentences; "Container", "Size", "Commands and restore".
 - [ADR 0023](0023-logical-backup-format.md) §2 (the format_version 1 trailing SHA-256), §3 (`MAX_BACKUP_FILE_LEN`).
 - [ADR 0020](0020-partial-supersession.md) point 9.
 - [CRYPTO.md §9.1](../CRYPTO.md#91-symmetric-envelope-algorithm-0x01) (the 90-byte `0x01` overhead; the commitment covers key, nonce and AAD), [§9.8](../CRYPTO.md#98-chunked-db-backup-format_version-2-m8) ("Ordering and completeness", "Reader").
