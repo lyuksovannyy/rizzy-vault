@@ -76,8 +76,8 @@ What exists (V, this branch):
   [CRYPTO.md §6.1](../CRYPTO.md#61-parameter-table) `kdf_id` 1 = m 65 536 KiB, t 3, p 4, "M1 default and
   floor", 32-byte output outside OPAQUE.
 - **Server-only purposes** 0x0100–0x0106 are taken or reserved: 0x0100–0x0102 in CRYPTO.md §8.4, 0x0103
-  SMTP credentials (INV-86, name and ctx still open, for ADR 0086), 0x0104 (ADR 0066, Proposed), 0x0105
-  (ADR 0071), 0x0106 (ADR 0072, Proposed). The next free id is **0x0107**.
+  SMTP credentials (INV-86; named `SERVER_SMTP_CREDENTIAL` by ADR 0086, Proposed), 0x0104 (ADR 0066,
+  Proposed), 0x0105 (ADR 0071), 0x0106 (ADR 0072, Proposed). The next free id is **0x0107**.
 - **Transport.** The server speaks HTTP/1.1 in clear; "TLS is the reverse proxy's" (`server.rs`). ADR
   0060 §2: compose examples do not publish the admin port, and the docs tell operators to reach it "only
   over a tunnel or VPN".
@@ -85,8 +85,8 @@ What exists (V, this branch):
   only `SHA-256(token)` stored (INV-8). Vault sessions are bearer headers, "never a query parameter or
   cookie" (ADR 0028 item 4, INV-52); the public listener reads no cookie.
 - **No per-account security event log exists** in code or in any Accepted ADR: ADR 0075 calls it a
-  candidate "once that log has an ADR".
-- **Migrations** run 0001–0009 (`0009_vault_kinds`); 0010 is being taken by the ADR 0045 track.
+  candidate "once that log has an ADR". ADR 0090 (Proposed, drafted in parallel) is that ADR (§9.4).
+- **Migrations:** the number is the next free one at implementation.
 
 ADR 0020 point 5 requires an Accepted ADR for "authentication and session protocols" and for a schema
 change before code. This is that ADR for admin login.
@@ -183,10 +183,11 @@ question 5 and ADR 0047 open question 5. No Accepted text changes.
    admin login, no "remember this device" and no admin recovery codes; the break-glass path is §7.
 2. **The existing code path, a new purpose.** Secrets, URIs and verification are `totp.rs` and
    `rizzy-core` `TotpParams` unchanged: 20 random bytes, SHA-1, 6 digits, 30 s, steps −1/0/+1,
-   accepted only above `last_accepted_step`, stored in the login's transaction. The sealing is CRYPTO.md
-   §5.11's construction with a **new server-only purpose `SERVER_ADMIN_TOTP_SECRET` 0x0107**
-   (provisional: allocated in ADR-number order after 0x0106, renumbered by the owner at acceptance if
-   sibling ADRs are accepted out of order), subkey label `server/admin-totp-secret`, ctx `admin_id (16)
+   accepted only above `last_accepted_step`, which only a fully successful login, account change or
+   enrolment advances, in its transaction (§9.2 gives the order). The sealing is CRYPTO.md
+   §5.11's construction with a **new server-only purpose `SERVER_ADMIN_TOTP_SECRET` 0x0107** (this
+   ADR's number; ADR 0086 uses the reserved 0x0103 and ADR 0087 seals nothing, so no sibling claims
+   another id), subkey label `server/admin-totp-secret`, ctx `admin_id (16)
    ‖ u32 totp_credential_seq`. Not 0x0100: its ctx names a vault `account_id`, and a separate purpose
    keeps a DB writer from moving a sealed secret between a vault account and an admin.
    `totp_credential_seq` counts the admin's enrolments from 1, as for accounts.
@@ -258,7 +259,7 @@ All under `RIZZY_ADMIN_LISTEN`; every other path stays the listener's plain `404
 | `GET /admin/bootstrap` | The form: token, admin name, password, password again. `404` once an admin exists. |
 | `POST /admin/bootstrap` | Step 1. Checks CSRF, rate limits, the token (not consumed), name and password rules; hashes the password; generates the TOTP secret; stores `auth_admin_enrolments` (pending admin id, name, hash, sealed secret, `expires_at_ms = now + 15 min`) under the SHA-256 of a random enrolment id set as cookie `rizzy_admin_enrol` (same attributes, `Max-Age=900`); renders the TOTP page. |
 | `POST /admin/bootstrap/confirm` | Step 2. Checks CSRF and the enrolment cookie, verifies the code against the pending secret, then in one transaction: consumes the token (§3.5), creates the admin and the confirmed TOTP row (`last_accepted_step` set), deletes the enrolment, writes the audit row, creates the session. A wrong code re-renders the TOTP page (at most 5 tries per enrolment, then it is deleted). |
-| `GET /admin/login`, `POST /admin/login` | One form: name, password, TOTP code. One answer for every failure ("Name, password or code is wrong"), the same page and status, with Argon2id always run. Success: new session, `303` to `/admin/`. |
+| `GET /admin/login`, `POST /admin/login` | One form: name, password, TOTP code, and an optional login pass (§7). One answer for every failure ("Name, password or code is wrong"), the same page and status, with Argon2id always run once the attempt is admitted; the checks run in §9.2's order. Success: new session, a fresh known-browser cookie (§9.2), `303` to `/admin/`. |
 | `POST /admin/logout` | Ends the session. |
 | `GET /admin/account` | Change password; replace the TOTP credential. |
 | `POST /admin/account/password` | Current password + current code + new password twice. Ends the other sessions. |
@@ -270,10 +271,18 @@ session and §5.4's CSRF check, through one extractor in `auth.rs` that every pr
 
 ### 7. CLI: display and break-glass
 
-Two new `rizzy-vault admin …` subcommands in `crates/rizzy-server/src/admin.rs` and `cli.rs` (the CLI
+Three new `rizzy-vault admin …` subcommands in `crates/rizzy-server/src/admin.rs` and `cli.rs` (the CLI
 module ADR 0060 §1 keeps apart from `http/admin_panel`):
 
 - `rizzy-vault admin bootstrap-token`: §3.4. Exit code 0 only when it printed a token.
+- `rizzy-vault admin login-pass`: the break-glass for a login flood (§9.2), with the server running.
+  Refused when no admin account exists. It writes a fresh 32-byte random pass, base64url without
+  padding (43 characters), only to a terminal, by §3.4's rules (refuses a non-TTY stdout, prints
+  nothing else to stdout, expiry to stderr), and stores `SHA-256(pass)` in `auth_admin_login_passes`
+  with `expires_at_ms = now + 15 min`, replacing any earlier pass. It writes against the live database
+  as ADR 0087 §11's `invite` commands do (one insert, no exclusive lock) and appends a
+  `login_pass_issued` audit row (actor `cli`). The pass replaces neither the password nor the code: it
+  only admits one login attempt past the flood (§9.2). Exit code 0 only when it printed a pass.
 - `rizzy-vault admin reset --confirm` (bare flag, as ADR 0047): the break-glass for a lost password,
   a lost authenticator or an expired bootstrap. It takes the exclusive instance lock like `restore` and
   `secrets rotate` (the server must be stopped), then in this order:
@@ -288,8 +297,8 @@ module ADR 0060 §1 keeps apart from `http/admin_panel`):
 
 ### 8. Tables
 
-One new migration, `NNNN_auth_admin.sql` for SQLite and PostgreSQL (next free number at
-implementation; 0010 is the ADR 0045 track's), in ADR 0011's `auth` domain. Columns are given in the
+One new migration, `NNNN_auth_admin.sql` for SQLite and PostgreSQL (the next free number at
+implementation), in ADR 0011's `auth` domain. Columns are given in the
 SQLite dialect of `0001_auth_initial.sql`, `STRICT`, all times `_ms` since the epoch.
 
 | Table | Columns | Notes |
@@ -299,40 +308,114 @@ SQLite dialect of `0001_auth_initial.sql`, `STRICT`, all times `_ms` since the e
 | `auth_admin_enrolments` | `enrolment_hash` BLOB(32) PK; `kind` (`bootstrap` \| `replace_totp`); `admin_id`; `name` (bootstrap only); `pw_salt`, `pw_hash` (bootstrap only); `totp_credential_seq`; `data_key_id`; `sealed_secret`; `failed_codes`; `expires_at_ms` | Short-lived, not in backups; `worker` deletes expired rows. |
 | `auth_admin_sessions` | `token_hash` BLOB(32) PK; `admin_id` FK CASCADE; `csrf_token` BLOB(32); `created_at_ms`; `last_seen_at_ms`; `expires_at_ms` | Not in backups; `worker` deletes expired rows. |
 | `auth_admin_bootstrap` | `token_hash` BLOB(32) PK; `armed_at_ms`; `expires_at_ms`; `redeemed_at_ms` NULL; `redeemed_by` `admin_id` NULL | In backups (a restore must not re-arm a redeemed token). |
-| `auth_admin_audit` | `seq` INTEGER PK ascending; `at_ms`; `actor_kind` (`panel` \| `cli`); `actor_admin_id` NULL (no FK: survives a reset); `action` TEXT from a fixed list; `target_account_id` NULL; `detail` TEXT ≤ 256 bytes, fixed per action; `source` TEXT NULL (the client address the HTTP layer resolves) | In backups. Append-only: no code path updates or deletes a row. |
+| `auth_admin_audit` | `seq` INTEGER PK ascending; `at_ms`; `actor_kind` (`panel` \| `cli` \| `system`); `actor_admin_id` NULL (§8.1); `action` TEXT from §9.3's fixed list; `target_account_id` NULL; `detail` TEXT ≤ 256 bytes, fixed per action; `source` TEXT NULL (the client address the HTTP layer resolves; `NULL` for `cli` and `system`) | In backups. Append-only: no code path updates or deletes a row. |
+| `auth_admin_known_browsers` | `token_hash` BLOB(32) PK; `admin_id` FK CASCADE; `created_at_ms`; `last_used_at_ms`; `expires_at_ms` (`created + 90 days`) | Not in backups; `worker` deletes expired rows. At most 5 per admin, the oldest evicted. |
+| `auth_admin_login_passes` | `pass_hash` BLOB(32) PK; `expires_at_ms`; `failed_attempts` | Not in backups; at most one row; `worker` deletes expired rows. |
 
 Rate limits reuse `auth_rate_limits` with new bucket kinds (§9.2). ADR 0023's `TABLES` list gains the
 four backed-up tables in foreign-key order; that bumps the dump's schema version as any migration does.
 
+#### 8.1 One actor encoding for the admin tables of ADRs 0085, 0086 and 0087
+
+Every column pair that records who did something, here and in the sibling drafts, has one shape:
+
+- `<role>_kind` TEXT, `CHECK (<role>_kind IN ('panel', 'cli'))`: `panel` is an admin acting through
+  the panel, `cli` the operator acting through a `rizzy-vault` command on the host. `NOT NULL` for a
+  role every row has (`actor`, `updated`, `issued`); for a role that may not have happened yet
+  (`revoked`), `NULL` exactly when the role's time column is (`revoked_at_ms`), checked in SQL.
+- `<role>_admin_id` BLOB NULL, `CHECK (<role>_admin_id IS NULL OR length(<role>_admin_id) = 16)`, and
+  `CHECK ((<role>_kind = 'panel') = (<role>_admin_id IS NOT NULL))` (written so that a `NULL` kind
+  also requires a `NULL` id): the acting `admin_id` for `panel`,
+  `NULL` for `cli` (a host shell is not an admin account and has no id). No foreign key: the value
+  outlives `admin reset` and the admin's removal, so who changed what is never erased.
+
+The pairs are `actor_kind`/`actor_admin_id` in `auth_admin_audit`, which alone also allows the kind
+`system` (an event the server records for nobody's action, with `NULL` id: `invite_redeemed`);
+`updated_kind`/`updated_admin_id` in ADR 0086's `auth_instance_settings`; and
+`issued_kind`/`issued_admin_id` and `revoked_kind`/`revoked_admin_id` in ADR 0087's `auth_invites`. No
+other encoding (free text such as `operator-cli`, a bare nullable id) is used for an actor.
+
 ### 9. Rate limits, audit log, logging, parsing
 
-1. **No hard lockout** (INV-7's rule carried over: a lockout would let anyone who reaches the listener
-   lock the operator out; the operator then needs `admin reset`).
-2. **Buckets** (`ratelimit.rs`, new kinds): `admin_login_source` per client address, 5 attempts per
-   15 min, then backoff from 60 s doubling to 1 h; `admin_login_global` per instance, 20 per hour, then
-   backoff from 60 s doubling to 1 h; `admin_bootstrap_source` and `admin_bootstrap_global` with the same
-   numbers. A blocked attempt answers `429` without running Argon2id. Success clears the per-source
-   bucket, never the global one. Each TOTP-carrying `/admin/account/*` POST counts against the login
-   buckets.
-3. **Audit log** (`auth_admin_audit`, append-only, never a secret): `bootstrap_redeemed`,
-   `login_succeeded`, `login_failed` (no name stored, so a mistyped password never lands there),
-   `logout`, `password_changed`, `totp_replaced`, `admin_reset`, and one action per screen of ADR
-   0060 and its siblings (for example `user_disabled` with `target_account_id`, `signup_mode_changed`
-   with detail `closed→open`, `smtp_password_set` / `smtp_password_cleared` without the value). Rate
-   limits bound the failed-login rows. An audit write is in the transaction of the action it records:
-   no action without its row. The panel shows the log read-only, newest first, 50 per page. Retention
-   and export are a later decision.
+1. **No hard lockout** (INV-7's rule carried over): nothing an outsider sends may stop the operator
+   from logging in with the right password and code. A refusal of everyone would let anyone who
+   reaches the listener lock the operator out, leaving only `admin reset`; §1.3's adversaries (a
+   tunnel or VPN peer, another local user, a misconfigured proxy) can reach it. So limits that refuse
+   before Argon2id apply only to attempts that carry no proof of an earlier success, and a correct
+   login always has a lane that a flood cannot fill.
+2. **Lanes and buckets** (`ratelimit.rs`, new kinds). The lane is chosen before any Argon2id, by a
+   SHA-256 lookup:
+   - **Known browser.** Each fully successful login sets
+     `rizzy_admin_known=<43 base64url>; Path=/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=7776000`
+     (90 days), a fresh random 32-byte value whose SHA-256 goes to `auth_admin_known_browsers`; the
+     value it arrived with, if any, is deleted (one use per value). A password change, a TOTP
+     replacement and `admin reset` delete every known browser of the admin. An attempt with a valid
+     cookie is counted only in its own bucket, `admin_login_known` per cookie (5 attempts per 15 min,
+     then backoff from 60 s doubling to 1 h), never in the per-source or the global bucket. An unknown,
+     expired or malformed cookie value is ignored and the attempt takes the ordinary lane. This is the
+     "device cookie" defence against lockout (L: OWASP, "Slow Down Online Guessing Attacks with Device
+     Cookies", not re-read for this draft).
+   - **Login pass.** A form whose optional pass field matches the live `auth_admin_login_passes` row
+     (constant-time compare of the SHA-256) takes the same reserved lane. The pass is deleted by a full
+     success, by its expiry, or after 5 failed attempts. It is how the operator logs in from a new
+     browser during a flood (§7).
+   - **Ordinary** (everything else): `admin_login_source` per client address, 5 attempts per 15 min,
+     then backoff from 60 s doubling to 1 h; and `admin_login_global` per instance, 20 failed attempts
+     per hour, then backoff from 60 s doubling to 1 h. A blocked ordinary attempt answers `429`
+     without running Argon2id. Success clears the per-source bucket, never the global one.
+   - **Argon2id cost** stays bounded in every lane: the ordinary lane shares §2's 2 permits, and the
+     reserved lane has 1 permit of its own (at most 3 × 64 MiB at once). Only a valid cookie or pass,
+     which an outsider does not have, reaches the reserved permit.
+   - **Order of the checks** (one answer for every failure, §6): form and CSRF (§5.4); lane lookup;
+     the lane's buckets (blocked: `429`); an Argon2id permit (§2); Argon2id over the admin's salt, or
+     the dummy salt for an unknown name; the TOTP code, **only when the password matched**; then, only
+     on full success, in one transaction: `last_accepted_step` advanced, the session created, the
+     known-browser value replaced and the lane's bucket cleared. A wrong password never checks the code
+     and never spends a TOTP step. A failure counts in the lane's bucket and, in the ordinary lane, in
+     the global one.
+   - **Bootstrap:** `admin_bootstrap_source` per client address with the per-source numbers above. There
+     is no global bootstrap bucket: the token is compared (§3.6) before any Argon2id, so an attempt
+     without the token costs no Argon2id, and a 256-bit token is not guessed online; a flood cannot
+     let the 24 h window expire unredeemed.
+   - **Account changes:** each TOTP-carrying `/admin/account/*` POST counts in a bucket of its
+     session (5 per 15 min, then backoff), never in the per-source or global buckets.
+   - Behind a TLS proxy (§5.1(b)) every request may share the proxy's address, so the per-source bucket
+     can act like a second global one; the reserved lane is why that is no lockout either. Whether ADR
+     0028 item 11's `RIZZY_TRUSTED_PROXIES` applies to the admin listener is open question 4.
+3. **Audit log** (`auth_admin_audit`, append-only, never a secret), one row per action, actor per
+   §8.1. The list is fixed:
+   - this ADR, panel: `bootstrap_redeemed`, `login_succeeded`, `login_failed` (no name stored, so a
+     mistyped password never lands there; a `429` writes no row), `logout`, `password_changed`,
+     `totp_replaced`;
+   - this ADR, CLI: `admin_reset`, `login_pass_issued`;
+   - ADR 0060's user screens: one action per screen (for example `user_disabled` with
+     `target_account_id`);
+   - ADR 0086's settings, panel or CLI (`rizzy-vault settings set|reset`): `setting_changed`, detail the
+     key and, for a plain key, `old→new` in canonical text; for a sealed key (`smtp_password`) the key
+     and `set` or `cleared`, never the value;
+   - ADR 0087's invites, panel or CLI (`rizzy-vault invite create|revoke`): `invite_issued` and
+     `invite_revoked`, detail the `invite_id` in hex; and `invite_redeemed` (actor `system`,
+     `target_account_id` the new account, detail the `invite_id`), written in the redemption's
+     transaction.
+   Every CLI command that changes admin state, settings or invites writes its row like the panel does.
+   Rate limits bound the failed-login rows. An audit write is in the transaction of the action it
+   records: no action without its row. The panel shows the log read-only, newest first, 50 per page.
+   Retention and export are a later decision.
 4. **Not the per-account security event log.** INV-69's "goes into the affected users' security event
-   log" needs that log, which no ADR has decided; this ADR does not invent it (open question 3).
+   log" is ADR 0090 (Proposed, drafted in parallel): that log, its rows
+   and who reads them. `auth_admin_audit` is the admin's side only. A screen that touches users (disable
+   user, the recovery wait) writes ADR 0090's rows as well as its audit row, in the same transaction,
+   and merges only once ADR 0090 is Accepted; the login screens here touch no user and do not wait for
+   it.
 5. **Logs** (INV-48): the access-log line stays ADR 0060's fixed route name `admin`. No log line, error
    message, panic message or `Debug` output carries a password, TOTP secret or code, the bootstrap
    token, a session, pre-auth, enrolment or CSRF token, or a form body. Secret values travel in
    `Zeroizing` types with redacted `Debug`.
 6. **Parsing** (CLAUDE.md "untrusted input"): `forms.rs` parses `application/x-www-form-urlencoded`
    into a typed struct per form: a fixed field set, each field once, unknown or duplicate fields
-   refused, per-field byte caps (name 254, password 1 024 before NFC, code 6 digits, token and CSRF
-   43), whole body 16 KiB; the cookie parser takes only `rizzy_admin`, `rizzy_admin_pre` and
-   `rizzy_admin_enrol`, each 43 base64url characters, and ignores others. Neither panics. Whether the
+   refused, per-field byte caps (name 254, password 1 024 before NFC, code 6 digits, token, login pass
+   and CSRF 43), whole body 16 KiB; the cookie parser takes only `rizzy_admin`, `rizzy_admin_pre`,
+   `rizzy_admin_enrol` and `rizzy_admin_known`, each 43 base64url characters, and ignores others. Neither panics. Whether the
    urlencoded decoding is our own code or the `form_urlencoded` crate already in `Cargo.lock` is the
    implementing PR's call under CLAUDE.md's dependency rules.
 
@@ -342,8 +425,8 @@ four backed-up tables in foreign-key order; that bumps the dump's schema version
 |---|---|---|
 | 1 | `rizzy-core` | `SERVER_ADMIN_TOTP_SECRET` 0x0107 and the label `server/admin-totp-secret` beside the existing server purposes; KAT vectors (below). No new code path otherwise. |
 | 2 | `rizzy-storage` | Migration `NNNN_auth_admin.sql` (both engines), queries, `TABLES` update, engine-parity tests. |
-| 3 | `rizzy-domain-auth` | `admin.rs`: `AdminService` with `bootstrap_arm`, `bootstrap_start`, `bootstrap_confirm`, `login`, `session` (check/touch/end), `change_password`, `totp_replace_start/confirm`, `reset`; reuse of `totp.rs` internals; new rate-limit kinds; clock and RNG injected. |
-| 4 | `rizzy-server` | `http/admin_panel/auth.rs` (session extractor, login, bootstrap, account routes), `forms.rs` (CSRF, parser), `templates/admin/{login,bootstrap,totp,account,audit}.html`, Host check, `no-store`; `server.rs` arming at start-up; `config.rs` `RIZZY_ADMIN_HOSTS`; `cli.rs`/`admin.rs` `admin bootstrap-token`, `admin reset --confirm`; `worker` cleanup. |
+| 3 | `rizzy-domain-auth` | `admin.rs`: `AdminService` with `bootstrap_arm`, `bootstrap_start`, `bootstrap_confirm`, `login` (lanes and check order of §9.2), `session` (check/touch/end), `change_password`, `totp_replace_start/confirm`, `login_pass_issue`, `reset`; reuse of `totp.rs` internals; new rate-limit kinds; clock and RNG injected. |
+| 4 | `rizzy-server` | `http/admin_panel/auth.rs` (session extractor, login, bootstrap, account routes, known-browser cookie), `forms.rs` (CSRF, parser), `templates/admin/{login,bootstrap,totp,account,audit}.html`, Host check, `no-store`; `server.rs` arming at start-up; `config.rs` `RIZZY_ADMIN_HOSTS`; `cli.rs`/`admin.rs` `admin bootstrap-token`, `admin login-pass`, `admin reset --confirm`; `worker` cleanup. |
 | 5 | docs | Deploy docs: reaching the panel (tunnel or HTTPS), first-boot steps, `admin reset`. |
 
 No new dependency is expected (Argon2id via `rizzy-core`, `subtle`, `sha2`, the TOTP code; Askama
@@ -365,6 +448,13 @@ arrives with ADR 0060's implementing PR).
   page and status for unknown name, wrong password and wrong code; rate-limit backoff and `429` without
   Argon2id; the Argon2id semaphore; `admin reset` crash-and-rerun; the public listener answers `404`
   to every admin route even with a valid admin cookie.
+- **No lockout** (§9.1, INV-107): with the global bucket saturated by failed attempts from many
+  sources and the 2 ordinary permits held, a correct login from a known browser succeeds, and so does
+  one from a new browser carrying a `login-pass`; a forged, expired or reused known-browser value takes
+  the ordinary lane and gets `429`; a password change ends every known browser; a wrong password never
+  checks the code and leaves `last_accepted_step` unchanged; a flood of wrong bootstrap tokens never
+  runs Argon2id. Every audit action of §9.3 is written once, with §8.1's actor columns, for the panel
+  and the CLI paths.
 - **INV-48 / INV-69 canary:** a run at the most verbose log level through bootstrap, login, password
   change, TOTP replacement and reset, then a search of every log line, HTTP response and DB row for the
   token, the passwords and the TOTP secret (raw, hex, base64, base32); `bootstrap-token` refuses a
@@ -383,11 +473,14 @@ arrives with ADR 0060's implementing PR).
 - [CRYPTO.md](../CRYPTO.md) §5.11 gains `SERVER_ADMIN_TOTP_SECRET` 0x0107 with its ctx; §8.4 gains its
   row; §4.3's server-subkey row names `admin-totp-secret`; §6.1 notes the admin password hash as a use of
   `kdf_id` 1 with a 32-byte output and a random 16-byte salt.
-- [THREAT_MODEL.md](../THREAT_MODEL.md) §8 gains INV-107 (provisional number): "Admin passwords are stored
+- [THREAT_MODEL.md](../THREAT_MODEL.md) §8 gains INV-107 (this ADR's number; ADR 0087 is INV-108 and ADR
+  0086 adds none, provisional until acceptance as for the 2026-10-11 batch): "Admin passwords are stored
   only as Argon2id `kdf_id` 1 hashes with a random 16-byte salt; admin TOTP secrets only as 0x0107
-  envelopes; admin session tokens and the bootstrap token only as SHA-256 in the DB. The bootstrap token
-  is redeemed at most once, only within 24 h of arming and only together with a confirmed second
-  factor; no server code path prints, logs or renders it." §7.19 "S" links this ADR.
+  envelopes; admin session tokens, known-browser values, login passes and the bootstrap token only as
+  SHA-256 in the DB. The bootstrap token is redeemed at most once, only within 24 h of arming and only
+  together with a confirmed second factor; no server code path prints, logs or renders it. Failed
+  admin logins from any number of sources never refuse a login from a known browser or one carrying
+  a login pass." Verified by §10's tests. §7.19 "S" links this ADR.
 - ADR 0028 item 12 is not edited; `RIZZY_ADMIN_HOSTS` follows `RIZZY_ADMIN_LISTEN`'s naming, as ADR
   0060 did.
 - `secrets.rs`'s "No Accepted ADR fixes it" comment on `BOOTSTRAP_TOKEN_LEN` points here.
@@ -410,7 +503,11 @@ arrives with ADR 0060's implementing PR).
 - TOTP only at M3: admins who want a security key wait for a later ADR.
 - One admin per instance at M3; shared administration means sharing one credential.
 - `admin reset` needs the server stopped; an expired bootstrap token (24 h) costs a restart.
-- Argon2id at 64 MiB per attempt makes login a little slow and caps concurrency at 2.
+- Argon2id at 64 MiB per attempt makes login a little slow and caps concurrency at 2 ordinary
+  attempts plus 1 in the reserved lane.
+- Two more small tables and a 90-day cookie. A stolen known-browser value gives its holder the
+  reserved lane only: it still needs the password and the code, and it is spent by one use.
+- During a flood, the first login from a new browser needs host access (`admin login-pass`).
 
 ### Risks
 
@@ -422,8 +519,9 @@ arrives with ADR 0060's implementing PR).
   domain.
 - A browser that stops keeping `Secure` cookies on `http://localhost` would break loopback login; the
   e2e test catches it, and the answer would be HTTPS on loopback, a later ADR.
-- If ADR 0086 or 0087 also claims 0x0107 or INV-107, the owner renumbers in ADR-number order at
-  acceptance (the 2026-10-11 batch precedent).
+- Numbers: this ADR is INV-107 and 0x0107, ADR 0087 is INV-108, and ADR 0086 adds no invariant and
+  uses the reserved 0x0103. If another ADR is accepted first and takes one of them, the owner
+  renumbers at acceptance (the 2026-10-11 batch precedent).
 
 ## Alternatives considered
 
@@ -441,6 +539,13 @@ arrives with ADR 0060's implementing PR).
 - **Signed (HMAC) CSRF tokens.** Lost: a new derivation from `server_data_key` where a stored random
   synchronizer token is enough.
 - **A hard lockout after N failures.** Lost: anyone who reaches the listener could lock the operator out.
+- **A global bucket that refuses every attempt** (this draft's first version). Lost after the
+  2026-10-25 gap review (G09-14): it is a hard lockout in effect, since 20 bad attempts an hour from
+  rotating sources keep the operator's own attempts at `429` before the password is checked.
+- **Only a concurrency limit, no refusing global bucket.** Lost: a flood keeps both Argon2id permits
+  busy and the operator's attempt times out at `503`, again a lockout; the reserved lane is still needed.
+- **Exempt loopback sources.** Lost: another local user and a proxy on the host are §1.3's
+  adversaries, and behind a local proxy every request is loopback.
 - **Admin recovery codes.** Lost: the operator has `admin reset`, and recovery codes would be one more
   long-lived secret to protect.
 
@@ -453,10 +558,15 @@ arrives with ADR 0060's implementing PR).
    needs a script exception to ADR 0060's `ADMIN_CSP` and an admin relying-party origin distinct from
    INV-84's public one. *Recommendation:* yes, TOTP-only at M3; draft the WebAuthn ADR when the panel
    ships, together with adding admins.
-3. **INV-69's per-user security event log.** No ADR decides that log; the disable-user and recovery-wait
-   screens must write to it. *Recommendation:* a separate small ADR for the per-account security event
-   log before those screens merge; this ADR's `auth_admin_audit` covers the admin's side only, and the
-   login screens here touch no user and do not wait for it.
+3. **INV-69's per-user security event log** is ADR 0090 (Proposed). *Recommendation:* accept it before
+   the disable-user and recovery-wait screens merge (§9.4); the login screens here do not wait for it.
+4. **Does ADR 0028 item 11 (`RIZZY_TRUSTED_PROXIES`, `X-Forwarded-For`) apply to the admin listener,
+   or does it need its own `RIZZY_ADMIN_TRUSTED_PROXIES`?** It decides the client address of the
+   per-source bucket and the audit `source` behind §5.1(b)'s proxy. *Recommendation:* a separate
+   setting, default empty (the peer address), so trusting a proxy for the admin listener never makes
+   the public listener trust it; §9.2's reserved lane keeps either choice from locking the operator out.
+5. **The known-browser cookie: 90 days, 5 per admin, one use per value?** *Recommendation:* yes; a
+   shorter life only sends the operator to `login-pass` more often during a flood.
 
 ## References
 
@@ -469,6 +579,9 @@ arrives with ADR 0060's implementing PR).
   [ADR 0082](0082-security-keys-user-presence-only.md), [ADR 0075](0075-session-listing-and-ending.md).
 - [CRYPTO.md](../CRYPTO.md) §2, §5.9, §5.10, §5.11, §6.1, §8.4, §11.15, §15.
 - [THREAT_MODEL.md](../THREAT_MODEL.md) §7.19, A3, INV-7, INV-8, INV-48, INV-52, INV-69, INV-84, INV-86.
+- [ADR 0086](0086-instance-settings-persistence.md) and [ADR 0087](0087-invite-only-signup-tokens.md) (Proposed siblings: §8.1's
+  actor columns, §9.3's actions), ADR 0090 (Proposed: the per-account security event log).
+- [Gap review of 2026-10-25](../reviews/2026-10-25-adr-gap-review.md), findings G09-14 to G09-19 and G09-24.
 - [ROADMAP.md](../ROADMAP.md) §4.8 (post-v1.0 note), §4.9.
 - RFC 9106 (Argon2), RFC 6238 (TOTP), RFC 6265 and draft-ietf-httpbis-rfc6265bis (`SameSite`,
   `Secure` on loopback) (L, not re-read for this draft); W3C Fetch Metadata (`Sec-Fetch-Site`) (L);
