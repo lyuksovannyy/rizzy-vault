@@ -146,6 +146,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0087 | [Invite-only signup: invite tokens, issuance, delivery and redemption (answers ADR 0060 open question 6)](0087-invite-only-signup-tokens.md) | Proposed | M3 |
 | 0090 | [Per-account security event log: `auth_security_events`, event kinds, the `security-events/list` endpoint and the alert summary](0090-per-account-security-event-log.md) | Proposed | M3 |
 | 0095 | [The owner's answers to ADRs 0023–0028, recorded from their acceptance commits, and the ADR 0026, 0027 and 0028 text they contradict](0095-owner-answers-0023-0028-recorded.md) | Proposed | M1 |
+| 0096 | [Secrets that cross the client binding (ADR 0013 §3 rule 2, restated in full), and KeePass KDBX import inside the web vault's one core Worker](0096-binding-secrets-and-kdbx-worker.md) | Proposed | M1 / M3 |
 
 ## Gates
 
