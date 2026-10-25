@@ -14,7 +14,7 @@
 What exists today (read in this worktree, V):
 
 - **Configuration.** `crates/rizzy-server/src/config.rs` reads `RIZZY_*` settings from the environment or a `NAME=value` file, environment over file ([ADR 0028](0028-api-v1-http-conventions.md) item 12). `RIZZY_SIGNUP` is `closed` (default) or `open` into `SignupMode { Closed, Open }`; any other value is a startup error. `RIZZY_RECOVERY_WAIT_HOURS` is "whole hours from 0 to 720 (30 days), default 72", applying "to recoveries started after the setting changed: a pending recovery keeps the release time it was opened with"; 0 logs a startup warning (threat model Q-15's sub-question is open). `rizzy-domain-auth`'s `MAX_RECOVERY_WAIT_MS` is 30 × 24 h. Both values are copied once at startup into `AuthConfig` (`signup: SignupPolicy`, `recovery_wait_ms`), so changing them needs a restart. There is no SMTP setting at all.
-- **Storage.** [ADR 0011](0011-storage.md): the `auth` domain owns `auth_`-prefixed tables (rule 5), queries live in `queries/*.sql` (rule 7), portable column types and no JSON columns (rule 4), forward-only migrations per engine (rule 8). The newest migration is `0009_vault_kinds.sql`; `0010` is being taken by the ADR 0045 track, so this ADR's migration number is the **next free one at implementation**.
+- **Storage.** [ADR 0011](0011-storage.md): the `auth` domain owns `auth_`-prefixed tables (rule 5), queries live in `queries/*.sql` (rule 7), portable column types and no JSON columns (rule 4), forward-only migrations per engine (rule 8). This ADR's migration number is the **next free one at implementation**.
 - **Server sealing.** [CRYPTO.md §5.11](../CRYPTO.md#511-server-side-encryption-not-zero-knowledge): subkey `HKDF(ikm = server_data_key, salt = empty, info = LABEL("server/<purpose>") ‖ 0x00 ‖ u32(data_key_id), 32)`, Algorithm 0x01, server-only purposes 0x0100–0x01FF; "The DB records the `data_key_id` of every sealed row, and the server refuses to start if a row names an id the file lacks"; rotation by `rizzy-vault secrets rotate --data-key`, after which `worker` re-seals. Its `0x0103` bullet: "It is the same construction as `SERVER_TOTP_SECRET`, with the SMTP password as the plaintext." The code is `rizzy-core`'s `server_seal.rs`, `labels.rs` and `envelope/purpose.rs`, with KATs in `crates/rizzy-core/tests/vectors/{derivations,envelopes}.json`.
 - **Invariants.** THREAT_MODEL INV-86: "An SMTP password is sealed at rest with CRYPTO.md §5.11's Algorithm 0x01 server-side envelope, under the server-only purpose `0x0103`. It is never logged (INV-48), and the admin UI never redisplays a saved value, only whether one is set." INV-69: admins authenticate separately with a second factor, the UI has its own CSP and CSRF defence, and "Every admin action, including a change to the recovery waiting period, goes into the affected users' security event log." The §7.19 E-row: "A 0 wait only on single-account instances (Q-15)."
 - **Enumeration.** [CRYPTO.md §5.9](../CRYPTO.md#59-account-enumeration): registration is an enumeration oracle; "The M1 default is invite-only signup … Open signup is opt-in, rate-limited per IP".
@@ -24,7 +24,7 @@ The forces: settings must change without a restart; every replica (profile C, M1
 
 ## Decision
 
-**Supersedes: none.** This ADR fulfills ADR 0060 §4's "Not fixed here" paragraph and owner answer 3, adds one table under ADR 0011 rule 5, and gives purpose `0x0103` its name and ctx. It changes no Accepted text.
+**Supersedes: none.** This ADR fulfills ADR 0060 §4's "Not fixed here" paragraph and owner answer 3, adds one table under ADR 0011 rule 5, and gives purpose `0x0103` its name and ctx. It changes no Accepted text. **Numbers:** it uses the reserved server-only purpose 0x0103 (INV-86) and adds no invariant of its own; its siblings are [ADR 0085](0085-admin-authentication-bootstrap.md) (INV-107, 0x0107) and [ADR 0087](0087-invite-only-signup-tokens.md) (INV-108, no purpose).
 
 ### 1. The table
 
@@ -40,13 +40,15 @@ CREATE TABLE auth_instance_settings (
     data_key_id   INTEGER CHECK (data_key_id >= 0),
     setting_seq   INTEGER NOT NULL CHECK (setting_seq >= 1),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
-    updated_by    BLOB    CHECK (updated_by IS NULL OR length(updated_by) = 16),
+    updated_kind  TEXT    NOT NULL CHECK (updated_kind IN ('panel', 'cli')),
+    updated_admin_id BLOB CHECK (updated_admin_id IS NULL OR length(updated_admin_id) = 16),
+    CHECK ((updated_kind = 'panel') = (updated_admin_id IS NOT NULL)),
     CHECK ((value_text IS NOT NULL AND sealed_value IS NULL AND data_key_id IS NULL)
         OR (value_text IS NULL AND sealed_value IS NOT NULL AND data_key_id IS NOT NULL))
 ) STRICT;
 ```
 
-PostgreSQL uses `text`, `bytea` and `bigint` with the same checks (`octet_length` for the byte lengths). Every row holds exactly one of a plain value or a sealed value; a sealed row names its `data_key_id` (CRYPTO §5.11). `setting_seq` counts writes of that key from 1 (an aid for the event log and the concurrency test, not a security field). `updated_by` is the admin id defined by ADR 0085, or `NULL` when `rizzy-vault settings` (§6) wrote the row; it has no foreign key, so removing an admin does not erase who changed what. No SQL `CHECK` lists the key names: the set of keys is closed **in Rust** (§1.1), so a later key needs no table rebuild, and an unknown key in the table is a startup error naming the key (it can only come from a DB writer or a newer binary, and `rizzy-storage`'s `migrate.rs` already refuses a database a newer release migrated, with `VersionMissing`).
+PostgreSQL uses `text`, `bytea` and `bigint` with the same checks (`octet_length` for the byte lengths). Every row holds exactly one of a plain value or a sealed value; a sealed row names its `data_key_id` (CRYPTO §5.11). `setting_seq` counts writes of that key from 1 (an aid for the event log and the concurrency test, not a security field). `updated_kind` and `updated_admin_id` record who wrote the row in [ADR 0085](0085-admin-authentication-bootstrap.md) §8.1's actor encoding, the one ADR 0085's audit log and ADR 0087's invites use too: `panel` with the acting admin's `admin_id`, or `cli` with `NULL` when `rizzy-vault settings` (§6) wrote it. There is no foreign key, so removing an admin does not erase who changed what. Every write also appends ADR 0085's `setting_changed` audit row in its transaction (ADR 0085 §9.3), from the panel and the CLI alike. No SQL `CHECK` lists the key names: the set of keys is closed **in Rust** (§1.1), so a later key needs no table rebuild, and an unknown key in the table is a startup error naming the key (it can only come from a DB writer or a newer binary, and `rizzy-storage`'s `migrate.rs` already refuses a database a newer release migrated, with `VersionMissing`).
 
 #### 1.1 Typed keys and value encoding
 
@@ -54,7 +56,7 @@ PostgreSQL uses `text`, `bytea` and `bigint` with the same checks (`octet_length
 
 | Key | Type | Canonical `value_text` | Range / limits | Configuration fallback (§2) | Built-in default |
 |---|---|---|---|---|---|
-| `signup_mode` | enum | `closed` \| `open` | `invite` is **reserved for ADR 0087** and refused by the parser until that ADR is Accepted and implemented | `RIZZY_SIGNUP` | `closed` |
+| `signup_mode` | enum | `closed` \| `open` | `invite` is **reserved for ADR 0087** and refused by the parser until that ADR is Accepted and implemented. `RIZZY_SIGNUP`'s own value set is ADR 0048 §1's settings sentence (the binding text of ADR 0028 item 12), which ADR 0087 §10 supersedes to add `invite`; this ADR does not change it | `RIZZY_SIGNUP` | `closed` (ADR 0087 open question 2 recommends `invite`; if the owner accepts it, this default changes with it) |
 | `recovery_wait_hours` | integer | decimal, `0` or no leading zero | 0–720 (= `MAX_RECOVERY_WAIT_MS`), whole hours; 0 under §4 | `RIZZY_RECOVERY_WAIT_HOURS` | 72 |
 | `smtp_host` | host | ASCII-lowercased DNS name in A-label form, no trailing dot, 1–253 bytes; or an IPv4 / bracket-free IPv6 literal in its canonical text form | — | none | unset (mail off) |
 | `smtp_port` | integer | decimal | 1–65535 | none | — (required with `smtp_host`) |
@@ -64,6 +66,14 @@ PostgreSQL uses `text`, `bytea` and `bigint` with the same checks (`octet_length
 | `smtp_password` | **sealed** | `sealed_value`: a `SERVER_SMTP_CREDENTIAL` envelope (§5) | password 1–512 bytes | none | unset |
 
 **Groups.** `smtp_*` is one group: the SMTP screen and `rizzy-vault settings` write or delete all its rows in one transaction. `smtp_host`, `smtp_port`, `smtp_tls` and `smtp_from` are present together or absent together; `smtp_username` and `smtp_password` are present together or absent together, and only when the group is present. A partial group read from the table is treated as "mail not configured", with a warning naming the keys (never a value of `smtp_password`).
+
+#### 1.2 In the logical backup
+
+`auth_instance_settings` is **in** the logical backup: [ADR 0023](0023-logical-backup-format.md)'s `TABLES` gains it at the end of the `auth_` block, after `auth_pending_recoveries` (it has no foreign key, so any position is valid; this one keeps the `auth_` tables together). That bumps the dump's schema version as any migration does; [ADR 0071](0071-encrypted-db-backup-format.md)'s encrypted container wraps it unchanged.
+
+- **Why in.** Left out, a restored instance would fall back to the configuration value for every saved key without any visible change: signup could reopen, the recovery wait could shrink to the configured value, and the SMTP settings would vanish. The table holds no per-session or short-lived state, the kinds ADR 0023 leaves out.
+- **The sealed row.** A restored `smtp_password` row is still a `SERVER_SMTP_CREDENTIAL` envelope under the `server_data_key` its `data_key_id` names, and the backup holds no key. Restoring it therefore needs a secrets file that holds that `data_key_id` (the current key or a retained older one), exactly as the restored `auth_totp_credentials` rows already do. With a secrets file that lacks it, the server refuses to start and names the id (CRYPTO §5.11's rule, §5 "Rotation"); `rizzy-vault settings reset smtp` (§6) is the way out, then re-entering the password. The restore documentation says to keep the secrets file, or its encrypted backup ([ADR 0011](0011-storage.md) owner decision 3), with the database backups.
+- **Test** (§8): a dump and restore round trip with every key saved, the SMTP group included: the restored server reads the same effective values and opens the password with the same secrets file; with a secrets file that lacks the row's `data_key_id` it refuses to start, and after `settings reset smtp` it starts with mail off.
 
 ### 2. Precedence: the configuration is the default, a saved row wins
 
@@ -96,7 +106,7 @@ Staleness is therefore **zero across any number of replicas**, bounded only by t
 
 - **Signup modes.** `closed` and `open` map to today's `SignupPolicy::{Closed, Open}`. `invite` is reserved: its token mechanism, storage and the `SignupPolicy::Invite` wiring are ADR 0087's. Until that ADR is Accepted and implemented, the parser refuses `invite` from the table and from `RIZZY_SIGNUP` alike, and the screen offers only Closed and Open (ADR 0060 owner answer 6). Opening signup on the screen shows CRYPTO §5.9's warning that registration is an enumeration oracle, rate-limited per IP.
 - **Recovery wait.** 0–720 whole hours, matching `config.rs` and `MAX_RECOVERY_WAIT_MS`; a change applies to recoveries started after it commits. Saving 0 needs a second, explicit confirmation on the screen stating the §7.19 E-row risk, and is logged as a warning. Whether the server should *refuse* 0 on an instance with more than one account is Q-15's open sub-question, raised here as open question 1; this ADR enforces nothing more until the owner answers.
-- **Events (INV-69).** A change to `recovery_wait_hours` writes, in the same transaction as the row, one entry per account into the per-account security event log. No Accepted ADR defines that log yet (`rizzy-server`'s `lib.rs` lists it as "M3's"; ADR 0075 says the same), so **the recovery-wait screen does not merge before that log exists** (open question 2). Signup and SMTP changes affect no single account; they are recorded in `updated_by` / `updated_at_ms` and in whatever admin audit record ADR 0085 defines.
+- **Events (INV-69).** A change to `recovery_wait_hours` writes, in the same transaction as the row, one entry per account into the per-account security event log. That log is ADR 0090 (Proposed, drafted in parallel; `rizzy-server`'s `lib.rs` and ADR 0075 call it "M3's"), so **the recovery-wait screen does not merge before ADR 0090 is Accepted** (open question 2). Signup and SMTP changes affect no single account; they are recorded in `updated_kind` / `updated_admin_id` / `updated_at_ms` and in ADR 0085's `auth_admin_audit` as `setting_changed` (ADR 0085 §9.3).
 
 ### 5. The SMTP credential: `SERVER_SMTP_CREDENTIAL`, 0x0103
 
@@ -139,7 +149,7 @@ POST bodies are `application/x-www-form-urlencoded`, at most 4 KiB, parsed witho
 - `rizzy-vault settings set smtp --host H --port P --tls <starttls|tls> --from A [--username U]`, reading the password from **stdin** when `--username` is given (no secret on the command line, ADR 0028 item 12); it needs the secrets file to seal.
 - `rizzy-vault settings reset <signup|recovery-wait|smtp>`.
 
-Writes are ordinary transactions through the auth domain API, so they take effect on the next action of every running replica (§3); the lock mode follows `admin.rs`'s table and is fixed in the implementing PR (recommended: no exclusive instance lock, as no other table changes). A CLI write sets `updated_by = NULL`; a recovery-wait change still writes the security events of §4. `rv` gains nothing.
+Writes are ordinary transactions through the auth domain API, so they take effect on the next action of every running replica (§3); the lock mode follows `admin.rs`'s table and is fixed in the implementing PR (recommended: no exclusive instance lock, as no other table changes). A CLI write sets `updated_kind = 'cli'` and `updated_admin_id = NULL` and appends a `setting_changed` audit row with actor `cli` (ADR 0085 §8.1, §9.3); a recovery-wait change still writes the security events of §4. `rv` gains nothing.
 
 ### 7. SMTP sending: not built here, and the credential waits for it
 
@@ -147,9 +157,9 @@ ROADMAP puts notification mail at M3 (before v1.0), but no Accepted ADR defines 
 
 ### 8. Implementation plan and tests
 
-Order: (a) table, loader, signup key and screen once ADR 0085 is Accepted; (b) recovery-wait key and screen once the security event log exists (open question 2); (c) SMTP once the sender ADR is Accepted (§7). Each step is its own PR passing CLAUDE.md's full gate, `cargo xtask check-tables` included.
+Order: (a) table, loader, signup key and screen once ADR 0085 is Accepted; (b) recovery-wait key and screen once ADR 0090 (the security event log, Proposed) is Accepted (open question 2); (c) SMTP once the sender ADR is Accepted (§7). Each step is its own PR passing CLAUDE.md's full gate, `cargo xtask check-tables` included.
 
-- **Storage** (`rizzy-storage`): `NNNN_auth_instance_settings.sql` for SQLite and PostgreSQL; queries `instance_setting_get.sql`, `instance_settings_all.sql`, `instance_setting_upsert.sql`, `instance_setting_delete.sql` under `rizzy-domain-auth/queries/`. Tests: the `CHECK`s reject a row with both or neither value column, a sealed row without `data_key_id`, oversize values; PostgreSQL parity as `#[ignore]`d tests, like the existing ones.
+- **Storage** (`rizzy-storage`): `NNNN_auth_instance_settings.sql` for SQLite and PostgreSQL; queries `instance_setting_get.sql`, `instance_settings_all.sql`, `instance_setting_upsert.sql`, `instance_setting_delete.sql` under `rizzy-domain-auth/queries/`. Tests: the `CHECK`s reject a row with both or neither value column, a sealed row without `data_key_id`, oversize values; PostgreSQL parity as `#[ignore]`d tests, like the existing ones. `TABLES` gains the table, with §1.2's dump and restore test.
 - **Domain** (`rizzy-domain-auth`): `InstanceSettings` API — typed getters read in the caller's transaction, `set` / `reset` with `setting_seq` increment; `SignupPolicy` and `recovery_wait_ms` in `AuthConfig` become the configuration fallback. Unit tests: every §1.1 boundary (`0`, `720`, `721`, `072`, `+1`, ` 72`, `OPEN`, `invite` refused); the §2 precedence matrix (row × environment × file × default); startup refusal on an unknown key, a non-canonical value, a partial group, a missing `data_key_id`; point-of-use fail-closed (signup refused, recovery start errors); concurrency: signup closed in one transaction, a signup in another, each outcome consistent with the commit order; the read happens before the name lookup for real and unknown names alike.
 - **Crypto** (`rizzy-core`): `labels::SERVER_SMTP_CREDENTIAL = "server/smtp-credential"`, `Purpose::ServerSmtpCredential` (0x0103, symmetric, §8.5-padded, server-only), `server_seal::{seal_smtp_credential, open_smtp_credential}` and `SmtpPassword` (zeroizing, redacted `Debug`). **KATs**, committed to `tests/vectors/derivations.json` (`server/smtp-credential`, `data_key_id` 1 and 2) and `tests/vectors/envelopes.json` (`SERVER_SMTP_CREDENTIAL` with ctx host `smtp.example.com`, port 587, `starttls`, user `rizzy@example.com`; one 1-byte, one 252-byte and one 253-byte password to pin the 256→Padmé boundary), regenerated by the existing vector generator and checked by its tests; negative vectors: the same envelope opened with each ctx field changed in turn, with the wrong `data_key_id`, with a non-zero padding byte, each failing with `DecryptError`; a test that no client allow-list accepts 0x0103.
 - **Server** (`rizzy-server`): the admin pages and `admin.rs` commands of §6; `worker`'s re-seal pass of §5. Tests: Askama adversarial-string rendering for every value the screens show (ADR 0060 §3); CSRF-missing and cross-site POST refused; the SMTP form refuses a ctx change without a password; **INV-86 DB inspection**: the stored `sealed_value` is a 0x01 envelope that opens only with the expected ctx and contains no substring of the password; **log inspection** across save, startup, rotation and a failed open: the password never appears; **ctx binding**: a direct DB edit of `smtp_host` makes the open fail, nothing is sent, the warning names the key; **rotation**: after `secrets rotate --data-key` the row names the new key and opens; `settings reset smtp` restores startup after a removed data key; the recovery-wait INV-69 event test (one event per account, same transaction).
@@ -170,13 +180,14 @@ Order: (a) table, loader, signup key and screen once ADR 0085 is Accepted; (b) r
 - Two sources of truth per key (row and configuration); an operator who edits `RIZZY_SIGNUP` after an admin saved the screen sees no effect until they reset, mitigated only by the startup warning and the screen's source label.
 - A PK lookup on every signup, recovery start and delivery batch.
 - Changing the SMTP server or user always means re-typing the password.
-- Two of the three screens wait on other ADRs (security event log, sender), so the M3 panel ships in steps.
+- Two of the three screens wait on other ADRs (ADR 0090's security event log, the sender ADR), so the M3 panel ships in steps.
+- A restore needs the secrets file holding the sealed row's `data_key_id` (§1.2), as restored TOTP rows already do.
 
 ### Risks
 
 - **DB writer.** Someone with write access to the database but not the secrets file can flip `signup_mode` to `open` or `recovery_wait_hours` to 0. That attacker can already rewrite auth tables directly (a pending recovery's release time included); this ADR adds no integrity protection for plain rows and claims none. They can also restore an older complete SMTP group an admin once entered, which then opens; if that old relay is now theirs, the old password reaches them. Accepted: the password is the admin's to rotate at the relay when changing relays.
 - **Lost data key** disables mail until the password is re-entered, and refuses startup until `settings reset smtp` (§5.11's existing rule).
-- **Ordering across ADRs**: if ADR 0085 or 0087 changes the admin id shape or the signup enum, §1's `updated_by` and §4's reservation follow them.
+- **Ordering across ADRs**: §1's actor columns follow ADR 0085 §8.1 and §4's `invite` reservation follows ADR 0087 §10; if either changes before acceptance, this ADR follows it.
 
 ## Alternatives considered
 
@@ -191,7 +202,7 @@ Order: (a) table, loader, signup key and screen once ADR 0085 is Accepted; (b) r
 ## Open questions for the owner
 
 1. **Q-15's sub-question: refuse a 0 recovery wait when the instance has more than one account?** *Recommendation:* yes, on both write paths (screen and `settings set`): refuse to save 0 unless exactly one account exists, and when a second account is created while the wait is 0, keep the stored 0 but log a warning at each startup and show a banner on `/admin/settings` until the admin raises it. This matches THREAT_MODEL Q-15's recommendation and the §7.19 E-row; the configuration path keeps today's startup warning.
-2. **The recovery-wait screen needs the per-account security event log (INV-69), which has no ADR. Ship the recovery-wait key before that log?** *Recommendation:* no. Draft the security event log ADR next (ADR 0075 and ADR 0058 also wait on it), ship signup mode first, and the recovery-wait screen with the log.
+2. **The recovery-wait screen needs the per-account security event log (INV-69), now ADR 0090 (Proposed). Ship the recovery-wait key before ADR 0090 is Accepted?** *Recommendation:* no. Ship signup mode first, and the recovery-wait screen with ADR 0090's log (ADR 0075 and ADR 0058 also wait on it).
 3. **Pad the SMTP password with §8.5's framing, although CRYPTO §5.11 currently says "the same construction as `SERVER_TOTP_SECRET`" (unpadded)?** *Recommendation:* yes. Key, subkey derivation and algorithm are identical; the framing is existing §8.5 machinery and hides the password's length from a DB reader at a cost of under 256 bytes.
 4. **Outbound mail: which ADR defines the sender, at which milestone, and should ADR 0066 (Proposed) use these rows instead of `RIZZY_SMTP_URL` / `RIZZY_SMTP_FROM`?** *Recommendation:* a short notification-mail ADR at M3 for ADR 0010's `worker` outbound (recovery notices to an account email per ADR 0008 decision 5 — which also needs an account-email field and its own enumeration review), reading only these rows; ADR 0066 is revised before acceptance to read the same rows, so there is one SMTP configuration with one sealed password and no secret in the environment.
 
@@ -199,7 +210,7 @@ Order: (a) table, loader, signup key and screen once ADR 0085 is Accepted; (b) r
 
 - **Gate:** docs only; no Accepted ADR's Status, Context, Decision or Consequences edited; CRYPTO.md and THREAT_MODEL.md edits are listed for acceptance, not made. **None found.**
 - **Crypto:** the §5.11 construction, the existing server data key and §8.5's framing are reused unchanged; the only new things are a label, a purpose name and a ctx, which §5.11 and ADR 0060 say an ADR must fix. KAT and negative vectors planned. **None found.**
-- **Invariants:** INV-86 (sealed, never logged, never redisplayed), INV-69 (separate admin login, CSRF, CSP, event log for the wait) and CRYPTO §5.9 (name-independent signup check) are kept; INV-69's event-log requirement is not yet satisfiable and is an explicit merge blocker (§4, open question 2) rather than a gap. **None found.**
+- **Invariants:** INV-86 (sealed, never logged, never redisplayed), INV-69 (separate admin login, CSRF, CSP, event log for the wait) and CRYPTO §5.9 (name-independent signup check) are kept; INV-69's event-log requirement waits for ADR 0090 (Proposed) and is an explicit merge blocker (§4, open question 2) rather than a gap. **None found.**
 - **Scope:** ROADMAP §4.9 is not narrowed; SMTP sending is not designed here and its storage is gated on the ADR that does (§7). **None found.**
 
 ## References
