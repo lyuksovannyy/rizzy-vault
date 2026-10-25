@@ -98,8 +98,11 @@ fn arb_record() -> impl Strategy<Value = AccountSettingsRecord> {
         any::<bool>(),
         1u16..=6,
         proptest::collection::btree_set(any::<[u8; 16]>(), 0..4),
+        // Tags a reader keeps verbatim. 0x0002 (the vault directory, ADR 0081 §A2), 0x0003 (contact
+        // pins, reserved by ADR 0081 §B2) and 0x0004 (identity-generator defaults, ADR 0079) have
+        // their own layouts now, so random bytes under them are rightly refused by `decode`.
         proptest::collection::btree_map(
-            2u16..0xfffe,
+            5u16..0xfffe,
             proptest::collection::vec(any::<u8>(), 0..16),
             0..4,
         ),
