@@ -42,7 +42,7 @@ ROADMAP rows: "Backup & restore command + documented procedure (tested, not just
 |---|---|---|---|
 | `MAX_BACKUP_FILE_LEN` | 2^40 bytes (1 TiB), type `u64` | `rizzy-storage` `backup::file` | Every database backup file this release writes, and every one it reads from a regular file, format_version 1 or 2. For format_version 2 it caps the whole file, as ADR 0071 "Size" says; ADR 0083's `plaintext_len ≤ MAX_BACKUP_FILE_LEN` check uses the same constant. |
 | `MAX_IN_MEMORY_BACKUP_LEN` | 2^31 bytes (2 GiB, today's value), type `usize` | `rizzy-storage` `backup::file` | A backup read from stdin (`--in -`) or from a path that is not a regular file; the in-memory `parse(&[u8])` wrapper; the fuzz target. |
-| `CHUNK_LEN` | 8 MiB, unchanged (ADR 0071 point 5) | `rizzy-server` `db_backup` | format_version 2. |
+| `CHUNK_LEN` | 8 MiB, unchanged (ADR 0071, owner answer 5 of 2026-10-22) | `rizzy-server` `db_backup` | format_version 2. |
 | `chunk_count` | derived, ≤ 2^40 / 2^23 = 131 072; still `u32` | — | format_version 2. |
 | Per-value, name and column limits | unchanged (ADR 0023 §3: text ≤ 4 KiB, blob ≤ 32 MiB, names 1–63 bytes, ≤ 64 columns) | `backup::file` | both formats. |
 
