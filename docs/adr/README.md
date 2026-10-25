@@ -142,6 +142,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0083 | [Erratum to ADR 0071: `plaintext_len` is bound by the canonical reader's framing, not by chunk AAD](0083-db-backup-plaintext-len-erratum.md) | Proposed | M8 |
 | 0084 | [Bare, unencrypted CXF passkey export (answers ADR 0074 open question 4)](0084-bare-cxf-passkey-export.md) | Proposed | M8 |
 | 0086 | [Instance settings persistence: the `auth_instance_settings` table, precedence over configuration, and the sealed SMTP credential (`SERVER_SMTP_CREDENTIAL`, 0x0103)](0086-instance-settings-persistence.md) | Proposed | M3 |
+| 0087 | [Invite-only signup: invite tokens, issuance, delivery and redemption (answers ADR 0060 open question 6)](0087-invite-only-signup-tokens.md) | Proposed | M3 |
 
 ## Gates
 
