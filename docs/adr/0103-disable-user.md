@@ -108,7 +108,7 @@ An admin who wants an account's data gone needs account deletion. No ADR defines
 | Flow | Check point | While disabled |
 |---|---|---|
 | `login/start` | none (no credential is verified yet) | unchanged: same answer as for an enabled account |
-| `login/finish` (OPAQUE; also re-authentication) | KE3 verified and, if the account has 2FA, the second factor verified. With 2FA, `login/finish` still answers `second_factor_required`, and the check point is the TOTP or WebAuthn step that would issue the session | `account_disabled`; no session, no event row |
+| `login/finish` (OPAQUE; also re-authentication) | KE3 verified and, if the account has 2FA, the second factor verified. A TOTP code travels in `login/finish` itself, so the check point is right after `check_second_factor` passes (`login.rs` line 295, V). With a security key, `login/finish` still answers `second_factor_required`, and the check point is in the WebAuthn login step that would issue the session ([ADR 0098](0098-security-key-limits-and-endpoints.md)) | `account_disabled`; no session, no event row |
 | `device-auth/start` | none | unchanged |
 | `device-auth/finish` | the device signature verified against a usable durable device | `account_disabled`; no session |
 | `recovery/start` | the recovery code verified (in the code's constant-time path) | `account_disabled`; no pending recovery is opened and no ADR 0090 code 13 row is written |
@@ -201,7 +201,7 @@ Prerequisites: this ADR, ADR 0085 (audit table, panel) and ADR 0090 (event codes
 
 1. Migration (both engines) and the `TABLES` entry; `cargo xtask check-tables`.
 2. `ErrorCode::AccountDisabled`, `AuthError::AccountDisabled`, the `403` mapping, and a `rizzy-proto` round-trip test.
-3. The `session::create` backstop and the `session_get.sql` join; the check points in `login.rs`, the TOTP and WebAuthn login steps, `device.rs` and `recovery.rs`.
+3. The `session::create` backstop and the `session_get.sql` join; the check points in `login.rs` (after KE3 and `check_second_factor`), the WebAuthn login step in `webauthn.rs`, `device.rs` and `recovery.rs`.
 4. `set_account_disabled` with §4's steps and §5's pause.
 5. CLI (§6), then the panel routes (§7), then the client messages (§8).
 
