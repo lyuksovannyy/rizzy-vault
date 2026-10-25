@@ -4,7 +4,20 @@
 - Date: 2026-10-24
 - Deciders: project owner
 - Milestone: M3 (`rizzy-domain-auth`, `rizzy-storage`, `rizzy-server` admin panel and operator CLI, `rizzy-client`, `rizzy-wasm`, web vault, `rv`)
-- Supersedes: [ADR 0048](0048-per-account-storage-quota.md) (§1 in part: its settings sentence, the binding text of [ADR 0028](0028-api-v1-http-conventions.md) item 12's settings clause, gains `RIZZY_SIGNUP` value `invite`), on acceptance; §10.1 gives the part and its replacement. It answers [ADR 0060](0060-admin-panel-stack-boundary.md) open question 6.
+- Supersedes: [ADR 0048](0048-per-account-storage-quota.md) (§1 in part: its settings sentence, the binding text of [ADR 0028](0028-api-v1-http-conventions.md) item 12's settings clause, gains `RIZZY_SIGNUP` value `invite`, the default), on acceptance; §10.1 gives the part and its replacement. It answers [ADR 0060](0060-admin-panel-stack-boundary.md) open question 6.
+
+## Owner answers (2026-10-25)
+
+The owner's words, verbatim: "0087. agreed"
+
+Every recommendation in the open questions stands:
+
+1. **Operator CLI first.** `rizzy-vault invite …` (§11) ships in phase A, ahead of the admin panel.
+2. **Default `invite`.** The default `RIZZY_SIGNUP` moves from `closed` to `invite` in phase A, with a
+   release note. §10.1's replacement text carries `default invite`, and ADR 0086 §1.1's built-in default for
+   `signup_mode` is `invite`.
+3. **No unbound invites at v1.0.** Every invite is bound to a login name (§3); revisit with M10 org
+   onboarding.
 
 ## Context
 
@@ -121,7 +134,7 @@ users anyway (ROADMAP §4.9). An *expired* open invite for the name is closed in
 ### 4. Issuance
 
 - **Who.** An admin signed in to the admin panel under ADR 0085 (on the `RIZZY_ADMIN_LISTEN` listener,
-  ADR 0060 §2), or the operator through the server CLI (§11, owner question 1). Nothing on the public
+  ADR 0060 §2), or the operator through the server CLI (§11; it ships in phase A, ahead of the admin panel, owner answer 1). Nothing on the public
   listener issues invites; there is no JSON admin API (ADR 0060).
 - **Inputs.** Login name (required); lifetime from a fixed list — 1 hour, 24 hours, **7 days (default)**,
   30 days — no "never"; an optional note of at most 200 characters, plain text, for the admin's own
@@ -258,9 +271,10 @@ States, derived from the row: **open** (not pending, not terminal), **pending** 
   `invite` for this ADR and whose parser accepts it, from the table and from `RIZZY_SIGNUP` alike, once this
   ADR is Accepted and implemented. ADR 0086's rule decides how `RIZZY_SIGNUP` and the stored value combine.
   This ADR adds only the value.
-- **Default.** Owner question 2 recommends the default move from `closed` to `invite`, matching §5.9's
-  "default is invite-only"; with no invite issued it refuses everyone, like `closed`. ADR 0086 §1.1's built-in
-  default for `signup_mode` and §10.1's replacement text follow the owner's answer.
+- **Default `invite`** (owner answer 2). The default moves from `closed` to `invite` in phase A, with a
+  release note, matching §5.9's "default is invite-only"; with no invite issued it refuses everyone, like
+  `closed`. ADR 0086 §1.1's built-in default for `signup_mode` is `invite`, and §10.1's replacement text
+  states it.
 - **Admin signup screen.** ADR 0060 §4's signup-mode screen gains the "Invite-only" option, once this ADR is
   Accepted and the code exists, and an Invites screen (§13). Neither lands before ADR 0085 is Accepted
   (ADR 0060 owner answer 5).
@@ -275,11 +289,7 @@ One Accepted sentence ([ADR 0020](0020-partial-supersession.md) point 9).
 
    > Settings `RIZZY_ROLES`, `RIZZY_ORIGIN`, `RIZZY_LISTEN` (default `127.0.0.1:8080`), `RIZZY_DATA_DIR` (`/data`), `RIZZY_DATABASE_URL`, `RIZZY_SECRETS_FILE` (`/run/rizzy-secrets/secrets.json`), `RIZZY_SIGNUP` (`closed`|`open`), `RIZZY_TRUSTED_PROXIES`, `RIZZY_LOG_LEVEL`, `RIZZY_WORKER_INTERVAL_SECS`, `RIZZY_MAX_UPLOAD_BYTES`, `RIZZY_ACCOUNT_QUOTA_BYTES`.
 
-   Replacement, in full:
-
-   > Settings `RIZZY_ROLES`, `RIZZY_ORIGIN`, `RIZZY_LISTEN` (default `127.0.0.1:8080`), `RIZZY_DATA_DIR` (`/data`), `RIZZY_DATABASE_URL`, `RIZZY_SECRETS_FILE` (`/run/rizzy-secrets/secrets.json`), `RIZZY_SIGNUP` (`closed`|`invite`|`open`), `RIZZY_TRUSTED_PROXIES`, `RIZZY_LOG_LEVEL`, `RIZZY_WORKER_INTERVAL_SECS`, `RIZZY_MAX_UPLOAD_BYTES`, `RIZZY_ACCOUNT_QUOTA_BYTES`.
-
-   If the owner accepts open question 2 (default `invite`), the replacement is instead, in full:
+   Replacement, in full (with the default `invite`, owner answer 2):
 
    > Settings `RIZZY_ROLES`, `RIZZY_ORIGIN`, `RIZZY_LISTEN` (default `127.0.0.1:8080`), `RIZZY_DATA_DIR` (`/data`), `RIZZY_DATABASE_URL`, `RIZZY_SECRETS_FILE` (`/run/rizzy-secrets/secrets.json`), `RIZZY_SIGNUP` (`closed`|`invite`|`open`, default `invite`), `RIZZY_TRUSTED_PROXIES`, `RIZZY_LOG_LEVEL`, `RIZZY_WORKER_INTERVAL_SECS`, `RIZZY_MAX_UPLOAD_BYTES`, `RIZZY_ACCOUNT_QUOTA_BYTES`.
 
@@ -301,7 +311,7 @@ Beside the existing `rizzy-vault secrets …` and `backup` subcommands (`rizzy-s
 They run against the live database (no exclusive lock: one insert or update each; verified at
 implementation against `backup`'s non-exclusive open), with the §3/§4 checks, `issued_kind = 'cli'` and
 `issued_admin_id = NULL` (`revoked_*` likewise), and the ADR 0085 §9.3 audit row of §12. Someone with shell access to the host already holds the database and the secrets file, so
-this adds no new authority. Whether it ships ahead of the admin panel is owner question 1.
+this adds no new authority. It ships in phase A, ahead of the admin panel (owner answer 1).
 
 ### 12. Audit
 
@@ -420,7 +430,7 @@ Phases (each a separate PR, in order; phase B and C wait as stated):
 
 | Phase | Waits for | Contents |
 |---|---|---|
-| A. Mechanism and operator CLI | This ADR Accepted (and owner answer 1) | Migration; `rizzy-domain-auth` `invite` module (issue, list, revoke, redeem; §6 changes in `signup.rs`; `SignupPolicy::Invite` unit variant; trait deleted); worker sweep; `RIZZY_SIGNUP=invite`; `rizzy-vault invite`; `rizzy-client` `invite_link`, `rizzy-wasm` binding, web vault fragment handling, `rv` prompt |
+| A. Mechanism and operator CLI | This ADR Accepted | Migration; `rizzy-domain-auth` `invite` module (issue, list, revoke, redeem; §6 changes in `signup.rs`; `SignupPolicy::Invite` unit variant; trait deleted); worker sweep; `RIZZY_SIGNUP=invite` and the default `invite` (release note); `rizzy-vault invite`; `rizzy-client` `invite_link`, `rizzy-wasm` binding, web vault fragment handling, `rv` prompt |
 | B. Admin panel screens | ADR 0085 and ADR 0086 Accepted | `http/admin_panel/invites.rs`, `templates/admin/invites_*.html`, the "Invite-only" option on the signup screen |
 | C. Email delivery | ADR 0086 SMTP settings and the outbound-mail decision (§5) | "Send by email", `emailed_at_ms`, fallback to shown-once |
 
@@ -479,6 +489,9 @@ implementing PR; README's index status; CLAUDE.md's Accepted list.
 ### Negative
 
 - A link is shown once; a lost link means revoke and reissue.
+- The default changes from `closed` to `invite` (owner answer 2): an instance that never set `RIZZY_SIGNUP`
+  starts in `invite` after the upgrade. It refuses everyone until an invite is issued, as before; the release
+  note says so.
 - The admin must choose the invitee's login name.
 - Charging buckets on refused invites changes today's order and lets a prober who knows a bound name slow
   that invitee's signup.
@@ -496,7 +509,11 @@ implementing PR; README's index status; CLAUDE.md's Accepted list.
 ## Alternatives considered
 
 - **Unbound invites** (the invitee picks the name): friendlier, but every invite holder gets a rate-limited
-  name oracle again, against §5.9's "bound to a login name". Owner question 3.
+  name oracle again, against §5.9's "bound to a login name". Not at v1.0 (owner answer 3); revisit with M10
+  org onboarding.
+- **Keeping `closed` as the default:** the draft carried a second §10.1 replacement text without a default
+  (`RIZZY_SIGNUP` (`closed`|`invite`|`open`)), for the case the owner kept `closed`. Dropped: the owner
+  chose the default `invite` (owner answer 2), which behaves like `closed` until an invite is issued.
 - **Peppered HMAC or a slow hash of the token:** no gain for a 256-bit uniform secret; one more key to
   rotate. Rejected, as for session tokens.
 - **Sealing the token (`0x01` envelope) so it can be shown again:** turns a database plus data-key
@@ -518,10 +535,15 @@ implementing PR; README's index status; CLAUDE.md's Accepted list.
    invite-only signup usable as soon as this ADR is Accepted, without waiting for ADR 0085, and gives
    headless deployments a path. It is an extra surface beyond the ROADMAP row's wording.
    *Recommendation:* yes. The operator already holds the database and the secrets file.
+   **Answered 2026-10-25: yes** (owner answer 1).
 2. **Change the default `RIZZY_SIGNUP` from `closed` to `invite`?** Behaviour is unchanged until an invite is
-   issued, and it matches CRYPTO.md §5.9. *Recommendation:* yes, in phase A, with a release note. If accepted, §10.1's second replacement text applies, and ADR 0086 §1.1's built-in default for `signup_mode` becomes `invite` with it.
+   issued, and it matches CRYPTO.md §5.9. *Recommendation:* yes, in phase A, with a release note.
+   **Answered 2026-10-25: yes** (owner answer 2): §10.1's replacement carries `default invite`, and ADR 0086
+   §1.1's built-in default for `signup_mode` is `invite`.
 3. **Allow unbound invites (the invitee chooses the name) as an admin option?** *Recommendation:* no for
-   v1.0 (§Alternatives); revisit with M10 org onboarding.
+   v1.0 (§Alternatives); revisit with M10 org onboarding. **Answered 2026-10-25: no** (owner answer 3).
+
+No open questions remain.
 
 ## References
 
