@@ -4,7 +4,7 @@
 - Date: 2026-10-24
 - Deciders: project owner
 - Milestone: M3 (`rizzy-domain-auth`, `rizzy-storage`, `rizzy-server` admin panel and operator CLI, `rizzy-client`, `rizzy-wasm`, web vault, `rv`)
-- Supersedes: none. It answers [ADR 0060](0060-admin-panel-stack-boundary.md) open question 6 and changes no Accepted text.
+- Supersedes: [ADR 0048](0048-per-account-storage-quota.md) (§1 in part: its settings sentence, the binding text of [ADR 0028](0028-api-v1-http-conventions.md) item 12's settings clause, gains `RIZZY_SIGNUP` value `invite`), on acceptance; §10.1 gives the part and its replacement. It answers [ADR 0060](0060-admin-panel-stack-boundary.md) open question 6.
 
 ## Context
 
@@ -75,7 +75,8 @@ attempts, never a hard lockout); INV-8 (bearer tokens stored hashed); INV-48 (no
 
 ## Decision
 
-**Supersedes: none.** No wire type changes: the token travels in the existing
+**Supersedes:** one Accepted sentence, ADR 0048 §1's settings list (the binding text of ADR 0028 item 12's
+settings clause), to let `RIZZY_SIGNUP` take `invite` (§10.1). No wire type changes: the token travels in the existing
 `RegisterStartRequest.invite` field and every refusal uses the existing `SignupRefused` → `unauthorized`
 mapping. The persistent additions are one table (§15) and one signup-mode value (§10).
 
@@ -115,7 +116,7 @@ name lookup, and an invite holder can try only the one name the admin chose.
 Issuance refuses a name that (a) belongs to an account with a credential, (b) is reserved by an unfinished
 signup, or (c) already has an open invite (§9) that has not expired. The admin sees which; admins can list
 users anyway (ROADMAP §4.9). An *expired* open invite for the name is closed in the issuance transaction
-(`revoked_at_ms = now`, `revoked_by` = the issuer).
+(`revoked_at_ms = now`, `revoked_kind`/`revoked_admin_id` = the issuer's actor, ADR 0085 §8.1).
 
 ### 4. Issuance
 
@@ -240,7 +241,7 @@ States, derived from the row: **open** (not pending, not terminal), **pending** 
 **redeemed**, **revoked**, and **expired** (`expires_at_ms <= now` and not redeemed or revoked).
 
 - **Revocation.** An admin (panel) or the operator (CLI) revokes an open or pending invite:
-  `revoked_at_ms`, `revoked_by`. It takes effect at once for both start and finish (§6). A redeemed invite
+  `revoked_at_ms`, `revoked_kind`, `revoked_admin_id`. It takes effect at once for both start and finish (§6). A redeemed invite
   cannot be revoked; the account exists, and disabling it is ADR 0060's disable-user screen.
 - **Worker** (ADR 0010 §5, the "expired auth state" sweep):
   - releases the reservation of an expired or revoked invite whose pending account has no credential, by
@@ -251,14 +252,41 @@ States, derived from the row: **open** (not pending, not terminal), **pending** 
 
 ### 10. Signup mode `invite`
 
-- The mode has three values: `closed`, `invite`, `open`. `RIZZY_SIGNUP` accepts `invite`.
-- **Persistence and precedence** belong to ADR 0086: the mode is that ADR's signup-mode setting, and its
-  rule decides how `RIZZY_SIGNUP` and the stored value combine. This ADR adds only the value.
+- The mode has three values: `closed`, `invite`, `open`. `RIZZY_SIGNUP` accepts `invite`, which changes
+  Accepted text (§10.1).
+- **Persistence and precedence** belong to ADR 0086: the mode is its `signup_mode` key, whose §1.1 row reserves
+  `invite` for this ADR and whose parser accepts it, from the table and from `RIZZY_SIGNUP` alike, once this
+  ADR is Accepted and implemented. ADR 0086's rule decides how `RIZZY_SIGNUP` and the stored value combine.
+  This ADR adds only the value.
 - **Default.** Owner question 2 recommends the default move from `closed` to `invite`, matching §5.9's
-  "default is invite-only"; with no invite issued it refuses everyone, like `closed`.
+  "default is invite-only"; with no invite issued it refuses everyone, like `closed`. ADR 0086 §1.1's built-in
+  default for `signup_mode` and §10.1's replacement text follow the owner's answer.
 - **Admin signup screen.** ADR 0060 §4's signup-mode screen gains the "Invite-only" option, once this ADR is
   Accepted and the code exists, and an Invites screen (§13). Neither lands before ADR 0085 is Accepted
   (ADR 0060 owner answer 5).
+
+#### 10.1 What this ADR supersedes
+
+One Accepted sentence ([ADR 0020](0020-partial-supersession.md) point 9).
+
+1. **[ADR 0048](0048-per-account-storage-quota.md) §1, its last sentence**, the settings list, which ADR 0048's
+   table names as its replacement of [ADR 0028](0028-api-v1-http-conventions.md) item 12's settings clause and
+   which is therefore the binding text of that clause. Word for word:
+
+   > Settings `RIZZY_ROLES`, `RIZZY_ORIGIN`, `RIZZY_LISTEN` (default `127.0.0.1:8080`), `RIZZY_DATA_DIR` (`/data`), `RIZZY_DATABASE_URL`, `RIZZY_SECRETS_FILE` (`/run/rizzy-secrets/secrets.json`), `RIZZY_SIGNUP` (`closed`|`open`), `RIZZY_TRUSTED_PROXIES`, `RIZZY_LOG_LEVEL`, `RIZZY_WORKER_INTERVAL_SECS`, `RIZZY_MAX_UPLOAD_BYTES`, `RIZZY_ACCOUNT_QUOTA_BYTES`.
+
+   Replacement, in full:
+
+   > Settings `RIZZY_ROLES`, `RIZZY_ORIGIN`, `RIZZY_LISTEN` (default `127.0.0.1:8080`), `RIZZY_DATA_DIR` (`/data`), `RIZZY_DATABASE_URL`, `RIZZY_SECRETS_FILE` (`/run/rizzy-secrets/secrets.json`), `RIZZY_SIGNUP` (`closed`|`invite`|`open`), `RIZZY_TRUSTED_PROXIES`, `RIZZY_LOG_LEVEL`, `RIZZY_WORKER_INTERVAL_SECS`, `RIZZY_MAX_UPLOAD_BYTES`, `RIZZY_ACCOUNT_QUOTA_BYTES`.
+
+   If the owner accepts open question 2 (default `invite`), the replacement is instead, in full:
+
+   > Settings `RIZZY_ROLES`, `RIZZY_ORIGIN`, `RIZZY_LISTEN` (default `127.0.0.1:8080`), `RIZZY_DATA_DIR` (`/data`), `RIZZY_DATABASE_URL`, `RIZZY_SECRETS_FILE` (`/run/rizzy-secrets/secrets.json`), `RIZZY_SIGNUP` (`closed`|`invite`|`open`, default `invite`), `RIZZY_TRUSTED_PROXIES`, `RIZZY_LOG_LEVEL`, `RIZZY_WORKER_INTERVAL_SECS`, `RIZZY_MAX_UPLOAD_BYTES`, `RIZZY_ACCOUNT_QUOTA_BYTES`.
+
+Nothing else in ADR 0048 or ADR 0028 changes: ADR 0048 §1's other sentences (the quota setting) and ADR 0028
+item 12's other clauses stay binding. [ADR 0066](0066-share-email-otp-verification.md) (Proposed) also
+supersedes this settings sentence, quoting ADR 0028's older text; whichever of the two is accepted later
+restates the other's change in its replacement.
 
 ### 11. Operator CLI (server binary)
 
@@ -271,19 +299,22 @@ Beside the existing `rizzy-vault secrets …` and `backup` subcommands (`rizzy-s
 - `rizzy-vault invite revoke <invite_id>`.
 
 They run against the live database (no exclusive lock: one insert or update each; verified at
-implementation against `backup`'s non-exclusive open), with the §3/§4 checks and `issued_by =
-"operator-cli"`. Someone with shell access to the host already holds the database and the secrets file, so
+implementation against `backup`'s non-exclusive open), with the §3/§4 checks, `issued_kind = 'cli'` and
+`issued_admin_id = NULL` (`revoked_*` likewise), and the ADR 0085 §9.3 audit row of §12. Someone with shell access to the host already holds the database and the secrets file, so
 this adds no new authority. Whether it ships ahead of the admin panel is owner question 1.
 
 ### 12. Audit
 
 - The `auth_invites` row is the record: issuer, creation, expiry, email time, pending account, redemption
   (time and account), revocation (time and revoker).
-- One structured `info` log line per issue, revoke and redeem: `invite_id`, the actor (ADR 0085's admin
-  id, `operator-cli`, or the redeeming `account_id`) and the time. No token, hash, note or email address.
-- When ADR 0085 (or a later ADR) defines an admin audit log, these three events are written to it; once the
-  per-account security event log has an ADR (THREAT_MODEL §7.19 "R"), the redemption is the new account's
-  first entry, naming the issuer. Neither log is decided here.
+- One structured `info` log line per issue, revoke and redeem: `invite_id`, the actor (ADR 0085 §8.1's kind and
+  admin id, or the redeeming `account_id`) and the time. No token, hash, note or email address.
+- **Admin audit log:** ADR 0085 §9.3's fixed list carries `invite_issued` and `invite_revoked` (actor `panel` or
+  `cli`, from the panel and from `rizzy-vault invite` alike) and `invite_redeemed` (actor `system`,
+  `target_account_id` the new account), each with the `invite_id` as detail and written in the transaction of
+  the action it records. This is no longer conditional on a later ADR.
+- **Per-account security event log:** ADR 0090 (Proposed). Once it is Accepted, the redemption is the new
+  account's first entry, naming the issuer; this ADR does not define that entry's format.
 
 ### 13. Admin panel screens (ADR 0060 `http/admin_panel/`)
 
@@ -325,7 +356,7 @@ never carry a secret.
 ### 15. Table `auth_invites`
 
 One migration in each of `migrations/sqlite` and `migrations/postgres`, `NNNN_auth_invites.sql` with the next
-free number at implementation (0009 is taken; 0010 is expected to go to the ADR 0045 track). SQLite shown;
+free number at implementation. SQLite shown;
 PostgreSQL uses `BYTEA`, `BIGINT` and the same checks.
 
 ```sql
@@ -334,7 +365,8 @@ CREATE TABLE auth_invites (
     token_hash          BLOB    NOT NULL UNIQUE CHECK (length(token_hash) = 32),
     login_name          TEXT    NOT NULL CHECK (length(login_name) BETWEEN 1 AND 254),
     note                TEXT    CHECK (length(note) <= 200),
-    issued_by           TEXT    NOT NULL CHECK (length(issued_by) BETWEEN 1 AND 64),
+    issued_kind         TEXT    NOT NULL CHECK (issued_kind IN ('panel', 'cli')),
+    issued_admin_id     BLOB    CHECK (length(issued_admin_id) = 16),
     created_at_ms       INTEGER NOT NULL CHECK (created_at_ms >= 0),
     expires_at_ms       INTEGER NOT NULL CHECK (expires_at_ms > created_at_ms),
     emailed_at_ms       INTEGER CHECK (emailed_at_ms >= 0),
@@ -343,10 +375,13 @@ CREATE TABLE auth_invites (
     redeemed_at_ms      INTEGER CHECK (redeemed_at_ms >= 0),
     redeemed_account_id BLOB    CHECK (length(redeemed_account_id) = 16),
     revoked_at_ms       INTEGER CHECK (revoked_at_ms >= 0),
-    revoked_by          TEXT    CHECK (length(revoked_by) BETWEEN 1 AND 64),
+    revoked_kind        TEXT    CHECK (revoked_kind IN ('panel', 'cli')),
+    revoked_admin_id    BLOB    CHECK (length(revoked_admin_id) = 16),
     CHECK ((pending_account_id IS NULL) = (pending_at_ms IS NULL)),
     CHECK ((redeemed_at_ms IS NULL) = (redeemed_account_id IS NULL)),
-    CHECK ((revoked_at_ms IS NULL) = (revoked_by IS NULL)),
+    CHECK ((revoked_at_ms IS NULL) = (revoked_kind IS NULL)),
+    CHECK ((issued_kind = 'panel') = (issued_admin_id IS NOT NULL)),
+    CHECK ((revoked_kind IS NOT NULL AND revoked_kind = 'panel') = (revoked_admin_id IS NOT NULL)),
     CHECK (redeemed_at_ms IS NULL OR revoked_at_ms IS NULL)
 ) STRICT;
 -- At most one open (not redeemed, not revoked) invite per name; issuance closes an expired one first (§3).
@@ -357,14 +392,23 @@ CREATE INDEX auth_invites_pending ON auth_invites (pending_account_id)
 CREATE INDEX auth_invites_expiry ON auth_invites (expires_at_ms);
 ```
 
-`issued_by` and `revoked_by` hold ADR 0085's admin identifier or `operator-cli`; their format follows ADR 0085.
-Account ids carry no foreign key, so the record outlives a deleted account until the 365-day purge.
-The note is personal data an admin typed; the table is covered by the existing database backup
-([ADR 0071](0071-encrypted-db-backup-format.md)) like every `auth_` table.
+`issued_kind`/`issued_admin_id` and `revoked_kind`/`revoked_admin_id` follow ADR 0085 §8.1's actor encoding,
+the one ADR 0085's audit log and ADR 0086's settings use: `panel` with the acting admin's `admin_id`, or `cli`
+with `NULL`; no foreign key, so the record outlives the admin. Account ids carry no foreign key either, so the
+record outlives a deleted account until the 365-day purge. The note is personal data an admin typed.
+
+**Backup.** `auth_invites` is in the logical backup: [ADR 0023](0023-logical-backup-format.md)'s `TABLES` gains it
+at the end of the `auth_` block (no foreign key, so any position is valid), which bumps the dump's schema
+version as any migration does; [ADR 0071](0071-encrypted-db-backup-format.md) only wraps the dump. Inclusion is
+per table, not implied by the `auth_` prefix. It is in because the row is the invite's audit record (§12) and
+because a restore without it would silently void every open invite. A restore rolls invites back with the
+accounts: an invite redeemed after the backup is open again, together with the name its account no longer
+holds, and the admin revokes it if it should not be used twice.
 
 ### 16. Proposed invariant
 
-**INV-I1** (number allocated at acceptance; parallel drafts may claim the next free numbers): "An invite
+**INV-108** (this ADR's number, the next free one after ADR 0085's INV-107; ADR 0086 adds none;
+provisional until acceptance, as for the 2026-10-11 batch): "An invite
 token is 32 CSPRNG bytes, stored only as SHA-256 and never logged. It admits exactly one signup, under the
 one login name it was issued for, before its expiry and unless revoked; it is redeemed in the same
 transaction that creates the account. Every refused invite gets the same answer as a closed server, and in
@@ -416,7 +460,9 @@ Tests:
 
 Documentation edits, made by whoever records the acceptance (not by this draft):
 [CRYPTO.md §5.9](../CRYPTO.md#59-account-enumeration) "Registration" and §11.1 step 1 point here for the
-token mechanism; THREAT_MODEL §8 gains INV-I1 under its allocated number and §7.19 "I"/"S" names it;
+token mechanism; THREAT_MODEL §8 gains INV-108 (§16) and §7.19 "I"/"S" names it; [ADR 0048](0048-per-account-storage-quota.md)'s
+status line, "Accepted" or whatever it holds then, gains "[ADR 0087](0087-invite-only-signup-tokens.md) (§1 in part)" (ADR 0020
+point 9, semicolon-separated after any earlier entry); ADR 0023's `TABLES` gains `auth_invites` (§15);
 `config.rs` and `rizzy-proto` `limits.rs` drop "format not specified" / "admin API is M3" in the
 implementing PR; README's index status; CLAUDE.md's Accepted list.
 
@@ -444,8 +490,8 @@ implementing PR; README's index status; CLAUDE.md's Accepted list.
 - **Bucket DoS on a known name** (§8): exponential backoff, never a lockout (INV-7); the admin can reissue
   under another name.
 - **Mailbox compromise** (§5): bounded by binding, expiry, single use and revocation.
-- **Unproven parallel ADRs:** ADR 0085's admin identifier format and ADR 0086's precedence rule may change
-  the columns `issued_by`/`revoked_by` and §10's wording; a revision of this ADR while Proposed absorbs it.
+- **Unproven parallel ADRs:** the actor columns follow ADR 0085 §8.1 and §10 follows ADR 0086's
+  `signup_mode` key; a revision of either while Proposed is absorbed by a revision of this ADR.
 
 ## Alternatives considered
 
@@ -473,14 +519,16 @@ implementing PR; README's index status; CLAUDE.md's Accepted list.
    headless deployments a path. It is an extra surface beyond the ROADMAP row's wording.
    *Recommendation:* yes. The operator already holds the database and the secrets file.
 2. **Change the default `RIZZY_SIGNUP` from `closed` to `invite`?** Behaviour is unchanged until an invite is
-   issued, and it matches CRYPTO.md §5.9. *Recommendation:* yes, in phase A, with a release note.
+   issued, and it matches CRYPTO.md §5.9. *Recommendation:* yes, in phase A, with a release note. If accepted, §10.1's second replacement text applies, and ADR 0086 §1.1's built-in default for `signup_mode` becomes `invite` with it.
 3. **Allow unbound invites (the invitee chooses the name) as an admin option?** *Recommendation:* no for
    v1.0 (§Alternatives); revisit with M10 org onboarding.
 
 ## References
 
 - [ADR 0060](0060-admin-panel-stack-boundary.md) §1, §2, §4, open question 6, owner answers 3, 5, 6
-- ADR 0085 (admin authentication, Proposed draft), ADR 0086 (settings persistence, Proposed draft)
+- [ADR 0085](0085-admin-authentication-bootstrap.md) (admin authentication, Proposed: §8.1's actor encoding, §9.3's audit actions), [ADR 0086](0086-instance-settings-persistence.md) (settings persistence, Proposed: the `signup_mode` key), ADR 0090 (the per-account security event log, Proposed)
+- [ADR 0048](0048-per-account-storage-quota.md) §1 (the settings sentence, §10.1); [ADR 0020](0020-partial-supersession.md) point 9; [ADR 0023](0023-logical-backup-format.md) (`TABLES`)
+- [Gap review of 2026-10-25](../reviews/2026-10-25-adr-gap-review.md), findings G09-22 to G09-25
 - [ADR 0010](0010-server-shape.md) §1, §5; [ADR 0022](0022-server-mode-only.md) §2; [ADR 0011](0011-storage.md);
   [ADR 0028](0028-api-v1-http-conventions.md) point 3 and its "Register finish" row; [ADR 0071](0071-encrypted-db-backup-format.md)
 - [ADR 0008](0008-account-recovery.md), [ADR 0058](0058-webauthn-2fa-second-factor.md),
