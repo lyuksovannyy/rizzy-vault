@@ -154,6 +154,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0097 | [Website matching corrections: the compared URL, the *Regex* mode, and reading ACCOUNT_SETTINGS independently of the reader's PSL](0097-website-matching-corrections.md) | Proposed | M2 |
 | 0098 | [Security keys: per-account and per-key limits, the six `webauthn` endpoints and `pending_id` (erratum to ADRs 0077 and 0028)](0098-security-key-limits-and-endpoints.md) | Proposed | M3 |
 | 0099 | [Website icons: a per-account opt-in, off by default, and no request while the setting or the `icons` role is off (erratum to ADR 0052)](0099-website-icons-opt-in.md) | Proposed | M3 |
+| 0093 | [Attachment lifecycle: cleanup after Purge (`attachments/delete-item`), export and import, and unsupported items on move (answers review D1, D2, D6)](0093-attachment-lifecycle.md) | Proposed | M3 |
 
 ## Gates
 
