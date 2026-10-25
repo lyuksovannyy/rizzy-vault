@@ -719,10 +719,11 @@ fn pre_migration_copy() {
         let last = MIGRATIONS.last().unwrap().version;
         let mut w = db.begin_write().await.unwrap();
         on_engine!(w.conn(), |c| {
-            // Undo the last migration (0010: the account's last recovery time).
-            for undo in ["ALTER TABLE auth_accounts DROP COLUMN last_recovery_at_ms"] {
-                sqlx::query(undo).execute(&mut *c).await.unwrap();
-            }
+            // Undo the last migration (0011: ADR 0047's invalidate marker).
+            sqlx::query("DROP TABLE auth_invalidate_pending")
+                .execute(&mut *c)
+                .await
+                .unwrap();
             sqlx::query("DELETE FROM _sqlx_migrations WHERE version = $1")
                 .bind(last)
                 .execute(&mut *c)

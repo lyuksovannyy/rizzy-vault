@@ -468,7 +468,9 @@ async fn try_exec(
 /// index keeps one Personal vault per account and allows any number of owned ones, the CHECK
 /// refuses another kind, and the migration itself fails loudly on an account that already has
 /// two vaults. Needs `fixture()` restored (`ACCOUNT_1` owns vault `0xb1…` as kind 1) and every
-/// migration applied. Leaves migration 9 pending and the second vault in place: the caller
+/// migration applied. Undoes migrations 10 (ADR 0045's `last_recovery_at_ms`) and 11 (ADR
+/// 0047's marker table), which come after it, as well. Leaves migrations 9 to 11 pending and the
+/// second vault in place: the caller
 /// closes this handle (sqlx keeps PostgreSQL's migration advisory lock on the connection of a
 /// failed run) and calls [`finish_vault_kinds`] on a new one.
 #[expect(
@@ -517,10 +519,16 @@ pub(crate) async fn exercise_vault_kinds(db: &rizzy_storage::Database) {
     }
 
     // The migration on a database where one account has two vaults fails and changes nothing.
-    // Migration 10 (ADR 0045's `last_recovery_at_ms`) came after it; undo both, newest first.
+    // Migrations 10 (ADR 0045's `last_recovery_at_ms`) and 11 (ADR 0047's invalidate marker)
+    // came after it; undo all three, newest first.
     let last = crate::common::last_migration();
-    assert_eq!(last, 10, "the last-recovery migration is the last one");
+    assert_eq!(
+        last, 11,
+        "migrations 10 and 11 are the only ones after vault kinds"
+    );
     for undo in [
+        "DROP TABLE auth_invalidate_pending",
+        "DELETE FROM _sqlx_migrations WHERE version = 11",
         "ALTER TABLE auth_accounts DROP COLUMN last_recovery_at_ms",
         "DELETE FROM _sqlx_migrations WHERE version = 10",
         "DROP INDEX vault_vaults_personal",
@@ -531,7 +539,7 @@ pub(crate) async fn exercise_vault_kinds(db: &rizzy_storage::Database) {
     }
     assert!(try_exec(db, insert, &[id(0xc1), a1]).await);
     assert!(db.migrate().await.is_err());
-    assert_eq!(db.pending_migrations().await.unwrap(), vec![9, 10]);
+    assert_eq!(db.pending_migrations().await.unwrap(), vec![9, 10, 11]);
 }
 
 /// The second half of [`exercise_vault_kinds`], on a fresh handle: without the second vault
@@ -542,7 +550,7 @@ pub(crate) async fn exercise_vault_kinds(db: &rizzy_storage::Database) {
 )]
 pub(crate) async fn finish_vault_kinds(db: &rizzy_storage::Database) {
     let a1 = id(ACCOUNT_1);
-    assert_eq!(db.pending_migrations().await.unwrap(), vec![9, 10]);
+    assert_eq!(db.pending_migrations().await.unwrap(), vec![9, 10, 11]);
     assert!(try_exec(db, "DELETE FROM vault_vaults WHERE id = $1", &[id(0xc1)]).await);
     db.migrate().await.unwrap();
     assert!(db.pending_migrations().await.unwrap().is_empty());

@@ -133,6 +133,15 @@ pub const MIGRATIONS: &[MigrationFile] = &[
         sqlite: include_str!("../migrations/sqlite/0010_auth_last_recovery.sql"),
         postgres: include_str!("../migrations/postgres/0010_auth_last_recovery.sql"),
     },
+    // ADR 0047: the crash marker of `rizzy-vault secrets invalidate`. Its ADR names it `0006`
+    // provisionally; 0006 to 0010 were taken first, so it is the next free number. Raises the
+    // backup `schema_version` to 11; the table itself is not backed up (`tables::NOT_BACKED_UP`).
+    MigrationFile {
+        version: 11,
+        description: "auth_invalidate_pending",
+        sqlite: include_str!("../migrations/sqlite/0011_auth_invalidate_pending.sql"),
+        postgres: include_str!("../migrations/postgres/0011_auth_invalidate_pending.sql"),
+    },
 ];
 
 /// This release's schema version: the last migration's version. A logical backup is stamped

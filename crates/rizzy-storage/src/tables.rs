@@ -16,6 +16,10 @@
 //!   revive sessions that were ended after the backup (for example those of a device revoked
 //!   since, INV-59), and 60 s login state and challenges mean nothing after a restore. Every
 //!   user signs in again.
+//! - `auth_invalidate_pending` (ADR 0047): the crash marker of one `rizzy-vault secrets
+//!   invalidate` run against this database and the secrets file next to it. A backup taken
+//!   while one is pending would carry a half-finished run into another instance; the restored
+//!   database is checked against the secrets file anyway (`ServerSecrets::check_dump`).
 //! - `storage_meta` and `storage_reconciliation`: `restore` writes both itself, with a new
 //!   restore generation (ADR 0021 §2) and a reconciliation epoch for every account (INV-59).
 //!
@@ -73,6 +77,7 @@ pub const NOT_BACKED_UP: &[&str] = &[
     "auth_device_challenges",
     "auth_webauthn_pending",
     "auth_webauthn_challenges",
+    "auth_invalidate_pending",
     "storage_meta",
     "storage_reconciliation",
 ];
