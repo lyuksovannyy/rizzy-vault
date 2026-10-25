@@ -250,9 +250,24 @@ The dated bullets below are a log: an ADR status in a bullet is the status on th
     - 0087 (invite tokens bound to a login name, link in the URL fragment, same 401 as closed signup).
     - Purpose and INV numbers in 0085–0087 are renumbered at acceptance.
   - **Test fix:** the settings round-trip property drew tags that now have layouts (0x0002/0x0004).
+- **2026-10-25: ADR gap review and fixes (owner: "can you first review all the adrs…", then "start"):**
+  - **Review:** [docs/reviews/2026-10-25-adr-gap-review.md](reviews/2026-10-25-adr-gap-review.md) covers 240 findings (3 blockers, 97 major, 140 minor), with raw files and the errata-candidates list.
+  - **Fix drafts, all Proposed:**
+    - **0088–0099:** the three blockers via 0088 (device-state grammar), 0090 (security event log) and the 0068 alias tombstone; extension frames (0089), the revoked-device race (0091), rotation size limits (0092), the attachment lifecycle (0093), backup limits (0094), commit-only owner answers (0095), binding secrets/KDBX (0096), matching fixes (0097), security-key limits (0098) and the favicon opt-in (0099).
+    - **0100–0114:** notification mail (0100), client licensing (0101), native TLS (0102), disable user (0103), metrics (0104), Secret Key QR (0105), the AGPL source link (0106), backup-key retention (0107), the sync c‍ursor (0109; no stall exists), passkey UV (0110), extension session and idle lock (0111; Firefox MV3 has no persistent page), core dumps (0112), the breach endpoint (0113) and one settings register (0114).
+    - **0108** (interrupted-recovery exit) is still being drafted.
+  - **Also done:** drafts 0068 and 0083–0087 fixed; docs hygiene.
+  - **Numbers:** INV-107…125 and the AR rows are provisional, allocated by the lead. The owner confirms them at acceptance.
+  - **Code gaps found, needing no new ADR (Accepted text binds):**
+    - the extension durable device writes no alarm rows (ADR 0026 §4 step 4);
+    - the Chromium auto-lock setting is ignored (offscreen document has no storage);
+    - `rizzy-vault --help` omits the icons/breach settings;
+    - the Containerfile lacks ADR 0017 §7 OCI source labels;
+    - code comments still call 0047 Proposed.
 - **What is left for agents:**
-  - After the owner accepts: 0083 (doc edits only), 0084, and 0085–0087 (admin screens, invite signup).
-  - Still blocked: 0073 (approval records). ADR 0081 Part B and masked email come after v1.0.
+  - The code gaps above.
+  - After the owner accepts drafts: their implementation, in dependency order.
+  - Everything else waits on owner answers (the open questions in each draft).
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
