@@ -54,7 +54,7 @@ Under [ADR 0020](0020-partial-supersession.md) point 9, this ADR supersedes exac
 
   Replaced by:
 
-  "A device sends its cursor: per device, per vault, the `device_seq` up to which it holds every header of that device's chain in a state it will not need served again. That is the chain's head, unless a link at or after the first undelivered one has a rejected body or a lapsed hold and its item's settled version vector does not cover it, in which case it is that link's `vault_prev_seq`, so the server serves the link again. The cursor is derived from the replica's chain state on every request and is never stored, on the client or the server ([ADR 0109](0109-sync-cursor-held-header.md) §2)."
+  "A device sends its cursor: per device, per vault, one `device_seq`. It is the chain's head (the newest header linked into the chain; a link held under [ADR 0050](0050-paged-fetch-tombstone-boundary.md) §2 does not lower it, and only the next page of its own response sequence may carry a cursor past it), unless a link at or after the first undelivered one has a rejected body or a lapsed hold and its item's settled version vector does not cover it, in which case it is that link's `vault_prev_seq`, so the server serves the link again. The cursor is derived from the replica's chain state on every request and is never stored, on the client or the server ([ADR 0109](0109-sync-cursor-held-header.md) §2)."
 
   The three sub-bullets of that bullet ("It receives every op header after the cursor…", the compacted-body sub-bullet as ADR 0021 left it, and the wrap-set sub-bullet) are untouched.
 
