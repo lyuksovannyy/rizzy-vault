@@ -163,6 +163,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0101 | [Native-client repository licensing: AGPL-3.0-only with two §7 permissions, store channels, the Windows App SDK, Qt LGPLv3, DCO and licence gates in the client repositories (partially supersedes ADR 0017)](0101-native-client-licensing.md) | Proposed | M3 |
 | 0104 | [Metrics endpoint: `GET /metrics` on the admin listener, a closed Prometheus metric set, and an optional scrape token](0104-metrics-endpoint.md) | Proposed | M3 |
 | 0100 | [Notification mail: the account email address, the `worker` sender and its outbox, and the recovery notices of ADR 0008 decision 5](0100-notification-mail.md) | Proposed | M3 |
+| 0113 | [Breach-check endpoint: path, JSON shapes, error codes, size caps, caching and the `icons` settings (erratum to ADRs 0053 and 0048)](0113-breach-check-endpoint.md) | Proposed | M3 |
 
 ## Gates
 
