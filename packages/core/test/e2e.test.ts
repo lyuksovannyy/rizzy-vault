@@ -693,6 +693,9 @@ describe.skipIf(binary === undefined)("against a real server", () => {
   // an item, then reopen from that same store as a fresh browser session would and read the
   // item back — the full cycle `DeviceSession`'s module docs describe, against the real
   // protocol rather than the fake test server.
+  // Bob's Secret Key, for the alarm test below: one more signup on this server would run into
+  // its signup rate limit and fail a later test's (the pattern of `erinSecretKey`).
+  let bobSecretKey = "";
   it("enrols a durable device (kind 2), writes and syncs an item, and reopens from its cache store", async () => {
     const transport = fetchTransport(origin);
     const signup = await Signup.start(
@@ -705,6 +708,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     kit.secretKey.fill(0);
     const lastGroup = secretKey.split("-").at(-1) ?? "";
     await signup.confirm(lastGroup);
+    bobSecretKey = secretKey;
     const owner = await signup.login();
     const ownerAccountId = owner.accountId;
     // ADR 0042 §5: the web session writes the account's match settings, one `account/commit` of
@@ -864,24 +868,18 @@ describe.skipIf(binary === undefined)("against a real server", () => {
 
   // ADR 0026 §4 steps 4 and 7 as ADR 0095 §C replaces step 7's last sentence: a durable device
   // restored from an older copy of its own cache (here: the store as it was before this device
-  // uploaded its second write) sees, on its first Fetch, more of its own history than it holds.
+  // uploaded its second write; a second durable device of Bob's account) sees, on its first
+  // Fetch, more of its own history than it holds.
   // It writes alarm 4 into its store with that answer and goes read-only, a restart keeps it so,
   // and the only way on is removal (§5 as ADR 0095 §D replaces it), which alarm 4 does not
   // block and which first uploads the unsent own row the older copy holds, byte for byte.
   it("keeps a durable device read-only across restarts after an older copy of its cache raises alarm 4", async () => {
     const transport = fetchTransport(origin);
-    const signup = await Signup.start(
-      transport,
-      { origin, loginName: "Heidi", password: PASSWORD, issueRecoveryCode: false },
-      Date.now,
-    );
-    const kit = signup.emergencyKit();
-    const secretKey = new TextDecoder().decode(kit.secretKey);
-    kit.secretKey.fill(0);
-    await signup.confirm(secretKey.split("-").at(-1) ?? "");
+    const secretKey = bobSecretKey;
+    expect(secretKey).not.toBe("");
 
     const store = memoryCacheStore();
-    const session = await enrolDevice(transport, { origin, loginName: "heidi", secretKey, password: PASSWORD }, store);
+    const session = await enrolDevice(transport, { origin, loginName: "bob", secretKey, password: PASSWORD }, store);
     await session.authenticate();
     await session.sync();
     expect(session.alarms).toEqual([]);
