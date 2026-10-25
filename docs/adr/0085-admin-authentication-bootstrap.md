@@ -209,10 +209,11 @@ question 5 and ADR 0047 open question 5. No Accepted text changes.
    complete (point 6 detects it and says so). Browsers treat loopback origins as secure contexts and keep
    `Secure` cookies on them (L: MDN "Secure contexts" and `Set-Cookie`; checked per browser in the e2e
    suite, §10).
-2. **Host check (DNS rebinding).** Every admin request whose `Host` is not an IP literal, `localhost`
+2. **Host check (DNS rebinding).** Every request under `/admin` whose `Host` is not an IP literal, `localhost`
    or a name listed in the new setting `RIZZY_ADMIN_HOSTS` (comma-separated host names, default empty)
    gets a plain-text `421` naming the setting, before routing. A rebinding page on another name can
-   then neither read the panel nor post to it.
+   then neither read the panel nor post to it. The metrics endpoint that ADR 0060 owner answer 4 puts
+   on this listener is outside `/admin` and not affected (scrapers often address it by a service name).
 3. **The session.** On a successful login or bootstrap the server issues a fresh random 32-byte token
    (never reused from a pre-auth value: no fixation) and stores `SHA-256(token)` in
    `auth_admin_sessions` with a fresh random 32-byte `csrf_token`, `created_at_ms`,
@@ -229,14 +230,15 @@ question 5 and ADR 0047 open question 5. No Accepted text changes.
      password change or TOTP re-enrolment deletes every other session of that admin.
 4. **CSRF.** Every state-changing request is a `POST` (no `GET` changes state) and passes all of:
    - `Content-Type: application/x-www-form-urlencoded`, body at most 16 KiB, parsed by §9's form parser;
-   - `Sec-Fetch-Site`, when present, equal to `same-origin`; `Origin`, when present, not `null` and
-     with the same host and port as `Host`;
+   - `Sec-Fetch-Site`, when present, equal to `same-origin`; `Origin`, when present, not `null`, and
+     either with the same host and port as `Host` or with a host listed in `RIZZY_ADMIN_HOSTS` (a TLS
+     proxy that rewrites `Host` to the upstream address, as nginx does by default (L), then still works);
    - a hidden `csrf` field equal, in constant time, to the session's `csrf_token` (synchronizer token).
    - **Before login** (bootstrap and login forms) there is no session: the `GET` sets
      `rizzy_admin_pre=<43 base64url random>; Path=/admin; HttpOnly; Secure; SameSite=Strict;
      Max-Age=900` and puts the same value in the hidden field; the `POST` requires both and equal
      (double submit). Both cookies are deleted on success. Residual: a double-submit cookie can be
-     planted by a sibling subdomain; the admin origin is loopback or the operator's own host (§10 Risks).
+     planted by a sibling subdomain; the admin origin is loopback or the operator's own host (Consequences, Risks).
    A failed check answers `403` with a fixed page and changes nothing.
 5. **Headers.** Every admin answer keeps ADR 0060's `ADMIN_CSP` and common headers and adds
    `Cache-Control: no-store` (pages carry CSRF tokens and, once, a TOTP secret). Successful POSTs answer
