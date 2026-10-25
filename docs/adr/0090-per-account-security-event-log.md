@@ -59,7 +59,7 @@ The part below is named under ADR 0020 point 9. Nothing else in any Accepted ADR
 
 ### 2. Trust model: advisory, written by the server, never a trust input
 
-1. **The log is advisory.** Every entry and every field of the alert summary (§7) is server-written, unsigned and unverifiable by the client, exactly like ADR 0045's `PendingRecoveryNotice` (INV-70). A malicious or compromised server (A2), or anyone with write access to the database, can omit, delete, reorder, back-date or invent entries. A client must not use an entry's presence, absence or content in any trust decision: not for the device set, not for `account-state` verification (INV-25), not for recovery state (INV-70), not to enable or disable any control. It is shown to the user and used for nothing else. This is a new invariant (§12, "INV-SEL").
+1. **The log is advisory.** Every entry and every field of the alert summary (§7) is server-written, unsigned and unverifiable by the client, exactly like ADR 0045's `PendingRecoveryNotice` (INV-70). A malicious or compromised server (A2), or anyone with write access to the database, can omit, delete, reorder, back-date or invent entries. A client must not use an entry's presence, absence or content in any trust decision: not for the device set, not for `account-state` verification (INV-25), not for recovery state (INV-70), not to enable or disable any control. It is shown to the user and used for nothing else. This is a new invariant (§12, "INV-110").
 2. **What it protects, and against whom.** Against an *honest* server it tells the account owner what a third party did with the owner's credentials: a login with the password and Secret Key, a second factor that failed after them, a cloned security key, an enrolled device, a recovery started with the printed kit, a weakened setting. Against an admin who has only the panel (A3 without shell or database access), the panel has no path that edits or deletes an entry (§10). It does not protect against the server operator with database access, and the UI says so (§8).
 3. **Why not signed.** Most events (logins, refused second factors, the clone signal, admin actions, the wait setting) originate at the server, which holds no account key, so no account key can sign them. A server-held signing key or a server-side hash chain proves nothing to a client against the server that holds the key and the chain (A2), and truncation is undetectable without a client-held anchor. What the signed account state already carries (device certificates and revocations, `password_epoch`, the key and identity epochs, recovery enablement) the client verifies from the state itself (INV-25, CRYPTO.md §11.2 step 4); the log adds nothing to that verification and is not asked to. Entries that correspond to a signed-state step carry its `state_seq` (§4) only so the UI can relate the two.
 
@@ -253,11 +253,11 @@ pub struct SecurityAlertSummary {
 
 `auth_security_events` joins ADR 0023's `TABLES` directly after `auth_accounts` (its one foreign key), with its columns in the order of §4; the migration bumps the dump's schema version as any migration does, and the `tables.rs` schema test covers it. Reason: a dispute ("who disabled me, who changed the wait") must survive a restore. Cost: a backup carries every account's event history (metadata only, no address, §4), inside ADR 0071's encrypted backup file. A restore brings the log back as of the backup; entries written after it are lost with everything else (a residual; a later ADR may add a "restored" entry, which would need a step in ADR 0023 §5).
 
-### 12. Invariant (proposed; drafted as **INV-SEL**, its number assigned at acceptance, because parallel drafts may also claim numbers after INV-107)
+### 12. Invariant (proposed; drafted as **INV-110**, its number assigned at acceptance, because parallel drafts may also claim numbers after INV-107)
 
 | ID | Invariant | From | Verified by |
 |---|---|---|---|
-| INV-SEL | Every entry of the per-account security event log and every field of `SecurityAlertSummary` is advisory, unsigned and server-set. A client shows them as UI only and never uses them as input to device-set, `account-state` (INV-25) or recovery-state (INV-70) verification. An honest server writes each entry in the transaction of the action it records, never stores a source address, user agent or secret in it, and shows an account's entries only to that account's OPAQUE or device sessions ([ADR 0090](adr/0090-per-account-security-event-log.md)). | M3 | `rizzy-client` and web e2e: forged, missing or reordered entries and a forged summary change nothing the client trusts; a DB-dump inspection after every event kind finds no canary secret, no source address and no user agent; IDOR test (another account's session lists none of the rows); a failing insert rolls its action back. |
+| INV-110 | Every entry of the per-account security event log and every field of `SecurityAlertSummary` is advisory, unsigned and server-set. A client shows them as UI only and never uses them as input to device-set, `account-state` (INV-25) or recovery-state (INV-70) verification. An honest server writes each entry in the transaction of the action it records, never stores a source address, user agent or secret in it, and shows an account's entries only to that account's OPAQUE or device sessions ([ADR 0090](adr/0090-per-account-security-event-log.md)). | M3 | `rizzy-client` and web e2e: forged, missing or reordered entries and a forged summary change nothing the client trusts; a DB-dump inspection after every event kind finds no canary secret, no source address and no user agent; IDOR test (another account's session lists none of the rows); a failing insert rolls its action back. |
 
 ### 13. How this satisfies INV-69, INV-83 and ADR 0058 owner answer 4
 
@@ -282,8 +282,8 @@ pub struct SecurityAlertSummary {
 ### 15. On acceptance (documentation edits, not made now)
 
 1. **THREAT_MODEL.md**
-   - §8: add the INV-SEL row of §12 under its assigned number.
-   - §7.6 R row: mitigation "The per-account security event log of [ADR 0090](adr/0090-per-account-security-event-log.md): server-visible metadata only, no secrets, no source address; advisory (AR-9). M10 adds org audit logs."; Inv. column "INV-48, INV-SEL". Record that this M1 mitigation is met at M3.
+   - §8: add the INV-110 row of §12 under its assigned number.
+   - §7.6 R row: mitigation "The per-account security event log of [ADR 0090](adr/0090-per-account-security-event-log.md): server-visible metadata only, no secrets, no source address; advisory (AR-9). M10 adds org audit logs."; Inv. column "INV-48, INV-110". Record that this M1 mitigation is met at M3.
    - INV-69 "Verified by": replace "event-log test for a wait change" with the two test names of §13. INV-83 "Verified by": replace "an event-log test for the refused case" with the two test names of §13.
    - §7.19 R and E rows: link ADR 0090 §6 and §10.
    - AR-9: add "the security event log" to its list of server-enforced controls.
@@ -315,7 +315,7 @@ pub struct SecurityAlertSummary {
 
 ### Risks
 
-- **False assurance.** Users may read an empty log as "nothing happened". The footnote (§8) and INV-SEL address it; the signed device list stays the authority. If users or reviewers start relying on the log for trust, revisit with a client-anchored design.
+- **False assurance.** Users may read an empty log as "nothing happened". The footnote (§8) and INV-110 address it; the signed device list stays the authority. If users or reviewers start relying on the log for trust, revisit with a client-anchored design.
 - **Second-factor probing stays invisible** when the attacker stops at the prompt (open question 3).
 - **Log flushing** by a credential holder (§5 residual). If it is seen in practice, add a per-kind rate cap.
 - **A server clock that goes back** reorders entries (order is by `at_ms`); the log is advisory.
@@ -342,7 +342,7 @@ pub struct SecurityAlertSummary {
 ## Self-review (blockers only)
 
 - **Gate:** docs only; no ADR's Status changed; no Context, Decision or Consequences of an Accepted ADR edited; the one superseded part (ADR 0028 item 1, first sentence, in part) is named with full replacement text that keeps ADR 0052's `icons/fetch` clause; CRYPTO.md, THREAT_MODEL.md, ROADMAP.md and CLAUDE.md edits are listed for acceptance, not made. **None found.**
-- **Crypto and trust:** no construction, key, envelope purpose or signed format; the log is advisory under a new invariant (INV-SEL) modelled on INV-70, and no client decision reads it. **None found.**
+- **Crypto and trust:** no construction, key, envelope purpose or signed format; the log is advisory under a new invariant (INV-110) modelled on INV-70, and no client decision reads it. **None found.**
 - **Enumeration and abuse:** no entry is written before KE3 or before `H_rec` matched, so no unauthenticated request writes into a named account or gains a new oracle (§3); every write rides on an existing rate limit (§5). **None found.**
 - **Privacy:** no source address, user agent, token, `session_id` or secret is stored (§4); the backup inclusion is stated with its cost (§11). **None found.**
 - **Dependencies on Proposed ADRs:** codes 24 (panel and CLI paths), 25, 26 and 27 are written only once the ADRs defining those actions are Accepted (§14 step 10); everything else rests on Accepted ADRs and existing code. **None found.**
