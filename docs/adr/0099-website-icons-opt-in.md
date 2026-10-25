@@ -1,10 +1,21 @@
-# ADR 0099: Website icons: a per-account opt-in, off by default, and no request while the setting or the `icons` role is off (erratum to ADR 0052)
+# ADR 0099: Website icons: a per-account setting, on by default, and no request while the setting or the `icons` role is off (erratum to ADR 0052)
 
 - Status: Proposed
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3 (`rizzy-client`, `rizzy-wasm`, `packages/core`, `packages/ui`, web vault, extension)
 - Supersedes: on acceptance, in part: [ADR 0052](0052-icon-proxy-role.md) (point 5, third sentence). §8 gives the replacement text ([ADR 0020](0020-partial-supersession.md) point 9). It also adds tag `0x0005` to [ADR 0042](0042-account-settings-matching-layout.md)'s registry through an amendment, the route that registry provides for (On acceptance item 2).
+
+## Owner answers (2026-10-25)
+
+The owner's words, verbatim: "0099. make on by default"
+
+Open question 1 (the default) is answered: **on**. An account that never touched the switch reads on; the user can turn it off, for every device at once. The Decision follows:
+
+- §1: an absent tag reads on; `0x00` = off, `0x01` = on. Nothing is requested before the account's settings record is loaded and verified in the session; then the client follows it.
+- §3: unchanged. While the server's `icons` role is off, the probe still keeps every host on the client.
+- §6: the disclosure is one line in Settings, beside the switch, always shown.
+- §9: the accepted-risk row (AR-MM) now applies by default, to every account that has not turned the setting off; the threat-model texts say so. ROADMAP line 140's "must be optional" still holds: optional means the user can turn it off, not that it starts off.
 
 ## Context
 
@@ -34,18 +45,19 @@
 ### 1. The setting: "Website icons", per account, synced, `ACCOUNT_SETTINGS` tag `0x0005`
 
 - **Layout.** Tag `0x0005`; value exactly 1 byte: `0x00` = off, `0x01` = on. Any other length or byte is a violation inside a recognised tag, rejected as ADR 0042 §2 says. There is no version field: a richer setting later is a new tag.
-- **Reading.** The setting is on only when the account's `ACCOUNT_SETTINGS` record has been loaded and verified in this unlocked session and holds `0x0005` = `0x01`. In every other case it is off: an absent tag, an absent record (`settings_seq = 0`), a record not yet loaded, and a record that is rejected or parked ("update required").
+- **Reading.** The setting has a value only once the account's `ACCOUNT_SETTINGS` record has been loaded and verified in this unlocked session (ADR 0042, with the freshness check against the signed account state that INV-25 requires). From that record: tag `0x0005` = `0x01` reads on; `0x0005` = `0x00` reads off; an absent tag reads on, the default; an absent record (`settings_seq = 0` in the verified account state, ADR 0042 §2 "Absent object") reads on, as every setting reads its default. A record that is rejected or parked ("update required"), or whose tag `0x0005` cannot be read, reads off: the client never falls back to the default, which is the wider one, when the record it cannot read may hold an explicit `0x00`.
 - **Writing.** Turning it on writes `0x01`; turning it off writes `0x00`. It never deletes the tag, so an explicit "off" survives any later change of the default. The change is one more `SettingsEdit` over the existing whole-record settings write (ADR 0042), with its compare-and-swap and its retry.
 - **Scope.** One value for the whole account, on every device and client: the web vault, the extension and the native apps (through `rizzy-client`). `rv` shows no icons. Why per account: what leaks is the list of sites, and the first device that fetches gives it all to the operator, who already links all of the account's devices through their authenticated calls. A per-device switch would only let a user believe that one device protects a list the account has already exposed.
-- **Default: off** (Open question 1).
+- **Before the record is loaded.** Right after unlock, until the record is loaded and verified, the setting has no value. The client sends nothing to `/api/v1/icons/fetch`, not even the probe, and shows the item-type icon. Once the record is verified it follows it: on starts the probe (§3), off stays silent.
+- **Default: on** (owner answer, 2026-10-25). The switch stays, so icons remain optional: the user turns them off once, for every device.
 
-### 2. No request while the setting is off
+### 2. No request while the setting is off or not yet known
 
-While the setting reads off, a client sends nothing to `/api/v1/icons/fetch`: no host and no probe. The web vault and the extension create no `IconLoader` and show the item-type icon. Turning the setting off during a session clears the loader at once: the queue is dropped, every `blob:` URL is revoked, and answers to requests already in flight are discarded.
+While the setting reads off, or has no value yet (§1, before the record is loaded), a client sends nothing to `/api/v1/icons/fetch`: no host and no probe. The web vault and the extension create no `IconLoader` and show the item-type icon. Turning the setting off during a session clears the loader at once: the queue is dropped, every `blob:` URL is revoked, and answers to requests already in flight are discarded.
 
 ### 3. No host while the role is off: the probe
 
-When the setting reads on, the client probes the role once per unlocked session, before any host is sent:
+When the setting reads on, the client probes the role once per unlocked session, before any host is sent. With the default on, this is what keeps hosts on the client on every deployment that does not run the `icons` role, which is off by default (ADR 0010 owner decision 5): there, the default costs one probe per unlock and sends no host.
 
 - **Request.** `POST /api/v1/icons/fetch` with the same headers as an icon fetch (no `Authorization` header) and the 11-byte body `{"host":""}`, exactly.
 - **Outcome.** A `400` answer with code `invalid_request` means **available**. `429 rate_limited` means wait: the `Retry-After` value, or 4 s without one, at most 3 attempts in all, then **unavailable**. Anything else means **unavailable**: `404 not_found`, another code, a `2xx`, a `5xx` or a transport failure.
@@ -55,7 +67,7 @@ When the setting reads on, the client probes the role once per unlocked session,
 
 The rule lives in the shared core, so no host application can send a host by mistake:
 
-- `rizzy_client::icons` gains `IconPermit`, a type with a private constructor. The only way to make one is `icon_probe_finish(status, body, setting)`, which returns it when the probe outcome is "available" and the caller passes the setting value read under §1 as on.
+- `rizzy_client::icons` gains `IconPermit`, a type with a private constructor. The only way to make one is `icon_probe_finish(status, body, setting)`, which returns it when the probe outcome is "available" and the caller passes the setting value read under §1 as on. That value comes only from a loaded and verified record (§1); before it, the caller has no value to pass and gets no permit.
 - `icon_request` takes `&IconPermit` as well as the host. Without a permit, no request can be built.
 - `rizzy-wasm`'s `Session` holds `Option<IconPermit>`. It drops the permit on lock, on a settings write or reload that reads off, and when the session ends. The wasm icon fetch refuses without a permit, with the `CoreError` code `icons_off`. `packages/core`'s `fetchItemIcon` takes the session, and a new `probeItemIcons` runs §3.
 
@@ -67,15 +79,17 @@ The rule lives in the shared core, so no host application can send a host by mis
 
 ### 6. What the user is told
 
-Settings, section "Website icons": one switch, off by default, with this text (English as given; translations keep the meaning):
+Settings, section "Website icons": one switch, on by default, with this text, always shown under the switch, whether it is on or off (English as given; translations keep the meaning):
 
 > **Show website icons.** To show a site's icon, this app sends the site's host name (for example, `example.com`) to your server, which fetches the icon. The host names are sent without your account name, but the people who run your server could still link them to your account. This setting applies to all your devices.
 
 When the probe says unavailable, the switch stays on and the section adds: "This server does not offer website icons." No probe is sent to word that line while the switch is off.
 
+That line in Settings is the disclosure: no one-time notice, banner or onboarding step. The web vault, the extension and the native apps each show it in their own Settings.
+
 ### 7. Server
 
-No server change. The `icons` role, its cache, its rate limit and `icons/fetch` stay as ADR 0052 gives them, and the role stays off by default (ADR 0010 owner decision 5). An icon is fetched only when the operator runs the role *and* the user turned the setting on.
+No server change. The `icons` role, its cache, its rate limit and `icons/fetch` stay as ADR 0052 gives them, and the role stays off by default (ADR 0010 owner decision 5). An icon is fetched only when the operator runs the role *and* the account's setting reads on (the default, unless the user turned it off).
 
 ### 8. What this ADR supersedes
 
@@ -83,7 +97,7 @@ Under [ADR 0020](0020-partial-supersession.md) point 9, the part named below sto
 
 **[ADR 0052](0052-icon-proxy-role.md)**
 
-1. *Point 5, third sentence* ("No account, session or request identifier ever reaches `rizzy-icon-proxy` — the endpoint (below) carries none — so the cache cannot correlate requests to a user.") is replaced by: "No account, session or request identifier ever reaches `rizzy-icon-proxy` — the endpoint (below) carries none — so neither the role nor its cache can tie a request to a user from what the request carries. The operator of the deployment still can, through the address, connection and timing the reverse proxy sees next to the account's authenticated calls; clients therefore send a host only when the account has turned website icons on and this session's probe found the role ([ADR 0099](0099-website-icons-opt-in.md)), and the remaining exposure is an accepted risk in THREAT_MODEL §9."
+1. *Point 5, third sentence* ("No account, session or request identifier ever reaches `rizzy-icon-proxy` — the endpoint (below) carries none — so the cache cannot correlate requests to a user.") is replaced by: "No account, session or request identifier ever reaches `rizzy-icon-proxy` — the endpoint (below) carries none — so neither the role nor its cache can tie a request to a user from what the request carries. The operator of the deployment still can, through the address, connection and timing the reverse proxy sees next to the account's authenticated calls; clients therefore send a host only when the account's website-icons setting reads on (the default; the user can turn it off) and this session's probe found the role ([ADR 0099](0099-website-icons-opt-in.md)), and the remaining exposure is an accepted risk in THREAT_MODEL §9."
 
 ADR 0052 point 6 is not superseded: the endpoint, its body and its codes are unchanged, and the probe uses them as point 6 defines them. ADR 0042 is not superseded: tag `0x0005` is added by the amendment its registry provides for.
 
@@ -93,35 +107,36 @@ ADR 0052 point 6 is not superseded: the endpoint, its body and its codes are unc
 2. **[ADR 0042](0042-account-settings-matching-layout.md) Amendments.** A dated entry, approved by the owner as ADR 0020 point 4 requires (the precedent is the 2026-10-24 entry for `0x0004`): "`0x0005` = website icons ([ADR 0099](0099-website-icons-opt-in.md) §1). Layout: exactly one byte, `0x00` off, `0x01` on; any other length or value is a violation inside a recognised tag, rejected as §2 says. `0x0006`–`0xFFFE` stay unassigned."
 3. **[CRYPTO.md](../CRYPTO.md) "Account-settings plaintext" paragraph** (line 684): add "and tag `0x0005` (website icons) by [ADR 0099](adr/0099-website-icons-opt-in.md) §1".
 4. **[THREAT_MODEL.md](../THREAT_MODEL.md):**
-   - §7.11, the "I" row's mitigation cell becomes: "Per-account opt-in, off by default: a client sends a host only when the account's website-icons setting is on and this session's probe found the role ([ADR 0099](adr/0099-website-icons-opt-in.md), INV-NN). Role off by default ([Q-11](#10-open-questions-for-the-owner)). Unauthenticated shared cache. No per-user logs, of domains or of HIBP prefixes; the breach-check endpoint is rate-limited per source ([ADR 0053](adr/0053-hibp-breach-check-egress.md) item 8). Operator-side correlation: AR-MM." The Inv. cell adds INV-NN.
-   - AST-13: after "domains requested from the icons role" add "(only for accounts that turned website icons on, [ADR 0099](adr/0099-website-icons-opt-in.md))".
-   - **New invariant INV-NN** (the next free id at acceptance; INV-107 unless another ADR takes it first), "From" M3: "A client sends nothing to `/api/v1/icons/fetch` unless the account's website-icons setting (`ACCOUNT_SETTINGS` tag `0x0005`) reads on, and sends a website host only after a probe in the same unlocked session found the `icons` role ([ADR 0099](adr/0099-website-icons-opt-in.md) §2–§4)." Verified by: "`rizzy-client` tests (no `IconPermit` without the setting on and a probe answer of `invalid_request`); web and extension e2e: with the setting off, no request to `/api/v1/icons/` after unlock; with the setting on and the role off, exactly one request, the probe, and no host."
-   - **New accepted risk AR-MM** (the next free id; AR-30 unless taken first): "With website icons on, the server operator ([A2](#a2-active-malicious-or-compromised-server), [A3](#a3-malicious-instance-admin)) can link each host requested from the `icons` role, and each breach-check prefix (INV-77), to the account, through the address, connection and timing the reverse proxy sees next to the account's authenticated calls. It learns which sites the user has items for." Why we accept it: "The icons and the breach check need the server to fetch on the user's behalf. Icons are opt-in per account and off by default, with this exposure stated where the user turns them on ([ADR 0099](adr/0099-website-icons-opt-in.md) §6); the breach check runs only when the user asks for it." Revisit: "–". This also gives INV-77's "separately accepted risk" the row it refers to.
-   - Q-11: append "The user's own switch, per account and off by default, is [ADR 0099](adr/0099-website-icons-opt-in.md)."
-5. **[ROADMAP.md](../ROADMAP.md) line 140** (owner-approved edit): the last cell "M3 design" becomes "M3: [ADR 0052](adr/0052-icon-proxy-role.md), per-account opt-in [ADR 0099](adr/0099-website-icons-opt-in.md)".
+   - §7.11, the "I" row's mitigation cell becomes: "Per-account setting, on by default, which the user can turn off: a client sends a host only when the account's website-icons setting reads on and this session's probe found the role ([ADR 0099](adr/0099-website-icons-opt-in.md), INV-NN). Role off by default ([Q-11](#10-open-questions-for-the-owner)). Unauthenticated shared cache. No per-user logs, of domains or of HIBP prefixes; the breach-check endpoint is rate-limited per source ([ADR 0053](adr/0053-hibp-breach-check-egress.md) item 8). Operator-side correlation: AR-MM." The Inv. cell adds INV-NN.
+   - AST-13: after "domains requested from the icons role" add "(for every account whose website-icons setting reads on, the default, [ADR 0099](adr/0099-website-icons-opt-in.md))".
+   - **New invariant INV-NN** (the next free id at acceptance; INV-107 unless another ADR takes it first), "From" M3: "A client sends nothing to `/api/v1/icons/fetch` unless the account's website-icons setting (`ACCOUNT_SETTINGS` tag `0x0005`) reads on from the record loaded and verified in this unlocked session, and sends a website host only after a probe in the same unlocked session found the `icons` role ([ADR 0099](adr/0099-website-icons-opt-in.md) §2–§4)." Verified by: "`rizzy-client` tests (no `IconPermit` without the setting on and a probe answer of `invalid_request`); web and extension e2e: before the settings record is loaded, no request; with the setting off, no request to `/api/v1/icons/` after unlock; with the setting on and the role off, exactly one request, the probe, and no host."
+   - **New accepted risk AR-MM** (the next free id; AR-30 unless taken first): "With website icons on, which is the default, the server operator ([A2](#a2-active-malicious-or-compromised-server), [A3](#a3-malicious-instance-admin)) can link each host requested from the `icons` role, and each breach-check prefix (INV-77), to the account, through the address, connection and timing the reverse proxy sees next to the account's authenticated calls. It learns which sites the user has items for." Why we accept it: "The icons and the breach check need the server to fetch on the user's behalf. Icons are on by default per account (the owner's choice, [ADR 0099](adr/0099-website-icons-opt-in.md) owner answer), so this risk applies by default: to every account that has not turned the setting off, on every deployment whose operator runs the `icons` role. The exposure is stated beside the switch in Settings (§6), and one switch turns it off on every device; a deployment that does not run the role, the default, receives no host; the breach check runs only when the user asks for it." Revisit: "–". This also gives INV-77's "separately accepted risk" the row it refers to.
+   - Q-11: append "The user's own switch, per account and on by default, is [ADR 0099](adr/0099-website-icons-opt-in.md)."
+5. **[ROADMAP.md](../ROADMAP.md) line 140** (owner-approved edit): the last cell "M3 design" becomes "M3: [ADR 0052](adr/0052-icon-proxy-role.md), per-account setting, on by default [ADR 0099](adr/0099-website-icons-opt-in.md)". The row's "must be optional" stays as written and still holds: the user can turn icons off; optional does not mean off by default.
 6. **Code comments.** `packages/ui/src/itemIcons.ts` and `rizzy_client::icons` module docs: "When" gains the setting and the probe.
 
 ### 10. Implementation plan and tests
 
-1. **`rizzy-client`.** `settings.rs`: `TAG_WEBSITE_ICONS = 0x0005`, parse and encode, `SettingsEdit::SetWebsiteIcons(bool)`. `icons.rs`: `IconPermit`, `icon_probe_request`, `icon_probe_finish`, `icon_request(&IconPermit, host)`. Tests: known-answer records with the tag absent, `0x00`, `0x01`; rejection of `0x02` and of lengths 0 and 2; an unknown tag still round-trips; probe outcomes for `400 invalid_request` (available), `400` with another code, `404`, `429` three times, `200` and `500` (unavailable); no permit when the setting reads off whatever the probe said.
+1. **`rizzy-client`.** `settings.rs`: `TAG_WEBSITE_ICONS = 0x0005`, parse and encode, `SettingsEdit::SetWebsiteIcons(bool)`. `icons.rs`: `IconPermit`, `icon_probe_request`, `icon_probe_finish`, `icon_request(&IconPermit, host)`. Tests: known-answer records with the tag absent (reads on), `0x00` (off), `0x01` (on), and an absent record (on); rejection of `0x02` and of lengths 0 and 2; an unknown tag still round-trips; probe outcomes for `400 invalid_request` (available), `400` with another code, `404`, `429` three times, `200` and `500` (unavailable); no permit when the setting reads off whatever the probe said. No permit before the record is loaded, and none from a rejected or parked record.
 2. **`rizzy-wasm`.** `Session::website_icons()` and `set_website_icons(bool)` (over `settings_change`), `Session::icon_probe_request()` and `icon_probe_finish(status, body)`; the icon fetch moves onto the session and refuses with `icons_off` without a permit; the permit is dropped on lock and when a reload reads off. Tests in `crates/rizzy-wasm/src/tests.rs`.
 3. **`packages/core`.** `probeItemIcons(session, transport)` and `fetchItemIcon(session, transport, host)`; unit tests for the `icons_off` refusal.
 4. **Web vault.** `VaultView.tsx` creates the `IconLoader` only after an "available" probe with the setting on, and clears it when the setting turns off. A new section in `SettingsView.tsx` holds the switch and the text of §6.
 5. **Extension.** `popup/views/Items.tsx` and the core host follow the same rule through the extension's core context.
-6. **E2E** (`apps/web/e2e/icons.spec.ts`, `apps/extension/e2e/icons.spec.ts`, extending the mocked-role routes they already have): (a) setting off (the default), role mocked on: after unlock and a full list render, no request to `/api/v1/icons/`; (b) setting on, role answering `404`: exactly one request, with body `{"host":""}`; (c) setting on, role on: the probe, then one request per host, each body only `{"host":…}`; (d) the setting turned off mid-session: no request after the switch; (e) the setting turned on in one browser context shows icons in a second context of the same account after its next unlock.
+6. **E2E** (`apps/web/e2e/icons.spec.ts`, `apps/extension/e2e/icons.spec.ts`, extending the mocked-role routes they already have): (a) setting turned off, role mocked on: after unlock and a full list render, no request to `/api/v1/icons/`; (a′) a fresh account (tag absent, the default on), role mocked on, settings response delayed: no request to `/api/v1/icons/` until the record is verified, then the probe and the hosts; (b) setting on, role answering `404`: exactly one request, with body `{"host":""}`; (c) setting on, role on: the probe, then one request per host, each body only `{"host":…}`; (d) the setting turned off mid-session: no request after the switch; (e) the setting turned on in one browser context shows icons in a second context of the same account after its next unlock.
 
 ## Consequences
 
 ### Positive
 
-- ROADMAP's "must be optional" is met for the user, not only the operator. By default no account sends its list of sites anywhere.
+- ROADMAP's "must be optional" is met for the user, not only the operator: one switch turns icons off on every device, and nothing is sent before the account's own record says so.
 - No host leaves a client whose server has no `icons` role, whatever the proxy does with the path.
 - No server change, and the shipped icon endpoint is used exactly as defined.
 - The threat model now records the operator-correlation risk that ADR 0052 point 5 and INV-77 left unstated.
 
 ### Negative
 
-- With the default off, an operator who enables the role sees it used only by accounts that opt in; most users will see type icons.
+- With the default on, every account that has not turned the setting off sends its item hosts to a deployment that runs the `icons` role, and the operator can link them to the account (AR-MM). A user who never opens Settings is exposed without having chosen it; the line in Settings (§6) is the only disclosure.
+- Icons appear only after the settings record is loaded and verified, a short delay after unlock.
 - Each unlock with the setting on costs one probe request, and each host still costs one request per session.
 - The probe relies on the role answering `invalid_request` to an empty host, before any lookup. That is ADR 0052 point 6's rule and the role's own test. A future change that answers a malformed host with another code turns icons off for everyone, a safe failure that a test in §10 catches.
 
@@ -129,19 +144,21 @@ ADR 0052 point 6 is not superseded: the endpoint, its body and its codes are unc
 
 - Clients built before this ADR (development builds only; nothing is released) keep fetching unconditionally. If a release ships before the implementation, ADR 0002 point 5's minimum-version raise is needed for the extension.
 - A malicious server can serve a web vault that ignores the setting. That is AR-1 (a backdoored web vault), not a new risk; native clients and the extension keep the rule.
+- A server that withholds the settings record or replays an older one to hide an explicit `0x00`: the record has no value until it passes ADR 0042's freshness check against the signed account state (INV-25), and a rejected record reads off (§1). The default is never used in place of a record the client cannot verify.
 
 ## Alternatives considered
 
 - **A per-device setting.** Lost: the list of sites leaks once from any device, and the operator links an account's devices anyway (§1).
 - **An `icons` flag in `GET /api/meta`.** Lost: the `api` process does not know whether the proxy routes to a running role. It would need a new operator variable that can disagree with the real routing. It would also be a wire change to ADR 0002 point 3's meta body.
 - **A dedicated `POST /api/v1/icons/status` endpoint.** Clearer than the empty-host probe, but it is a new endpoint (ADR 0028 item 1, ADR 0052 point 6) and a server change for an answer the existing endpoint already gives. It stays the fallback if the empty-host answer ever becomes unreliable.
-- **Default on, or on when the operator enables the role.** Open question 1.
+- **Default off (opt in).** The draft's recommendation: ROADMAP says favicon fetching "must be optional", the leak is the list of sites to an in-scope attacker (A2/A3), and off costs only looks. The owner chose on (owner answer, 2026-10-25); the switch keeps icons optional.
+- **On only when the operator enables the role.** Not a separate rule: the probe (§3) already sends no host while the role is off.
 - **Batching hosts, or a persistent device icon cache.** Lost (§5).
 - **Fetching icons from the sites directly in the browser.** Lost: it exposes the user's address and the list to every site and to third-party image hosts, and needs a looser `img-src`. ADR 0052 chose the proxy for that reason.
 
 ## Open questions for the owner
 
-1. **Default.** Off (opt in) or on (opt out), for an account that never touched the setting? *Recommendation:* off. ROADMAP §4.4 says favicon fetching "must be optional". The leak is the list of sites the account has items for, to an in-scope attacker (A2/A3). The cost of off is cosmetic. A variant, "on when the operator enabled the role", still sends the list by default to the operator, whom this setting is meant to protect against.
+None. The draft's open question 1 (the default) is answered: on (owner answer, 2026-10-25).
 
 ## References
 

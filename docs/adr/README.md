@@ -155,7 +155,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0096 | [Secrets that cross the client binding (ADR 0013 §3 rule 2, restated in full), and KeePass KDBX import inside the web vault's one core Worker](0096-binding-secrets-and-kdbx-worker.md) | Proposed | M1 / M3 |
 | 0097 | [Website matching corrections: the compared URL, the *Regex* mode, and reading ACCOUNT_SETTINGS independently of the reader's PSL](0097-website-matching-corrections.md) | Proposed | M2 |
 | 0098 | [Security keys: per-account and per-key limits, the six `webauthn` endpoints and `pending_id` (erratum to ADRs 0077 and 0028)](0098-security-key-limits-and-endpoints.md) | Proposed | M3 |
-| 0099 | [Website icons: a per-account opt-in, off by default, and no request while the setting or the `icons` role is off (erratum to ADR 0052)](0099-website-icons-opt-in.md) | Proposed | M3 |
+| 0099 | [Website icons: a per-account setting, on by default, and no request while the setting or the `icons` role is off (erratum to ADR 0052)](0099-website-icons-opt-in.md) | Proposed | M3 |
 | 0100 | [Notification mail: the account email address, the `worker` sender and its outbox, and the recovery notices of ADR 0008 decision 5](0100-notification-mail.md) | Proposed | M3 |
 | 0101 | [Native-client repository licensing: AGPL-3.0-only with two §7 permissions, store channels, the Windows App SDK, Qt LGPLv3, DCO and licence gates in the client repositories (partially supersedes ADR 0017)](0101-native-client-licensing.md) | Proposed | M3 |
 | 0102 | [Native client TLS: who terminates TLS per platform, the TLS 1.3 floor, trust anchors, a private CA through the core, and what the core checks regardless of TLS](0102-native-client-tls.md) | Proposed | M3 |
