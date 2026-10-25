@@ -158,6 +158,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0099 | [Website icons: a per-account opt-in, off by default, and no request while the setting or the `icons` role is off (erratum to ADR 0052)](0099-website-icons-opt-in.md) | Proposed | M3 |
 | 0106 | [AGPL §13 source link: `RIZZY_SOURCE_URL`, the `/api/meta` `source_url` member and the "Source" link (supersedes ADR 0028 item 14 and ADR 0048 §1 in part)](0106-agpl-source-url.md) | Proposed | M1 |
 | 0109 | [Sync cursor past a held header: derived, never stored, rewound on lapse (erratum to ADR 0050)](0109-sync-cursor-held-header.md) | Proposed | M1 |
+| 0110 | [Passkey user verification: the `UV` flag reflects a recent master-password verification, and `userVerification: "required"` gets one in the toolbar popup](0110-passkey-user-verification.md) | Proposed | M2 |
 
 ## Gates
 
