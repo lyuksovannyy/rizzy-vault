@@ -40,6 +40,8 @@ import {
   fetchTransport,
   cxfExportWarning,
   detectImportFormat,
+  cacheRemovalRefusal,
+  cacheStoreNames,
   enrolDevice,
   login,
   newElementId,
@@ -858,6 +860,81 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     await expect(unlockDurableDevice(transport, store, PASSWORD)).rejects.toMatchObject({ code: "cache_corrupt" });
     await store.put("cache_meta", FLOOR, be64(5));
     (await unlockDurableDevice(transport, store, PASSWORD)).lock();
+  });
+
+  // ADR 0026 §4 steps 4 and 7 as ADR 0095 §C replaces step 7's last sentence: a durable device
+  // restored from an older copy of its own cache (here: the store as it was before this device
+  // uploaded its second write) sees, on its first Fetch, more of its own history than it holds.
+  // It writes alarm 4 into its store with that answer and goes read-only, a restart keeps it so,
+  // and the only way on is removal (§5 as ADR 0095 §D replaces it), which alarm 4 does not
+  // block and which first uploads the unsent own row the older copy holds, byte for byte.
+  it("keeps a durable device read-only across restarts after an older copy of its cache raises alarm 4", async () => {
+    const transport = fetchTransport(origin);
+    const signup = await Signup.start(
+      transport,
+      { origin, loginName: "Dave", password: PASSWORD, issueRecoveryCode: false },
+      Date.now,
+    );
+    const kit = signup.emergencyKit();
+    const secretKey = new TextDecoder().decode(kit.secretKey);
+    kit.secretKey.fill(0);
+    await signup.confirm(secretKey.split("-").at(-1) ?? "");
+
+    const store = memoryCacheStore();
+    const session = await enrolDevice(transport, { origin, loginName: "dave", secretKey, password: PASSWORD }, store);
+    await session.authenticate();
+    await session.sync();
+    expect(session.alarms).toEqual([]);
+    await session.createItem(pv(session), "login", [{ op: "set", key: "item.name", value: "Before the copy" }]);
+    expect(session.unsentChanges).toBe(1);
+    // The copy a restored browser profile would bring back: one own op, never sent.
+    const older: CacheRow[] = [];
+    for (const name of cacheStoreNames()) {
+      for (const row of await store.list(name)) {
+        older.push({ store: row.store, key: new Uint8Array(row.key), value: new Uint8Array(row.value) });
+      }
+    }
+    await session.sync();
+    await session.createItem(pv(session), "login", [{ op: "set", key: "item.name", value: "After the copy" }]);
+    await session.sync();
+    expect(session.unsentChanges).toBe(0);
+    session.lock();
+
+    const restored = memoryCacheStore(older);
+    const stale = await unlockDurableDevice(transport, restored, PASSWORD);
+    expect(stale.alarms).toEqual([]);
+    expect(stale.readOnly).toBe(false);
+    await stale.authenticate();
+    await expect(stale.sync()).rejects.toMatchObject({ code: "device_state_outdated" });
+    expect(stale.alarms).toEqual(["device_state_outdated"]);
+    expect(stale.readOnly).toBe(true);
+    // Persisted with the answer that raised it: an `account_objects` row of kind 7, key 4.
+    const alarmKeys = (await restored.list("account_objects"))
+      .filter((r) => r.key.length >= 8 && r.key.slice(0, 8).every((b, i) => b === (i === 7 ? 7 : 0)))
+      .map((r) => [...r.key.slice(8)]);
+    expect(alarmKeys).toEqual([[4]]);
+    stale.lock();
+
+    // A restart never lifts read-only mode (§4 step 4), and the cache is not synced again.
+    const restarted = await unlockDurableDevice(transport, restored, PASSWORD);
+    expect(restarted.alarms).toEqual(["device_state_outdated"]);
+    expect(restarted.readOnly).toBe(true);
+    await expect(
+      restarted.createItem(pv(restarted), "login", [{ op: "set", key: "item.name", value: "Refused" }]),
+    ).rejects.toMatchObject({ code: "read_only" });
+    await restarted.authenticate();
+    await expect(restarted.sync()).rejects.toMatchObject({ code: "device_state_outdated" });
+
+    // Removal: allowed under alarm 4, by the session and by the key-less check alike; the
+    // unsent own op goes up byte for byte (no new dot is signed) and is acknowledged.
+    expect(restarted.removalRefusal).toBeUndefined();
+    await expect(cacheRemovalRefusal(restored)).resolves.toBeUndefined();
+    expect(restarted.unsentChanges).toBe(1);
+    await restarted.uploadUnsentForRemoval();
+    expect(restarted.unsentChanges).toBe(0);
+    expect(restarted.unsentSnapshots).toBe(0);
+    expect(restarted.alarms).toEqual(["device_state_outdated"]);
+    restarted.lock();
   });
 
   // Gap 00 (ADR 0012 §5, ADR 0018 §9, §11): `VaultSession.sync` runs the client-side trash

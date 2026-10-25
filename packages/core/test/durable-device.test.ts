@@ -13,6 +13,7 @@ import {
   DurableSession,
   MatchMode,
   type Transport,
+  cacheRemovalRefusal,
   cacheStoreNames,
   decideMatchCandidates,
   enrolDevice,
@@ -173,6 +174,148 @@ describe("DurableSession.sync", () => {
 
     await expect(session.sync()).resolves.toBeUndefined();
     expect(drains).toBe(2);
+  });
+});
+
+/** A request-shaped object `takeRequest` can read and free, for the stubbed drivers below. */
+function stubRequest(): object {
+  return {
+    client: "rizzy-test",
+    authorization: undefined,
+    contentType: undefined,
+    requestCounter: undefined,
+    requestSignature: undefined,
+    method: "POST",
+    path: "/api/v1/vault/fetch",
+    body: new Uint8Array(),
+    free: () => {},
+  };
+}
+
+/** A transport that answers every request with an empty 200 and logs it. */
+function loggingTransport(log: string[]): Transport {
+  return async (request) => {
+    log.push(`send ${request.path}`);
+    return { status: 200, body: new Uint8Array() };
+  };
+}
+
+// ADR 0026 §4 step 4: "an alarm is written in the transaction that detects it". An answer that
+// raises one (a rollback, a fork, an older copy of this device's history) fails `syncRespond`,
+// and the alarm row journaled with that answer must reach the `CacheStore` before the error
+// propagates, or a restart would lift read-only mode.
+describe("DurableSession.sync and alarms", () => {
+  const clock: Clock = () => 1_000;
+
+  it("drains the writes of an answer that raised an alarm before rethrowing", async () => {
+    const log: string[] = [];
+    let requests = 0;
+    const inner = {
+      syncStart: () => log.push("start"),
+      syncRequest: () => (requests++ === 0 ? stubRequest() : undefined),
+      syncRespond: () => {
+        log.push("respond");
+        throw new Error("device_state_outdated");
+      },
+      drainCacheWrites: () => {
+        log.push("drain");
+        return { puts: [], deletes: [], free: () => {} };
+      },
+    } as unknown as ConstructorParameters<typeof DurableSession>[0];
+    const session = new DurableSession(inner, loggingTransport(log), memoryCacheStore(), clock);
+
+    await expect(session.sync()).rejects.toThrow("device_state_outdated");
+    expect(log).toEqual(["start", "send /api/v1/vault/fetch", "respond", "drain"]);
+  });
+});
+
+// ADR 0026 §5 as ADR 0095 §D replaces it: the removal upload persists every step's rows (the
+// rows it sends are recorded as sent) before the next request goes out, and an alarm a step
+// raised before its error propagates; a transport failure ends it with nothing more tried.
+describe("DurableSession.uploadUnsentForRemoval", () => {
+  const clock: Clock = () => 1_000;
+
+  function removalInner(log: string[], respond: () => void, requestsLeft: number) {
+    let left = requestsLeft;
+    return {
+      removalUploadStart: () => log.push("start"),
+      removalUploadRequest: () => (left-- > 0 ? stubRequest() : undefined),
+      removalUploadRespond: () => {
+        log.push("respond");
+        respond();
+      },
+      removalUploadAbort: () => log.push("abort"),
+      drainCacheWrites: () => {
+        log.push("drain");
+        return { puts: [], deletes: [], free: () => {} };
+      },
+    } as unknown as ConstructorParameters<typeof DurableSession>[0];
+  }
+
+  it("drains after the start and after every answer, before the next request", async () => {
+    const log: string[] = [];
+    const session = new DurableSession(removalInner(log, () => {}, 2), loggingTransport(log), memoryCacheStore(), clock);
+    await session.uploadUnsentForRemoval();
+    expect(log).toEqual([
+      "start",
+      "drain",
+      "send /api/v1/vault/fetch",
+      "respond",
+      "drain",
+      "send /api/v1/vault/fetch",
+      "respond",
+      "drain",
+    ]);
+  });
+
+  it("drains before rethrowing a refused answer, and tries nothing more", async () => {
+    const log: string[] = [];
+    const inner = removalInner(
+      log,
+      () => {
+        throw new Error("server_unauthorized");
+      },
+      3,
+    );
+    const session = new DurableSession(inner, loggingTransport(log), memoryCacheStore(), clock);
+    await expect(session.uploadUnsentForRemoval()).rejects.toThrow("server_unauthorized");
+    expect(log).toEqual(["start", "drain", "send /api/v1/vault/fetch", "respond", "drain"]);
+  });
+
+  it("ends the upload when the transport fails", async () => {
+    const log: string[] = [];
+    const failing: Transport = async () => {
+      log.push("send");
+      throw new CoreError("transport_failed");
+    };
+    const session = new DurableSession(removalInner(log, () => {}, 3), failing, memoryCacheStore(), clock);
+    await expect(session.uploadUnsentForRemoval()).rejects.toThrow("transport_failed");
+    expect(log).toEqual(["start", "drain", "send", "abort"]);
+  });
+});
+
+// ADR 0095 §D: the alarm rows are cleartext (ADR 0026 §3), so a cache that does not unlock is
+// refused removal by the same rule, read through the real core without any key.
+describe("cacheRemovalRefusal", () => {
+  /** An `account_objects` row of kind 7 (alarm) with key `key`, in the core's byte codec. */
+  function alarmRow(key: readonly number[]): CacheRow {
+    return { store: "account_objects", key: new Uint8Array([0, 0, 0, 0, 0, 0, 0, 7, ...key]), value: new Uint8Array() };
+  }
+
+  it("allows removal with no alarm or only alarm 4 (device state outdated)", async () => {
+    await expect(cacheRemovalRefusal(memoryCacheStore())).resolves.toBeUndefined();
+    await expect(cacheRemovalRefusal(memoryCacheStore([alarmRow([4])]))).resolves.toBeUndefined();
+  });
+
+  it("refuses removal under alarms 1 to 3 and names the alarm", async () => {
+    await expect(cacheRemovalRefusal(memoryCacheStore([alarmRow([1])]))).resolves.toBe("rollback");
+    await expect(cacheRemovalRefusal(memoryCacheStore([alarmRow([2]), alarmRow([4])]))).resolves.toBe("fork");
+    await expect(cacheRemovalRefusal(memoryCacheStore([alarmRow([3])]))).resolves.toBe("identity_change_unconfirmed");
+  });
+
+  it("refuses removal under an alarm key this build does not know", async () => {
+    await expect(cacheRemovalRefusal(memoryCacheStore([alarmRow([5])]))).resolves.toBe("alarm_unknown");
+    await expect(cacheRemovalRefusal(memoryCacheStore([alarmRow([])]))).resolves.toBe("alarm_unknown");
   });
 });
 

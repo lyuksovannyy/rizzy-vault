@@ -78,6 +78,7 @@ import initWasm, {
   sessionEndedByYouNotice as wasmSessionEndedByYouNotice,
   sessionEndedNotice as wasmSessionEndedNotice,
   registrableDomainOf as wasmRegistrableDomainOf,
+  removalRefusal as wasmRemovalRefusal,
 } from "../generated/rizzy_core.js";
 
 // ---------------------------------------------------------------------------------------------
@@ -3238,6 +3239,21 @@ export async function unlockDurableDevice(
 }
 
 /**
+ * The alarm that refuses "remove this device" for the cache in `cacheStore`, read without any
+ * key (ADR 0026 §3 kind 7, §5; ADR 0095 §D: the alarm rows are cleartext, so a cache that does
+ * not unlock is refused removal by the same rule as one that does): `"rollback"`, `"fork"`,
+ * `"identity_change_unconfirmed"`, or `"alarm_unknown"` for an alarm key this build does not
+ * know; `undefined` when removal may go on (no alarm, or only `"device_state_outdated"`, whose
+ * only resolution removal is). Only the `account_objects` store is read, and the core parses
+ * nothing of it but the alarm keys.
+ */
+export async function cacheRemovalRefusal(cacheStore: CacheStore): Promise<string | undefined> {
+  const rows = await cacheStore.list("account_objects");
+  ensureReady();
+  return call(() => wasmRemovalRefusal(rows.map((r) => new KvRow(r.store, r.key, r.value))));
+}
+
+/**
  * The values of one signed request (CRYPTO.md §5.10 "Request signing"): the `Authorization`
  * header value and the `device-request` counter and signature (ADR 0028 item 5's
  * `Rizzy-Request-Counter`/`Rizzy-Request-Signature`). {@link DurableSession.sync} already
@@ -3396,6 +3412,78 @@ export class DurableSession {
     return call(() => this.#inner.unsentChanges);
   }
 
+  /** Own snapshots the server has not acknowledged: with {@link DurableSession.unsentChanges},
+   * what removal of this device loses (ADR 0026 §5). */
+  get unsentSnapshots(): number {
+    return call(() => this.#inner.unsentSnapshots);
+  }
+
+  /**
+   * The alarms this device holds (ADR 0026 §3 kind 7, §4 step 4), by code: `"rollback"`,
+   * `"fork"`, `"identity_change_unconfirmed"`, `"device_state_outdated"`. Every vault is
+   * read-only while one is held, and a restart keeps it: the alarm is a cache row. A fork or an
+   * outdated device state also refuses {@link DurableSession.sync} with its code.
+   */
+  get alarms(): string[] {
+    return call(() => this.#inner.alarms);
+  }
+
+  /** The alarm that refuses "remove this device" (ADR 0095 §D), by code; `undefined` when
+   * removal may go on (see {@link cacheRemovalRefusal}). */
+  get removalRefusal(): string | undefined {
+    return call(() => this.#inner.removalRefusal);
+  }
+
+  /**
+   * The upload that comes first in "remove this device" (ADR 0026 §5 as ADR 0095 §D replaces
+   * it): the own ops and snapshots the server never acknowledged, byte for byte, vault by vault
+   * after one Fetch each, until an answer acknowledges nothing more. No new dot, signature or
+   * re-issue is made. Every step's cache writes are persisted before the next request goes out
+   * (the rows it sends are recorded as sent first, ADR 0026 §4 step 1). It rejects under alarm
+   * 1, 2 or 3 (with its code), and with the transport's or the server's error when the upload
+   * cannot run; nothing more is tried then. Afterwards {@link DurableSession.unsentChanges} and
+   * {@link DurableSession.unsentSnapshots} say what removal would still lose.
+   */
+  async uploadUnsentForRemoval(): Promise<void> {
+    const s = this.#inner;
+    call(() => s.removalUploadStart());
+    await this.#drain();
+    for (;;) {
+      const request = call(() => s.removalUploadRequest());
+      if (request === undefined) {
+        return;
+      }
+      let answer: CoreResponse;
+      try {
+        answer = await this.#transport(takeRequest(request));
+      } catch (e) {
+        if (this.#inner === s) {
+          s.removalUploadAbort();
+        }
+        throw e;
+      }
+      if (this.#inner !== s) {
+        throw new CoreError("locked");
+      }
+      await this.#respondThenDrain(() => s.removalUploadRespond(answer.status, answer.body, this.#now()));
+    }
+  }
+
+  /** Passes an answer in, then drains, on an error too: an alarm the answer raised is
+   * persisted with that answer (ADR 0026 §4 step 4) before the error propagates. */
+  async #respondThenDrain(respond: () => void): Promise<void> {
+    let failure: { error: unknown } | undefined;
+    try {
+      respond();
+    } catch (e) {
+      failure = { error: toCoreError(e) };
+    }
+    await this.#drain();
+    if (failure !== undefined) {
+      throw failure.error;
+    }
+  }
+
   /**
    * The server's notice of a pending recovery that came with the last account answer of this
    * session (ADR 0045), `undefined` when none did (and always right after an unlock, which is
@@ -3476,8 +3564,11 @@ export class DurableSession {
       if (this.#inner !== s) {
         throw new CoreError("locked");
       }
-      call(() => s.syncRespond(answer.status, answer.body, this.#now()));
-      await this.#drain();
+      // ADR 0026 §4 step 4: an answer that raises an alarm (a rollback, a fork, an older copy
+      // of this device's history) fails the call, and the alarm's row, journaled with that
+      // answer, is persisted before the error propagates, so a restart keeps the device
+      // read-only.
+      await this.#respondThenDrain(() => s.syncRespond(answer.status, answer.body, this.#now()));
     }
   }
 
