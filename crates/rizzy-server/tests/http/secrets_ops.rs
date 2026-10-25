@@ -283,7 +283,7 @@ fn invalidate_after_a_setup_only_loss() {
         assert!(
             printed.contains("new OPAQUE setup 2")
                 && printed.contains("2 account(s) need to re-register")
-                && printed.contains("0 TOTP enrollment(s)"),
+                && printed.contains("0 TOTP enrolment(s)"),
             "{printed}"
         );
         let renewed = secrets_file::load(&config.secrets_file).unwrap();

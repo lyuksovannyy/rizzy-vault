@@ -685,7 +685,7 @@ fn secrets_invalidate_refuses_outside_the_two_cases_and_carries_both_out() {
             "needs --confirm",
             "setup-only loss",
             "1 account(s) must re-register",
-            "0 TOTP enrollment(s)",
+            "0 TOTP enrolment(s)",
             "secrets restore",
         ],
     );
@@ -696,7 +696,7 @@ fn secrets_invalidate_refuses_outside_the_two_cases_and_carries_both_out() {
         stdout.contains("setup-only loss")
             && stdout.contains("new OPAQUE setup 2")
             && stdout.contains("1 account(s) need to re-register")
-            && stdout.contains("0 TOTP enrollment(s) to redo"),
+            && stdout.contains("0 TOTP enrolment(s) to redo"),
         "{stdout}"
     );
     let stderr = String::from_utf8(out.stderr).unwrap();
@@ -738,14 +738,14 @@ fn secrets_invalidate_refuses_outside_the_two_cases_and_carries_both_out() {
     assert_failed(
         &whole.run(&["secrets", "invalidate"]),
         2,
-        &["whole loss", "1 TOTP enrollment(s) are deleted"],
+        &["whole loss", "1 TOTP enrolment(s) are deleted"],
     );
     assert_eq!(whole.secrets_bytes().unwrap(), b"{}");
     let out = whole.run(&["secrets", "invalidate", "--confirm"]);
     let stdout = assert_ok(&out);
     assert!(
         stdout.contains("whole loss")
-            && stdout.contains("1 TOTP enrollment(s) to redo")
+            && stdout.contains("1 TOTP enrolment(s) to redo")
             && stdout.contains("no bootstrap token was made"),
         "{stdout}"
     );

@@ -141,7 +141,7 @@
 //!      file that cannot be read for another reason (permissions, say): refused, nothing
 //!      touched.
 //! 2. **Without `--confirm`**, a usage error (exit 2) reports the case and the accounts and
-//!    TOTP enrollments it would cost; nothing is written.
+//!    TOTP enrolments it would cost; nothing is written.
 //! 3. **The database** ([`invalidation::invalidate_in_database`]): one transaction retires every
 //!    setup, deletes every login state (and on a whole loss every TOTP row), records a new
 //!    setup under the next unused `setup_id` and writes the marker. The `secrets_invalidated`
@@ -274,7 +274,7 @@ pub enum InvalidateDiagnosis {
         case: LossCase,
         /// The marker of the interrupted run this one resumes, if any.
         resumed: Option<PendingInvalidation>,
-        /// The accounts and TOTP enrollments affected.
+        /// The accounts and TOTP enrolments affected.
         cost: InvalidationCost,
     },
     /// An earlier run wrote its secrets file (setup `setup_id`); only its marker is left.
@@ -323,7 +323,7 @@ impl fmt::Display for InvalidateDiagnosis {
                     f,
                     ". With --confirm every OPAQUE setup is retired and a new one made: {} \
                      account(s) must re-register their password (through an enrolled device or \
-                     their recovery code), and {} TOTP enrollment(s) are deleted. If any secrets \
+                     their recovery code), and {} TOTP enrolment(s) are deleted. If any secrets \
                      backup exists, try `rizzy-vault secrets restore` first",
                     cost.accounts, cost.totp_enrolments
                 )

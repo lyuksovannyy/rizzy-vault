@@ -156,12 +156,14 @@ Settings are `RIZZY_*` names. Each comes from the environment, or from a configu
 | `rizzy-vault secrets init` | `secrets-init` | the secrets volume writable |
 | `rizzy-vault secrets rotate [--data-key]` | `secrets-rotate` | the server stopped (it takes the SQLite writer lock, or the PostgreSQL instance lock); the secrets volume writable; with `--data-key`, the data volume too ([§5](#5-the-secrets-file)) |
 | `rizzy-vault secrets retire-setups [--grace-days <n>]` | `secrets-retire-setups` | the server stopped (it takes the SQLite writer lock, or the PostgreSQL instance lock); the secrets and data volumes writable ([§5](#5-the-secrets-file)) |
+| `rizzy-vault secrets restore --in <file\|-> --passphrase-file <file\|->` | `secrets-restore` (the passphrase on standard input) | the server stopped (it takes the SQLite writer lock, or the PostgreSQL instance lock); the secrets volume writable, the data volume; the backup file ([§5](#restoring-the-secrets-file-secrets-restore)) |
+| `rizzy-vault secrets invalidate [--confirm]` | `secrets-invalidate` | the server stopped (it takes the SQLite writer lock, or the PostgreSQL instance lock); the secrets and data volumes writable ([§5](#if-the-secrets-are-lost-and-no-backup-fits-secrets-invalidate)) |
 | `rizzy-vault backup-secrets --out <file> --passphrase-file <file\|->` | `backup-secrets` | the secrets volume (read-only is enough) |
 | `rizzy-vault migrate` | `migrate` | the server stopped (it takes the SQLite writer lock, or the PostgreSQL instance lock) |
 | `rizzy-vault backup --out <file\|->` | none: `docker compose exec` into the running server ([§8](#8-backup)) | nothing: it runs next to the server |
 | `rizzy-vault restore --in <file\|->` | `restore` (reads standard input) | the server stopped (it takes the SQLite writer lock, or the PostgreSQL instance lock), an empty database, the instance's secrets file ([§9](#9-restore)) |
 
-The one-off services of `compose.yaml` are written for SQLite: they mount the data volume and have no network. On PostgreSQL, `migrate`, `restore`, `secrets-rotate` and `secrets-retire-setups` also need `RIZZY_DATABASE_URL` and the database's network, like the server.
+The one-off services of `compose.yaml` are written for SQLite: they mount the data volume and have no network. On PostgreSQL, `migrate`, `restore`, `secrets-rotate`, `secrets-retire-setups`, `secrets-restore` and `secrets-invalidate` also need `RIZZY_DATABASE_URL` and the database's network, like the server.
 
 Exit codes: 0 success, 1 a runtime failure, 2 a usage or configuration error. Messages name the setting or file that failed, never a value.
 
@@ -170,7 +172,7 @@ Exit codes: 0 success, 1 a runtime failure, 2 a usage or configuration error. Me
 What it holds: every OPAQUE server setup (the OPRF seed and server keypair) by `setup_id`, `enum_key` (fake login answers for unknown names), every server data key by `data_key_id` (they seal 2FA secrets and in-flight login state), the bootstrap token, and, once you add one, every backup key by `backup_key_id` (they seal encrypted database backups, [§8](#8-backup)) ([CRYPTO.md §5.11](CRYPTO.md#511-server-side-encryption-not-zero-knowledge)).
 
 **Handling.**
-- It lives on its own volume, `rizzy-vault-secrets`, mounted **read-only** into the server. Only `secrets init`, `secrets rotate` and `secrets retire-setups` mount it writable, as one-offs. The server never writes it.
+- It lives on its own volume, `rizzy-vault-secrets`, mounted **read-only** into the server. Only `secrets init`, `secrets rotate`, `secrets retire-setups`, `secrets restore` and `secrets invalidate` mount it writable, as one-offs. The server never writes it.
 - Mode 0600, owned by UID 65532. Nothing else on the host needs to read it.
 - Instead of the named volume you may bind-mount a host directory, a Docker or Podman secret, or a systemd credential at `/run/rizzy-secrets` ([ADR 0010](adr/0010-server-shape.md) §4). Never inside the data directory: the server refuses that.
 - A whole-host backup (a VM snapshot, a backup of `/var/lib/docker`) captures the database and the secrets together, which is exactly what INV-50 forbids. Exclude one of the two volumes from such a backup, or encrypt that backup as carefully as the secrets themselves.
@@ -189,14 +191,28 @@ sudo mv backup-secrets/rizzy-secrets-backup.json /somewhere/safe/rizzy-secrets-$
 
 The file is written with mode 0600 and never overwrites, so move it away before the next run; do not leave it in the staging directory, and never point a host backup tool at that directory together with `backup-db`. Keep it, and the passphrase, **apart from the database backups** (another medium, another location, another account), and make a new one after every `secrets rotate`.
 
-> **Gap: no command reads the encrypted backup yet.** No Accepted ADR names a command that restores the secrets from a `backup-secrets` file, so this build has none (the decryption code exists and is tested, see [§10](#10-the-restore-drill)). Until that command ships, a `backup-secrets` file alone does not let you restore. Also keep a copy of `secrets.json` itself, encrypted with a tool you trust (for example `age` or `gpg`) and stored apart from the database backups. Write it straight to its safe place, never into the repository checkout or next to the database archives:
->
-> ```sh
-> docker run --rm -v rizzy-vault-secrets:/s:ro --user 65532:65532 docker.io/library/alpine:3 \
->   cat /s/secrets.json | age -p > /somewhere/safe/rizzy-secrets-$(date +%F).json.age
-> ```
->
-> In this build that encrypted copy is the **only** way to restore the secrets.
+### Restoring the secrets file: `secrets restore`
+
+`rizzy-vault secrets restore --in <file|-> --passphrase-file <file|->` installs a `backup-secrets` file ([ADR 0047](adr/0047-opaque-secrets-operator-commands.md)). Stop the server first (every replica, on PostgreSQL; the command refuses otherwise). In order, it:
+1. shuts every server process out, as `secrets rotate` does, and opens the database;
+2. reads the backup (a file, or `-` for standard input) and the passphrase (a file or standard input, never the command line; not both from standard input), and decrypts it. A wrong passphrase and a changed file give the same error;
+3. checks that the decrypted file is a valid secrets file;
+4. **checks it against the database** without writing anything, as the server's startup check would: a backup of another instance, one whose setup the database marks retired, or one that lacks a data key a 2FA row names is refused ("this secrets backup does not belong to this database"), and **nothing is written**. A setup that accounts are still on but that the backup lacks (a backup older than a `secrets rotate`) is reported, not refused: those accounts log in through an enrolled device or with their recovery code. A database that was never migrated holds nothing to check against, so the backup is installed and the command says to restore the database next;
+5. only then writes the file, byte for byte as it was backed up, with mode 0600: an absent file is created, an existing one replaced. Everything the file held comes back, the backup keys of encrypted database backups ([§8](#8-backup)) included.
+
+Put the backup file into the staging directory (`RIZZY_SECRETS_BACKUP_DIR`, mounted read-only) under the name the service reads, and pass the passphrase on standard input:
+
+```sh
+docker compose stop rizzy-vault
+cp /somewhere/safe/rizzy-secrets-2026-10-01.json backup-secrets/rizzy-secrets-backup.json
+docker compose --profile admin run --rm -T secrets-restore < ~/rizzy-backup-passphrase
+rm backup-secrets/rizzy-secrets-backup.json
+docker compose start rizzy-vault
+```
+
+**Recovering both backups** (a lost host): `secrets restore` first, into the empty database, then `rizzy-vault restore` of the database backup ([§9](#9-restore)), which checks the database backup against the restored secrets.
+
+A copy of `secrets.json` encrypted with a tool you trust (`age`, `gpg`) still works as a second way back, if you keep one; write it straight to its safe place, never into the repository checkout or next to the database archives.
 
 **Rotation** ([CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets), §5.11): `secrets rotate --backup-key` adds a new current backup key for `backup --encrypt` ([§8](#8-backup)). `secrets rotate` adds a new OPAQUE setup, which new registrations use; an existing account moves to it the next time a client logs in, or unlocks an enrolled device, with the typed password (a transparent re-registration with the same password, [ADR 0031](adr/0031-retiring-old-opaque-setups.md)). `secrets rotate --data-key` adds a new data key and marks it current. Stop the server first (every replica, on PostgreSQL; the command refuses otherwise):
 
@@ -227,9 +243,28 @@ docker compose start rizzy-vault
 - The server never retires a setup by itself. Its worker logs `opaque_setup_retirable` (the `setup_id` and the count) at most once a day for a setup whose successor is more than 90 days old.
 - Make a new secrets backup afterwards: an old one still holds the retired setups, and a leaked old backup is a leaked setup.
 
-**If the secrets are lost** and no backup exists, nobody can log in with a password: the OPAQUE records cannot be used without their setup. The design's way out is that users with an enrolled device re-register OPAQUE from that device the next time they type their password, and others use their recovery code ([CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets)). Starting the old database with a new secrets file is refused (the setup does not match), which is what you want.
+### If the secrets are lost and no backup fits: `secrets invalidate`
 
-> **Gap: this build has no re-registration or recovery endpoint.** The HTTP API of this build has no OPAQUE re-registration, recovery, password-change, device-revocation or key-rotation request. So **losing the secrets without a restorable copy locks every account out for good** in this build: there is no path back for any user. Since `backup-secrets` files cannot be read back yet (the gap above), the `age`/`gpg` copy of `secrets.json` is your only working restore path. Make it now, and check that you can decrypt it.
+If the secrets file is lost, damaged, or its OPAQUE setup no longer matches the database, nobody can log in with a password: the OPAQUE records cannot be used without their setup, and the server refuses to start (starting the old database with a new secrets file is refused too, which is what you want). **Try `secrets restore` first** with every secrets backup you have. Only when none fits, `rizzy-vault secrets invalidate --confirm` gives the instance a way back ([CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets): "the admin marks the records invalid"; [ADR 0047](adr/0047-opaque-secrets-operator-commands.md)). Users then re-register their password from an enrolled device the next time they type it, or use their recovery code.
+
+It looks before it acts, and acts only on one of two diagnosed cases:
+- **Setup-only loss**: the file loads, but its OPAQUE setup does not match the database, or none of its setups is recorded there. Only the setup is replaced: `enum_key`, the data keys (so every 2FA enrolment keeps working), the bootstrap token and the backup keys (so encrypted database backups stay restorable) are kept.
+- **Whole loss**: the file is absent, or present but not a valid secrets file. Nothing carries forward: every 2FA (TOTP) enrolment is deleted, since its key is gone; no bootstrap token is made (a silent one would re-arm the first-run admin bootstrap, INV-69); no backup key exists, so encrypted database backups made before cannot be restored.
+
+In every other state it refuses and changes nothing: a file that matches the database ("nothing to invalidate"), a missing data key (`secrets restore` fits; `invalidate` never discards data keys), a retired setup still in the file (run `secrets retire-setups` again), a file that exists but cannot be read (fix its permissions), or a database that is not at this release's schema.
+
+```sh
+docker compose stop rizzy-vault
+docker compose --profile admin run --rm secrets-invalidate          # the diagnosis and its cost only
+docker compose --profile admin run --rm secrets-invalidate secrets invalidate --confirm
+docker compose start rizzy-vault
+```
+
+- **Without `--confirm`** it only reports (exit 2): which case applies, how many accounts must re-register and how many 2FA enrolments would be deleted. Nothing is written.
+- **With `--confirm`**, in one database transaction, every OPAQUE setup is retired, pending logins are dropped (and, on a whole loss, every 2FA enrolment deleted), and a new setup is recorded under a `setup_id` never used before; then the new secrets file is written. It logs one `secrets_invalidated` warning ([§11](#11-logs)) and prints the counts (no names).
+- **Afterwards** every account logs in through an enrolled device, which re-registers the typed password under the new setup, or with its recovery code. A web-only account without a device needs its recovery code; its password login only says "wrong password". After a whole loss, users set up 2FA again.
+- **If it is interrupted** after the database step (a crash, a full disk), run it again: it resumes the case it diagnosed, from a marker it left in the database, and mints another new setup. A run whose file was written but whose marker was not cleared only clears the marker.
+- **Make a new secrets backup and a new database backup** afterwards: older ones no longer match the new setup.
 
 ## 6. TLS, the reverse proxy and ports
 
@@ -438,14 +473,14 @@ docker compose start rizzy-vault
 docker compose logs rizzy-vault        # expect: listening
 ```
 
-If the secrets volume was lost too, restore it **before** running `restore` (below). `restore` exits with 0 on success, 1 when it refused or failed (a running server, a non-empty database, a damaged file, another schema version, secrets that do not belong to the backup or lack its backup key), and 2 on a usage error. An encrypted backup needs no `age -d`: pipe or name the file as it is.
+If the secrets volume was lost too, restore it **before** running `restore`, with `rizzy-vault secrets restore` from a `backup-secrets` file ([§5](#restoring-the-secrets-file-secrets-restore)): into the still-empty database it has nothing to check against, and `restore` then checks the database backup against it. `restore` exits with 0 on success, 1 when it refused or failed (a running server, a non-empty database, a damaged file, another schema version, secrets that do not belong to the backup or lack its backup key), and 2 on a usage error. An encrypted backup needs no `age -d`: pipe or name the file as it is.
 
 ### The PostgreSQL instance lock
 
-SQLite has one writing process, and a lock file next to the database proves it. PostgreSQL has no such file, and several server processes may share one database. So that `restore`, `migrate` and `secrets rotate` can still prove that no server is using the database ([ADR 0023](adr/0023-logical-backup-format.md) §5 step 1):
+SQLite has one writing process, and a lock file next to the database proves it. PostgreSQL has no such file, and several server processes may share one database. So that `restore`, `migrate` and the `secrets` commands that touch the database (`rotate`, `retire-setups`, `restore`, `invalidate`) can still prove that no server is using the database ([ADR 0023](adr/0023-logical-backup-format.md) §5 step 1):
 
 - **Every server process** that opens the database (`api`, `worker`, any replica) holds a PostgreSQL session-level advisory lock in **shared** mode, on a dedicated connection outside its pool, from startup until it has closed its pools. A `web`-only process opens no database and holds nothing.
-- **`restore`, `migrate` and `secrets rotate`** take the same lock in **exclusive** mode, without waiting. If any server process still holds it, they refuse (exit 1, "the database's instance lock is held") and change nothing: stop every replica and run the command again. While one of them runs, a server refuses to start; it starts normally once the command has finished.
+- **`restore`, `migrate` and those `secrets` commands** take the same lock in **exclusive** mode, without waiting. If any server process still holds it, they refuse (exit 1, "the database's instance lock is held") and change nothing: stop every replica and run the command again. While one of them runs, a server refuses to start; it starts normally once the command has finished.
 - **The key** is the single `bigint` advisory key `8247886433088438273` (`0x7276610300000001`). In `pg_locks` it shows as `locktype = 'advisory'`, `classid = 1920360707`, `objid = 1`, `objsubid = 1`, with `mode` `ShareLock` for a server and `ExclusiveLock` for an admin command. To see who holds it:
 
   ```sql
@@ -498,7 +533,9 @@ The server refuses to start against a database whose OPAQUE setup does not match
 
 A backup you have never restored is a hope, not a backup ([ROADMAP §4.9](ROADMAP.md#49-server-self-hosting--ops-m1-onward): "tested, not just written").
 
-**Automated (runs with `cargo test`).** [`crates/rizzy-server/tests/drill.rs`](../crates/rizzy-server/tests/drill.rs) runs the backup → wipe → restore drill in a fast form, against real SQLite files, through the functions the binary runs: `secrets init`, a populated instance, a start with the startup checks, `rizzy-vault backup` to a file next to the running server, `backup-secrets`, the native copy, a wipe, the secrets restored byte for byte from the encrypted backup, `rizzy-vault restore` of the backup file into an empty database, and a restart. It checks that the data reads back exactly, that the restore draws a new restore generation and opens a reconciliation epoch for every account (INV-59), that the backup file holds none of the secrets file's secrets (INV-50: every OPAQUE server setup, `enum_key`, every data key and the bootstrap token, searched for both as bytes and as their base64url text), and that a restore next to the running server, into a non-empty database, with a fresh secrets file, or of a damaged file is refused, as is a wrong passphrase. It also checks the warning of [§9](#9-restore): a native copy restored in place starts, but keeps the old restore generation and opens no epoch. `crates/rizzy-server/tests/cli.rs` runs the two commands as processes: through a pipe and a file, the digest on stderr, and the refusals.
+**Automated (runs with `cargo test`).** [`crates/rizzy-server/tests/drill.rs`](../crates/rizzy-server/tests/drill.rs) runs the backup → wipe → restore drill in a fast form, against real SQLite files, through the functions the binary runs: `secrets init`, a populated instance, a start with the startup checks, `rizzy-vault backup` to a file next to the running server, `backup-secrets`, the native copy, a wipe, the secrets restored byte for byte from the encrypted backup with `secrets restore`, `rizzy-vault restore` of the backup file into an empty database, and a restart. It checks that the data reads back exactly, that the restore draws a new restore generation and opens a reconciliation epoch for every account (INV-59), that the backup file holds none of the secrets file's secrets (INV-50: every OPAQUE server setup, `enum_key`, every data key and the bootstrap token, searched for both as bytes and as their base64url text), and that a restore next to the running server, into a non-empty database, with a fresh secrets file, or of a damaged file is refused, as is a wrong passphrase. It also checks the warning of [§9](#9-restore): a native copy restored in place starts, but keeps the old restore generation and opens no epoch. `crates/rizzy-server/tests/cli.rs` runs the two commands as processes: through a pipe and a file, the digest on stderr, and the refusals.
+
+**The secrets commands** ([ADR 0047](adr/0047-opaque-secrets-operator-commands.md)). `crates/rizzy-server/tests/http/secrets_ops.rs` drills them with a real client: a lost secrets file restored with `secrets restore` (another instance's backup and a wrong passphrase refused, nothing written), after which every account logs in again; `secrets invalidate` after a setup-only loss and after a whole loss, after which the accounts come back through an enrolled device or a recovery code, with the 2FA rows kept or deleted as described in [§5](#if-the-secrets-are-lost-and-no-backup-fits-secrets-invalidate); and a run interrupted after its database step, resumed. `crates/rizzy-server/tests/secrets_ops.rs` runs both as processes, with every refusal, and on PostgreSQL.
 
 The same file runs the **encrypted** drill ([ADR 0071](adr/0071-encrypted-db-backup-format.md)), in the same way. `backup --encrypt` without a backup key is refused. Then `secrets rotate --backup-key`, and `backup --encrypt` next to the running server, whose file must hold no table name, no row value and no secret of the secrets file. A second rotation follows: the backup still restores with its older key. A tampered file, a truncated one and another instance's secrets file (with and without a backup key 1) are each refused into an empty database, which stays empty. Then wipe, `restore` from the encrypted file, and start. A PostgreSQL variant is `#[ignore]`d unless `RIZZY_TEST_POSTGRES_URL` names an empty database: a tampered file is refused into PostgreSQL, the real one restored, and `backup --encrypt` from PostgreSQL gives the same dump back. `crates/rizzy-server/tests/cli.rs` runs the encrypted commands through the binary, and `crates/rizzy-server/tests/db_backup.rs` replays the container's known-answer vectors.
 
@@ -529,7 +566,7 @@ docker volume rm rizzy-drill-data rizzy-drill-secrets
 
 ## 11. Logs
 
-The server writes one JSON object per line to stderr: `ts_ms`, `level`, `event`, and fields that are integers or fixed strings; the one exception is `storage_usage_corrected`, which names the account by its random 32-hex-digit id ([ADR 0048](adr/0048-per-account-storage-quota.md) §4). By construction it never logs secrets, tokens, request bodies, headers, login names, file paths or IP addresses ([INV-48](THREAT_MODEL.md#8-security-invariants)). Retention is the container runtime's: `compose.yaml` keeps at most 5 files of 10 MB (`json-file` driver); change `logging` there. Rootless Podman may ignore some of these options; check `podman inspect` and set `log_size_max` in `containers.conf` if needed.
+The server writes one JSON object per line to stderr: `ts_ms`, `level`, `event`, and fields that are integers or fixed strings; the one exception is `storage_usage_corrected`, which names the account by its random 32-hex-digit id ([ADR 0048](adr/0048-per-account-storage-quota.md) §4). By construction it never logs secrets, tokens, request bodies, headers, login names, file paths or IP addresses ([INV-48](THREAT_MODEL.md#8-security-invariants)). One admin command logs too: `secrets invalidate --confirm` writes a `secrets_invalidated` line at `warn` (its `case`, `setup_count` retired, `totp_rows_deleted` and the new `setup_id`) just before its database step commits ([§5](#if-the-secrets-are-lost-and-no-backup-fits-secrets-invalidate)); a line with no matching secrets file means a run was interrupted, and running the command again finishes it. Retention is the container runtime's: `compose.yaml` keeps at most 5 files of 10 MB (`json-file` driver); change `logging` there. Rootless Podman may ignore some of these options; check `podman inspect` and set `log_size_max` in `containers.conf` if needed.
 
 The web vault's Settings → "What the server stores" tells your users what the server holds for their account and how long it is kept, including that this server's logs hold no IP addresses, that your reverse proxy may log them, and that your backups keep deleted data until they expire ([AR-11](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope)). Keep your proxy logging and backup retention ([§8](#8-backup)) in line with what you tell them.
 
@@ -538,7 +575,7 @@ The web vault's Settings → "What the server stores" tells your users what the 
 - [ ] `RIZZY_ADMIN_LISTEN` is a loopback address (the default), its port is not published, and the proxy does not route to it ([§6](#the-admin-listener)).
 - [ ] `RIZZY_ORIGIN` is the exact `https://` origin users type, and will not change.
 - [ ] The secrets volume is mounted read-only into the server and is not inside the data volume.
-- [ ] A `backup-secrets` file **and** an encrypted copy of `secrets.json` exist, stored apart from the database backups; the passphrase is stored safely.
+- [ ] A `backup-secrets` file exists, stored apart from the database backups, and has been restored once with `secrets restore` on scratch volumes ([§10](#10-the-restore-drill)); the passphrase is stored safely.
 - [ ] Database backups (`rizzy-vault backup`) run on a schedule, are encrypted (`backup --encrypt`, or `age` over a plain backup), and are pruned; a plain backup's SHA-256 is recorded.
 - [ ] If you use `backup --encrypt`: a secrets backup taken after the last `secrets rotate --backup-key` exists, kept for as long as the database backups sealed under its keys.
 - [ ] No backup holds both volumes (whole-host snapshots included).
@@ -653,6 +690,18 @@ podman exec rizzy-vault rizzy-vault backup --out - > "rizzy-data-$(date +%Y%m%dT
 podman run --rm -i --network=none -v rizzy-vault-data:/data -v rizzy-vault-secrets:/run/rizzy-secrets:ro \
   --tmpfs /tmp:size=64m,mode=1777 --user 65532:65532 --read-only --cap-drop=all \
   --security-opt=no-new-privileges:true localhost/rizzy-vault:dev restore --in -
+
+# secrets restore (server stopped first): the backup file from the staging directory, read-only,
+# the passphrase on stdin, as compose.yaml's `secrets-restore` service:
+podman run --rm -i --network=none -v rizzy-vault-data:/data -v rizzy-vault-secrets:/run/rizzy-secrets \
+  -v ~/rizzy-backup-secrets:/backup:ro --user 65532:65532 --read-only --cap-drop=all \
+  --security-opt=no-new-privileges:true localhost/rizzy-vault:dev secrets restore \
+  --in /backup/rizzy-secrets-backup.json --passphrase-file - < ~/rizzy-backup-passphrase
+
+# secrets invalidate (server stopped first; §5): without --confirm it only reports.
+podman run --rm --network=none -v rizzy-vault-data:/data -v rizzy-vault-secrets:/run/rizzy-secrets \
+  --user 65532:65532 --read-only --cap-drop=all --security-opt=no-new-privileges:true \
+  localhost/rizzy-vault:dev secrets invalidate --confirm
 ```
 
 `backup` needs none of this: it runs inside the already-networked, already-hardened `rizzy-vault` container through `exec`, the same as under `compose.yaml`.

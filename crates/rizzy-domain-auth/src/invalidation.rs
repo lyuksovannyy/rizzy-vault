@@ -96,7 +96,7 @@ pub struct PendingInvalidation {
 pub struct InvalidationCost {
     /// OPAQUE records, one per account: every one re-registers.
     pub accounts: u64,
-    /// TOTP enrollments deleted: every one on a whole loss, none on a setup-only loss.
+    /// TOTP enrolments deleted: every one on a whole loss, none on a setup-only loss.
     pub totp_enrolments: u64,
 }
 

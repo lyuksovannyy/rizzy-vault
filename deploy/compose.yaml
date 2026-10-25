@@ -133,8 +133,8 @@ services:
         ipv4_address: ${RIZZY_PROXY_IP:-172.30.87.10}
 
   # ---- one-off admin commands (`--profile admin run --rm <name>`); the server must be stopped
-  # for secrets-rotate, secrets-retire-setups and migrate (they take the SQLite writer lock,
-  # ADR 0010 §2) ----
+  # for secrets-rotate, secrets-retire-setups, secrets-restore, secrets-invalidate and migrate
+  # (they take the SQLite writer lock, ADR 0010 §2) ----
 
   secrets-init:
     <<: *hardening
@@ -163,6 +163,35 @@ services:
     image: ${RIZZY_IMAGE:-localhost/rizzy-vault:dev}
     profiles: [admin]
     command: ["secrets", "retire-setups"]
+    network_mode: none
+    volumes:
+      - data:/data
+      - secrets:/run/rizzy-secrets
+
+  # Installs a backup-secrets file (ADR 0047; guide §5): put it into RIZZY_SECRETS_BACKUP_DIR as
+  # rizzy-secrets-backup.json first. It is checked against the database before anything is
+  # written. The passphrase comes on standard input, never from the command line:
+  #   docker compose --profile admin run --rm -T secrets-restore < /path/to/passphrase-file
+  secrets-restore:
+    <<: *hardening
+    image: ${RIZZY_IMAGE:-localhost/rizzy-vault:dev}
+    profiles: [admin]
+    command: ["secrets", "restore", "--in", "/backup/rizzy-secrets-backup.json", "--passphrase-file", "-"]
+    network_mode: none
+    stdin_open: true
+    volumes:
+      - data:/data
+      - secrets:/run/rizzy-secrets
+      - ${RIZZY_SECRETS_BACKUP_DIR:-./backup-secrets}:/backup:ro
+
+  # Only when no secrets backup fits (ADR 0047; guide §5). As written it reports the diagnosis
+  # and changes nothing; to carry it out:
+  #   docker compose --profile admin run --rm secrets-invalidate secrets invalidate --confirm
+  secrets-invalidate:
+    <<: *hardening
+    image: ${RIZZY_IMAGE:-localhost/rizzy-vault:dev}
+    profiles: [admin]
+    command: ["secrets", "invalidate"]
     network_mode: none
     volumes:
       - data:/data

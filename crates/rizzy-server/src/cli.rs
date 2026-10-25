@@ -821,7 +821,7 @@ pub fn secrets_invalidate_message(done: &admin::SecretsInvalidated) -> String {
                 outcome.accounts
             ));
             lines.push(format!(
-                "{} TOTP enrollment(s) to redo",
+                "{} TOTP enrolment(s) to redo",
                 outcome.totp_rows_deleted
             ));
             if outcome.case == LossCase::Whole {
