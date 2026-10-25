@@ -4,7 +4,9 @@
 //! change and a Secret Key change, also with a full rotation, with the other device following
 //! them (CRYPTO.md §11.5, §11.6, §11.3 step 5), an interrupted change settled by the next
 //! run, server-side 2FA (§5.10, §11.15), and a recovery with the Emergency Kit completed
-//! through the binaries on a server with a zero waiting period (§11.9).
+//! through the binaries on a server with a zero waiting period (§11.9), also when it is
+//! interrupted after its pre-commit write or loses its answer and the next run settles the
+//! recovery-pending record (ADR 0046 §3, §5; threat model INV-71).
 //!
 //! The harness is `tests/e2e.rs`'s, cut down: the built `rizzy-vault` binary on a loopback
 //! port with a temporary `SQLite` database (ADR 0016 §3 forbids a dependency on
@@ -35,6 +37,8 @@ use rizzy_cli::ui::Ui;
 use rizzy_client::ClientError;
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
+use rizzy_client::store::load;
+use rizzy_client::store::record::Stage;
 use rizzy_core::totp::{TotpParams, TotpSecret};
 use zeroize::Zeroizing;
 
@@ -299,12 +303,17 @@ enum Fault {
     Refused,
 }
 
+/// The path and body of every request a [`Proxy`] received, in arrival order.
+type Seen = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
 /// A loopback reverse proxy in front of a [`Server`] that loses one answer (`tests/e2e.rs`).
 struct Proxy {
     /// Its port.
     port: u16,
     /// The armed fault.
     fault: Arc<Mutex<Option<(&'static str, Fault)>>>,
+    /// The path and body of every request, in arrival order.
+    seen: Seen,
     /// Set on drop.
     stop: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -317,19 +326,49 @@ impl Proxy {
         let server = Server::start(extra, Some(port));
         let upstream = server.port;
         let fault = Arc::new(Mutex::new(None));
+        let seen = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (thread_fault, thread_stop) = (fault.clone(), stop.clone());
+        let (thread_fault, thread_seen, thread_stop) = (fault.clone(), seen.clone(), stop.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 if thread_stop.load(Ordering::Relaxed) {
                     break;
                 }
                 if let Ok(stream) = stream {
-                    let _ = Self::serve(stream, upstream, &thread_fault);
+                    let _ = Self::serve(stream, upstream, &thread_fault, &thread_seen);
                 }
             }
         });
-        (Self { port, fault, stop }, server)
+        (
+            Self {
+                port,
+                fault,
+                seen,
+                stop,
+            },
+            server,
+        )
+    }
+
+    /// The paths of the requests so far, in arrival order.
+    fn paths(&self) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.clone())
+            .collect()
+    }
+
+    /// The bodies of the requests to `path` so far, in arrival order.
+    fn bodies(&self, path: &str) -> Vec<Vec<u8>> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p == path)
+            .map(|(_, body)| body.clone())
+            .collect()
     }
 
     /// Arms `fault` for the next request to `path`.
@@ -378,6 +417,7 @@ impl Proxy {
         mut client: std::net::TcpStream,
         upstream: u16,
         armed: &Mutex<Option<(&'static str, Fault)>>,
+        seen: &Mutex<Vec<(String, Vec<u8>)>>,
     ) -> std::io::Result<()> {
         use std::io::Write as _;
         client.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -387,6 +427,7 @@ impl Proxy {
             .nth(1)
             .unwrap_or_default()
             .to_owned();
+        seen.lock().unwrap().push((path.clone(), body.clone()));
         let fault = {
             let mut armed = armed.lock().unwrap();
             match *armed {
@@ -1248,4 +1289,348 @@ fn recovery_completes_through_the_binaries() {
         &[&new_recovery_code],
         &[],
     );
+}
+
+/// What `rv`'s data directory holds for its one account, read without unlocking.
+struct CacheState {
+    /// The device-state record's stage.
+    stage: Stage,
+    /// The stored commit.
+    pending_commit: Option<Vec<u8>>,
+    /// This device's id, in hex.
+    device: String,
+}
+
+/// The cache of the one account in `rv`'s data directory; `None` if there is no cache file.
+fn cache_state(rv: &Rv) -> Option<CacheState> {
+    use std::fmt::Write as _;
+    let accounts = rizzy_cli::paths::enrolled_accounts(&rv.dir).unwrap();
+    let account = match accounts.as_slice() {
+        [] => return None,
+        [one] => *one,
+        more => panic!("{} caches", more.len()),
+    };
+    rv.runtime.block_on(async {
+        let path = rizzy_cli::paths::cache_path(&rv.dir, &account);
+        let mut db = rizzy_cli::db::Db::open(&path).await.unwrap();
+        let rows = db.read().await.unwrap();
+        db.close().await;
+        let record = load::open(&rows, false).unwrap();
+        let device = record
+            .device_id()
+            .to_bytes()
+            .iter()
+            .fold(String::new(), |mut out, b| {
+                let _ = write!(out, "{b:02x}");
+                out
+            });
+        Some(CacheState {
+            stage: record.stage(),
+            pending_commit: rows.pending_commit.clone(),
+            device,
+        })
+    })
+}
+
+/// How many Emergency Kits a run printed.
+fn kits(script: &Script) -> usize {
+    script
+        .out
+        .iter()
+        .filter(|l| l.starts_with("Secret Key:"))
+        .count()
+}
+
+/// A new recovery attempt of alice's run to its pre-commit write, then "killed": the flow is
+/// dropped before the commit is sent (ADR 0046 §5's crash point). Returns the outcome, the
+/// body the attempt stored, and the run's output.
+fn recovery_until_the_commit(
+    rv: &Rv,
+    origin: &str,
+    code: &str,
+) -> (Result<Vec<u8>, CliError>, Script) {
+    let mut script = Script {
+        secrets: VecDeque::from([
+            code.to_owned(),
+            RECOVERED_PASSWORD.to_owned(),
+            RECOVERED_PASSWORD.to_owned(),
+        ]),
+        ..Script::default()
+    };
+    let outcome = {
+        let mut env = Env {
+            data_dir: rv.dir.clone(),
+            account: None,
+            trust: rizzy_cli::tls::Trust::default(),
+            ui: &mut script,
+            sign_outs: SignOuts::default(),
+        };
+        rv.runtime
+            .block_on(rizzy_cli::recover::prepare(&mut env, origin, "alice", true))
+            .map(|prepared| {
+                let body = prepared.body().to_vec();
+                drop(prepared);
+                body
+            })
+    };
+    (outcome, script)
+}
+
+/// `rv recovery complete --server origin --name alice`.
+fn complete_args(origin: &str) -> [&str; 6] {
+    [
+        "recovery", "complete", "--server", origin, "--name", "alice",
+    ]
+}
+
+/// ADR 0046 §5, the first crash-injection case: a recovery killed after its pre-commit write.
+/// The stage-3 record is on disk with the exact commit; while it is unsettled no second kit is
+/// made (INV-71), no other command opens it and `device forget` does not remove it. Another
+/// device's write then makes the stored commit stale; the next `recovery complete` asks for no
+/// new credentials, tries device authentication (refused), the OPAQUE-login probe (the old
+/// credentials still hold), then resends the stored body byte for byte over a fresh recovery
+/// session. The server refuses it (`state_conflict`), and the record is abandoned with no
+/// row left behind, so a new attempt starts from nothing and succeeds.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one interrupted recovery, settled step by step"
+)]
+fn an_interrupted_recovery_is_resent_and_abandoned_when_its_commit_went_stale() {
+    let (proxy, server) = Proxy::start(&[("RIZZY_RECOVERY_WAIT_HOURS", "0")]);
+    let origin = server.origin();
+    let a = Rv::new("a");
+    let (_, recovery_code) = sign_up(&a, &origin, "alice");
+    create_note(&a, PASSWORD, "Before");
+    let r = Rv::new("r");
+    r.ok(
+        &["recovery", "start", "--server", &origin, "--name", "alice"],
+        &[&recovery_code],
+        &[],
+    );
+
+    // Killed after the pre-commit write: nothing was sent, the stage-3 record is on disk.
+    let (outcome, crashed) = recovery_until_the_commit(&r, &origin, &recovery_code);
+    let stored = outcome.unwrap_or_else(|e| panic!("prepare: {e:?} {:?}", crashed.notes));
+    assert_eq!(kits(&crashed), 1);
+    assert!(proxy.bodies(paths::ACCOUNT_COMMIT).is_empty());
+    let cache = cache_state(&r).unwrap();
+    assert_eq!(cache.stage, Stage::RecoveryPending);
+    assert_eq!(cache.pending_commit.as_deref(), Some(stored.as_slice()));
+
+    // INV-71: no second kit while the record is unsettled, and it is not removed unsettled.
+    let (outcome, again) = recovery_until_the_commit(&r, &origin, &recovery_code);
+    assert!(
+        matches!(outcome, Err(CliError::AlreadyEnrolled)),
+        "{outcome:?}"
+    );
+    assert_eq!(kits(&again), 0);
+    let (outcome, listed) = r.try_run(&["item", "list"], &[], &[]);
+    assert!(
+        matches!(outcome, Err(CliError::Client(ClientError::RecoveryPending))),
+        "{outcome:?}"
+    );
+    assert!(listed.noted("rv recovery"), "{:?}", listed.notes);
+    let (outcome, _) = r.try_run(&["device", "forget"], &[], &["FORGET"]);
+    assert!(
+        matches!(outcome, Err(CliError::Client(ClientError::RecoveryPending))),
+        "{outcome:?}"
+    );
+    assert_eq!(cache_state(&r).unwrap().stage, Stage::RecoveryPending);
+
+    // Another device writes to the vault: the stored rotation's cursor is stale now.
+    create_note(&a, PASSWORD, "Meanwhile");
+
+    // The next run settles the record: the new password, then (once device authentication and
+    // the probe ruled out "it landed") the recovery code; no new kit.
+    let mark = proxy.paths().len();
+    let (outcome, settled) = r.try_run(
+        &complete_args(&origin),
+        &[RECOVERED_PASSWORD, &recovery_code],
+        &[],
+    );
+    assert!(
+        matches!(outcome, Err(CliError::Server(ErrorCode::StateConflict))),
+        "{outcome:?} {:?}",
+        settled.notes
+    );
+    assert!(
+        settled.noted("did not reach the server and was discarded"),
+        "{:?}",
+        settled.notes
+    );
+    assert_eq!(kits(&settled), 0);
+    assert!(settled.secrets.is_empty());
+    let steps: Vec<String> = proxy.paths()[mark..]
+        .iter()
+        .filter(|p| {
+            [
+                paths::DEVICE_AUTH_START,
+                paths::LOGIN_START,
+                paths::RECOVERY_COMPLETE,
+                paths::ACCOUNT_COMMIT,
+                paths::ACCOUNT_REREGISTER_START,
+            ]
+            .contains(&p.as_str())
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            paths::DEVICE_AUTH_START,
+            paths::LOGIN_START,
+            paths::RECOVERY_COMPLETE,
+            paths::ACCOUNT_COMMIT,
+        ]
+    );
+    // The resend is the stored body, byte for byte, and the only commit sent.
+    assert_eq!(proxy.bodies(paths::ACCOUNT_COMMIT), [stored]);
+    // Abandoned: no cache file, so no row, and no lock file.
+    assert!(cache_state(&r).is_none());
+    assert!(
+        std::fs::read_dir(&r.dir).unwrap().all(|e| e
+            .unwrap()
+            .path()
+            .extension()
+            .is_none_or(|x| x != "lock")),
+    );
+
+    // A new attempt starts from nothing (no `AlreadyEnrolled`) and recovers the account.
+    let (outcome, done) = r.try_run(
+        &complete_args(&origin),
+        &[&recovery_code, RECOVERED_PASSWORD, RECOVERED_PASSWORD],
+        &[],
+    );
+    outcome.unwrap_or_else(|e| panic!("recovery complete: {e:?} {:?}", done.notes));
+    assert!(done.noted("account is recovered"), "{:?}", done.notes);
+    assert_eq!(kits(&done), 1);
+    let cache = cache_state(&r).unwrap();
+    assert_eq!(cache.stage, Stage::Committed);
+    assert!(cache.pending_commit.is_none());
+    let mut names = r.item_names(RECOVERED_PASSWORD);
+    names.sort();
+    assert_eq!(names, ["Before", "Meanwhile"]);
+}
+
+/// ADR 0046 §3 step 2: the server applied the recovery but its answer was lost. The stage-3
+/// record stays; the next `recovery complete` asks for the new password only, device
+/// authentication succeeds, and the record is finalised with no probe, no recovery code and no
+/// resend.
+#[test]
+fn a_recovery_whose_answer_was_lost_is_finished_by_device_authentication() {
+    let (proxy, server) = Proxy::start(&[("RIZZY_RECOVERY_WAIT_HOURS", "0")]);
+    let origin = server.origin();
+    let a = Rv::new("a");
+    let (_, recovery_code) = sign_up(&a, &origin, "alice");
+    create_note(&a, PASSWORD, "Before");
+    let r = Rv::new("r");
+    r.ok(
+        &["recovery", "start", "--server", &origin, "--name", "alice"],
+        &[&recovery_code],
+        &[],
+    );
+    proxy.arm(paths::ACCOUNT_COMMIT, Fault::AnswerLost);
+    let (outcome, lost) = r.try_run(
+        &complete_args(&origin),
+        &[&recovery_code, RECOVERED_PASSWORD, RECOVERED_PASSWORD],
+        &[],
+    );
+    assert!(proxy.fired());
+    assert!(outcome.is_err());
+    assert!(lost.noted("is unknown"), "{:?}", lost.notes);
+    assert_eq!(kits(&lost), 1);
+    assert_eq!(cache_state(&r).unwrap().stage, Stage::RecoveryPending);
+
+    let mark = proxy.paths().len();
+    let (outcome, finished) = r.try_run(&complete_args(&origin), &[RECOVERED_PASSWORD], &[]);
+    outcome.unwrap_or_else(|e| panic!("resume: {e:?} {:?}", finished.notes));
+    assert!(
+        finished.noted("had applied the recovery"),
+        "{:?}",
+        finished.notes
+    );
+    assert!(
+        finished.noted("account is recovered"),
+        "{:?}",
+        finished.notes
+    );
+    assert_eq!(kits(&finished), 0);
+    let since = &proxy.paths()[mark..];
+    for path in [
+        paths::LOGIN_START,
+        paths::RECOVERY_COMPLETE,
+        paths::ACCOUNT_COMMIT,
+    ] {
+        assert!(!since.iter().any(|p| p == path), "{path} in {since:?}");
+    }
+    let cache = cache_state(&r).unwrap();
+    assert_eq!(cache.stage, Stage::Committed);
+    assert!(cache.pending_commit.is_none());
+    assert_eq!(r.item_names(RECOVERED_PASSWORD), ["Before"]);
+}
+
+/// ADR 0046 §5, the second crash-injection case: the recovery landed (its answer was lost),
+/// then another device revoked the recovering computer's device. Device authentication is
+/// refused, the OPAQUE-login probe succeeds: the record is finalised, nothing is removed or
+/// resent, no recovery code is asked for, and the user is told to enrol again.
+#[test]
+fn a_landed_recovery_whose_device_was_revoked_is_finalised_not_abandoned() {
+    let (proxy, server) = Proxy::start(&[("RIZZY_RECOVERY_WAIT_HOURS", "0")]);
+    let origin = server.origin();
+    let a = Rv::new("a");
+    let (_, recovery_code) = sign_up(&a, &origin, "alice");
+    create_note(&a, PASSWORD, "Before");
+    let r = Rv::new("r");
+    r.ok(
+        &["recovery", "start", "--server", &origin, "--name", "alice"],
+        &[&recovery_code],
+        &[],
+    );
+    proxy.arm(paths::ACCOUNT_COMMIT, Fault::AnswerLost);
+    let (outcome, lost) = r.try_run(
+        &complete_args(&origin),
+        &[&recovery_code, RECOVERED_PASSWORD, RECOVERED_PASSWORD],
+        &[],
+    );
+    assert!(proxy.fired() && outcome.is_err());
+    let new_secret_key = lost.printed("Secret Key:");
+    let new_recovery_code = lost.printed("Recovery code:");
+
+    // A follows the recovery, then revokes the recovering computer's device.
+    a.ok(
+        &["sync"],
+        &[PASSWORD, RECOVERED_PASSWORD, &new_secret_key],
+        &["alice"],
+    );
+    let device = cache_state(&r).unwrap().device;
+    let (outcome, revoked) = a.try_run(
+        &["device", "revoke", &device, "--name", "alice", "--standard"],
+        &[RECOVERED_PASSWORD, &new_recovery_code],
+        &[],
+    );
+    outcome.unwrap_or_else(|e| panic!("revoke: {e:?} {:?}", revoked.notes));
+
+    let commits = proxy.bodies(paths::ACCOUNT_COMMIT).len();
+    let recoveries = proxy.bodies(paths::RECOVERY_COMPLETE).len();
+    let (outcome, settled) = r.try_run(&complete_args(&origin), &[RECOVERED_PASSWORD], &[]);
+    assert!(
+        matches!(outcome, Err(CliError::Server(ErrorCode::Unauthorized))),
+        "{outcome:?} {:?}",
+        settled.notes
+    );
+    assert!(
+        settled.noted("had applied the recovery"),
+        "{:?}",
+        settled.notes
+    );
+    assert!(settled.noted("rv device forget"), "{:?}", settled.notes);
+    assert_eq!(kits(&settled), 0);
+    assert!(settled.secrets.is_empty());
+    assert_eq!(proxy.bodies(paths::ACCOUNT_COMMIT).len(), commits);
+    assert_eq!(proxy.bodies(paths::RECOVERY_COMPLETE).len(), recoveries);
+    // Finalised, not removed.
+    let cache = cache_state(&r).unwrap();
+    assert_eq!(cache.stage, Stage::Committed);
+    assert!(cache.pending_commit.is_none());
 }

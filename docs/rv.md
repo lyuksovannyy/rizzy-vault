@@ -204,7 +204,7 @@ rv device forget                       # removes this computer's copy of the acc
 
 If a rotation or a signup is interrupted after it was sent, the next `rv` run finds out whether the server took it and finishes it or sends it again before doing anything else. `rv` keeps what it saved for the rotation or signup as long as the outcome is unknown: no answer, a proxy's error page (`502`, `504`), a server failure or a rate limit. It drops it only when the server answers with a refusal and, for a rotation, a second look at the account shows the rotation was not applied.
 
-`rv login` and `rv recovery complete` save nothing before the server answers ([ADR 0026](adr/0026-client-device-state-and-cache.md) defines no pending stage for them; an open point). If their answer is lost, `rv` says that the outcome is unknown: run the command again, and if the first attempt did reach the server, revoke the extra device it left with `rv device revoke`. After a recovery with an unknown outcome keep both Emergency Kits until you know which one logs in.
+`rv login` saves nothing before the server answers ([ADR 0026](adr/0026-client-device-state-and-cache.md) defines no pending stage for it; an open point). If its answer is lost, `rv` says that the outcome is unknown: run the command again, and if the first attempt did reach the server, revoke the extra device it left with `rv device revoke`. `rv recovery complete` saves the recovery before it sends it; see [Forgotten master password](#forgotten-master-password).
 
 ## Sessions
 
@@ -248,6 +248,15 @@ rv account status                       # on an enrolled device: is a recovery p
 ```
 
 `recovery start` needs the recovery code from the Emergency Kit. The server then makes you wait (72 hours), and a device that is still enrolled can cancel a recovery you did not start with `rv recovery cancel`. While a recovery is pending, every `rv` command that goes online on an enrolled device (`sync`, `unlock`, the commands that change items, `account status`, and the others that reach the server) prints a warning that says when it was requested and when it can complete, every time, until it is cancelled or completed; `rv account status` shows it as `recovery: PENDING …`. The offline commands (`item list`, `item show`, `totp`, `generate`) never ask the server and never show it, so run `rv sync` now and then. The warning is the server's word, not something `rv` can verify: a server can hide a recovery or invent one, and `rv`'s checks of the account never depend on it. `recovery complete` asks for the recovery code again, sets a new master password, shows a **new Emergency Kit** (the old Secret Key and recovery code stop working), rotates the keys unless `--skip-rotation` is given, and enrols this computer. Every other device then asks for the new master password and Secret Key the next time it goes online. An operator who runs the server for one person can set the wait to 0 hours (`RIZZY_RECOVERY_WAIT_HOURS`, see [self-hosting.md](self-hosting.md)).
+
+**An interrupted recovery.** `recovery complete` saves the recovery on this computer once you have confirmed the new kit, before it sends it ([ADR 0046](adr/0046-recovery-pending-device-stage.md)). If it is interrupted, or the server's answer is lost, run the same `rv recovery complete --server … --name …` again; keep both Emergency Kits until it says how it ended. It asks for the new master password you chose, not for new credentials, and finds out what the server did:
+
+- the server applied the recovery: it is finished on this computer, with no recovery code asked for;
+- the server applied it but no longer accepts this computer as a device (another device revoked it): `rv` says so; run `rv device forget`, then `rv login` with the new kit;
+- the server did not apply it: it asks for the recovery code again and sends the saved recovery once more. If the server refuses it (the recovery was cancelled, or the account changed meanwhile), the saved recovery is discarded and its kit is void: start again with `rv recovery complete` (or `rv recovery start` if the recovery was cancelled);
+- the server cannot be reached: nothing is changed; run the command again later.
+
+While a recovery is saved and unsettled, `rv` makes no new Emergency Kit for that account, no other command opens it, and `rv device forget` does not remove it.
 
 ## After the server was restored from a backup
 
