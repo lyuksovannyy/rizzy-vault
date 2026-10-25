@@ -67,7 +67,7 @@ Ten read-only reviewers checked every ADR (0000–0087) against the gap checklis
 | D6 | A retired `0x0009` (bank) item on a cross-vault move or "move items to Personal, then delete the vault": the importer refuses unsupported types, so the item can be lost with the vault. | G08-8 | erratum + code |
 | D7 | ADR 0042's PSL check runs on read: a PSL update can make a whole ACCOUNT_SETTINGS record unreadable, vault directory included. "Blocks writes until resolved" has no resolution path. | G05-1, G05-2 | erratum |
 | D8 | ADR 0046 has no exit when the user can't type the new master password of an interrupted recovery (`device forget` refuses stage 3; INV-71 forbids a new kit). | G05-13 | erratum |
-| D9 | ADR 0050: the sync c‍ursor advances past a held header, with no rule for falling back when the hold lapses or is lost on restart; possibly a permanent stall (not confirmed). | G05-21 | erratum |
+| D9 | ADR 0050: the sync cursor advances past a held header, with no rule for falling back when the hold lapses or is lost on restart; possibly a permanent stall (not confirmed). | G05-21 | erratum |
 | D10 | ADR 0047 `invalidate` doesn't say what happens to the ADR 0071 backup keys. The implementation keeps them on a setup-only loss and makes fresh ones on a whole loss (owner to confirm). | G05-15 | owner |
 
 ## 5. Security coverage
