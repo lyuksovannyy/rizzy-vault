@@ -565,7 +565,7 @@ mod reach {
     use std::collections::BTreeSet;
 
     use proptest::strategy::{Strategy, ValueTree};
-    use proptest::test_runner::{Config, TestRunner};
+    use proptest::test_runner::{Config, TestRng, TestRunner};
 
     use super::{
         Decision, GenHost, case_strategy, decide, host_and_domain, normalized_string, port_norm,
@@ -597,10 +597,15 @@ mod reach {
 
     fn reach(cases: u32) -> Reach {
         let mut r = Reach::default();
-        let mut runner = TestRunner::new(Config {
+        // Proptest's deterministic RNG, as the PR batches use (main.rs `Seeds::Fixed`): with a
+        // fresh seed the reach check is a coin toss (CI run 40154629790 drew no MatchExact case in
+        // 10,000 on Windows), and a reach check exists to prove the generator, not to sample it.
+        let config = Config {
             cases,
             ..Config::default()
-        });
+        };
+        let rng = TestRng::deterministic_rng(config.rng_algorithm);
+        let mut runner = TestRunner::new_with_rng(config, rng);
         let strategy = case_strategy();
         for _ in 0..cases {
             let Ok(tree) = strategy.new_tree(&mut runner) else {
