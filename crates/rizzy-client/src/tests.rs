@@ -2356,6 +2356,7 @@ mod local_index;
 mod mutation;
 mod paged_fetch;
 mod password_history;
+mod recovery_pending;
 mod retention;
 mod rotation;
 mod settings;

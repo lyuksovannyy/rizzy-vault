@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Fuzzes `rizzy-client`'s device-state record parser (ADR 0026 §2, §6; record version 2, ADR
-//! 0057 §2, §5): the record is read back from a file anyone with the user's rights can change,
+//! 0057 §2, §5; the recovery-pending stage 3, ADR 0046 §1, §5): the record is read back from a file anyone with the user's rights can change,
 //! so it is untrusted input.
 //!
 //! Each input is parsed under both values of the platform gate `keystore_capable`. For each:
@@ -15,7 +15,10 @@
 //! - One state has one encoding: a version-2 record encodes back to the input byte for byte; a
 //!   version-1 record encodes to its version-2 form (two bytes longer, `has_ks = 0`, no
 //!   forward envelopes), which is canonical in turn.
-//! - A stage-2 record never has a pending record and always has `E_local`.
+//! - A stage-2 or stage-3 record never has a pending record and always has `E_local`; a
+//!   stage-3 record never has `E_ks` (ADR 0057 §2). Neither unlocks: `unlock` answers
+//!   `SignupPending` or `RecoveryPending` before any key is derived.
+//! - The stage byte is 1, 2 or 3.
 //! - The lifecycle steps the host runs on a parsed record (`with_pending` is not reachable
 //!   from bytes; `promote_pending`, `without_pending`, `committed`) keep it encodable, and
 //!   what they encode parses under the same gate.
@@ -71,8 +74,22 @@ fn check(data: &[u8], capable: bool) -> Option<bool> {
         }
         _ => panic!("only record versions 1 and 2 parse"),
     }
-    if record.stage() == Stage::SignupPending {
-        assert!(record.has_local() && !record.has_pending());
+    match record.stage() {
+        Stage::Committed => assert_eq!(data.get(2), Some(&1)),
+        Stage::SignupPending => {
+            assert_eq!(data.get(2), Some(&2));
+            assert!(record.has_local() && !record.has_pending());
+            assert_eq!(record.unlock("").err(), Some(ClientError::SignupPending));
+        }
+        Stage::RecoveryPending => {
+            assert_eq!(data.get(2), Some(&3));
+            assert!(record.has_local() && !record.has_pending() && !record.has_keystore());
+            assert_eq!(record.unlock("").err(), Some(ClientError::RecoveryPending));
+            assert_eq!(
+                record.unlock_keystore(&[0; 32]).err(),
+                Some(ClientError::RecoveryPending)
+            );
+        }
     }
     let has_ks = record.has_keystore();
     let has_pending = record.has_pending();

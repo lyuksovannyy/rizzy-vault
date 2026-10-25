@@ -484,13 +484,15 @@ fn vector_bytes_of(version: u8, stage: u8, has_local: bool, pending: bool) -> Ve
 }
 
 /// ADR 0026 §6: known-answer vectors of a committed record with a pending record, of
-/// `has_local = 0`, and of `stage = 2`; each parses back to itself (one state, one encoding).
+/// `has_local = 0`, of `stage = 2` and of `stage = 3` (ADR 0046 §5); each parses back to itself
+/// (one state, one encoding).
 #[test]
 fn device_record_vectors() {
     let cases = [
         (Stage::Committed, 1u8, true, true),
         (Stage::Committed, 1, false, false),
         (Stage::SignupPending, 2, true, false),
+        (Stage::RecoveryPending, 3, true, false),
     ];
     for (stage, stage_byte, has_local, pending) in cases {
         let record = vector_record(stage, has_local, pending);
@@ -555,7 +557,7 @@ fn device_record_refusals() {
     }
     corrupt(&vec![0u8; MAX_DEVICE_STATE_LEN + 1]);
     // A stage, kind or flag outside its values.
-    for (at, value) in [(2usize, 0u8), (2, 3), (64, 0), (64, 4)] {
+    for (at, value) in [(2usize, 0u8), (2, 3), (2, 4), (64, 0), (64, 4)] {
         let mut bad = good.clone();
         bad[at] = value;
         corrupt(&bad);

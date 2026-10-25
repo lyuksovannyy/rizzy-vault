@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The device-state record, record version 2 ([ADR 0057] §2, extending [ADR 0026] §2): the one
-//! opaque byte string a durable device persists for its enrolment (ADR 0013 §3 rule 2).
+//! The device-state record, record version 2 ([ADR 0057] §2, extending [ADR 0026] §2, with
+//! the recovery-pending stage of [ADR 0046] §1): the one opaque byte string a durable device
+//! persists for its enrolment (ADR 0013 §3 rule 2).
 //!
 //! ```text
-//! device_state = u16(record_version = 1 | 2) ‖ u8(stage: 1 committed | 2 signup-pending)
+//! device_state = u16(record_version = 1 | 2)
+//!              ‖ u8(stage: 1 committed | 2 signup-pending | 3 recovery-pending)
 //!              ‖ str(server_origin) ‖ account_id (16) ‖ device_id (16) ‖ u8(device_kind: 1–3)
 //!              ‖ secret_key (16) ‖ device_salt (16) ‖ u16(kdf_id) ‖ bytes(E_dev)
 //!              ‖ u8(has_local: 0 | 1) ‖ [u32(local_account_key_epoch) ‖ u32(local_password_epoch) ‖ bytes(E_local)]
@@ -37,9 +39,10 @@
 //! and must already be canonical; `device_kind` is 1–3; each `kdf_id` is on the client
 //! allow-list; each envelope is at most 256 bytes and parses as a symmetric envelope
 //! (`rizzy_core::envelope::parse`); a `stage` or flag outside its values, a signup-pending
-//! record without `E_local` or with a pending record, `has_ks = 1` without `E_local` or
-//! without `keystore_capable`, a `forward_count` above [`MAX_FORWARD_COUNT`], and a trailing
-//! byte are refused. One state has one encoding: [`DeviceRecord::encode`] of a parsed
+//! or recovery-pending record without `E_local` or with a pending record (ADR 0046 §1), a
+//! recovery-pending record with `E_ks` (ADR 0057 §2: `stage = 3 ⇒ has_ks = 0`), `has_ks = 1`
+//! without `E_local` or without `keystore_capable`, a `forward_count` above
+//! [`MAX_FORWARD_COUNT`], and a trailing byte are refused. One state has one encoding: [`DeviceRecord::encode`] of a parsed
 //! version-2 record gives the input back, and of a version-1 record its version-2 form. A
 //! record version above 2 is [`ClientError::CacheUpdateRequired`]; everything else is
 //! [`ClientError::CacheCorrupt`]. Nothing panics, and no error carries a byte of the record.
@@ -55,6 +58,7 @@
 //! The keystore unlock secret itself is never in the record (INV-82): only `E_ks`.
 //!
 //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
+//! [ADR 0046]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0046-recovery-pending-device-stage.md
 //! [ADR 0057]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0057-device-state-v2-keystore.md
 
 use core::fmt;
@@ -95,14 +99,31 @@ pub enum Stage {
     /// A signup whose `register/finish` has not been acknowledged (CRYPTO.md §11.1 step 7).
     /// The stored request is resent; nothing else runs in this stage.
     SignupPending,
+    /// A recovery (CRYPTO.md §11.9) whose `account/commit` has not been acknowledged ([ADR
+    /// 0046] §1). The base fields are what this device holds once the stored commit lands: the
+    /// new Secret Key, `device_salt`, `kdf_id`, `E_local` and `E_dev`. The record does not
+    /// unlock for ordinary use; the host settles it (ADR 0046 §3) through
+    /// [`DeviceRecord::unlock_recovery_pending`].
+    ///
+    /// [ADR 0046]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0046-recovery-pending-device-stage.md
+    RecoveryPending,
 }
 
 impl Stage {
+    /// Whether this stage is one of a commit that has not been acknowledged (stage 2 or 3):
+    /// its record carries `E_local` and no pending record, and does not unlock for ordinary
+    /// use (ADR 0026 §2, ADR 0046 §1).
+    #[must_use]
+    pub const fn is_pending(self) -> bool {
+        matches!(self, Self::SignupPending | Self::RecoveryPending)
+    }
+
     /// The stage's byte in the record.
     const fn to_u8(self) -> u8 {
         match self {
             Self::Committed => 1,
             Self::SignupPending => 2,
+            Self::RecoveryPending => 3,
         }
     }
 
@@ -111,6 +132,7 @@ impl Stage {
         match value {
             1 => Some(Self::Committed),
             2 => Some(Self::SignupPending),
+            3 => Some(Self::RecoveryPending),
             _ => None,
         }
     }
@@ -146,7 +168,7 @@ impl fmt::Debug for PendingRecord {
 /// A device-state record (see the module docs). Not `Clone`; `Debug` shows ids and the stage
 /// only.
 pub struct DeviceRecord {
-    /// Committed or signup-pending.
+    /// Committed, signup-pending or recovery-pending.
     pub(crate) stage: Stage,
     /// The origin this device is enrolled with.
     pub(crate) server_origin: ServerOrigin,
@@ -342,7 +364,12 @@ impl DeviceRecord {
             None
         };
         reader.finish().map_err(bad)?;
-        if stage == Stage::SignupPending && (local_wrap.is_none() || pending.is_some()) {
+        // Stages 2 and 3 carry `E_local` and no pending record (ADR 0026 §2 as ADR 0046 §1
+        // amends it); stage 3 carries no `E_ks` (ADR 0057 §2).
+        if stage.is_pending() && (local_wrap.is_none() || pending.is_some()) {
+            return Err(ClientError::CacheCorrupt);
+        }
+        if stage == Stage::RecoveryPending && keystore_wrap.is_some() {
             return Err(ClientError::CacheCorrupt);
         }
         // `has_ks = 1` requires `has_local = 1`, and is read only behind the platform gate
@@ -373,12 +400,14 @@ impl DeviceRecord {
     ///
     /// # Errors
     /// [`ClientError::Internal`] if the record breaks a rule the parser enforces (a
-    /// signup-pending record without `E_local` or with a pending record, an over-long
+    /// signup-pending or recovery-pending record without `E_local` or with a pending record,
+    /// a recovery-pending record with `E_ks`, an over-long
     /// envelope, a record above [`MAX_DEVICE_STATE_LEN`]): no such record is written.
     pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>, ClientError> {
-        if self.stage == Stage::SignupPending
-            && (self.local_wrap.is_none() || self.pending.is_some())
-        {
+        if self.stage.is_pending() && (self.local_wrap.is_none() || self.pending.is_some()) {
+            return Err(ClientError::Internal);
+        }
+        if self.stage == Stage::RecoveryPending && self.keystore_wrap.is_some() {
             return Err(ClientError::Internal);
         }
         if (self.keystore_wrap.is_some() && self.local_wrap.is_none())
@@ -525,14 +554,13 @@ impl DeviceRecord {
     /// The offline unlock from this record (CRYPTO.md §5.6; ADR 0026 §4 step 5).
     ///
     /// # Errors
-    /// [`ClientError::SignupPending`] in stage 2 and [`ClientError::LocalUnlockUnavailable`]
-    /// without `E_local`: neither state unlocks (ADR 0026 §2);
+    /// [`ClientError::SignupPending`] in stage 2, [`ClientError::RecoveryPending`] in stage 3
+    /// and [`ClientError::LocalUnlockUnavailable`] without `E_local`: none of these states
+    /// unlocks (ADR 0026 §2, ADR 0046 §1);
     /// [`ClientError::WrongPasswordOrSecretKey`]; [`ClientError::CacheCorrupt`] when `E_dev`
     /// does not open; [`ClientError::InvalidInput`]; [`ClientError::Internal`].
     pub fn unlock(&self, password: &str) -> Result<UnlockedDevice, ClientError> {
-        if self.stage == Stage::SignupPending {
-            return Err(ClientError::SignupPending);
-        }
+        self.refuse_pending_stage()?;
         let local_wrap = self
             .local_wrap
             .as_ref()
@@ -557,15 +585,14 @@ impl DeviceRecord {
     /// check; it opens `E_ks`, then `E_dev`. `E_local` is not opened.
     ///
     /// # Errors
-    /// [`ClientError::SignupPending`] in stage 2 and [`ClientError::LocalUnlockUnavailable`]
-    /// without `E_local`: neither state unlocks (ADR 0026 §2, ADR 0057 §1);
+    /// [`ClientError::SignupPending`] in stage 2, [`ClientError::RecoveryPending`] in stage 3
+    /// and [`ClientError::LocalUnlockUnavailable`] without `E_local`: none of these states
+    /// unlocks (ADR 0026 §2, ADR 0046 §1, ADR 0057 §1);
     /// [`ClientError::KeystoreUnlockUnavailable`] without `E_ks` or when it does not open;
     /// [`ClientError::InvalidInput`] unless `secret` is 32 bytes; [`ClientError::CacheCorrupt`]
     /// when `E_dev` does not open.
     pub fn unlock_keystore(&self, secret: &[u8]) -> Result<UnlockedDevice, ClientError> {
-        if self.stage == Stage::SignupPending {
-            return Err(ClientError::SignupPending);
-        }
+        self.refuse_pending_stage()?;
         if self.local_wrap.is_none() {
             return Err(ClientError::LocalUnlockUnavailable);
         }
@@ -575,6 +602,53 @@ impl DeviceRecord {
             self.device_id,
             self.keystore_wrap.as_ref(),
             &self.device_keys_wrap,
+        )
+    }
+
+    /// The refusal of [`DeviceRecord::unlock`] and [`DeviceRecord::unlock_keystore`] for a
+    /// record whose commit was not acknowledged (ADR 0026 §2, ADR 0046 §1).
+    const fn refuse_pending_stage(&self) -> Result<(), ClientError> {
+        match self.stage {
+            Stage::Committed => Ok(()),
+            Stage::SignupPending => Err(ClientError::SignupPending),
+            Stage::RecoveryPending => Err(ClientError::RecoveryPending),
+        }
+    }
+
+    /// The offline unlock of a **recovery-pending** (stage 3) record (ADR 0046 §1): the single
+    /// entry point of every branch of the resume of ADR 0046 §3. The keys it returns are the
+    /// ones this device holds once the stored recovery commit lands: the account key after the
+    /// commit, for the `setup_retired` rebuild of `E_srv'`, and the new device keys, for the
+    /// device-authentication attempt of §3 step 2. With [`DeviceRecord::secret_key_text`] and
+    /// the password, the host also runs the OPAQUE-login probe of §3 step 3 and, on
+    /// `setup_retired`, [`DeviceRecord::registration_restart`]. The host must not use the keys
+    /// for anything else until the record is finalised: whether the commit landed is what §3
+    /// works out.
+    ///
+    /// A wrong password answers [`ClientError::WrongPasswordOrSecretKey`] locally, before any
+    /// round trip (§3 step 1).
+    ///
+    /// # Errors
+    /// [`ClientError::InvalidInput`] for a record that is not in stage 3;
+    /// [`ClientError::CacheCorrupt`] without `E_local` (which `parse` already refuses);
+    /// otherwise as [`DeviceRecord::unlock`].
+    pub fn unlock_recovery_pending(&self, password: &str) -> Result<UnlockedDevice, ClientError> {
+        if self.stage != Stage::RecoveryPending {
+            return Err(ClientError::InvalidInput);
+        }
+        let local_wrap = self.local_wrap.as_ref().ok_or(ClientError::CacheCorrupt)?;
+        offline_unlock(
+            password,
+            &OfflineUnlock {
+                account_id: self.account_id,
+                device_id: self.device_id,
+                secret_key: &self.secret_key,
+                device_salt: &self.device_salt,
+                kdf_id: self.kdf_id,
+                local_wrap,
+                forward: &[],
+                device_keys_wrap: &self.device_keys_wrap,
+            },
         )
     }
 
@@ -687,7 +761,7 @@ impl DeviceRecord {
     }
 
     /// This record as committed (`stage = 1`), after the server acknowledged the signup
-    /// (CRYPTO.md §11.1 step 9).
+    /// (CRYPTO.md §11.1 step 9) or the recovery (ADR 0046 §2, §3).
     #[must_use]
     pub const fn committed(mut self) -> Self {
         self.stage = Stage::Committed;

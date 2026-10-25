@@ -147,6 +147,12 @@ pub enum ClientError {
     /// The device-state record is signup-pending (ADR 0026 §2, `stage = 2`): the stored
     /// `register/finish` request must be resent and acknowledged before anything else runs.
     SignupPending,
+    /// The device state is a recovery whose `account/commit` has not been acknowledged ([ADR
+    /// 0046] §1, stage 3): it does not unlock for ordinary use. The host settles it first (ADR
+    /// 0046 §3: `rv recovery complete` again).
+    ///
+    /// [ADR 0046]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0046-recovery-pending-device-stage.md
+    RecoveryPending,
     /// The device state holds no `E_local` (ADR 0026 §2, `has_local = 0`): it cannot unlock;
     /// the one path left is CRYPTO.md §11.3 step 5, "I changed my password on another device".
     LocalUnlockUnavailable,
@@ -257,6 +263,7 @@ impl ClientError {
             Self::CacheUpdateRequired => "cache_update_required",
             Self::CacheCorrupt => "cache_corrupt",
             Self::SignupPending => "signup_pending",
+            Self::RecoveryPending => "recovery_pending",
             Self::LocalUnlockUnavailable => "local_unlock_unavailable",
             Self::KeystoreUnlockUnavailable => "keystore_unlock_unavailable",
             Self::DeviceStateOutdated => "device_state_outdated",
@@ -342,6 +349,7 @@ impl fmt::Display for ClientError {
                 "the local data does not load; remove this device and enrol it again"
             }
             Self::SignupPending => "the signup has not been acknowledged yet",
+            Self::RecoveryPending => "the recovery has not been acknowledged yet",
             Self::LocalUnlockUnavailable => "this device can no longer unlock with a password",
             Self::KeystoreUnlockUnavailable => "unlock with the password instead",
             Self::DeviceStateOutdated => "the local data is older than this device's own history",
@@ -426,6 +434,7 @@ mod tests {
             ClientError::CacheUpdateRequired,
             ClientError::CacheCorrupt,
             ClientError::SignupPending,
+            ClientError::RecoveryPending,
             ClientError::LocalUnlockUnavailable,
             ClientError::KeystoreUnlockUnavailable,
             ClientError::DeviceStateOutdated,

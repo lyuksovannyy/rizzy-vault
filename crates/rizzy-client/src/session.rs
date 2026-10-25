@@ -36,6 +36,7 @@ use rizzy_proto::wire::{Fixed, SessionToken};
 
 use crate::device::{DeviceState, UnlockedDevice};
 use crate::error::ClientError;
+use crate::store::record::{DeviceRecord, Stage};
 use crate::wire::id;
 
 /// Step 1 of device authentication: the request for a challenge.
@@ -93,20 +94,86 @@ pub fn device_auth_finish(
     unlocked: &UnlockedDevice,
     challenge: &DeviceAuthStartResponse,
 ) -> Result<DeviceAuthFinishRequest, ClientError> {
-    if unlocked.account_id != state.account_id || unlocked.device_id != state.device_id {
+    sign_challenge(
+        &state.server_origin,
+        state.account_id,
+        state.device_id,
+        unlocked,
+        challenge,
+    )
+}
+
+/// Step 1 for a **recovery-pending** (stage 3) record, the short-circuit of [ADR 0046] §3 step
+/// 2: the record's own account and device ids, and never `reconciliation`, so the server
+/// accepts the device only if its own stored device set already lists the certificate (the
+/// certificate-carrying path of ADR 0012 §7 could accept a carried, not-yet-landed one).
+///
+/// # Errors
+/// [`ClientError::InvalidInput`] for a record that is not in stage 3.
+///
+/// [ADR 0046]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0046-recovery-pending-device-stage.md
+pub fn device_auth_start_recovery_pending(
+    record: &DeviceRecord,
+) -> Result<DeviceAuthStartRequest, ClientError> {
+    if record.stage() != Stage::RecoveryPending {
+        return Err(ClientError::InvalidInput);
+    }
+    Ok(DeviceAuthStartRequest {
+        account_id: id(record.account_id().to_bytes()),
+        device_id: id(record.device_id().to_bytes()),
+        reconciliation: None,
+    })
+}
+
+/// Step 2 for a recovery-pending record ([`device_auth_start_recovery_pending`]): the served
+/// challenge signed with the device key `unlocked` holds (from
+/// [`DeviceRecord::unlock_recovery_pending`]), over the record's own origin, and without
+/// `reconciliation`. The session the answer opens proves the commit landed; the host
+/// finalises the record and does not otherwise use the session.
+///
+/// # Errors
+/// [`ClientError::InvalidInput`] for a record that is not in stage 3, or if `unlocked` is
+/// another device's; [`ClientError::Internal`] if signing fails.
+pub fn device_auth_finish_recovery_pending(
+    record: &DeviceRecord,
+    unlocked: &UnlockedDevice,
+    challenge: &DeviceAuthStartResponse,
+) -> Result<DeviceAuthFinishRequest, ClientError> {
+    if record.stage() != Stage::RecoveryPending {
+        return Err(ClientError::InvalidInput);
+    }
+    sign_challenge(
+        record.server_origin(),
+        record.account_id(),
+        record.device_id(),
+        unlocked,
+        challenge,
+    )
+}
+
+/// The `device-auth` container over `challenge` (CRYPTO.md §5.10 step 2), without
+/// `reconciliation`.
+fn sign_challenge(
+    server_origin: &ServerOrigin,
+    account_id: AccountId,
+    device_id: DeviceId,
+    unlocked: &UnlockedDevice,
+    challenge: &DeviceAuthStartResponse,
+) -> Result<DeviceAuthFinishRequest, ClientError> {
+    if unlocked.account_id != account_id || unlocked.device_id != device_id {
         return Err(ClientError::InvalidInput);
     }
     let container = DeviceAuth {
-        server_origin: &state.server_origin,
-        account_id: state.account_id,
-        device_id: state.device_id,
+        server_origin,
+        account_id,
+        device_id,
         challenge: challenge.challenge.to_bytes(),
     }
     .sign(unlocked.device_keys.signing_key())
     .map_err(|_| ClientError::Internal)?;
     Ok(DeviceAuthFinishRequest {
-        account_id: id(state.account_id.to_bytes()),
-        device_id: id(state.device_id.to_bytes()),
+        account_id: id(account_id.to_bytes()),
+        device_id: id(device_id.to_bytes()),
         challenge: challenge.challenge,
         signature: Fixed::from_bytes(container.to_bytes()),
         reconciliation: None,

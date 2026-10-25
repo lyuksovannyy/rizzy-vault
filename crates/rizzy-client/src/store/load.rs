@@ -8,8 +8,8 @@
 //!
 //! 1. [`open`]: no key needed. The cache format, every `cache_meta` row, and the device-state
 //!    record ([`DeviceRecord::parse`]); the record must name the account, device and origin of
-//!    `cache_meta`, and a pending record or a signup-pending stage must come with
-//!    `pending_commit`, and only then.
+//!    `cache_meta`, and a pending record, a signup-pending stage or a recovery-pending stage
+//!    must come with `pending_commit`, and only then.
 //! 2. The host runs the offline unlock ([`DeviceRecord::unlock`], one Argon2id run), then
 //!    [`load`]: every account object is verified as a new device verifies a login answer
 //!    (`E_id` under the account key `E_local` gave, the bundle whose keys are those of `E_id`,
@@ -205,9 +205,9 @@ pub fn open(rows: &CacheRows, keystore_capable: bool) -> Result<DeviceRecord, Cl
     if next_device_seq == 0 || highest_list_version > u64::from(u32::MAX) {
         return Err(corrupt);
     }
-    // A pending record or a pending signup and the stored commit are written and removed
-    // together (§4 step 3).
-    let outstanding = record.has_pending() || record.stage() == Stage::SignupPending;
+    // A pending record, a pending signup or a pending recovery and the stored commit are
+    // written and removed together (§4 step 3; ADR 0046 §2).
+    let outstanding = record.has_pending() || record.stage().is_pending();
     match &rows.pending_commit {
         Some(request)
             if outstanding && !request.is_empty() && request.len() <= MAX_UPLOAD_BODY_LEN => {}
@@ -358,8 +358,8 @@ fn check_object_columns(
 /// for the HLC receive rule.
 ///
 /// # Errors
-/// [`ClientError::SignupPending`] and [`ClientError::LocalUnlockUnavailable`] for a record
-/// that does not unlock; [`ClientError::InvalidInput`] if `unlocked` is another device's;
+/// [`ClientError::SignupPending`], [`ClientError::RecoveryPending`] and
+/// [`ClientError::LocalUnlockUnavailable`] for a record that does not unlock; [`ClientError::InvalidInput`] if `unlocked` is another device's;
 /// [`ClientError::CacheCorrupt`] for everything else (§5 (d)).
 pub fn load(
     rows: &CacheRows,
@@ -368,8 +368,10 @@ pub fn load(
     now_ms: u64,
 ) -> Result<Loaded, ClientError> {
     let corrupt = ClientError::CacheCorrupt;
-    if record.stage() == Stage::SignupPending {
-        return Err(ClientError::SignupPending);
+    match record.stage() {
+        Stage::Committed => {}
+        Stage::SignupPending => return Err(ClientError::SignupPending),
+        Stage::RecoveryPending => return Err(ClientError::RecoveryPending),
     }
     if unlocked.account_id() != record.account_id() || unlocked.device_id() != record.device_id() {
         return Err(ClientError::InvalidInput);

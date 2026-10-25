@@ -8,8 +8,8 @@
 //!   recovery/complete with RecoveryStarted::request) ──RecoveryCompleteResponse──►
 //! RecoveryStarted::open ──► Recovered ── start_commit ──ReregisterStartRequest──► host
 //!   ──ReregisterStartResponse──► Reregistering::finish ──► PendingRecovery:
-//!   show the new Emergency Kit, confirm_kit ──► commit_request ──CommitChangeRequest──► host
-//!   ──ack──► PendingRecovery::finalize
+//!   show the new Emergency Kit, confirm_kit ──► store_writes (stage 3, before the send)
+//!   ──► commit_request ──CommitChangeRequest──► host ──ack──► PendingRecovery::finalize
 //! ```
 //!
 //! Every request after `recovery/complete` travels over the recovery-only session it returned
@@ -47,18 +47,32 @@
 //! # Secrets before commit (CRYPTO.md §11)
 //!
 //! [`PendingRecovery::commit_request`] is released only after the new kit was confirmed
-//! ([`PendingRecovery::confirm_kit`]). A recovering client has no device state before the
-//! commit, so there is no pending record to write (the rule's step 3 for a client without
-//! device state): the confirmed kit is what survives a crash, and the host writes the cache
-//! ([`PendingRecovery::store_writes`]) once the server acknowledged. The recovery code is
-//! never persisted.
+//! ([`PendingRecovery::confirm_kit`]). Then, before the commit leaves (the rule's step 3), the
+//! host writes the whole cache of the new device in **one** transaction
+//! ([`PendingRecovery::store_writes`], [ADR 0046] §2): the device-state record in stage 3
+//! (recovery-pending, [`Stage::RecoveryPending`]), the exact commit body as `pending_commit`,
+//! the account objects after the commit and the wrap sets. On the acknowledgement
+//! [`crate::store::finalize_writes`] promotes the record to stage 1 and drops the stored body.
+//! The recovery code is never persisted.
+//!
+//! A stage-3 record found on a later run is settled before anything else (ADR 0046 §3):
+//! [`crate::store::record::DeviceRecord::unlock_recovery_pending`] with the new password, a
+//! device authentication without reconciliation objects
+//! ([`crate::session::device_auth_start_recovery_pending`]), an OPAQUE-login probe, and only
+//! then a resend of the stored bytes through a fresh `recovery/complete`, or the abandon of
+//! the record. None of these steps generates a secret: [`Recovered::start_commit`] and
+//! [`Reregistering::finish`] run at most once per stage-3 record, so this device holds at most
+//! one unconfirmed recovery commit's secrets per account (threat model INV-71).
+//!
+//! [ADR 0046]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0046-recovery-pending-device-stage.md
 //!
 //! # Not in this build (reported)
 //!
 //! - Recovery by a **web vault** (kind 4): only a durable device recovers here.
 //! - The **full rotation** the UI offers "if the user believes the kit was stolen".
-//! - A lost compare-and-swap (`state_conflict`) is not retried: the host runs
-//!   `recovery/complete` again and rebuilds.
+//! - A lost compare-and-swap (`state_conflict`) is not retried with a rebuilt commit: the
+//!   host abandons the stage-3 record (ADR 0046 §3 step 5) and the user runs the recovery
+//!   again from the start.
 
 use core::fmt;
 
@@ -84,6 +98,7 @@ use rizzy_proto::change::{
     CommitChangeRequest, ReregisterStartRequest, ReregisterStartResponse, VaultRotation,
     VaultRotationUpload,
 };
+use rizzy_proto::limits::MAX_UPLOAD_BODY_LEN;
 use rizzy_proto::objects::{
     AccountKeyRecoveryWrap, AccountKeyServerWrap, DeviceGrant, IdentitySecretKeys, ItemKeyWrap,
     VaultSelfGrant,
@@ -800,18 +815,34 @@ impl PendingRecovery {
         }
     }
 
-    /// The cache of the new device (ADR 0026 §1, §3), for the host to create once the server
-    /// acknowledged the commit: the `cache_meta` rows, the device-state record, the account
-    /// objects after the commit, and per vault the self-grant and the wrap set at the epoch of
-    /// the vault key it holds.
+    /// The cache of the new device (ADR 0026 §1, §3), for the host to create in one
+    /// transaction **before** it sends the commit (CRYPTO.md §11 "Secrets before commit" step
+    /// 3; [ADR 0046] §2, mirroring [`crate::signup::PendingSignup::store_writes`]): the
+    /// `cache_meta` rows, the device-state record in stage 3 (recovery-pending),
+    /// `commit_json` as `pending_commit`, the account objects after the commit (bundle,
+    /// state, device set with this device's certificate, self-grants, `E_id`), and per vault
+    /// the self-grant and the wrap set at the epoch of the vault key it holds.
+    ///
+    /// `commit_json` is the exact JSON body of [`PendingRecovery::commit_request`] the host is
+    /// about to send; a resend sends those bytes again (a byte-identical repeat is success, ADR
+    /// 0028). On the acknowledgement the host finalises with [`crate::store::finalize_writes`]
+    /// and [`crate::store::record::DeviceRecord::committed`].
     ///
     /// # Errors
-    /// [`ClientError::EmergencyKitNotConfirmed`]; [`ClientError::Internal`].
-    pub fn store_writes(&self) -> Result<Changeset, ClientError> {
+    /// [`ClientError::EmergencyKitNotConfirmed`] before the kit was confirmed (step 2 comes
+    /// first); [`ClientError::InvalidInput`] for an empty or oversized `commit_json`;
+    /// [`ClientError::Internal`].
+    ///
+    /// [ADR 0046]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0046-recovery-pending-device-stage.md
+    pub fn store_writes(&self, commit_json: &[u8]) -> Result<Changeset, ClientError> {
         if !self.confirmed {
             return Err(ClientError::EmergencyKitNotConfirmed);
         }
-        let mut changeset = store::create_writes(&self.device.record(Stage::Committed)?)?;
+        if commit_json.is_empty() || commit_json.len() > MAX_UPLOAD_BODY_LEN {
+            return Err(ClientError::InvalidInput);
+        }
+        let mut changeset = store::create_writes(&self.device.record(Stage::RecoveryPending)?)?;
+        changeset.push(Write::PendingCommit(Some(commit_json.to_vec())));
         changeset.append(store::object_writes(
             &self.device.pin,
             &self.certificates,
@@ -826,6 +857,20 @@ impl PendingRecovery {
             });
         }
         Ok(changeset)
+    }
+
+    /// The device state after the commit, for the finalising write
+    /// ([`crate::store::finalize_writes`] of its record in stage 1).
+    #[must_use]
+    pub const fn device(&self) -> &DeviceState {
+        &self.device
+    }
+
+    /// The device's keys after the commit: the account key a `setup_retired` restart rebuilds
+    /// `E_srv'` under (ADR 0031 point 8). Not for anything else before the acknowledgement.
+    #[must_use]
+    pub const fn unlocked(&self) -> &UnlockedDevice {
+        &self.unlocked
     }
 
     /// After the server acknowledged the commit: the recovered device.

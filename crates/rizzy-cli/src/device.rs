@@ -12,7 +12,8 @@
 //!
 //! The account's lock, the cache rows, `store::load::open` (format, meta rows, the
 //! device-state record), then, in stage 2, the stored `register/finish` again (ADR 0026 §2
-//! "Signup pending"); the master password; the offline unlock (one Argon2id run); the load,
+//! "Signup pending"), while stage 3 is refused for `rv recovery complete` to settle (ADR 0046
+//! §3); the master password; the offline unlock (one Argon2id run); the load,
 //! which verifies every row like a server's answer; then the `item_index` rows the merge implies
 //! are committed (ADR 0056 §4: a corrupt table is rebuilt alone, never failing the load).
 //! Nothing so far needs the network: the vault reads offline.
@@ -520,13 +521,36 @@ impl Device {
     /// # Errors
     /// [`CliError::NotEnrolled`], [`CliError::SeveralAccounts`], [`CliError::InUse`];
     /// [`ClientError::WrongPasswordOrSecretKey`], [`ClientError::CacheCorrupt`],
-    /// [`ClientError::CacheUpdateRequired`] and [`ClientError::LocalUnlockUnavailable`] as
-    /// [`CliError::Client`]; the transport's errors when a pending signup is resent.
+    /// [`ClientError::CacheUpdateRequired`], [`ClientError::LocalUnlockUnavailable`] and
+    /// [`ClientError::RecoveryPending`] (a stage-3 record, which only `rv recovery complete`
+    /// settles) as [`CliError::Client`]; the transport's errors when a pending signup is
+    /// resent.
+    pub async fn open(env: &mut Env<'_>) -> Result<Self, CliError> {
+        Self::open_with(env, None).await
+    }
+
+    /// [`Device::open`] with the master password already typed in this run: the open after
+    /// `rv recovery complete` finalised a recovery-pending record (ADR 0046 §3 step 2), which
+    /// unlocked under it already.
+    ///
+    /// # Errors
+    /// As [`Device::open`].
+    pub(crate) async fn open_with_password(
+        env: &mut Env<'_>,
+        password: Zeroizing<String>,
+    ) -> Result<Self, CliError> {
+        Self::open_with(env, Some(password)).await
+    }
+
+    /// [`Device::open`]'s body; `typed_password` is asked for when `None`.
     #[expect(
         clippy::too_many_lines,
         reason = "the steps of an open in the order the specs fix, the ADR 0056 reconcile last"
     )]
-    pub async fn open(env: &mut Env<'_>) -> Result<Self, CliError> {
+    async fn open_with(
+        env: &mut Env<'_>,
+        mut typed_password: Option<Zeroizing<String>>,
+    ) -> Result<Self, CliError> {
         let account = pick_account(env)?;
         // ADR 0026 §3: "directory 0700", also when `rv` did not create it.
         check_data_dir(&env.data_dir)?;
@@ -537,7 +561,16 @@ impl Device {
         // INV-62), so a record with `E_ks` is refused as corrupt (ADR 0057 §2, INV-81).
         let mut record = load::open(&rows, false)?;
         let http = Http::new(record.server_origin().as_str(), &env.trust)?;
-        let mut typed_password = None;
+        if record.stage() == Stage::RecoveryPending {
+            // ADR 0046 §1, §3: a recovery whose commit is unsettled does not unlock; only
+            // `rv recovery complete` settles it, before any new kit is made (INV-71).
+            env.ui.note(&format!(
+                "A recovery started on this computer was not finished. Run `rv recovery \
+                 complete --server {} --name <login name>` to settle it.",
+                record.server_origin().as_str()
+            ));
+            return Err(CliError::Client(ClientError::RecoveryPending));
+        }
         if record.stage() == Stage::SignupPending {
             // ADR 0026 §2: the stored `register/finish` is resent as it is; the server treats
             // a byte-identical repeat as success, and its answer finalises the record. The

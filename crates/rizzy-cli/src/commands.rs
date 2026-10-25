@@ -1737,7 +1737,7 @@ async fn device_revoke(
 }
 
 /// Deletes the files of `account` in the data directory. The lock is held until they are gone.
-fn delete_account_files(
+pub(crate) fn delete_account_files(
     env: &Env<'_>,
     account: &[u8; 16],
     lock: AccountLock,
@@ -1824,6 +1824,9 @@ async fn device_forget(env: &mut Env<'_>) -> Result<(), CliError> {
             (lock, Some(unsent))
         }
         Err(CliError::InUse) => return Err(CliError::InUse),
+        // INV-71 (ADR 0046 §3): a stage-3 record may hold the only device state of a recovery
+        // the server applied; it is settled by `rv recovery complete`, never removed unsettled.
+        Err(e @ CliError::Client(ClientError::RecoveryPending)) => return Err(e),
         Err(CliError::NoTerminal | CliError::InputEnded) => return Err(CliError::NoTerminal),
         Err(e) => {
             // The cache does not unlock or load: its unsent edits cannot be verified, so
