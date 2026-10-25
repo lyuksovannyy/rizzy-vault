@@ -1,6 +1,6 @@
 # ADR 0009: Cryptographic dependency and memory-hygiene policy
 
-- Status: Partially superseded by [ADR 0019](0019-native-clients.md) ("RNG rules" in part); [ADR 0052](0052-icon-proxy-role.md) (Amendments, 2026-10-05 entry, "Where it is applied" in part); [ADR 0077](0077-webauthn-rs-integration-fixes.md) ("RNG rules" in part, owner decision 1 in part, Amendments 2026-10-22 entry in part)
+- Status: Partially superseded by [ADR 0019](0019-native-clients.md) ("RNG rules" in part); [ADR 0029](0029-kdbx-import.md) ("Allowed crate families for cryptography" in part); [ADR 0052](0052-icon-proxy-role.md) (Amendments, 2026-10-05 entry, "Where it is applied" in part); [ADR 0077](0077-webauthn-rs-integration-fixes.md) ("RNG rules" in part, owner decision 1 in part, Amendments 2026-10-22 entry in part)
 - Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M1 (applies from the first crypto dependency in `rizzy-core`)
