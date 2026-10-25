@@ -230,12 +230,27 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
     - xtask scratch dirs have no colon.
     - Extension e2e profile dirs are now removed on teardown (the /tmp leak).
   - **CI is triggered by workflow_dispatch on the working branch** (`gh workflow run ci.yml --ref claude/password-manager-planning-2gg9yc`).
+- **2026-10-24/25 (owner accepted 0033, 0045, 0046, 0047; ADR 0042 tag-0x0004 amendment "ok"; PR #11 re-signed):**
+  - **ADR 0045 (implemented):** advisory `pending_recovery` notice; migration **0010** (`last_recovery_at_ms`); banners in rv (`rv account status` plus a warning on every online command), web and extension; INV-70 tests with lying servers.
+    - **Owner items:**
+      - per Decision point 4 an honest server never sends the notice to web (OPAQUE) sessions, so the web banner only renders a forged notice;
+      - `last_recovery_at_ms` travels only inside a pending notice, so point 6 is only half reachable;
+      - `rv export` (OPAQUE re-auth) never sees it.
+      
+      Each needs an amendment ADR if wanted.
+  - **ADR 0046 (implemented):** device-state stage 3, the record still at version 2. rv saves the cache plus the exact commit body before sending, and resumes through device-auth → OPAQUE probe → resend → abandon (§3). INV-71 lock/guard; `device forget` refuses stage 3. Crash-injection e2e.
+  - **ADR 0047 (implemented):** `rizzy-vault secrets restore` / `secrets invalidate [--confirm]`; migration **0011** (`auth_invalidate_pending`, renumbered from the track's 0010); backup schema_version **11**; compose one-off services; self-hosting §4/5/9–13. HANDOFF gaps 11 and 22 closed.
+  - **Proposed, awaiting the owner:**
+    - 0083 (0071 `plaintext_len` erratum, no code change);
+    - 0084 (bare unencrypted CXF export). Finding: the plaintext JSON export already holds passkey private keys, and its warning doesn't say so; a separate ADR is recommended.
+    - 0085 (admin auth: Argon2id operator accounts, the secrets-file bootstrap token armed for 24 h, mandatory TOTP sealed under provisional 0x0107, `rizzy_admin` cookie, `admin reset`);
+    - 0086 (settings table `auth_instance_settings`, DB-over-env precedence, no cache, `SERVER_SMTP_CREDENTIAL` 0x0103). Finding: no Accepted ADR defines outbound mail, though ROADMAP has notification mail at M3.
+    - 0087 (invite tokens bound to a login name, link in the URL fragment, same 401 as closed signup).
+    - Purpose and INV numbers in 0085–0087 are renumbered at acceptance.
+  - **Test fix:** the settings round-trip property drew tags that now have layouts (0x0002/0x0004).
 - **What is left for agents:**
-  - Whatever the next Windows CI run still finds.
-  - The 0060 admin screens (new ADRs needed).
-  - 0073 (supply-chain approval records).
-  - ADR 0081 Part B (M9) and masked email (M6), both after v1.0.
-  - The open owner items above (the ADR 0042 tag-0x0004 amendment approval, the 0071 `plaintext_len` sentence, 0074 Q4).
+  - After the owner accepts: 0083 (doc edits only), 0084, and 0085–0087 (admin screens, invite signup).
+  - Still blocked: 0073 (approval records). ADR 0081 Part B and masked email come after v1.0.
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
