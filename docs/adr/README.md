@@ -152,6 +152,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0099 | [Website icons: a per-account opt-in, off by default, and no request while the setting or the `icons` role is off (erratum to ADR 0052)](0099-website-icons-opt-in.md) | Proposed | M3 |
 | 0088 | [Erratum to ADRs 0046 and 0057: one device-state record grammar (record version 1 | 2, stage 1 | 2 | 3)](0088-device-state-record-grammar.md) | Proposed | M1 |
 | 0088 | [Erratum to ADRs 0046 and 0057: one device-state record grammar (record version 1 or 2, stages 1–3)](0088-device-state-record-grammar.md) | Proposed | M1 |
+| 0089 | [Extension-origin frames: one content-script message list, the save-dialog instance token, the save-prompt token and the save dialog's visibility gates (reconciles ADRs 0043 and 0076)](0089-extension-frames-and-save-dialog.md) | Proposed | M3 |
 
 ## Gates
 
