@@ -4,6 +4,8 @@ State at the end of the 2026-10-21 session: what was done, and what comes next.
 Delete or rewrite this file when its next steps are done. §2–§7 are carried over from the
 2026-10-11 session unchanged except where §1 says otherwise.
 
+The dated bullets below are a log: an ADR status in a bullet is the status on that bullet's date. The [ADR index](adr/README.md#index) is current. Where a bullet called an ADR Proposed and it has been accepted since, a *Since:* note says so (2026-10-25 docs-hygiene pass).
+
 ## 1. Where things stand
 
 - **Machine moved.** Work now runs on a Linux host (Ubuntu 24.04, 20 cores, 8 GB RAM), not the earlier macOS box. Parallel work uses git worktrees under `~/rizzy-wt/`: `integration/` holds this branch and each track is `~/rizzy-wt/<track>` on branch `wip/<track>`. Tracks are cut from integration HEAD and cherry-picked back. Helper `~/rizzy-wt/bin/wt` (`new`, `adopt`, `list`, `sync`, `integrate`, `gate`, `rm`), `bin/gate.sh [--full]` (the CLAUDE.md list, plus check-tables, the JS/e2e list, both Playwright suites and `RUSTC_BOOTSTRAP=1 expand-bindings` as in CI), and `bin/bg` / `bin/bg-status` to run long commands detached from the agent session. Local tool setup: Node 24 and corepack pnpm in `~/.local/opt/node24`; Chromium's missing system libraries unpacked into `~/.local/opt/pw-libs` (no sudo); sccache. See `~/rizzy-wt/README.md`.
@@ -17,8 +19,8 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
   - `cargo xtask check-tables` (the M1 row, §6), `auth_`/`vault_` only. `storage_*` is skipped and counted, pending the owner (§5 gap 19). It is in CLAUDE.md's and CONTRIBUTING.md's push lists, but not in CI (an owner decision, §5).
   - **Advisory bumps** (the gate was red on `main` too): `rustls` =0.23.46 (RUSTSEC-2026-0346/0347), `webpki-roots` =1.0.10 (RUSTSEC-2026-0381), `rustls-webpki` 0.103.16 in the lockfile (RUSTSEC-2026-0382), and `vite` 8.3.5 (six pnpm audit advisories, check-js). These are patch bumps of exact pins, so **the owner reviews them as ADR 0009 asks** ("a patch release needs a human PR"). CRYPTO.md §3 is updated to the new pins; ADR 0009's own amendment table still names the old versions, because it is Accepted and only the owner edits it.
 - **Second wave (2026-10-21).**
-  - **Transparency page:** integrated as a client-only Settings group, "What the server stores" (`dae02d6`…`3e4ee56`). Its server-reported byte sizes are blocked: no Accepted ADR defines an endpoint, and ADR 0048 is Proposed.
-  - **Force logout:** blocked at the ADR gate. ADR 0075 (Proposed) now drafts it, so it waits for the owner (§3).
+  - **Transparency page:** integrated as a client-only Settings group, "What the server stores" (`dae02d6`…`3e4ee56`). Its server-reported byte sizes are blocked: no Accepted ADR defines an endpoint, and ADR 0048 is Proposed. *Since:* ADR 0048 was accepted on 2026-10-22 and implemented (wave 1 below): the account's usage and quota are shown there.
+  - **Force logout:** blocked at the ADR gate. ADR 0075 (Proposed) now drafts it, so it waits for the owner (§3). *Since:* accepted on 2026-10-22 and implemented (wave 1 below, "ADR 0075, sessions").
   - **Conflict chooser:** integrated: rizzy-client `conflicts.rs`, wasm, core, the web chooser and e2e. Both resolutions are ordinary edits under ADR 0012 §4 step 5 and ADR 0018 §6, and `rizzy-sync` is untouched. **Owner decision:** the ADRs name "keep both" but define no layout. The implementation keeps the shown value and moves each other Text value into a new website or custom field, using only ADR 0018 §7 keys. Concurrent keep-both on two devices yields duplicate copies (documented). Bool, Enum and similar fields resolve only by pick. Bindings `unsafe` went from 945 to 997, all wasm-bindgen glue for the new exports. No `rv` support (no ADR asks for it).
   - **Onboarding:** integrated as a getting-started guide after signup (Emergency Kit confirmation, import, extension instructions), which Settings reopens. Nothing is persisted, because CRYPTO §11.4 allows only the opted-in Secret Key and the theme in browser storage; a remembered "dismissed" state would need an owner change there. The e2e sign-up helpers close the guide, so new sign-up e2e code must too.
   - **Advisory bump:** vitest 4.1.12 (GHSA-qxg6-89mg-rqv8, GHSA-xp26-3454-mjgp). The owner reviews it, as with the earlier bumps.
@@ -50,7 +52,7 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
     - Commits authored by the AI identities (Agent, Claude) are re-authored to the owner, with the AI as `Co-Authored-By`, matching how earlier sessions' commits were authored.
     - The final tree is identical to this branch, and `cargo xtask check-signoff` passes.
     - A PR from it to `main` is open. Nothing was pushed to `main`; merging is the owner's act. After the merge, future work branches from `main`.
-  - Autocomplete-driven autofill was requested. It needs a new item key and fill-contract changes, so it is drafted as **ADR 0076 (Proposed)**. It also needs a ROADMAP row (its open question 1).
+  - Autocomplete-driven autofill was requested. It needs a new item key and fill-contract changes, so it is drafted as **ADR 0076 (Proposed)**. It also needs a ROADMAP row (its open question 1). *Since:* accepted on 2026-10-22 and implemented (wave 3 below).
 - **"Keep both" (owner question, rephrased).** When two devices change the same field before they sync, the field ends up holding two values at once. The ADRs define "pick one": choose a value, and the others stay only in history. "Keep both" is named in the ROADMAP, but no ADR says where the second value lives, because a field such as a password holds exactly one value. The implementation keeps the shown value in the field and turns each other value into a new field on the same item ("Password (from <device>)", hidden like the original), or a new website entry for URLs. Other shapes are possible:
   - a duplicate item holding the other value;
   - a field that keeps several values side by side (a format change);
@@ -76,7 +78,7 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
 - **Implemented from the 2026-10-22 batch (wave 1, each full-gated and integrated):**
   - **ADR 0048, storage quota:**
     - `quota_exceeded` (409) and the `AccountView` usage fields.
-    - Migration **0006** / schema_version 6. The ADR text says both 0007 and "schema_version 6", so 0006 was used; when ADR 0047 is accepted, it takes the next free number.
+    - Migration **0006** / schema_version 6. The ADR text says both 0007 and "schema_version 6", so 0006 was used; when ADR 0047 is accepted, it takes the next free number. *Since:* it took **0011** (see the shipped-migration table in §3).
     - Startup backfill and daily reconciliation.
     - Usage shown in Settings → What the server stores, and in `rv unlock`.
     - Beyond the letter of §2: rotation and heal-3b also credit the deleted wrap bytes, so the counter stays the sum of the rows.
@@ -107,7 +109,7 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
   - storing credentials and the UV policy also need decisions;
   - openssl-sys needs a system OpenSSL.
   
-  **ADR 0077 (Proposed)** resolves all of this, with seven open questions and recommendations. It needs owner acceptance; then the track runs. Its acceptance also authorizes one CI workflow edit (installing OpenSSL).
+  **ADR 0077 (Proposed)** resolves all of this, with seven open questions and recommendations. It needs owner acceptance; then the track runs. Its acceptance also authorizes one CI workflow edit (installing OpenSSL). *Since:* accepted on 2026-10-23; WebAuthn is built (2026-10-23/24 batch below).
 - **Possible flake:** `rv` e2e signups intermittently answer `Server(InvalidRequest)`. Seen three times in different tests under load; they pass on rerun. Not investigated.
 - **Wave 3 (integrated, full-gated):**
   - **ADR 0076, autocomplete autofill:**
@@ -145,7 +147,7 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
     - assertion signing now reads `alg`, so EdDSA passkeys sign with Ed25519.
   - **ADR 0071, encrypted DB backup:** `backup --encrypt`, `secrets rotate --backup-key`, `restore` of format v2, KAT container vectors, drills on SQLite and PG.
     - The reader is strict (exact framing) because the ADR's `plaintext_len` claim is false (see above).
-    - Without ADR 0047 (Proposed) there is no secrets-restore command: **a lost secrets file means encrypted backups can't be restored.**
+    - *Since:* ADR 0047 was accepted on 2026-10-24 and `rizzy-vault secrets restore` exists (2026-10-24/25 below). At the time: without ADR 0047 (Proposed) there was no secrets-restore command: **a lost secrets file means encrypted backups can't be restored.**
     - `Purpose::ALL` is 32, not 34: 0x0103 and 0x0104 are absent.
   - **ADR 0052, icon proxy:** favicon fetch, discovery and re-encode using `image =0.25.10` (default features off; png, jpeg, gif, bmp, ico, webp); `POST /api/v1/icons/fetch`; icons in the web vault and the extension popup; compose `--profile icons`, Caddy route and Quadlet icons unit.
     - **Owner answer 7 was settled by test:** Chromium refuses a same-origin `blob:` image under `img-src 'self'`. `WEB_CSP` is now `img-src 'self' blob:`, and ADR 0028's status line names item 10 for that token. Firefox untested.
@@ -164,7 +166,7 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
 - **State of the 2026-10-22 batch:**
   - **Implemented:** 0043, 0044, 0048–0057, 0062, 0071, 0074–0076, and 0060's listener only.
   - **Not implemented:**
-    - 0058/0059: blocked; ADR 0077, Proposed, would unblock them.
+    - 0058/0059: blocked; ADR 0077, Proposed, would unblock them. *Since:* 0077 accepted 2026-10-23, and 0058/0059 are built.
     - 0060's screens: they need new ADRs.
     - 0073: blocked on its supply-chain approval records.
 - **2026-10-23/24 batch (owner requests, ADRs 0077–0080 accepted 2026-10-23; each full-gated):**
@@ -265,9 +267,11 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
 | Sync convergence / gap-14 | "bound `absorb_snapshot`'s join to the causal layer's cut"; "refuse a tombstone `absorb_snapshot`'s bound-capped cut can't settle"; "adopt the offered epoch before healing in `World::upload`"; a rotation writer-rule false positive fixed; seeds pinned for gap-14 (`14-G1`) and a second family-9 `held_snaps` disagreement. One new defect surfaced and pinned as an **ignored** regression, not fixed: `ContextNotSettled` (§7). |
 | Licensing | SPDX headers added to source files plus `cargo xtask check-spdx`; a wave-3 and an A7-files SPDX follow-up; `check-spdx` dropped from CLAUDE.md's pre-push list (CI wiring is separate, §5) |
 | Docs | "INV-39 requires a strictly higher list version" correction in THREAT_MODEL.md |
-| ADR drafting | ADR 0043 proposed and its review blockers fixed; ADR 0044 proposed and its review blockers fixed (both committed). This session's own work — the 30-ADR batch 0045–0074 (§3) — is drafted and corrected on disk but not committed yet (§1). |
+| ADR drafting | ADR 0043 proposed and its review blockers fixed; ADR 0044 proposed and its review blockers fixed (both committed). This session's own work — the 30-ADR batch 0045–0074 (§3) — is drafted and corrected on disk but not committed yet (§1). *Since:* committed. |
 
 ## 3. Owner review batch
+
+*Since (2026-10-25):* this is the 2026-10-11 table. Most rows have been accepted since; still Proposed are 0061, 0063–0070 and 0072 here, and 0083–0087 (drafted later). The [ADR index](adr/README.md#index) is current.
 
 Every Proposed ADR as of today, oldest first. "Unblocks" is what accepting it clears; "Recommended" compresses its open questions to the call the owner has to make.
 
@@ -312,6 +316,24 @@ Every Proposed ADR as of today, oldest first. "Unblocks" is what accepting it cl
 
 **Reconcile at acceptance (shared numbers).** The batch was drafted in parallel, so shared numbered slots were allocated once, in ADR-number order, and each ADR marks them provisional: proposed invariants INV-70 … INV-100, CRYPTO.md §5.11 server-only purposes 0x0103 (0060 SMTP credentials), 0x0104 (0066), 0x0105 (0071), 0x0106 (0072), migrations 0006 (0047), 0007 (0048), 0008 (0064), and ADR 0028 item 1's endpoint count (+5 → 32 for 0054, +4 → 36 for 0064, +1 → 37 for 0066, +3 → 40 for 0068). If ADRs are accepted out of order, renumber at acceptance. Three things no single ADR could fix, left for whoever accepts the last of them: (1) 0052, 0061 and 0064 each partially supersede ADR 0028 item 1's "Paths and methods" text and the replacement texts do not chain; merge them into one text; (2) ADR 0028's "Retry after an unknown outcome" table has no row for 0054's five attachment endpoints or 0068's three mail endpoints; (3) `Purpose::ALL` reaches 35 once 0060, 0066, 0071 and 0072 all land, and no ADR states that final figure. 0054's clause (c) was read as an amendment to INV-15, not a new invariant; if it is new, ids from INV-80 on shift by one.
 
+**Shipped migration numbers (2026-10-25).** Several Accepted ADRs name the provisional number, not the shipped one (0047 says 0006, 0048 says 0007, 0081 says 0008 and, for M9, 0009); they are listed for an erratum in [the errata candidates](reviews/2026-10-25-errata-candidates.md). The shipped files, `crates/rizzy-storage/migrations/{sqlite,postgres}/` and `crates/rizzy-storage/src/migrate.rs`, and a backup's `schema_version` (the last applied migration, 11 today):
+
+| # | File | ADR |
+|---|---|---|
+| 0001 | `auth_initial` | 0011, 0022 §2 |
+| 0002 | `vault_initial` | 0011, 0012, 0021 |
+| 0003 | `storage_restore` | 0021 §2, 0012 §7 (INV-59) |
+| 0004 | `auth_retired_setups` | 0031 |
+| 0005 | `auth_credential_epochs` | 0032 §4 |
+| 0006 | `storage_account_usage` | 0048 |
+| 0007 | `vault_attachments` | 0054 |
+| 0008 | `auth_webauthn` | 0058, 0077 |
+| 0009 | `vault_kinds` | 0081 Part A |
+| 0010 | `auth_last_recovery` | 0045 |
+| 0011 | `auth_invalidate_pending` | 0047 |
+
+A new migration takes the next free number when it is implemented (0012 now), whatever its ADR's text says.
+
 ## 4. Dependency requests waiting for the owner
 
 | Crate | For | Governing ADR | Crypto | Why |
@@ -321,10 +343,10 @@ Every Proposed ADR as of today, oldest first. "Unblocks" is what accepting it cl
 | `wasm-bindgen-test` | wasm32 KAT vectors under Node, M1 (gap 07/43) | ADR 0019 §10 (Accepted) | No | Dev-dependency only; the binding smoke-test is already required. |
 | `utoipa` (recommended) | OpenAPI 3.1 description for `/api/v1`, M1 (gap 20) | ADR 0002 pt.3 (Accepted part) | No | Mechanism already required; the generator itself was never chosen. |
 | `uniffi` 0.31.2 | `rizzy-ffi`, M3 (macOS) | ADR 0019 §4.1 (Accepted) | No | Pinned per owner decision 8; wait for Spike S1 to run and be recorded first. |
-| A vetted image decoder (e.g. `image`) | Icon-proxy re-encode, M3 | 0052 (Proposed) | No | THREAT_MODEL §7.11 requires safe-Rust re-encoding before caching or serving. |
-| A Markdown parser + HTML sanitizer | Markdown in notes, M3 | 0062 (Proposed) | No | Neither exists in `apps/web` yet. |
+| A vetted image decoder (e.g. `image`) | Icon-proxy re-encode, M3 | 0052 (Proposed). *Since:* accepted; `image =0.25.10` added | No | THREAT_MODEL §7.11 requires safe-Rust re-encoding before caching or serving. |
+| A Markdown parser + HTML sanitizer | Markdown in notes, M3 | 0062 (Proposed). *Since:* accepted and built with a hand-written parser, no new crate | No | Neither exists in `apps/web` yet. |
 | `qrcode` (rv) + a JS QR library | Secret Key QR transfer, M3 | none — ADR 0004 already covers the string format | No | Pure rendering/scan convenience over an already-Accepted format. |
-| `webauthn-rs` 0.5.5 | Server WebAuthn 2FA, M3 | 0058/0059 (Proposed) | Yes | Ceremony correctness (origin/RP-ID binding, counter/clone, attestation) needs an audited crate. |
+| `webauthn-rs` 0.5.5 | Server WebAuthn 2FA, M3 | 0058/0059 (Proposed). *Since:* accepted, amended by 0077 and 0082; added | Yes | Ceremony correctness (origin/RP-ID binding, counter/clone, attestation) needs an audited crate. |
 | `tokio-tungstenite` | `notify` WebSocket, M3 | 0061 (Proposed) | No | Needed via axum's `ws` feature once the protocol ADR lands. |
 | `metrics-exporter-prometheus` or hand-rolled | Prometheus metrics, M3 | ADR 0010 §1 (Accepted) | No | Listener boundary already decided; the instrumentation choice is still open (§5). |
 | `lettre` (candidate) | Share-verification OTP mail, M5 | 0066 (Proposed) | No | No outbound-mail crate exists yet. |
@@ -360,7 +382,7 @@ Implementable now (status partial or not_started, no Proposed ADR in the way). `
 | Command palette (Cmd/Ctrl+K) | M3 | ADR 0014 (Accepted) |
 | Item detail view polish (large-type password display) | M3 | ADR 0014 (Accepted) |
 | Accessibility CI checks (contrast, screen reader, native toolkits) | M3 | ADR 0014 §5 / 0019 §13 (Accepted) |
-| Transparency page (built client-side from data existing endpoints already return; no new endpoint) | M3 | None governs it; ADR 0028 items 1/14 (Accepted) only constrain it. A server-reported variant would need a new endpoint and so a new ADR (ADR 0048 is Proposed) |
+| Transparency page (built client-side from data existing endpoints already return; no new endpoint) | M3 | None governs it; ADR 0028 items 1/14 (Accepted) only constrain it. A server-reported variant would need a new endpoint and so a new ADR (ADR 0048 is Proposed; *since* accepted, it adds only the account usage and quota figures) |
 | Onboarding flow (import wizard, Emergency Kit, extension install) | M3 | ADR 0008 / 0014 (Accepted) |
 | i18n scaffold (English only) | M3 | ADR 0014 §4 (Accepted) |
 | Conflict UI — explicit "keep both / pick one" chooser | M3 | ADR 0012/0018/0021 (Accepted) |
