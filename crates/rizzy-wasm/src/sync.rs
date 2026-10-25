@@ -37,6 +37,14 @@
 //! - **An older copy of this device's history** cannot exist for an ephemeral device; if the
 //!   server shows one anyway (`own_history_ahead`, `own_conflict`), the vault becomes read-only
 //!   and the sync ends with `device_state_outdated`, as in `rv`.
+//! - **Alarms of a durable device** (`crate::alarms`; ADR 0026 §4 step 4, ADR 0095 §C). The
+//!   extension's device ([`Ctx::alarms`] set) writes each alarm in the drain that carries the
+//!   answer that raised it, and every vault goes read-only: a rollback or fork of the account
+//!   answer (alarms 1 and 2, with the pinned and the served `account-state` as evidence), a
+//!   vault-key rollback or fork (no evidence, as `rv`), and an older copy of this device's
+//!   history (alarm 4). A verified, adopted account answer clears a held rollback alarm in the
+//!   same drain as its `account-state` (ADR 0021 §9 "Server behind", as `rv`'s `adopt`). The web
+//!   vault's ephemeral device persists nothing and keeps the behaviour above.
 //! - **One healing round per vault and sync**, as `rv` does; a second need is `cannot_heal`.
 //! - **Every vault, one after the other** ([ADR 0081] §A7): after the account answer the vault
 //!   set follows the catalog (`crate::vaults`: new vaults get a driver, dropped ones are
@@ -57,9 +65,11 @@ use rizzy_client::rizzy_proto::http::paths;
 use rizzy_client::rizzy_proto::vault::{FetchResponse, HealingResponse, UploadResponse};
 use rizzy_client::rizzy_proto::wire::SessionToken;
 use rizzy_client::session::DeviceSession as ClientDeviceSession;
+use rizzy_client::store::rows::Alarm;
 use rizzy_client::sync::{Authors, VaultSync};
 use serde::Serialize;
 
+use crate::alarms::{self, Alarms};
 use crate::error::{CoreError, CoreResult, VAULT_KEY_ROTATED, WRONG_STATE};
 use crate::http::{self, HttpRequest};
 use crate::rng::Rng;
@@ -84,7 +94,7 @@ impl Signer<'_> {
     /// # Errors
     /// `internal` if `body` does not serialise; as
     /// [`rizzy_client::session::DeviceSession::sign_request`].
-    fn build<T: Serialize>(
+    pub(crate) fn build<T: Serialize>(
         &mut self,
         path: &'static str,
         body: &T,
@@ -137,6 +147,36 @@ pub(crate) struct Ctx<'a> {
     pub(crate) signer: Signer<'a>,
     /// The RNG.
     pub(crate) rng: &'a mut Rng,
+    /// The durable device's alarms (`crate::alarms`), persisted with the next drain; `None`
+    /// for the web vault's ephemeral device, which persists nothing (module docs).
+    pub(crate) alarms: Option<&'a mut Alarms>,
+}
+
+impl Ctx<'_> {
+    /// Raises `alarm` on a durable device (ADR 0026 §4 step 4) and makes every vault
+    /// read-only; nothing on the ephemeral device, whose caller already made the vault
+    /// read-only (module docs).
+    ///
+    /// # Errors
+    /// As [`Alarms::raise`].
+    pub(crate) fn raise(&mut self, alarm: Alarm, evidence: &[&[u8]]) -> CoreResult<()> {
+        if let Some(alarms) = self.alarms.as_deref_mut() {
+            alarms.raise(alarm, evidence)?;
+            self.vaults.set_alarmed(true);
+        }
+        Ok(())
+    }
+
+    /// An adopted, verified account answer resolves a held rollback alarm (module docs); the
+    /// vaults leave read-only once no alarm is held.
+    fn resolve_rollback(&mut self) {
+        if let Some(alarms) = self.alarms.as_deref_mut()
+            && alarms.resolve_rollback()
+            && !alarms.is_raised()
+        {
+            self.vaults.set_alarmed(false);
+        }
+    }
 }
 
 /// The sync step driver (module docs).
@@ -322,6 +362,7 @@ impl SyncDriver {
                 let outcome = vault.apply_fetch(&*ctx.authors, &response, now_ms)?;
                 if outcome.own_history_ahead {
                     vault.set_read_only(true);
+                    ctx.raise(Alarm::DeviceStateOutdated, &[])?;
                     return Err(ClientError::DeviceStateOutdated.into());
                 }
                 if !response.complete {
@@ -361,6 +402,7 @@ impl SyncDriver {
                 let outcome = vault.apply_upload_response(&response)?;
                 if outcome.own_conflict {
                     vault.set_read_only(true);
+                    ctx.raise(Alarm::DeviceStateOutdated, &[])?;
                     return Err(ClientError::DeviceStateOutdated.into());
                 }
                 if outcome.rejected.contains(&ErrorCode::StaleEpoch) {
@@ -443,13 +485,31 @@ fn adopt_account(ctx: &mut Ctx<'_>, view: &AccountView) -> CoreResult<Vec<VaultI
             for vault in ctx.vaults.all_mut() {
                 vault.set_read_only(true);
             }
+            // As `rv`'s `apply_view`: the pinned and the served state are the evidence.
+            let alarm = if matches!(e, ClientError::Rollback) {
+                Alarm::Rollback
+            } else {
+                Alarm::Fork
+            };
+            let pinned = ctx.account.pin().state_wire().to_vec();
+            ctx.raise(alarm, &[&pinned, view.account_state.as_slice()])?;
             return Err(e.into());
         }
         Err(e) => return Err(e.into()),
     };
     let authors = Authors::from_account(&fresh)?;
-    let dropped = ctx.vaults.reconcile(&mut fresh, ctx.unlocked)?;
+    let dropped = match ctx.vaults.reconcile(&mut fresh, ctx.unlocked) {
+        Ok(dropped) => dropped,
+        Err(e) => {
+            // ADR 0025 §4, as `rv`'s `reconcile_vaults`: the alarm alone, without evidence.
+            if let Some(alarm) = alarms::of_vault_key_error(e.as_str()) {
+                ctx.raise(alarm, &[])?;
+            }
+            return Err(e);
+        }
+    };
     *ctx.authors = authors;
     *ctx.account = fresh;
+    ctx.resolve_rollback();
     Ok(dropped)
 }

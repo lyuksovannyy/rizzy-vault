@@ -93,6 +93,7 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
+pub mod alarms;
 pub mod autofill;
 pub mod breach;
 pub mod device;
@@ -105,6 +106,7 @@ pub mod items;
 mod login;
 pub mod matching;
 pub mod passkey;
+mod removal;
 mod rng;
 pub mod secret;
 pub mod session;
@@ -113,6 +115,7 @@ pub mod store;
 pub mod sync;
 pub mod vaults;
 
+pub use alarms::removal_refusal;
 pub use breach::{BreachCheck, BreachVerdict};
 pub use device::{DeviceSession, EnrolFlow};
 pub use error::CoreError;

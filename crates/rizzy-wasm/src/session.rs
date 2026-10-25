@@ -451,6 +451,7 @@ impl Session {
             unlocked: &inner.unlocked,
             signer: Signer::Bearer(&inner.token),
             rng: &mut inner.rng,
+            alarms: None,
         };
         inner.sync.start(&mut ctx)
     }
@@ -479,6 +480,7 @@ impl Session {
             unlocked: &inner.unlocked,
             signer: Signer::Bearer(&inner.token),
             rng: &mut inner.rng,
+            alarms: None,
         };
         inner.sync.respond(ctx, status, body, now_ms)
     }

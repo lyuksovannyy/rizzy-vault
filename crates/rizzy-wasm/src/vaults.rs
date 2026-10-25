@@ -75,6 +75,9 @@ pub(crate) struct VaultSet {
     discarded: usize,
     /// Whether new drivers journal their writes (a host with a cache).
     persist: bool,
+    /// Whether an account alarm of the durable device is held (`crate::alarms`): every
+    /// driver is read-only while one is, new ones included (ADR 0026 §4 step 4).
+    alarmed: bool,
 }
 
 impl VaultSet {
@@ -88,6 +91,7 @@ impl VaultSet {
             too_new: BTreeSet::new(),
             discarded: 0,
             persist,
+            alarmed: false,
         };
         for vault in vaults {
             let id = vault.vault_id();
@@ -270,9 +274,12 @@ impl VaultSet {
             && self.get(vault_id).is_ok_and(|v| !v.is_read_only())
     }
 
-    /// Inserts a driver, sharing the counters.
+    /// Inserts a driver, sharing the counters; read-only while an alarm is held.
     pub(crate) fn insert(&mut self, mut vault: VaultSync) {
         vault.share_counters(&self.counters);
+        if self.alarmed {
+            vault.set_read_only(true);
+        }
         let at = self
             .vaults
             .partition_point(|v| v.vault_id() < vault.vault_id());
@@ -340,12 +347,26 @@ impl VaultSet {
         self.update_read_only();
     }
 
+    /// Raises or lifts the durable device's account alarm (`crate::alarms`): while `alarmed`
+    /// every driver is read-only (ADR 0026 §4 step 4; ADR 0095 §C: "every vault of the account
+    /// goes read-only"). Lifting it (a resolved rollback, the last alarm held) leaves read-only
+    /// only the drivers [`VaultSet::update_read_only`] names.
+    pub(crate) fn set_alarmed(&mut self, alarmed: bool) {
+        self.alarmed = alarmed;
+        if !alarmed {
+            for vault in &mut self.vaults {
+                vault.set_read_only(false);
+            }
+        }
+        self.update_read_only();
+    }
+
     /// A driver whose vault the catalog does not open, or a `client_too_old` refusal named,
-    /// is read-only.
+    /// is read-only; while an alarm is held, every driver is.
     pub(crate) fn update_read_only(&mut self) {
         for vault in &mut self.vaults {
             let id = vault.vault_id();
-            if !self.catalog.is_open(id) || self.too_new.contains(&id) {
+            if self.alarmed || !self.catalog.is_open(id) || self.too_new.contains(&id) {
                 vault.set_read_only(true);
             }
         }

@@ -94,11 +94,13 @@ use rizzy_client::webauthn::{self, SecondFactor};
 use wasm_bindgen::prelude::wasm_bindgen;
 use zeroize::Zeroizing;
 
+use crate::alarms::{self, Alarms};
 use crate::error::{CoreError, CoreResult, SECURITY_KEY_REQUIRED, WRONG_STATE};
 use crate::http::{self, HttpRequest};
 use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, item_ref, type_from_name};
 use crate::matching::{self, MatchDecision, MatchSettingsView, UriInput};
 use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
+use crate::removal::UnsentUpload;
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
 use crate::store::{CacheDelta, KvRow, decode_rows, encode_rows};
@@ -449,6 +451,7 @@ impl EnrolResult {
                 rows,
                 floors,
                 Changeset::new(),
+                Alarms::default(),
             )),
         })
     }
@@ -540,6 +543,11 @@ pub struct DeviceSession {
     /// [`Floors::admit`] like any other (ADR 0051 §3, INV-75: until the host commits them, a
     /// restart re-migrates and re-verifies, never accepts an older list).
     start_writes: Changeset,
+    /// The alarms the cache holds and those raised since (`crate::alarms`): while one is held
+    /// every vault is read-only, across restarts (ADR 0026 §4 step 4).
+    alarms: Alarms,
+    /// The upload that comes first in "remove this device" (`crate::removal`).
+    removal: UnsentUpload,
 }
 
 impl fmt::Debug for DeviceSession {
@@ -578,6 +586,7 @@ impl DeviceSession {
         cache: CacheRows,
         floors: Floors,
         mut start_writes: Changeset,
+        alarms: Alarms,
     ) -> Self {
         let global_groups = start_global_groups(&floors, &mut start_writes);
         Self {
@@ -595,6 +604,8 @@ impl DeviceSession {
             settings: SettingsCache::default(),
             global_groups,
             start_writes,
+            alarms,
+            removal: UnsentUpload::default(),
         }
     }
 
@@ -620,6 +631,9 @@ impl DeviceSession {
         for vault in self.vaults.all_mut() {
             changeset.append(vault.take_writes());
         }
+        // ADR 0026 §4 step 4: an alarm goes out with the answer that raised it; a cleared
+        // rollback alarm with the `account-state` above, which the floors require.
+        changeset.append(self.alarms.take_writes());
         if changeset.is_empty() {
             return Ok(CacheDelta::default());
         }
@@ -683,7 +697,13 @@ impl DeviceSession {
         // nothing here calls `take_vault_key`/`VaultSync::new` itself. ADR 0081 §A2, §A7: only
         // the vaults the cached account's catalog lists are kept, sharing one device counter.
         let catalog = catalog_of(&loaded.account, &unlocked);
-        let vaults = VaultSet::new(loaded.vaults, catalog, true);
+        let mut vaults = VaultSet::new(loaded.vaults, catalog, true);
+        // ADR 0026 §4 step 4: a held alarm keeps every vault read-only after a restart, those
+        // the account's next answer adds included (`crate::alarms`).
+        let alarms = Alarms::loaded(loaded.alarms);
+        if alarms.is_raised() {
+            vaults.set_alarmed(true);
+        }
         Ok(Self::from_parts(
             loaded.device,
             unlocked,
@@ -693,6 +713,7 @@ impl DeviceSession {
             stored,
             loaded.floors,
             migration,
+            alarms,
         ))
     }
 
@@ -871,11 +892,21 @@ impl DeviceSession {
     /// Starts a sync (`crate::sync`'s module docs), signed with this device's key
     /// (`Signer::Device`) rather than a bearer-only session.
     ///
+    /// A held fork or outdated-device-state alarm refuses it, as `rv`'s `online` does: they end
+    /// the online life of this cache (`crate::alarms`); "remove this device" is what is left.
+    ///
     /// # Errors
-    /// `wrong_state` while a sync runs; as `DeviceSession::vault_ref`; `locked` is never
-    /// returned (a [`DeviceSession`] with no vault cannot exist).
+    /// `fork` or `device_state_outdated` under that alarm; `wrong_state` while a sync or the
+    /// removal upload runs; as `DeviceSession::vault_ref`; `locked` is never returned (a
+    /// [`DeviceSession`] with no vault cannot exist).
     #[wasm_bindgen(js_name = syncStart)]
     pub fn sync_start(&mut self) -> Result<(), CoreError> {
+        if let Some(alarm) = self.alarms.sync_refusal() {
+            return Err(alarms::error_of(alarm).into());
+        }
+        if self.removal.running() {
+            return Err(CoreError::new(WRONG_STATE));
+        }
         let AuthStage::Done(session) = &mut self.auth else {
             return Err(CoreError::new(WRONG_STATE));
         };
@@ -886,6 +917,7 @@ impl DeviceSession {
             unlocked: &self.unlocked,
             signer: Signer::Device(session),
             rng: &mut self.rng,
+            alarms: Some(&mut self.alarms),
         };
         self.sync.start(&mut ctx)
     }
@@ -898,9 +930,10 @@ impl DeviceSession {
     }
 
     /// Passes in the answer to the outstanding request. `now_ms` is the host's clock. Any
-    /// error ends the sync. On success, call `DeviceSession::drain_cache_writes` before the
-    /// next request is released (ADR 0026 §4 step 2; struct docs) — before calling
-    /// [`DeviceSession::sync_request`] again.
+    /// error ends the sync. Then, on success and on an error alike, call
+    /// `DeviceSession::drain_cache_writes` before the next request is released (ADR 0026 §4
+    /// step 2; struct docs) — before calling [`DeviceSession::sync_request`] again: an error may
+    /// carry an alarm whose row goes out with the answer that raised it (§4 step 4).
     ///
     /// # Errors
     /// As [`crate::sync`] describes; as `DeviceSession::vault_ref`.
@@ -916,6 +949,7 @@ impl DeviceSession {
             unlocked: &self.unlocked,
             signer: Signer::Device(session),
             rng: &mut self.rng,
+            alarms: Some(&mut self.alarms),
         };
         self.sync.respond(ctx, status, body, now_ms)
     }
@@ -930,6 +964,109 @@ impl DeviceSession {
     pub fn sync_abort(&mut self) -> Result<(), CoreError> {
         self.sync.abort(&mut self.vaults);
         Ok(())
+    }
+
+    /// The codes of the alarms this device holds (`crate::alarms`; ADR 0026 §3 kind 7):
+    /// `rollback`, `fork`, `identity_change_unconfirmed`, `device_state_outdated`. Every vault
+    /// is read-only while one is held, and a restart keeps it.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn alarms(&self) -> Vec<String> {
+        self.alarms.codes()
+    }
+
+    /// The alarm that refuses "remove this device" (ADR 0095 §D): alarm 1, 2 or 3, by code;
+    /// `undefined` when removal may go on (no alarm, or only `device_state_outdated`, whose
+    /// only resolution removal is).
+    #[wasm_bindgen(getter, js_name = removalRefusal)]
+    #[must_use]
+    pub fn removal_refusal(&self) -> Option<String> {
+        self.alarms
+            .removal_refusal()
+            .map(|a| alarms::error_of(a).code().to_owned())
+    }
+
+    /// How many own snapshots the server has not acknowledged (with
+    /// [`DeviceSession::unsent_changes`], what removal of this device would lose, ADR 0026 §5).
+    #[wasm_bindgen(getter, js_name = unsentSnapshots)]
+    #[must_use]
+    pub fn unsent_snapshots(&self) -> usize {
+        self.vaults.all().iter().map(|v| v.unacknowledged().1).sum()
+    }
+
+    /// Starts the upload that comes first in "remove this device" (`crate::removal`): the
+    /// unacknowledged own rows of every open vault, byte for byte. Drain the cache writes after
+    /// this call and after every [`DeviceSession::removal_upload_respond`], before the request
+    /// goes out (ADR 0026 §4 step 1).
+    ///
+    /// # Errors
+    /// `rollback`, `fork` or `identity_change_unconfirmed` under that alarm (removal is
+    /// refused); `wrong_state` before authentication or while a sync or this upload runs; as
+    /// the first Fetch request.
+    #[wasm_bindgen(js_name = removalUploadStart)]
+    pub fn removal_upload_start(&mut self) -> Result<(), CoreError> {
+        if let Some(alarm) = self.alarms.removal_refusal() {
+            return Err(alarms::error_of(alarm).into());
+        }
+        if self.sync.running() {
+            return Err(CoreError::new(WRONG_STATE));
+        }
+        let AuthStage::Done(session) = &mut self.auth else {
+            return Err(CoreError::new(WRONG_STATE));
+        };
+        let mut ctx = Ctx {
+            vaults: &mut self.vaults,
+            account: &mut self.account,
+            authors: &mut self.authors,
+            unlocked: &self.unlocked,
+            signer: Signer::Device(session),
+            rng: &mut self.rng,
+            alarms: Some(&mut self.alarms),
+        };
+        self.removal.start(&mut ctx)
+    }
+
+    /// The removal upload's outstanding request, or `undefined` when it is done.
+    #[wasm_bindgen(js_name = removalUploadRequest)]
+    #[must_use]
+    pub fn removal_upload_request(&self) -> Option<HttpRequest> {
+        self.removal.request()
+    }
+
+    /// Passes in the answer to the removal upload's outstanding request; `now_ms` is the
+    /// host's clock. Any error ends the upload (nothing more is tried, ADR 0095 §D). Drain the
+    /// cache writes after this call, on an error too.
+    ///
+    /// # Errors
+    /// `wrong_state` when nothing is outstanding; the answer's refusal; as `crate::removal`.
+    #[wasm_bindgen(js_name = removalUploadRespond)]
+    pub fn removal_upload_respond(
+        &mut self,
+        status: u16,
+        body: &[u8],
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let AuthStage::Done(session) = &mut self.auth else {
+            self.removal.abort();
+            return Err(CoreError::new(WRONG_STATE));
+        };
+        let ctx = Ctx {
+            vaults: &mut self.vaults,
+            account: &mut self.account,
+            authors: &mut self.authors,
+            unlocked: &self.unlocked,
+            signer: Signer::Device(session),
+            rng: &mut self.rng,
+            alarms: Some(&mut self.alarms),
+        };
+        self.removal.respond(ctx, status, body, now_ms)
+    }
+
+    /// Ends the removal upload when the host could not carry its request. A no-op when it is
+    /// not running.
+    #[wasm_bindgen(js_name = removalUploadAbort)]
+    pub fn removal_upload_abort(&mut self) {
+        self.removal.abort();
     }
 
     /// Every vault the account's directory lists (ADR 0081 §A2): the Personal vault first, then

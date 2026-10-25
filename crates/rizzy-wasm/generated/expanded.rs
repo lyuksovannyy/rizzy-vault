@@ -97,11 +97,306 @@ extern crate std;
 #[prelude_import]
 use std::prelude::rust_2024::*;
 
+pub mod alarms {
+
+
+
+
+    //! The durable device's alarms ([ADR 0026] §3 kind 7, §4 step 4, §5; the replacement text of
+    //! [ADR 0095] §A, §C and §D, as `rizzy-client` and `rv` implement it): what the extension
+    //! persists so that "a restart never lifts read-only mode", and the removal rules.
+    //!
+    //! # The split (written before this module's code, as CLAUDE.md requires)
+    //!
+    //! Every decision about the rows is already [`rizzy_client::store`]'s: the row an alarm is
+    //! ([`store::alarm_write`]), the one write that clears one ([`Write::ClearAlarm`], refused by the
+    //! floors for every alarm but a resolved rollback and a confirmed identity change), and the
+    //! load that refuses an alarm key this build does not know and makes every vault read-only
+    //! while an alarm is held ([`store::load::Loaded::alarms`]). This module only does what `rv`'s
+    //! `Device::raise`/`Device::alarms` and `commands.rs`'s `refuse_under_alarm` do for a native
+    //! host: it keeps the held set and the writes not yet drained, and names the alarm that
+    //! refuses a sync or a removal. No new row, key or format: an alarm is an `account_objects`
+    //! row of kind 7 in the extension's store exactly as in `rv`'s `SQLite` file (`crate::store`'s
+    //! codec already carries every kind from 1 to 7).
+    //!
+    //! | Alarm | Raised here when | Cleared | Sync | Removal |
+    //! |---|---|---|---|---|
+    //! | 1 rollback | the account answer or a vault key is older than the pin | in the changeset that adopts a verified answer (ADR 0021 §9 "Server behind") | runs (it may resolve it) | refused |
+    //! | 2 fork | two account states or vault keys at one sequence | never | refused | refused |
+    //! | 3 unconfirmed identity change | never: the extension has no confirmation flow (the sync ends with `identity_change_unconfirmed` and writes nothing) | only by `rv`'s confirmation | runs | refused |
+    //! | 4 device state outdated | a Fetch shows more own history, or an upload a conflict at an own dot (ADR 0095 §C) | never | refused | allowed: its only resolution |
+    //!
+    //! The key-less check ([`removal_refusal`]) reads the alarm keys of a cache that does not
+    //! unlock, as `rv`'s `Db::alarm_keys` does: the rows are cleartext (§3), so a cache that does
+    //! not unlock is refused removal by the same rule, and an alarm key this build does not know
+    //! is refused too (it may be an alarm of a newer build; deleting evidence is not undone).
+    //!
+    //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
+    //! [ADR 0095]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0095-owner-answers-0023-0028-recorded.md
+    use std::collections::BTreeSet;
+    use core::fmt;
+    use rizzy_client::ClientError;
+    use rizzy_client::store::rows::{Alarm, Changeset, Write, kind};
+    use rizzy_client::store::self;
+    use wasm_bindgen::prelude::wasm_bindgen;
+    use crate::store::KvRow;
+    /// The code an alarm key this build does not know is named by.
+    pub const ALARM_UNKNOWN: &str = "alarm_unknown";
+    /// The error an alarm stands for; its code names the alarm to the host.
+    #[must_use]
+    pub(crate) const fn error_of(alarm: Alarm) -> ClientError {
+        match alarm {
+            Alarm::Rollback => ClientError::Rollback,
+            Alarm::Fork => ClientError::Fork,
+            Alarm::UnconfirmedIdentityChange =>
+                ClientError::IdentityChangeUnconfirmed,
+            Alarm::DeviceStateOutdated => ClientError::DeviceStateOutdated,
+        }
+    }
+    /// The alarm a vault-key refusal raises (ADR 0025 §4, as `rv`'s `device/vaults.rs`): a second
+    /// vault key at a seen epoch is a fork, one below the held epoch a rollback.
+    #[must_use]
+    pub(crate) fn of_vault_key_error(code: &str) -> Option<Alarm> {
+        if code == ClientError::Fork.code() {
+            Some(Alarm::Fork)
+        } else if code == ClientError::Rollback.code() {
+            Some(Alarm::Rollback)
+        } else { None }
+    }
+    /// The alarms a durable device holds, and the writes of those raised or cleared since the last
+    /// drain (module docs).
+    pub(crate) struct Alarms {
+        /// The alarms held: the loaded rows, then every one raised.
+        held: BTreeSet<Alarm>,
+        /// The writes not yet drained to the host.
+        writes: Changeset,
+    }
+    #[automatically_derived]
+    impl ::core::default::Default for Alarms {
+        #[inline]
+        fn default() -> Alarms {
+            Alarms {
+                held: ::core::default::Default::default(),
+                writes: ::core::default::Default::default(),
+            }
+        }
+    }
+    impl fmt::Debug for Alarms {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Alarms").field("held",
+                    &self.held).finish_non_exhaustive()
+        }
+    }
+    impl Alarms {
+        /// The alarms a cache loaded with ([`store::load::Loaded::alarms`]).
+        pub(crate) const fn loaded(held: BTreeSet<Alarm>) -> Self {
+            Self { held, writes: Changeset::new() }
+        }
+        /// Raises `alarm` with the conflicting signed statements as evidence (ADR 0026 §4 step 4):
+        /// its row goes out with the next drain, which also carries the answer that raised it.
+        ///
+        /// # Errors
+        /// As [`store::alarm_write`].
+        pub(crate) fn raise(&mut self, alarm: Alarm, evidence: &[&[u8]])
+            -> Result<(), ClientError> {
+            self.writes.push(store::alarm_write(alarm, evidence)?);
+            self.held.insert(alarm);
+            Ok(())
+        }
+        /// Clears a held rollback alarm (ADR 0021 §9 "Server behind", as `rv`'s `Device::adopt`):
+        /// called only when a verified account answer is adopted, so the drain that carries the
+        /// clear also carries that answer's `account-state`, which the floors require. Whether one
+        /// was held.
+        pub(crate) fn resolve_rollback(&mut self) -> bool {
+            let held = self.held.remove(&Alarm::Rollback);
+            if held { self.writes.push(Write::ClearAlarm(Alarm::Rollback)); }
+            held
+        }
+        /// Whether any alarm is held.
+        pub(crate) fn is_raised(&self) -> bool { !self.held.is_empty() }
+        /// The alarm that refuses a sync, as `rv`'s `Device::online`: a fork and an outdated
+        /// device state end the online life of this cache. A rollback does not (the next account
+        /// answer may resolve it), nor does an unconfirmed identity change (the answer is checked
+        /// again).
+        pub(crate) fn sync_refusal(&self) -> Option<Alarm> {
+            self.held.iter().copied().find(|a|
+                    #[allow(non_exhaustive_omitted_patterns)] match a {
+                        Alarm::Fork | Alarm::DeviceStateOutdated => true,
+                        _ => false,
+                    })
+        }
+        /// The alarm that refuses removal of this device (ADR 0095 §D): every alarm but 4.
+        pub(crate) fn removal_refusal(&self) -> Option<Alarm> {
+            self.held.iter().copied().find(|a|
+                    *a != Alarm::DeviceStateOutdated)
+        }
+        /// The codes of the held alarms, ascending by key.
+        pub(crate) fn codes(&self) -> Vec<String> {
+            self.held.iter().map(|a| error_of(*a).code().to_owned()).collect()
+        }
+        /// The writes since the last call.
+        pub(crate) fn take_writes(&mut self) -> Changeset {
+            core::mem::take(&mut self.writes)
+        }
+    }
+    #[allow(dead_code)]
+    #[doc =
+    " The alarm that refuses removal of the device whose cache holds `rows`, read without any"]
+    #[doc =
+    " key (module docs; ADR 0095 §D): the code of alarm 1, 2 or 3, or [`ALARM_UNKNOWN`] for an"]
+    #[doc =
+    " alarm key this build does not know; `undefined` when removal may go on (no alarm, or only"]
+    #[doc =
+    " alarm 4). Only the `account_objects` rows are read, and nothing else of them is parsed."]
+    #[must_use]
+    #[expect(clippy::needless_pass_by_value, reason =
+    "wasm-bindgen hands this exported call ownership of the JS array as Vec<KvRow>, never a slice")]
+    pub fn removal_refusal(rows: Vec<KvRow>) -> Option<String> {
+        removal_refusal_of(&rows).map(str::to_owned)
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The alarm that refuses removal of the device whose cache holds `rows`, read without any"]
+            #[doc =
+            " key (module docs; ADR 0095 §D): the code of alarm 1, 2 or 3, or [`ALARM_UNKNOWN`] for an"]
+            #[doc =
+            " alarm key this build does not know; `undefined` when removal may go on (no alarm, or only"]
+            #[doc =
+            " alarm 4). Only the `account_objects` rows are read, and nothing else of them is parsed."]
+            #[must_use]
+            #[allow(clippy::needless_pass_by_value, reason =
+            "wasm-bindgen hands this exported call ownership of the JS array as Vec<KvRow>, never a slice")]
+            #[export_name = "removalRefusal_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_removalRefusal(arg0_1:
+                    <<Vec<KvRow> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg0_2:
+                    <<Vec<KvRow> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg0_3:
+                    <<Vec<KvRow> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg0_4:
+                    <<Vec<KvRow> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4)
+                ->
+                    wasm_bindgen::convert::WasmRet<<Option<String> as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            {
+                                {
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<Vec<KvRow>>();
+                                    let arg0 =
+                                        unsafe {
+                                            <Vec<KvRow> as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Vec<KvRow>
+                                                        as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg0_1, arg0_2,
+                                                    arg0_3, arg0_4))
+                                        };
+                                    let _ret = removal_refusal(arg0);
+                                    _ret
+                                }
+                            });
+                <Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The alarm that refuses removal of the device whose cache holds `rows`, read without any"]
+            #[doc =
+            " key (module docs; ADR 0095 §D): the code of alarm 1, 2 or 3, or [`ALARM_UNKNOWN`] for an"]
+            #[doc =
+            " alarm key this build does not know; `undefined` when removal may go on (no alarm, or only"]
+            #[doc =
+            " alarm 4). Only the `account_objects` rows are read, and nothing else of them is parsed."]
+            #[must_use]
+            #[allow(clippy::needless_pass_by_value, reason =
+            "wasm-bindgen hands this exported call ownership of the JS array as Vec<KvRow>, never a slice")]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_removalRefusal_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(1u32);
+                <Vec<KvRow> as WasmDescribe>::describe();
+                <Option<String> as WasmDescribe>::describe();
+                <Option<String> as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x04X The alarm that refuses removal of the device whose cache holds `rows`, read without anyZ key (module docs; ADR 0095 \xc2\xa7D): the code of alarm 1, 2 or 3, or [`ALARM_UNKNOWN`] for anZ alarm key this build does not know; `undefined` when removal may go on (no alarm, or onlyX alarm 4). Only the `account_objects` rows are read, and nothing else of them is parsed.\0\x01\x04rows\0\0\0\0\0\x0eremovalRefusal\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    /// [`removal_refusal`] over a slice: a known alarm is named before an unknown key, the lowest
+    /// known key first.
+    pub(crate) fn removal_refusal_of(rows: &[KvRow]) -> Option<&'static str> {
+        let mut known: BTreeSet<Alarm> = BTreeSet::new();
+        let mut unknown = false;
+        for row in rows.iter().filter(|r| r.store() == "account_objects") {
+            let row_key = row.key();
+            let Some(key) = alarm_key_of(&row_key) else { continue; };
+            match key {
+                [byte] =>
+                    match Alarm::from_u8(*byte) {
+                        Some(Alarm::DeviceStateOutdated) => {}
+                        Some(alarm) => { known.insert(alarm); }
+                        None => unknown = true,
+                    },
+                _ => unknown = true,
+            }
+        }
+        match known.first() {
+            Some(alarm) => Some(error_of(*alarm).code()),
+            None => unknown.then_some(ALARM_UNKNOWN),
+        }
+    }
+    /// The alarm key of an `account_objects` row key in [`crate::store`]'s codec (`u64` kind,
+    /// then the key column), or `None` for a row of another kind; as `rv`'s `Db::alarm_keys`
+    /// selects `kind = 7`.
+    fn alarm_key_of(row_key: &[u8]) -> Option<&[u8]> {
+        let (prefix, rest) = row_key.split_first_chunk::<8>()?;
+        (i64::from_be_bytes(*prefix) == kind::ALARM).then_some(rest)
+    }
+}
 pub mod autofill {
-
-
-
-
     //! Autocomplete-driven autofill bindings ([ADR 0076] §2.5, §4, §5; ADR 0013 §3 rules 3 and 6):
     //! one coarse call per user action, over [`rizzy_client::autofill`].
     //!
@@ -5334,6 +5629,7 @@ pub mod device {
     use rizzy_client::webauthn::{self, SecondFactor};
     use wasm_bindgen::prelude::wasm_bindgen;
     use zeroize::Zeroizing;
+    use crate::alarms::{self, Alarms};
     use crate::error::{
         CoreError, CoreResult, SECURITY_KEY_REQUIRED, WRONG_STATE,
     };
@@ -5343,6 +5639,7 @@ pub mod device {
     };
     use crate::matching::{self, MatchDecision, MatchSettingsView, UriInput};
     use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
+    use crate::removal::UnsentUpload;
     use crate::rng::{Rng, os_rng};
     use crate::secret::take_secret;
     use crate::store::{CacheDelta, KvRow, decode_rows, encode_rows};
@@ -6996,7 +7293,7 @@ pub mod device {
                     cache_rows,
                     session: Some(DeviceSession::from_parts(enrolled.device,
                             enrolled.unlocked, account, authors, vaults, rows, floors,
-                            Changeset::new())),
+                            Changeset::new(), Alarms::default())),
                 })
         }
     }
@@ -7321,6 +7618,14 @@ pub mod device {
         #[doc =
         " restart re-migrates and re-verifies, never accepts an older list)."]
         start_writes: Changeset,
+        #[doc =
+        " The alarms the cache holds and those raised since (`crate::alarms`): while one is held"]
+        #[doc =
+        " every vault is read-only, across restarts (ADR 0026 §4 step 4)."]
+        alarms: Alarms,
+        #[doc =
+        " The upload that comes first in \"remove this device\" (`crate::removal`)."]
+        removal: UnsentUpload,
     }
     #[automatically_derived]
     impl wasm_bindgen::__rt::marker::SupportsConstructor for DeviceSession { }
@@ -7614,8 +7919,8 @@ pub mod device {
         "one private constructor over the session's parts; a parts struct would only rename them")]
         fn from_parts(device: DeviceState, unlocked: UnlockedDevice,
             account: VerifiedAccount, authors: Authors, vaults: VaultSet,
-            cache: CacheRows, floors: Floors, mut start_writes: Changeset)
-            -> Self {
+            cache: CacheRows, floors: Floors, mut start_writes: Changeset,
+            alarms: Alarms) -> Self {
             let global_groups =
                 start_global_groups(&floors, &mut start_writes);
             Self {
@@ -7633,6 +7938,8 @@ pub mod device {
                 settings: SettingsCache::default(),
                 global_groups,
                 start_writes,
+                alarms,
+                removal: UnsentUpload::default(),
             }
         }
         /// The cache writes of every step since the last drain, diffed against the current
@@ -7656,6 +7963,7 @@ pub mod device {
             for vault in self.vaults.all_mut() {
                 changeset.append(vault.take_writes());
             }
+            changeset.append(self.alarms.take_writes());
             if changeset.is_empty() { return Ok(CacheDelta::default()); }
             self.floors.admit(&changeset).map_err(CoreError::from)?;
             let before = encode_rows(&self.cache).map_err(CoreError::from)?;
@@ -7876,9 +8184,12 @@ pub mod device {
                 store::load::load(&rows, &record, &unlocked,
                             now_ms).map_err(CoreError::from)?;
             let catalog = catalog_of(&loaded.account, &unlocked);
-            let vaults = VaultSet::new(loaded.vaults, catalog, true);
+            let mut vaults = VaultSet::new(loaded.vaults, catalog, true);
+            let alarms = Alarms::loaded(loaded.alarms);
+            if alarms.is_raised() { vaults.set_alarmed(true); }
             Ok(Self::from_parts(loaded.device, unlocked, loaded.account,
-                    loaded.authors, vaults, stored, loaded.floors, migration))
+                    loaded.authors, vaults, stored, loaded.floors, migration,
+                    alarms))
         }
         #[doc = " The account, hex."]
         #[must_use]
@@ -9457,10 +9768,17 @@ pub mod device {
         " Starts a sync (`crate::sync`\'s module docs), signed with this device\'s key"]
         #[doc = " (`Signer::Device`) rather than a bearer-only session."]
         #[doc = ""]
+        #[doc =
+        " A held fork or outdated-device-state alarm refuses it, as `rv`\'s `online` does: they end"]
+        #[doc =
+        " the online life of this cache (`crate::alarms`); \"remove this device\" is what is left."]
+        #[doc = ""]
         #[doc = " # Errors"]
         #[doc =
-        " `wrong_state` while a sync runs; as `DeviceSession::vault_ref`; `locked` is never"]
-        #[doc = " returned (a [`DeviceSession`] with no vault cannot exist)."]
+        " `fork` or `device_state_outdated` under that alarm; `wrong_state` while a sync or the"]
+        #[doc =
+        " removal upload runs; as `DeviceSession::vault_ref`; `locked` is never returned (a"]
+        #[doc = " [`DeviceSession`] with no vault cannot exist)."]
         pub fn sync_start(&mut self) -> Result<(), CoreError> {
             #[automatically_derived]
             const _: () =
@@ -9470,11 +9788,17 @@ pub mod device {
                     #[doc =
                     " (`Signer::Device`) rather than a bearer-only session."]
                     #[doc = ""]
+                    #[doc =
+                    " A held fork or outdated-device-state alarm refuses it, as `rv`\'s `online` does: they end"]
+                    #[doc =
+                    " the online life of this cache (`crate::alarms`); \"remove this device\" is what is left."]
+                    #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
-                    " `wrong_state` while a sync runs; as `DeviceSession::vault_ref`; `locked` is never"]
+                    " `fork` or `device_state_outdated` under that alarm; `wrong_state` while a sync or the"]
                     #[doc =
-                    " returned (a [`DeviceSession`] with no vault cannot exist)."]
+                    " removal upload runs; as `DeviceSession::vault_ref`; `locked` is never returned (a"]
+                    #[doc = " [`DeviceSession`] with no vault cannot exist)."]
                     #[export_name = "devicesession_syncStart_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_syncStart(me:
                             <DeviceSession as
@@ -9510,11 +9834,17 @@ pub mod device {
                     #[doc =
                     " (`Signer::Device`) rather than a bearer-only session."]
                     #[doc = ""]
+                    #[doc =
+                    " A held fork or outdated-device-state alarm refuses it, as `rv`\'s `online` does: they end"]
+                    #[doc =
+                    " the online life of this cache (`crate::alarms`); \"remove this device\" is what is left."]
+                    #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
-                    " `wrong_state` while a sync runs; as `DeviceSession::vault_ref`; `locked` is never"]
+                    " `fork` or `device_state_outdated` under that alarm; `wrong_state` while a sync or the"]
                     #[doc =
-                    " returned (a [`DeviceSession`] with no vault cannot exist)."]
+                    " removal upload runs; as `DeviceSession::vault_ref`; `locked` is never returned (a"]
+                    #[doc = " [`DeviceSession`] with no vault cannot exist)."]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_devicesession_syncStart_e09cc0eb35f8b583() {
@@ -9535,7 +9865,7 @@ pub mod device {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\rDeviceSession\x06K Starts a sync (`crate::sync`'s module docs), signed with this device's key6 (`Signer::Device`) rather than a bearer-only session.\0\t # ErrorsR `wrong_state` while a sync runs; as `DeviceSession::vault_ref`; `locked` is never; returned (a [`DeviceSession`] with no vault cannot exist).\0\0\0\0\tsyncStart\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\rDeviceSession\nK Starts a sync (`crate::sync`'s module docs), signed with this device's key6 (`Signer::Device`) rather than a bearer-only session.\0Y A held fork or outdated-device-state alarm refuses it, as `rv`'s `online` does: they endW the online life of this cache (`crate::alarms`); \"remove this device\" is what is left.\0\t # ErrorsV `fork` or `device_state_outdated` under that alarm; `wrong_state` while a sync or theR removal upload runs; as `DeviceSession::vault_ref`; `locked` is never returned (a/ [`DeviceSession`] with no vault cannot exist).\0\0\0\0\tsyncStart\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -9561,6 +9891,12 @@ pub mod device {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
+            if let Some(alarm) = self.alarms.sync_refusal() {
+                return Err(alarms::error_of(alarm).into());
+            }
+            if self.removal.running() {
+                return Err(CoreError::new(WRONG_STATE));
+            }
             let AuthStage::Done(session) =
                 &mut self.auth else {
                     return Err(CoreError::new(WRONG_STATE));
@@ -9573,6 +9909,7 @@ pub mod device {
                     unlocked: &self.unlocked,
                     signer: Signer::Device(session),
                     rng: &mut self.rng,
+                    alarms: Some(&mut self.alarms),
                 };
             self.sync.start(&mut ctx)
         }
@@ -9671,10 +10008,13 @@ pub mod device {
         #[doc =
         " Passes in the answer to the outstanding request. `now_ms` is the host\'s clock. Any"]
         #[doc =
-        " error ends the sync. On success, call `DeviceSession::drain_cache_writes` before the"]
+        " error ends the sync. Then, on success and on an error alike, call"]
         #[doc =
-        " next request is released (ADR 0026 §4 step 2; struct docs) — before calling"]
-        #[doc = " [`DeviceSession::sync_request`] again."]
+        " `DeviceSession::drain_cache_writes` before the next request is released (ADR 0026 §4"]
+        #[doc =
+        " step 2; struct docs) — before calling [`DeviceSession::sync_request`] again: an error may"]
+        #[doc =
+        " carry an alarm whose row goes out with the answer that raised it (§4 step 4)."]
         #[doc = ""]
         #[doc = " # Errors"]
         #[doc =
@@ -9687,10 +10027,13 @@ pub mod device {
                     #[doc =
                     " Passes in the answer to the outstanding request. `now_ms` is the host\'s clock. Any"]
                     #[doc =
-                    " error ends the sync. On success, call `DeviceSession::drain_cache_writes` before the"]
+                    " error ends the sync. Then, on success and on an error alike, call"]
                     #[doc =
-                    " next request is released (ADR 0026 §4 step 2; struct docs) — before calling"]
-                    #[doc = " [`DeviceSession::sync_request`] again."]
+                    " `DeviceSession::drain_cache_writes` before the next request is released (ADR 0026 §4"]
+                    #[doc =
+                    " step 2; struct docs) — before calling [`DeviceSession::sync_request`] again: an error may"]
+                    #[doc =
+                    " carry an alarm whose row goes out with the answer that raised it (§4 step 4)."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
@@ -9793,10 +10136,13 @@ pub mod device {
                     #[doc =
                     " Passes in the answer to the outstanding request. `now_ms` is the host\'s clock. Any"]
                     #[doc =
-                    " error ends the sync. On success, call `DeviceSession::drain_cache_writes` before the"]
+                    " error ends the sync. Then, on success and on an error alike, call"]
                     #[doc =
-                    " next request is released (ADR 0026 §4 step 2; struct docs) — before calling"]
-                    #[doc = " [`DeviceSession::sync_request`] again."]
+                    " `DeviceSession::drain_cache_writes` before the next request is released (ADR 0026 §4"]
+                    #[doc =
+                    " step 2; struct docs) — before calling [`DeviceSession::sync_request`] again: an error may"]
+                    #[doc =
+                    " carry an alarm whose row goes out with the answer that raised it (§4 step 4)."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
@@ -9824,7 +10170,7 @@ pub mod device {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\rDeviceSession\x07S Passes in the answer to the outstanding request. `now_ms` is the host's clock. AnyU error ends the sync. On success, call `DeviceSession::drain_cache_writes` before theO next request is released (ADR 0026 \xc2\xa74 step 2; struct docs) \xe2\x80\x94 before calling' [`DeviceSession::sync_request`] again.\0\t # Errors= As [`crate::sync`] describes; as `DeviceSession::vault_ref`.\0\x03\x06status\0\0\0\x04body\0\0\0\x06now_ms\0\0\0\0\0\x0bsyncRespond\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\rDeviceSession\x08S Passes in the answer to the outstanding request. `now_ms` is the host's clock. AnyB error ends the sync. Then, on success and on an error alike, callV `DeviceSession::drain_cache_writes` before the next request is released (ADR 0026 \xc2\xa74\\ step 2; struct docs) \xe2\x80\x94 before calling [`DeviceSession::sync_request`] again: an error mayO carry an alarm whose row goes out with the answer that raised it (\xc2\xa74 step 4).\0\t # Errors= As [`crate::sync`] describes; as `DeviceSession::vault_ref`.\0\x03\x06status\0\0\0\x04body\0\0\0\x06now_ms\0\0\0\0\0\x0bsyncRespond\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -9862,6 +10208,7 @@ pub mod device {
                     unlocked: &self.unlocked,
                     signer: Signer::Device(session),
                     rng: &mut self.rng,
+                    alarms: Some(&mut self.alarms),
                 };
             self.sync.respond(ctx, status, body, now_ms)
         }
@@ -9971,6 +10318,842 @@ pub mod device {
                 };
             self.sync.abort(&mut self.vaults);
             Ok(())
+        }
+        #[doc =
+        " The codes of the alarms this device holds (`crate::alarms`; ADR 0026 §3 kind 7):"]
+        #[doc =
+        " `rollback`, `fork`, `identity_change_unconfirmed`, `device_state_outdated`. Every vault"]
+        #[doc = " is read-only while one is held, and a restart keeps it."]
+        #[must_use]
+        pub fn alarms(&self) -> Vec<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The codes of the alarms this device holds (`crate::alarms`; ADR 0026 §3 kind 7):"]
+                    #[doc =
+                    " `rollback`, `fork`, `identity_change_unconfirmed`, `device_state_outdated`. Every vault"]
+                    #[doc =
+                    " is read-only while one is held, and a restart keeps it."]
+                    #[must_use]
+                    #[export_name = "devicesession_alarms_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_alarms(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<DeviceSession>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.alarms();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The codes of the alarms this device holds (`crate::alarms`; ADR 0026 §3 kind 7):"]
+                    #[doc =
+                    " `rollback`, `fork`, `identity_change_unconfirmed`, `device_state_outdated`. Every vault"]
+                    #[doc =
+                    " is read-only while one is held, and a restart keeps it."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_alarms_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<String> as WasmDescribe>::describe();
+                        <Vec<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x03R The codes of the alarms this device holds (`crate::alarms`; ADR 0026 \xc2\xa73 kind 7):X `rollback`, `fork`, `identity_change_unconfirmed`, `device_state_outdated`. Every vault8 is read-only while one is held, and a restart keeps it.\0\0\0\0\x06alarms\x01\x01\0\0\0\0\x01\0\x02\x06alarms\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.alarms.codes()
+        }
+        #[doc =
+        " The alarm that refuses \"remove this device\" (ADR 0095 §D): alarm 1, 2 or 3, by code;"]
+        #[doc =
+        " `undefined` when removal may go on (no alarm, or only `device_state_outdated`, whose"]
+        #[doc = " only resolution removal is)."]
+        #[must_use]
+        pub fn removal_refusal(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The alarm that refuses \"remove this device\" (ADR 0095 §D): alarm 1, 2 or 3, by code;"]
+                    #[doc =
+                    " `undefined` when removal may go on (no alarm, or only `device_state_outdated`, whose"]
+                    #[doc = " only resolution removal is)."]
+                    #[must_use]
+                    #[export_name =
+                    "devicesession_removalRefusal_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_removalRefusal(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<DeviceSession>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.removal_refusal();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The alarm that refuses \"remove this device\" (ADR 0095 §D): alarm 1, 2 or 3, by code;"]
+                    #[doc =
+                    " `undefined` when removal may go on (no alarm, or only `device_state_outdated`, whose"]
+                    #[doc = " only resolution removal is)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_removalRefusal_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x03V The alarm that refuses \"remove this device\" (ADR 0095 \xc2\xa7D): alarm 1, 2 or 3, by code;U `undefined` when removal may go on (no alarm, or only `device_state_outdated`, whose\x1d only resolution removal is).\0\0\0\0\x0eremovalRefusal\x01\x01\0\0\0\0\x01\0\x02\x0eremovalRefusal\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.alarms.removal_refusal().map(|a|
+                    alarms::error_of(a).code().to_owned())
+        }
+        #[doc =
+        " How many own snapshots the server has not acknowledged (with"]
+        #[doc =
+        " [`DeviceSession::unsent_changes`], what removal of this device would lose, ADR 0026 §5)."]
+        #[must_use]
+        pub fn unsent_snapshots(&self) -> usize {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " How many own snapshots the server has not acknowledged (with"]
+                    #[doc =
+                    " [`DeviceSession::unsent_changes`], what removal of this device would lose, ADR 0026 §5)."]
+                    #[must_use]
+                    #[export_name =
+                    "devicesession_unsentSnapshots_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_unsentSnapshots(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<usize as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<DeviceSession>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.unsent_snapshots();
+                                            _ret
+                                        }
+                                    });
+                        <usize as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " How many own snapshots the server has not acknowledged (with"]
+                    #[doc =
+                    " [`DeviceSession::unsent_changes`], what removal of this device would lose, ADR 0026 §5)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_unsentSnapshots_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <usize as WasmDescribe>::describe();
+                        <usize as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x02= How many own snapshots the server has not acknowledged (withZ [`DeviceSession::unsent_changes`], what removal of this device would lose, ADR 0026 \xc2\xa75).\0\0\0\0\x0funsentSnapshots\x01\x01\0\0\0\0\x01\0\x02\x0funsentSnapshots\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.vaults.all().iter().map(|v| v.unacknowledged().1).sum()
+        }
+        #[doc =
+        " Starts the upload that comes first in \"remove this device\" (`crate::removal`): the"]
+        #[doc =
+        " unacknowledged own rows of every open vault, byte for byte. Drain the cache writes after"]
+        #[doc =
+        " this call and after every [`DeviceSession::removal_upload_respond`], before the request"]
+        #[doc = " goes out (ADR 0026 §4 step 1)."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `rollback`, `fork` or `identity_change_unconfirmed` under that alarm (removal is"]
+        #[doc =
+        " refused); `wrong_state` before authentication or while a sync or this upload runs; as"]
+        #[doc = " the first Fetch request."]
+        pub fn removal_upload_start(&mut self) -> Result<(), CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Starts the upload that comes first in \"remove this device\" (`crate::removal`): the"]
+                    #[doc =
+                    " unacknowledged own rows of every open vault, byte for byte. Drain the cache writes after"]
+                    #[doc =
+                    " this call and after every [`DeviceSession::removal_upload_respond`], before the request"]
+                    #[doc = " goes out (ADR 0026 §4 step 1)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `rollback`, `fork` or `identity_change_unconfirmed` under that alarm (removal is"]
+                    #[doc =
+                    " refused); `wrong_state` before authentication or while a sync or this upload runs; as"]
+                    #[doc = " the first Fetch request."]
+                    #[export_name =
+                    "devicesession_removalUploadStart_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_removalUploadStart(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefMutFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let mut me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            let _ret = me.removal_upload_start();
+                                            _ret
+                                        }
+                                    });
+                        <Result<(), CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Starts the upload that comes first in \"remove this device\" (`crate::removal`): the"]
+                    #[doc =
+                    " unacknowledged own rows of every open vault, byte for byte. Drain the cache writes after"]
+                    #[doc =
+                    " this call and after every [`DeviceSession::removal_upload_respond`], before the request"]
+                    #[doc = " goes out (ADR 0026 §4 step 1)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `rollback`, `fork` or `identity_change_unconfirmed` under that alarm (removal is"]
+                    #[doc =
+                    " refused); `wrong_state` before authentication or while a sync or this upload runs; as"]
+                    #[doc = " the first Fetch request."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_removalUploadStart_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\tS Starts the upload that comes first in \"remove this device\" (`crate::removal`): theY unacknowledged own rows of every open vault, byte for byte. Drain the cache writes afterX this call and after every [`DeviceSession::removal_upload_respond`], before the request  goes out (ADR 0026 \xc2\xa74 step 1).\0\t # ErrorsQ `rollback`, `fork` or `identity_change_unconfirmed` under that alarm (removal isV refused); `wrong_state` before authentication or while a sync or this upload runs; as\x19 the first Fetch request.\0\0\0\0\x12removalUploadStart\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            if let Some(alarm) = self.alarms.removal_refusal() {
+                return Err(alarms::error_of(alarm).into());
+            }
+            if self.sync.running() {
+                return Err(CoreError::new(WRONG_STATE));
+            }
+            let AuthStage::Done(session) =
+                &mut self.auth else {
+                    return Err(CoreError::new(WRONG_STATE));
+                };
+            let mut ctx =
+                Ctx {
+                    vaults: &mut self.vaults,
+                    account: &mut self.account,
+                    authors: &mut self.authors,
+                    unlocked: &self.unlocked,
+                    signer: Signer::Device(session),
+                    rng: &mut self.rng,
+                    alarms: Some(&mut self.alarms),
+                };
+            self.removal.start(&mut ctx)
+        }
+        #[doc =
+        " The removal upload\'s outstanding request, or `undefined` when it is done."]
+        #[must_use]
+        pub fn removal_upload_request(&self) -> Option<HttpRequest> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The removal upload\'s outstanding request, or `undefined` when it is done."]
+                    #[must_use]
+                    #[export_name =
+                    "devicesession_removalUploadRequest_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_removalUploadRequest(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<HttpRequest> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.removal_upload_request();
+                                            _ret
+                                        }
+                                    });
+                        <Option<HttpRequest> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The removal upload\'s outstanding request, or `undefined` when it is done."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_removalUploadRequest_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<HttpRequest> as WasmDescribe>::describe();
+                        <Option<HttpRequest> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x01J The removal upload's outstanding request, or `undefined` when it is done.\0\0\0\0\x14removalUploadRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.removal.request()
+        }
+        #[doc =
+        " Passes in the answer to the removal upload\'s outstanding request; `now_ms` is the"]
+        #[doc =
+        " host\'s clock. Any error ends the upload (nothing more is tried, ADR 0095 §D). Drain the"]
+        #[doc = " cache writes after this call, on an error too."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `wrong_state` when nothing is outstanding; the answer\'s refusal; as `crate::removal`."]
+        pub fn removal_upload_respond(&mut self, status: u16, body: &[u8],
+            now_ms: u64) -> Result<(), CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Passes in the answer to the removal upload\'s outstanding request; `now_ms` is the"]
+                    #[doc =
+                    " host\'s clock. Any error ends the upload (nothing more is tried, ADR 0095 §D). Drain the"]
+                    #[doc = " cache writes after this call, on an error too."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `wrong_state` when nothing is outstanding; the answer\'s refusal; as `crate::removal`."]
+                    #[export_name =
+                    "devicesession_removalUploadRespond_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_removalUploadRespond(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let mut me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u16>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <u16 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u16 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let _ret = me.removal_upload_respond(arg1, arg2, arg3);
+                                            _ret
+                                        }
+                                    });
+                        <Result<(), CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Passes in the answer to the removal upload\'s outstanding request; `now_ms` is the"]
+                    #[doc =
+                    " host\'s clock. Any error ends the upload (nothing more is tried, ADR 0095 §D). Drain the"]
+                    #[doc = " cache writes after this call, on an error too."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `wrong_state` when nothing is outstanding; the answer\'s refusal; as `crate::removal`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_removalUploadRespond_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(3u32);
+                        <u16 as WasmDescribe>::describe();
+                        <&[u8] as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x06R Passes in the answer to the removal upload's outstanding request; `now_ms` is theY host's clock. Any error ends the upload (nothing more is tried, ADR 0095 \xc2\xa7D). Drain the/ cache writes after this call, on an error too.\0\t # ErrorsV `wrong_state` when nothing is outstanding; the answer's refusal; as `crate::removal`.\0\x03\x06status\0\0\0\x04body\0\0\0\x06now_ms\0\0\0\0\0\x14removalUploadRespond\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let AuthStage::Done(session) =
+                &mut self.auth else {
+                    self.removal.abort();
+                    return Err(CoreError::new(WRONG_STATE));
+                };
+            let ctx =
+                Ctx {
+                    vaults: &mut self.vaults,
+                    account: &mut self.account,
+                    authors: &mut self.authors,
+                    unlocked: &self.unlocked,
+                    signer: Signer::Device(session),
+                    rng: &mut self.rng,
+                    alarms: Some(&mut self.alarms),
+                };
+            self.removal.respond(ctx, status, body, now_ms)
+        }
+        #[doc =
+        " Ends the removal upload when the host could not carry its request. A no-op when it is"]
+        #[doc = " not running."]
+        pub fn removal_upload_abort(&mut self) {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Ends the removal upload when the host could not carry its request. A no-op when it is"]
+                    #[doc = " not running."]
+                    #[export_name =
+                    "devicesession_removalUploadAbort_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_removalUploadAbort(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefMutFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<() as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let mut me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            let _ret = me.removal_upload_abort();
+                                            _ret
+                                        }
+                                    });
+                        <() as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Ends the removal upload when the host could not carry its request. A no-op when it is"]
+                    #[doc = " not running."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_removalUploadAbort_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <() as WasmDescribe>::describe();
+                        <() as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x02V Ends the removal upload when the host could not carry its request. A no-op when it is\r not running.\0\0\0\0\x12removalUploadAbort\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.removal.abort();
         }
         #[doc =
         " Every vault the account\'s directory lists (ADR 0081 §A2): the Personal vault first, then"]
@@ -41956,6 +43139,233 @@ pub mod passkey {
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
 }
+mod removal {
+    //! The upload that comes first in "remove this device" ([ADR 0026] §5 as [ADR 0095] §D
+    //! replaces it, the owner's decision on open question 6; `rv`'s `Device::upload_unsent`).
+    //!
+    //! ```text
+    //! start ──► per open vault: Fetch (one page: a restore generation) ──► Upload of the unsent own
+    //!   rows, byte for byte (ops in chain order, then snapshots) ──► … until an answer acknowledges
+    //!   nothing more (a conflict, a stale_epoch) or nothing is left ──► next vault ──► idle
+    //! ```
+    //!
+    //! Every step is `rizzy-client`'s: [`VaultSync::unsent_upload_request`] signs no new dot,
+    //! re-issues nothing and writes no snapshot, and journals the rows it hands out as sent (§4
+    //! step 1), so the host drains after every call here, before the request goes out. It runs
+    //! with or without alarm 4 (it is that alarm's only resolution) and is refused under alarms 1
+    //! to 3, which refuse removal itself. A Fetch that shows more own history, or an upload with a
+    //! conflict at an own dot, raises alarm 4 as in a sync (ADR 0095 §C), and the upload goes on: it
+    //! signs nothing new. Any error ends it, and the host then says how many own ops and snapshots
+    //! are still unacknowledged (`rv`: "could not be uploaded now"); nothing more is tried.
+    //!
+    //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
+    //! [ADR 0095]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0095-owner-answers-0023-0028-recorded.md
+    use rizzy_client::rizzy_core::ids::VaultId;
+    use rizzy_client::rizzy_proto::http::paths;
+    use rizzy_client::rizzy_proto::vault::{FetchResponse, UploadResponse};
+    use rizzy_client::store::rows::Alarm;
+    use rizzy_client::sync::VaultSync;
+    use crate::error::{CoreError, CoreResult, WRONG_STATE};
+    use crate::http::{self, HttpRequest};
+    use crate::sync::Ctx;
+    use crate::vaults::VaultSet;
+    /// Where the upload is.
+    enum Phase {
+
+        /// Not running.
+        Idle,
+
+        /// The vault's Fetch is outstanding.
+        Fetch,
+
+        /// An upload is outstanding; the vault's unacknowledged counts before it.
+        Upload((usize, usize)),
+    }
+    #[automatically_derived]
+    #[doc(hidden)]
+    unsafe impl ::core::clone::TrivialClone for Phase { }
+    #[automatically_derived]
+    impl ::core::clone::Clone for Phase {
+        #[inline]
+        fn clone(&self) -> Phase {
+            let _: ::core::clone::AssertParamIsClone<(usize, usize)>;
+            *self
+        }
+    }
+    #[automatically_derived]
+    impl ::core::marker::Copy for Phase { }
+    #[automatically_derived]
+    impl ::core::fmt::Debug for Phase {
+        #[inline]
+        fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            match self {
+                Phase::Idle => ::core::fmt::Formatter::write_str(f, "Idle"),
+                Phase::Fetch => ::core::fmt::Formatter::write_str(f, "Fetch"),
+                Phase::Upload(__self_0) =>
+                    ::core::fmt::Formatter::debug_tuple_field1_finish(f,
+                        "Upload", &__self_0),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl ::core::marker::StructuralPartialEq for Phase { }
+    #[automatically_derived]
+    impl ::core::cmp::PartialEq for Phase {
+        #[inline]
+        fn eq(&self, other: &Phase) -> bool {
+            let __self_discr = ::core::intrinsics::discriminant_value(self);
+            let __arg1_discr = ::core::intrinsics::discriminant_value(other);
+            __self_discr == __arg1_discr &&
+                match (self, other) {
+                    (Phase::Upload(__self_0), Phase::Upload(__arg1_0)) =>
+                        __self_0 == __arg1_0,
+                    _ => true,
+                }
+        }
+    }
+    #[automatically_derived]
+    impl ::core::cmp::Eq for Phase {
+        #[inline]
+        #[doc(hidden)]
+        #[coverage(off)]
+        fn assert_receiver_is_total_eq(&self) -> () {
+            let _: ::core::cmp::AssertParamIsEq<(usize, usize)>;
+        }
+    }
+    /// The removal upload's step driver (module docs).
+    pub(crate) struct UnsentUpload {
+        /// Where it is.
+        phase: Phase,
+        /// The outstanding request.
+        pending: Option<HttpRequest>,
+        /// The vaults still to upload, last first.
+        queue: Vec<VaultId>,
+        /// The vault of the outstanding request.
+        current: Option<VaultId>,
+    }
+    #[automatically_derived]
+    impl ::core::fmt::Debug for UnsentUpload {
+        #[inline]
+        fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            ::core::fmt::Formatter::debug_struct_field4_finish(f,
+                "UnsentUpload", "phase", &self.phase, "pending",
+                &self.pending, "queue", &self.queue, "current",
+                &&self.current)
+        }
+    }
+    impl Default for UnsentUpload {
+        fn default() -> Self {
+            Self {
+                phase: Phase::Idle,
+                pending: None,
+                queue: Vec::new(),
+                current: None,
+            }
+        }
+    }
+    impl UnsentUpload {
+        /// Whether it is running.
+        pub(crate) fn running(&self) -> bool { self.phase != Phase::Idle }
+        /// The outstanding request.
+        pub(crate) fn request(&self) -> Option<HttpRequest> {
+            self.pending.as_ref().map(HttpRequest::duplicate)
+        }
+        /// Starts it over every open vault ([`VaultSet::sync_order`], as `rv`'s `open_ids`).
+        ///
+        /// # Errors
+        /// `wrong_state` while it runs; as the first Fetch request.
+        pub(crate) fn start(&mut self, ctx: &mut Ctx<'_>) -> CoreResult<()> {
+            if self.running() { return Err(CoreError::new(WRONG_STATE)); }
+            let mut queue = ctx.vaults.sync_order();
+            queue.reverse();
+            self.queue = queue;
+            let started = self.next_vault(ctx);
+            self.end_on_error(started)
+        }
+        /// Passes in the answer to the outstanding request.
+        ///
+        /// # Errors
+        /// `wrong_state` when nothing is outstanding; the answer's refusal; the flows'. Any error
+        /// ends the upload.
+        pub(crate) fn respond(&mut self, mut ctx: Ctx<'_>, status: u16,
+            body: &[u8], now_ms: u64) -> CoreResult<()> {
+            let stepped = self.step(&mut ctx, status, body, now_ms);
+            self.end_on_error(stepped)
+        }
+        /// Ends it without an answer. Rows already handed out stay marked sent (§4 step 1: a crash
+        /// between the mark and the send counts as sent), so nothing is lost by dropping it.
+        pub(crate) fn abort(&mut self) { *self = Self::default(); }
+        /// Ends the upload when `result` is an error.
+        fn end_on_error(&mut self, result: CoreResult<()>) -> CoreResult<()> {
+            if result.is_err() { self.abort(); }
+            result
+        }
+        /// One answer.
+        fn step(&mut self, ctx: &mut Ctx<'_>, status: u16, body: &[u8],
+            now_ms: u64) -> CoreResult<()> {
+            match self.phase {
+                Phase::Idle => Err(CoreError::new(WRONG_STATE)),
+                Phase::Fetch => {
+                    let response: FetchResponse = http::json(status, body)?;
+                    let vault = self.vault(ctx.vaults)?;
+                    let outcome =
+                        vault.apply_fetch(&*ctx.authors, &response, now_ms)?;
+                    if outcome.own_history_ahead {
+                        vault.set_read_only(true);
+                        ctx.raise(Alarm::DeviceStateOutdated, &[])?;
+                    }
+                    self.upload_next(ctx)
+                }
+                Phase::Upload(before) => {
+                    let response: UploadResponse = http::json(status, body)?;
+                    let vault = self.vault(ctx.vaults)?;
+                    let outcome = vault.apply_upload_response(&response)?;
+                    let after = vault.unacknowledged();
+                    if outcome.own_conflict {
+                        vault.set_read_only(true);
+                        ctx.raise(Alarm::DeviceStateOutdated, &[])?;
+                    }
+                    if after == before { return self.next_vault(ctx); }
+                    self.upload_next(ctx)
+                }
+            }
+        }
+        /// The current vault's driver.
+        fn vault<'v>(&self, vaults: &'v mut VaultSet)
+            -> CoreResult<&'v mut VaultSync> {
+            vaults.get_mut(self.current.ok_or(CoreError::new(WRONG_STATE))?)
+        }
+        /// The next vault's Fetch, or the end after the last vault.
+        fn next_vault(&mut self, ctx: &mut Ctx<'_>) -> CoreResult<()> {
+            let Some(vault_id) =
+                self.queue.pop() else {
+                    *self = Self::default();
+                    return Ok(());
+                };
+            self.current = Some(vault_id);
+            let request = self.vault(ctx.vaults)?.fetch_request()?;
+            self.pending =
+                Some(ctx.signer.build(paths::VAULT_FETCH, &request,
+                            ctx.unlocked)?);
+            self.phase = Phase::Fetch;
+            Ok(())
+        }
+        /// The current vault's next upload of unsent rows, or the next vault when none is left.
+        fn upload_next(&mut self, ctx: &mut Ctx<'_>) -> CoreResult<()> {
+            let vault = self.vault(ctx.vaults)?;
+            let Some(request) =
+                vault.unsent_upload_request()? else {
+                    return self.next_vault(ctx);
+                };
+            let before = vault.unacknowledged();
+            self.pending =
+                Some(ctx.signer.build(paths::VAULT_UPLOAD, &request,
+                            ctx.unlocked)?);
+            self.phase = Phase::Upload(before);
+            Ok(())
+        }
+    }
+}
 mod rng {
     //! The randomness the libraries never draw themselves (ADR 0016 R2; ADR 0009 "RNG rules", as
     //! ADR 0019 §1.3 restates its third bullet; CRYPTO.md §12.1). This leaf crate supplies it to
@@ -52059,6 +53469,7 @@ pub mod session {
                     unlocked: &inner.unlocked,
                     signer: Signer::Bearer(&inner.token),
                     rng: &mut inner.rng,
+                    alarms: None,
                 };
             inner.sync.start(&mut ctx)
         }
@@ -52334,6 +53745,7 @@ pub mod session {
                     unlocked: &inner.unlocked,
                     signer: Signer::Bearer(&inner.token),
                     rng: &mut inner.rng,
+                    alarms: None,
                 };
             inner.sync.respond(ctx, status, body, now_ms)
         }
@@ -74480,6 +75892,14 @@ pub mod sync {
     //! - **An older copy of this device's history** cannot exist for an ephemeral device; if the
     //!   server shows one anyway (`own_history_ahead`, `own_conflict`), the vault becomes read-only
     //!   and the sync ends with `device_state_outdated`, as in `rv`.
+    //! - **Alarms of a durable device** (`crate::alarms`; ADR 0026 §4 step 4, ADR 0095 §C). The
+    //!   extension's device ([`Ctx::alarms`] set) writes each alarm in the drain that carries the
+    //!   answer that raised it, and every vault goes read-only: a rollback or fork of the account
+    //!   answer (alarms 1 and 2, with the pinned and the served `account-state` as evidence), a
+    //!   vault-key rollback or fork (no evidence, as `rv`), and an older copy of this device's
+    //!   history (alarm 4). A verified, adopted account answer clears a held rollback alarm in the
+    //!   same drain as its `account-state` (ADR 0021 §9 "Server behind", as `rv`'s `adopt`). The web
+    //!   vault's ephemeral device persists nothing and keeps the behaviour above.
     //! - **One healing round per vault and sync**, as `rv` does; a second need is `cannot_heal`.
     //! - **Every vault, one after the other** ([ADR 0081] §A7): after the account answer the vault
     //!   set follows the catalog (`crate::vaults`: new vaults get a driver, dropped ones are
@@ -74501,8 +75921,10 @@ pub mod sync {
     };
     use rizzy_client::rizzy_proto::wire::SessionToken;
     use rizzy_client::session::DeviceSession as ClientDeviceSession;
+    use rizzy_client::store::rows::Alarm;
     use rizzy_client::sync::{Authors, VaultSync};
     use serde::Serialize;
+    use crate::alarms::{self, Alarms};
     use crate::error::{CoreError, CoreResult, VAULT_KEY_ROTATED, WRONG_STATE};
     use crate::http::{self, HttpRequest};
     use crate::rng::Rng;
@@ -74527,8 +75949,8 @@ pub mod sync {
         /// # Errors
         /// `internal` if `body` does not serialise; as
         /// [`rizzy_client::session::DeviceSession::sign_request`].
-        fn build<T: Serialize>(&mut self, path: &'static str, body: &T,
-            unlocked: &UnlockedDevice) -> CoreResult<HttpRequest> {
+        pub(crate) fn build<T: Serialize>(&mut self, path: &'static str,
+            body: &T, unlocked: &UnlockedDevice) -> CoreResult<HttpRequest> {
             match self {
                 Self::Bearer(token) =>
                     HttpRequest::post(path, body, Some(token)),
@@ -74676,6 +76098,33 @@ pub mod sync {
         pub(crate) signer: Signer<'a>,
         /// The RNG.
         pub(crate) rng: &'a mut Rng,
+        /// The durable device's alarms (`crate::alarms`), persisted with the next drain; `None`
+        /// for the web vault's ephemeral device, which persists nothing (module docs).
+        pub(crate) alarms: Option<&'a mut Alarms>,
+    }
+    impl Ctx<'_> {
+        /// Raises `alarm` on a durable device (ADR 0026 §4 step 4) and makes every vault
+        /// read-only; nothing on the ephemeral device, whose caller already made the vault
+        /// read-only (module docs).
+        ///
+        /// # Errors
+        /// As [`Alarms::raise`].
+        pub(crate) fn raise(&mut self, alarm: Alarm, evidence: &[&[u8]])
+            -> CoreResult<()> {
+            if let Some(alarms) = self.alarms.as_deref_mut() {
+                alarms.raise(alarm, evidence)?;
+                self.vaults.set_alarmed(true);
+            }
+            Ok(())
+        }
+        /// An adopted, verified account answer resolves a held rollback alarm (module docs); the
+        /// vaults leave read-only once no alarm is held.
+        fn resolve_rollback(&mut self) {
+            if let Some(alarms) = self.alarms.as_deref_mut() &&
+                        alarms.resolve_rollback() && !alarms.is_raised() {
+                self.vaults.set_alarmed(false);
+            }
+        }
     }
     /// The sync step driver (module docs).
     pub(crate) struct SyncDriver {
@@ -74847,6 +76296,7 @@ pub mod sync {
                         vault.apply_fetch(&*ctx.authors, &response, now_ms)?;
                     if outcome.own_history_ahead {
                         vault.set_read_only(true);
+                        ctx.raise(Alarm::DeviceStateOutdated, &[])?;
                         return Err(ClientError::DeviceStateOutdated.into());
                     }
                     if !response.complete { return self.fetch(ctx, then); }
@@ -74885,6 +76335,7 @@ pub mod sync {
                     let outcome = vault.apply_upload_response(&response)?;
                     if outcome.own_conflict {
                         vault.set_read_only(true);
+                        ctx.raise(Alarm::DeviceStateOutdated, &[])?;
                         return Err(ClientError::DeviceStateOutdated.into());
                     }
                     if outcome.rejected.contains(&ErrorCode::StaleEpoch) {
@@ -74960,14 +76411,35 @@ pub mod sync {
                     for vault in ctx.vaults.all_mut() {
                         vault.set_read_only(true);
                     }
+                    let alarm =
+                        if #[allow(non_exhaustive_omitted_patterns)] match e {
+                                ClientError::Rollback => true,
+                                _ => false,
+                            } {
+                            Alarm::Rollback
+                        } else { Alarm::Fork };
+                    let pinned = ctx.account.pin().state_wire().to_vec();
+                    ctx.raise(alarm,
+                            &[&pinned, view.account_state.as_slice()])?;
                     return Err(e.into());
                 }
                 Err(e) => return Err(e.into()),
             };
         let authors = Authors::from_account(&fresh)?;
-        let dropped = ctx.vaults.reconcile(&mut fresh, ctx.unlocked)?;
+        let dropped =
+            match ctx.vaults.reconcile(&mut fresh, ctx.unlocked) {
+                Ok(dropped) => dropped,
+                Err(e) => {
+                    if let Some(alarm) = alarms::of_vault_key_error(e.as_str())
+                        {
+                        ctx.raise(alarm, &[])?;
+                    }
+                    return Err(e);
+                }
+            };
         *ctx.authors = authors;
         *ctx.account = fresh;
+        ctx.resolve_rollback();
         Ok(dropped)
     }
 }
@@ -75040,6 +76512,9 @@ pub mod vaults {
         discarded: usize,
         /// Whether new drivers journal their writes (a host with a cache).
         persist: bool,
+        /// Whether an account alarm of the durable device is held (`crate::alarms`): every
+        /// driver is read-only while one is, new ones included (ADR 0026 §4 step 4).
+        alarmed: bool,
     }
     #[automatically_derived]
     impl ::core::fmt::Debug for VaultSet {
@@ -75047,10 +76522,10 @@ pub mod vaults {
         fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
             let names: &'static _ =
                 &["vaults", "counters", "catalog", "too_new", "discarded",
-                            "persist"];
+                            "persist", "alarmed"];
             let values: &[&dyn ::core::fmt::Debug] =
                 &[&self.vaults, &self.counters, &self.catalog, &self.too_new,
-                            &self.discarded, &&self.persist];
+                            &self.discarded, &self.persist, &&self.alarmed];
             ::core::fmt::Formatter::debug_struct_fields_finish(f, "VaultSet",
                 names, values)
         }
@@ -75068,6 +76543,7 @@ pub mod vaults {
                     too_new: BTreeSet::new(),
                     discarded: 0,
                     persist,
+                    alarmed: false,
                 };
             for vault in vaults {
                 let id = vault.vault_id();
@@ -75211,9 +76687,10 @@ pub mod vaults {
                     !self.too_new.contains(&vault_id) &&
                 self.get(vault_id).is_ok_and(|v| !v.is_read_only())
         }
-        /// Inserts a driver, sharing the counters.
+        /// Inserts a driver, sharing the counters; read-only while an alarm is held.
         pub(crate) fn insert(&mut self, mut vault: VaultSync) {
             vault.share_counters(&self.counters);
+            if self.alarmed { vault.set_read_only(true); }
             let at =
                 self.vaults.partition_point(|v|
                         v.vault_id() < vault.vault_id());
@@ -75267,12 +76744,24 @@ pub mod vaults {
             self.catalog = catalog;
             self.update_read_only();
         }
+        /// Raises or lifts the durable device's account alarm (`crate::alarms`): while `alarmed`
+        /// every driver is read-only (ADR 0026 §4 step 4; ADR 0095 §C: "every vault of the account
+        /// goes read-only"). Lifting it (a resolved rollback, the last alarm held) leaves read-only
+        /// only the drivers [`VaultSet::update_read_only`] names.
+        pub(crate) fn set_alarmed(&mut self, alarmed: bool) {
+            self.alarmed = alarmed;
+            if !alarmed {
+                for vault in &mut self.vaults { vault.set_read_only(false); }
+            }
+            self.update_read_only();
+        }
         /// A driver whose vault the catalog does not open, or a `client_too_old` refusal named,
-        /// is read-only.
+        /// is read-only; while an alarm is held, every driver is.
         pub(crate) fn update_read_only(&mut self) {
             for vault in &mut self.vaults {
                 let id = vault.vault_id();
-                if !self.catalog.is_open(id) || self.too_new.contains(&id) {
+                if self.alarmed || !self.catalog.is_open(id) ||
+                        self.too_new.contains(&id) {
                     vault.set_read_only(true);
                 }
             }
@@ -76945,6 +78434,7 @@ pub mod vaults {
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
 }
+pub use alarms::removal_refusal;
 pub use breach::{BreachCheck, BreachVerdict};
 pub use device::{DeviceSession, EnrolFlow};
 pub use error::CoreError;
