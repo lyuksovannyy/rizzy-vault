@@ -164,6 +164,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0104 | [Metrics endpoint: `GET /metrics` on the admin listener, a closed Prometheus metric set, and an optional scrape token](0104-metrics-endpoint.md) | Proposed | M3 |
 | 0100 | [Notification mail: the account email address, the `worker` sender and its outbox, and the recovery notices of ADR 0008 decision 5](0100-notification-mail.md) | Proposed | M3 |
 | 0113 | [Breach-check endpoint: path, JSON shapes, error codes, size caps, caching and the `icons` settings (erratum to ADRs 0053 and 0048)](0113-breach-check-endpoint.md) | Proposed | M3 |
+| 0107 | [Backup-key retention: keys are kept until an explicit, evidence-gated `secrets backup-key retire` (supersedes ADR 0071 owner answer 3 and one restore sentence, and ADR 0047 restore step 4 in part)](0107-backup-key-retention.md) | Proposed | M8 |
 
 ## Gates
 
