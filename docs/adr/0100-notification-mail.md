@@ -85,7 +85,7 @@ An account has **zero or one verified address** and **zero or one pending addres
 
 #### 3.2 Address grammar (version 1)
 
-ASCII only at M3 (no SMTPUTF8). `local@domain`, total 6–254 bytes. `local`: 1–64 bytes, RFC 5322 dot-atom: `atext` characters (`A–Z a–z 0–9 ! # $ % & ' * + - / = ? ^ _ ` { | } ~`) and single dots, not first or last (no quoted strings, no comments). `domain`: the `smtp_host` DNS-name rule of ADR 0086 §1.1 (ASCII-lowercased A-labels, no trailing dot) with at least two labels; IP literals refused. Normalisation: the domain is lowercased, the local part is kept byte-for-byte (L: RFC 5321 leaves local-part case to the receiving host). The parser is the one function both endpoints, the outbox renderer and the fuzz target `mail_address` use; anything else is `invalid_request`.
+ASCII only at M3 (no SMTPUTF8). `local@domain`, total 6–254 bytes. `local`: 1–64 bytes, RFC 5322 dot-atom: `atext` characters (`` A–Z a–z 0–9 ! # $ % & ' * + - / = ? ^ _ ` { | } ~ ``) and single dots, not first or last (no quoted strings, no comments). `domain`: the `smtp_host` DNS-name rule of ADR 0086 §1.1 (ASCII-lowercased A-labels, no trailing dot) with at least two labels; IP literals refused. Normalisation: the domain is lowercased, the local part is kept byte-for-byte (L: RFC 5321 leaves local-part case to the receiving host). The parser is the one function both endpoints, the outbox renderer and the fuzz target `mail_address` use; anything else is `invalid_request`.
 
 #### 3.3 Verification by code, not by link
 
