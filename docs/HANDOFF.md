@@ -258,12 +258,14 @@ The dated bullets below are a log: an ADR status in a bullet is the status on th
     - **0108** (interrupted-recovery exit) is still being drafted.
   - **Also done:** drafts 0068 and 0083–0087 fixed; docs hygiene.
   - **Numbers:** INV-107…125 and the AR rows are provisional, allocated by the lead. The owner confirms them at acceptance.
-  - **Code gaps found, needing no new ADR (Accepted text binds):**
-    - the extension durable device writes no alarm rows (ADR 0026 §4 step 4);
-    - the Chromium auto-lock setting is ignored (offscreen document has no storage);
-    - `rizzy-vault --help` omits the icons/breach settings;
-    - the Containerfile lacks ADR 0017 §7 OCI source labels;
-    - code comments still call 0047 Proposed.
+  - **Code gaps found and fixed under Accepted text, 2026-10-25:**
+    - **Extension alarms:** the extension durable device persists alarms and stays read-only after a restart, and gains "Remove this device" (ADR 0026 §4–§5 as the 0095 drafts record them).
+    - **Help text:** `rizzy-vault --help` lists all 19 settings.
+    - **OCI labels:** the Containerfile carries them (ADR 0017 §7); CI needs `--build-arg RIZZY_BUILD_COMMIT=$GITHUB_SHA`, which is the owner's call.
+    - **Stale comments** fixed.
+    - **Still open, decided by Proposed ADR 0111:** Chromium ignores the user's auto-lock setting.
+    - **Extension divergences:** it never raises alarm 3 (no identity-change flow), and IndexedDB writes are one transaction per row.
+    - **Verified:** CI run 40222588461 is green.
 - **What is left for agents:**
   - The code gaps above.
   - After the owner accepts drafts: their implementation, in dependency order.
