@@ -59,7 +59,8 @@ USAGE:
     rizzy-vault restore --in <file|-> [--config <file>]
 
 OPTIONS:
-    --roles <list>    Roles to run: api, web, worker (default: all three; or RIZZY_ROLES)
+    --roles <list>    Roles to run: api, web, worker (default: these three), or icons, which
+                      runs alone (or RIZZY_ROLES)
     --config <file>   Configuration file of NAME=value lines (or RIZZY_CONFIG)
     --grace-days <n>  retire-setups: days since a setup's successor was recorded (default 90,
                       0 to 3650; 0 retires at once)
@@ -72,10 +73,13 @@ OPTIONS:
     -h, --help        Print this help
     -V, --version     Print version
 
-Settings come from RIZZY_* environment variables or the configuration file: RIZZY_ORIGIN,
-RIZZY_LISTEN, RIZZY_ADMIN_LISTEN, RIZZY_DATA_DIR, RIZZY_DATABASE_URL, RIZZY_SECRETS_FILE,
-RIZZY_SIGNUP, RIZZY_TRUSTED_PROXIES, RIZZY_LOG_LEVEL, RIZZY_WORKER_INTERVAL_SECS,
-RIZZY_MAX_UPLOAD_BYTES, RIZZY_ACCOUNT_QUOTA_BYTES, RIZZY_RECOVERY_WAIT_HOURS.
+Settings come from RIZZY_* environment variables or the configuration file (named by
+--config or RIZZY_CONFIG, never by the file itself): RIZZY_ROLES, RIZZY_ORIGIN, RIZZY_LISTEN,
+RIZZY_ADMIN_LISTEN, RIZZY_DATA_DIR, RIZZY_DATABASE_URL, RIZZY_SECRETS_FILE, RIZZY_SIGNUP,
+RIZZY_TRUSTED_PROXIES, RIZZY_LOG_LEVEL, RIZZY_WORKER_INTERVAL_SECS, RIZZY_MAX_UPLOAD_BYTES,
+RIZZY_RECOVERY_WAIT_HOURS, RIZZY_ACCOUNT_QUOTA_BYTES.
+The icons role reads RIZZY_BREACH_CHECK (off or on), RIZZY_ICON_CACHE_DIR,
+RIZZY_ICON_CACHE_TTL_SECS and RIZZY_ICON_CACHE_MAX_BYTES.
 ";
 
 /// A parsed command line.
@@ -922,10 +926,51 @@ fn run_restore(config: &Config, input: &std::path::Path) -> ExitCode {
 mod tests {
     //! The command-line grammar.
 
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
+    }
+
+    /// Every `"RIZZY_*"` string literal in `config.rs` outside its test module: the names
+    /// the server reads, read from the source so a name added there without a help line fails.
+    fn names_config_reads() -> BTreeSet<&'static str> {
+        const SOURCE: &str = include_str!("config.rs");
+        let code = SOURCE.split("#[cfg(test)]").next().unwrap();
+        code.match_indices("\"RIZZY_")
+            .filter_map(|(at, _)| {
+                let rest = &code[at + 1..];
+                let literal = &rest[..rest.find('"')?];
+                literal
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                    .then_some(literal)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn help_lists_every_setting_config_reads() {
+        let read = names_config_reads();
+        // The literals are exactly the file-and-environment names plus RIZZY_CONFIG.
+        let declared: BTreeSet<&str> = config::KEYS
+            .iter()
+            .copied()
+            .chain([config::CONFIG])
+            .collect();
+        assert_eq!(read, declared);
+        let words: BTreeSet<&str> = USAGE
+            .split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+            .collect();
+        for name in &read {
+            assert!(words.contains(name), "--help does not name {name}");
+        }
+        assert!(
+            USAGE.contains("icons"),
+            "--help does not name the icons role"
+        );
     }
 
     #[test]
