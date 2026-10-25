@@ -90,7 +90,9 @@ mapping. The persistent additions are one table (§15) and one signup-mode value
   a test at implementation). No prefix, no version byte, no checksum.
 - **Parsing at the server.** The wire rule (`InviteTokenRule`: ≤ 256 printable ASCII) is unchanged; the
   domain decodes the value and anything that is not exactly 43 canonical characters decoding to 32 bytes
-  is refused like any other bad invite (§7). It is never `invalid_request`.
+  is refused like any other bad invite (§7), never as `invalid_request`. Only a value the wire rule itself
+  rejects (over 256 bytes, or a non-printable byte) still fails deserialisation with `invalid_request`, as
+  every malformed body does; that reveals nothing about invites or names.
 
 ### 2. Storage: hash only
 
@@ -173,7 +175,9 @@ tied to the `account_id` at start and consumed at finish.
      pending account, answer `SignupRefused` (never `Conflict` in this mode).
    - If the invite is pending for another `account_id` that has no credential (a client that lost its
      state, e.g. a reloaded web vault), delete that uncredentialed `auth_accounts` row and reserve for the
-     new id. If that account has a credential, the invite was redeemed in between: `SignupRefused`.
+     new id. This relies on no other row referencing an account before `register_finish` commits its
+     credential (true of `signup.rs` as read; re-verified at implementation, and the delete is refused if
+     any row does). If that account has a credential, the invite was redeemed in between: `SignupRefused`.
    - Set `pending_account_id` and `pending_at_ms` with an `UPDATE … WHERE` that repeats every condition
      of step 3 and the old `pending_account_id`, and require exactly one row; else roll back with
      `SignupRefused`.
@@ -478,7 +482,7 @@ implementing PR; README's index status; CLAUDE.md's Accepted list.
 - [ADR 0060](0060-admin-panel-stack-boundary.md) §1, §2, §4, open question 6, owner answers 3, 5, 6
 - ADR 0085 (admin authentication, Proposed draft), ADR 0086 (settings persistence, Proposed draft)
 - [ADR 0010](0010-server-shape.md) §1, §5; [ADR 0022](0022-server-mode-only.md) §2; [ADR 0011](0011-storage.md);
-  [ADR 0028](0028-api-v1-http-conventions.md) points 3 and 28, "Register finish"; [ADR 0071](0071-encrypted-db-backup-format.md)
+  [ADR 0028](0028-api-v1-http-conventions.md) point 3 and its "Register finish" row; [ADR 0071](0071-encrypted-db-backup-format.md)
 - [ADR 0008](0008-account-recovery.md), [ADR 0058](0058-webauthn-2fa-second-factor.md),
   [ADR 0077](0077-webauthn-rs-integration-fixes.md), [ADR 0082](0082-security-keys-user-presence-only.md):
   the account-side second factors, unaffected; the admin's second factor is ADR 0085's
