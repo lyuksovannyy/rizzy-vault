@@ -289,7 +289,9 @@ impl fmt::Display for InvalidateDiagnosis {
         match self {
             Self::Finished { setup_id } => write!(
                 f,
-                "an earlier `secrets invalidate` already wrote the secrets file (OPAQUE setup                  {setup_id}); with --confirm only its leftover marker is cleared, nothing else                  changes"
+                "an earlier `secrets invalidate` already wrote the secrets file (OPAQUE setup \
+                 {setup_id}); with --confirm only its leftover marker is cleared, nothing else \
+                 changes"
             ),
             Self::Loss {
                 case,
@@ -299,22 +301,30 @@ impl fmt::Display for InvalidateDiagnosis {
                 match resumed {
                     Some(p) => write!(
                         f,
-                        "resuming an interrupted `secrets invalidate` (its OPAQUE setup {} was                          never written to the file and is lost): ",
+                        "resuming an interrupted `secrets invalidate` (its OPAQUE setup {} was \
+                         never written to the file and is lost): ",
                         p.setup_id
                     )?,
                     None => f.write_str("diagnosis: ")?,
                 }
                 match case {
                     LossCase::SetupOnly => f.write_str(
-                        "setup-only loss: the OPAQUE setup does not match the database;                          enum_key, the data keys, the bootstrap token and the backup keys are                          kept",
+                        "setup-only loss: the OPAQUE setup does not match the database; \
+                         enum_key, the data keys, the bootstrap token and the backup keys are \
+                         kept",
                     )?,
                     LossCase::Whole => f.write_str(
-                        "whole loss: the secrets file is absent or unreadable; nothing carries                          forward (no bootstrap token is made, and encrypted database backups                          sealed under the lost backup keys cannot be restored)",
+                        "whole loss: the secrets file is absent or unreadable; nothing carries \
+                         forward (no bootstrap token is made, and encrypted database backups \
+                         sealed under the lost backup keys cannot be restored)",
                     )?,
                 }
                 write!(
                     f,
-                    ". With --confirm every OPAQUE setup is retired and a new one made: {}                      account(s) must re-register their password (through an enrolled device or                      their recovery code), and {} TOTP enrollment(s) are deleted. If any secrets                      backup exists, try `rizzy-vault secrets restore` first",
+                    ". With --confirm every OPAQUE setup is retired and a new one made: {} \
+                     account(s) must re-register their password (through an enrolled device or \
+                     their recovery code), and {} TOTP enrollment(s) are deleted. If any secrets \
+                     backup exists, try `rizzy-vault secrets restore` first",
                     cost.accounts, cost.totp_enrolments
                 )
             }
@@ -394,33 +404,40 @@ impl fmt::Display for AdminError {
             ),
             Self::SecretsBackupMismatch(e) => write!(
                 f,
-                "this secrets backup does not belong to this database ({e}); nothing was                  written"
+                "this secrets backup does not belong to this database ({e}); nothing was \
+                 written"
             ),
             Self::SecretsCheck(e) => write!(
                 f,
                 "cannot check the secrets against the database ({e}); nothing was written"
             ),
             Self::InvalidateRefused(None) => f.write_str(
-                "the secrets file matches the database: there is nothing to invalidate;                  nothing was changed",
+                "the secrets file matches the database: there is nothing to invalidate; \
+                 nothing was changed",
             ),
             Self::InvalidateRefused(Some(e @ StartupCheckError::MissingDataKey { .. })) => {
                 write!(
                     f,
-                    "{e}: `secrets invalidate` never discards data keys; restore the secrets                      file with `rizzy-vault secrets restore`. Nothing was changed"
+                    "{e}: `secrets invalidate` never discards data keys; restore the secrets \
+                     file with `rizzy-vault secrets restore`. Nothing was changed"
                 )
             }
             Self::InvalidateRefused(Some(e)) => write!(
                 f,
-                "{e}. `secrets invalidate` only handles a setup that does not match the                  database or an absent or unreadable secrets file; nothing was changed"
+                "{e}. `secrets invalidate` only handles a setup that does not match the \
+                 database or an absent or unreadable secrets file; nothing was changed"
             ),
             Self::ConfirmRequired(d) => write!(f, "secrets invalidate needs --confirm. {d}"),
             Self::ResumeNeedsFile(e) => write!(
                 f,
-                "an interrupted setup-only `secrets invalidate` carries its keys forward from                  the secrets file, which cannot be read now ({e}); put the file back and run the                  command again"
+                "an interrupted setup-only `secrets invalidate` carries its keys forward from \
+                 the secrets file, which cannot be read now ({e}); put the file back and run the \
+                 command again"
             ),
             Self::Invalidate(e) => write!(
                 f,
-                "invalidating failed ({e}); if it failed after the database step, running the                  command again resumes it"
+                "invalidating failed ({e}); if it failed after the database step, running the \
+                 command again resumes it"
             ),
         }
     }
