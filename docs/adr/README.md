@@ -144,6 +144,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0085 | [Admin authentication: operator accounts, the bootstrap token, mandatory TOTP and admin sessions](0085-admin-authentication-bootstrap.md) | Proposed | M3 |
 | 0086 | [Instance settings persistence: the `auth_instance_settings` table, precedence over configuration, and the sealed SMTP credential (`SERVER_SMTP_CREDENTIAL`, 0x0103)](0086-instance-settings-persistence.md) | Proposed | M3 |
 | 0087 | [Invite-only signup: invite tokens, issuance, delivery and redemption (answers ADR 0060 open question 6)](0087-invite-only-signup-tokens.md) | Proposed | M3 |
+| 0090 | [Per-account security event log: `auth_security_events`, event kinds, the `security-events/list` endpoint and the alert summary](0090-per-account-security-event-log.md) | Proposed | M3 |
 
 ## Gates
 
