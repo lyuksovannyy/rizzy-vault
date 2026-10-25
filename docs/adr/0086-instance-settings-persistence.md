@@ -56,7 +56,7 @@ PostgreSQL uses `text`, `bytea` and `bigint` with the same checks (`octet_length
 
 | Key | Type | Canonical `value_text` | Range / limits | Configuration fallback (§2) | Built-in default |
 |---|---|---|---|---|---|
-| `signup_mode` | enum | `closed` \| `open` | `invite` is **reserved for ADR 0087** and refused by the parser until that ADR is Accepted and implemented. `RIZZY_SIGNUP`'s own value set is ADR 0048 §1's settings sentence (the binding text of ADR 0028 item 12), which ADR 0087 §10 supersedes to add `invite`; this ADR does not change it | `RIZZY_SIGNUP` | `closed` (ADR 0087 open question 2 recommends `invite`; if the owner accepts it, this default changes with it) |
+| `signup_mode` | enum | `closed` \| `open` | `invite` is **reserved for ADR 0087** and refused by the parser until that ADR is Accepted and implemented. `RIZZY_SIGNUP`'s own value set is ADR 0048 §1's settings sentence (the binding text of ADR 0028 item 12), which ADR 0087 §10 supersedes to add `invite`; this ADR does not change it | `RIZZY_SIGNUP` | `closed` until ADR 0087 is Accepted and implemented, then `invite` (ADR 0087 owner answer 2, 2026-10-25: the default becomes `invite`) |
 | `recovery_wait_hours` | integer | decimal, `0` or no leading zero | 0–720 (= `MAX_RECOVERY_WAIT_MS`), whole hours; 0 under §4 | `RIZZY_RECOVERY_WAIT_HOURS` | 72 |
 | `smtp_host` | host | ASCII-lowercased DNS name in A-label form, no trailing dot, 1–253 bytes; or an IPv4 / bracket-free IPv6 literal in its canonical text form | — | none | unset (mail off) |
 | `smtp_port` | integer | decimal | 1–65535 | none | — (required with `smtp_host`) |
