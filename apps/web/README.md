@@ -267,10 +267,12 @@ account and how (THREAT_MODEL §3.4, only the rows this server holds today: no s
 mail or `icons` yet), how long it is kept (the 30-day Trash, tombstones and signed change
 headers for the life of the vault, logs and backups: ADR 0012 §5 and §7, ADR 0021 §6, AR-11),
 and the item, Trash and enrolled-device counts this browser already has from the vault it
-fetched. The counts are labelled as the browser's own, not a server report. There are no
-byte sizes and no server call of its own: no Accepted ADR defines a transparency endpoint
-(ADR 0028 item 1 lists `GET /api/v1/devices/grants` as the only `GET`, and item 14's
-`/api/meta` holds nothing about any account), and ADR 0048's `bytes_used` is Proposed.
+fetched. The counts are labelled as the browser's own, not a server report. The one
+server-reported number is the storage use ADR 0048 §5 adds to every account answer
+(`bytes_used`, `quota_bytes`), shown as the server's word and labelled so. There is no
+server call of its own: no Accepted ADR defines a transparency endpoint (ADR 0028 item 1
+lists `GET /api/v1/devices/grants` as the only `GET`, and item 14's `/api/meta` holds
+nothing about any account).
 
 ### The getting-started guide (onboarding, ROADMAP §4.5)
 

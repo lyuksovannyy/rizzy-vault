@@ -16,8 +16,9 @@
 //!
 //! Any other value is a violation inside a recognised tag, so ADR 0042 §2's reject rule applies.
 //! The age mode is not stored: a client derives it on open (ADR 0079 §10). The tag number is
-//! the next one free at implementation: `0x0002` and `0x0003` are free in code but reserved by
-//! the Proposed [ADR 0081] (vault directory, contact pins), so this tag takes `0x0004`.
+//! the one that was next free at implementation: `0x0002` and `0x0003` were free in code but
+//! reserved by [ADR 0081] (vault directory, contact pins; then Proposed, Accepted since), so
+//! this tag takes `0x0004`.
 //!
 //! [ADR 0042]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0042-account-settings-matching-layout.md
 //! [ADR 0079]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0079-identity-generator.md

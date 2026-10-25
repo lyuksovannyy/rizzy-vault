@@ -89,9 +89,10 @@ pub const MIGRATIONS: &[MigrationFile] = &[
         postgres: include_str!("../migrations/postgres/0005_auth_credential_epochs.sql"),
     },
     // ADR 0048 §4 ("raises the backup `schema_version` to 6"). Its file name `0007` assumed
-    // the sibling ADR 0047 took `0006` first; 0047 is still Proposed, so this one takes the next
-    // free number: a backup's `schema_version` must name the shape of its dump, which a later
-    // lower version slotted in under it would break.
+    // the sibling ADR 0047 took `0006` first; 0047 was still Proposed when this shipped, so this
+    // one took the next free number, and 0047's migration came later as 0011 (below): a backup's
+    // `schema_version` must name the shape of its dump, which a later lower version slotted in
+    // under it would break.
     MigrationFile {
         version: 6,
         description: "storage_account_usage",

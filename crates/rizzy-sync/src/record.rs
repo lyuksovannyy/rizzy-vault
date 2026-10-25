@@ -43,8 +43,9 @@
 //! - [`parse_op`]`(data)` for `ITEM_OP`, [`parse_snapshot`]`(covered_vv, data)` for
 //!   `ITEM_SNAPSHOT`, with `covered_vv` the snapshot header's covered VV. The ADR's
 //!   `RecordRef` is split into the two result types; what is frozen is that every rule below
-//!   runs, with these inputs, on every path that yields a record: sync, a load from the
-//!   local store, and the M4 transfers.
+//!   runs, with these inputs, on every path that yields a record: sync and a load from the
+//!   local store. (The ADR's third path, "the M4 transfers", went with On-device mode, which
+//!   ADR 0022 parked.)
 //! - [`encode_op`] and [`encode_snapshot`] for writers, which check the same limits and rules
 //!   before encrypting (ADR 0018 §10): each sizes and checks the limits, writes, then parses
 //!   its own output with the reader's code, so a writer can never emit what a reader

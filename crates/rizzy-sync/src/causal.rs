@@ -116,7 +116,7 @@
 //!   stays before it, so the next Fetch asks again. A cover's part past a gap is never
 //!   recorded (reading 7). The one exception is a held cover (below).
 //!
-//! **Held covers** ([ADR 0050] §2, proposed INV-74). A page carries the covers of its own
+//! **Held covers** ([ADR 0050] §2, INV-74). A page carries the covers of its own
 //! bodiless headers only, and the server cannot see which purge a tombstone records (G-1), so a
 //! tombstone cover can arrive in a page that does not yet carry, in any chain, the header of
 //! the Purge it records. The merge then refuses it as `Refusal::PurgeAboveCut`, a refusal that

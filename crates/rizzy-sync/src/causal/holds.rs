@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Held covers across a page boundary (ADR 0050 §2, §4; proposed INV-74): unit tests of the
+//! Held covers across a page boundary (ADR 0050 §2, §4; INV-74): unit tests of the
 //! hold, its retry and its lapse, and a property test of convergence under every split of one
 //! response into pages.
 //!
@@ -181,7 +181,7 @@ impl Client {
         }
     }
 
-    /// Proposed INV-74: while its item's cover is still held (not taken), a held link's dot
+    /// INV-74: while its item's cover is still held (not taken), a held link's dot
     /// never joins the settled VV, and so nothing waiting for it is delivered.
     fn check_held_unsettled(&self) {
         for chain in self.log.chains.values() {
