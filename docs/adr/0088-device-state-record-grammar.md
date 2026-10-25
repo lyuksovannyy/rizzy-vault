@@ -1,4 +1,4 @@
-# ADR 0088: Erratum to ADRs 0046 and 0057: one device-state record grammar (record version 1 | 2, stage 1 | 2 | 3)
+# ADR 0088: Erratum to ADRs 0046 and 0057: one device-state record grammar (record version 1 or 2, stages 1–3)
 
 - Status: Proposed
 - Date: 2026-10-25
@@ -140,7 +140,7 @@ Unchanged and restated only for completeness. The v1 → v2 upgrade happens in t
 1. `crates/rizzy-client/src/store/record.rs:3–5`, module doc: cite "[ADR 0088] §1" as the grammar's source, in place of "ADR 0057 §2, extending ADR 0026 §2, with the recovery-pending stage of ADR 0046 §1". `Stage`'s doc (`record.rs:94`) and `parse`'s doc are unchanged. No code change.
 2. New test in `crates/rizzy-client/src/tests/recovery_pending.rs`: the **version-1 stage-3** record (the stage-3 vector with `record_version = 1` and the `has_ks`/`forward_count` bytes removed, 297 bytes) parses with `keystore_capable` false and true, gives `Stage::RecoveryPending`, and encodes to exactly the committed version-2 stage-3 vector. This pins part 1's "stage 3 is valid in both" sentence.
 3. New assertion in `device_record_refusals` (`store.rs:527`): a record of 4097 bytes whose first two bytes are `00 03` is `CacheCorrupt`, not `CacheUpdateRequired` (R1 before R2). A 1-byte input is `CacheCorrupt`.
-4. Check, and add if missing: a version-2 stage-3 record with `has_ks = 1` is `CacheCorrupt` with `keystore_capable = true` (R12), and `encode` of such a record is `Internal`. This may already be covered at `recovery_pending.rs:162` ff. (not re-read for this draft).
+4. R11 and R12 for stage 3 need no new test: `recovery_pending_rules` (`recovery_pending.rs:162–189`) already refuses stage 3 without `E_local`, with a nested pending record, and with `E_ks`. Each case is `CacheCorrupt` from the parser for both `keystore_capable` values and `Internal` from the encoder, and the test checks that the same flags in stage 1 parse.
 5. The fuzz target `fuzz/fuzz_targets/client_device_state.rs` needs no change: it already runs `DeviceRecord::parse`.
 6. Gate: `cargo test -p rizzy-client --locked`, `cargo fmt --all -- --check`, `cargo clippy -p rizzy-client --all-targets --locked -- -D warnings`, and `RUSTDOCFLAGS="-D warnings" cargo doc -p rizzy-client --no-deps --locked` for the doc link.
 

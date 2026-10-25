@@ -151,6 +151,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0098 | [Security keys: per-account and per-key limits, the six `webauthn` endpoints and `pending_id` (erratum to ADRs 0077 and 0028)](0098-security-key-limits-and-endpoints.md) | Proposed | M3 |
 | 0099 | [Website icons: a per-account opt-in, off by default, and no request while the setting or the `icons` role is off (erratum to ADR 0052)](0099-website-icons-opt-in.md) | Proposed | M3 |
 | 0088 | [Erratum to ADRs 0046 and 0057: one device-state record grammar (record version 1 | 2, stage 1 | 2 | 3)](0088-device-state-record-grammar.md) | Proposed | M1 |
+| 0088 | [Erratum to ADRs 0046 and 0057: one device-state record grammar (record version 1 or 2, stages 1–3)](0088-device-state-record-grammar.md) | Proposed | M1 |
 
 ## Gates
 
