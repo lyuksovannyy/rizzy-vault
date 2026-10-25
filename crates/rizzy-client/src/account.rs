@@ -180,7 +180,7 @@ pub struct VerifiedAccount {
 /// **Not verified, and never verifiable (INV-70).** Nothing signs it; it is the server's word.
 /// A host shows it to the user, prompting them to cancel a recovery they did not start, and
 /// nothing else: its presence, absence or content is never proof that a recovery is, or is not,
-/// pending or happened, and no check reads it. [`verify_account_view`] decides exactly as it
+/// pending or happened, and no check reads it. `verify_account_view` decides exactly as it
 /// would without it, and a notice reaches the host only on an answer that verified in full.
 /// A malicious server can hide a real recovery from it or invent one, as it can hide the
 /// web-vault session notice (CRYPTO.md §11.4, AR-9).
