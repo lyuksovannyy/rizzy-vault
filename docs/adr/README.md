@@ -168,6 +168,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0111 | [Extension unlocked state: no `storage.session` fallback (a torn-down long-lived context is locked), idle and screen-lock auto-lock relayed by the Chromium service worker, Firefox on a persistent MV2 background page (erratum to ADRs 0036, 0013 and 0019)](0111-extension-session-and-idle-lock.md) | Proposed | M2 |
 | 0112 | [Core dumps and crash reports for `rv` on Windows and macOS: a panic-exit hook on every OS, `RLIMIT_CORE` on macOS, no Win32 call, and accepted risk AR-31 (supersedes ADR 0024 Decision 3 in part)](0112-core-dumps-windows-macos.md) | Proposed | M1 |
 | 0103 | [Disabled accounts: the `disabled_at_ms` state, what it refuses, the `account_disabled` code, and enabling again](0103-disable-user.md) | Proposed | M3 |
+| 0105 | [Secret Key QR: payload, encoding, display gate and scanner validation](0105-secret-key-qr.md) | Proposed | M3 / M7 |
 
 ## Gates
 
