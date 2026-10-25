@@ -154,6 +154,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0088 | [Erratum to ADRs 0046 and 0057: one device-state record grammar (record version 1 or 2, stages 1–3)](0088-device-state-record-grammar.md) | Proposed | M1 |
 | 0089 | [Extension-origin frames: one content-script message list, the save-dialog instance token, the save-prompt token and the save dialog's visibility gates (reconciles ADRs 0043 and 0076)](0089-extension-frames-and-save-dialog.md) | Proposed | M3 |
 | 0091 | [Device revocation: the revocation window, the revoked-device rotation race and its accepted residual](0091-revoked-device-rotation-race.md) | Proposed | M3 |
+| 0092 | [Rotation size limits: a write-time cap on wrap-set rows, the `rotation_limit` code, and staged rotation so revocation and recovery never fail on size](0092-rotation-size-limits.md) | Proposed | M3 |
 
 ## Gates
 
