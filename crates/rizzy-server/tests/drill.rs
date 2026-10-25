@@ -18,7 +18,8 @@
 //!    text (INV-50). `restore` refuses to run next to the running server (writer lock).
 //! 3. **Stop** the server and take the native backup: a copy of the data directory.
 //! 4. **Wipe** the data directory and the secrets file.
-//! 5. **Restore** the secrets from the encrypted backup (byte for byte), then the database with
+//! 5. **Restore** the secrets from the encrypted backup with `rizzy-vault secrets restore`
+//!    (ADR 0047; byte for byte, into the empty database), then the database with
 //!    `rizzy-vault restore --in <file>` into an empty database.
 //! 6. **Start again.** The startup checks pass; the database reads back exactly as backed up;
 //!    the restore generation is new (ADR 0021 §2) and every account is in a reconciliation
@@ -54,7 +55,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rizzy_domain_auth::StartupCheckError;
 use rizzy_server::config::{self, Config, Settings, Sources};
 use rizzy_server::server::{ServeError, Services, open_services};
-use rizzy_server::{admin, db_backup, fsutil, secrets_backup, secrets_file};
+use rizzy_server::{admin, db_backup, secrets_backup, secrets_file};
 use rizzy_storage::backup::file;
 use rizzy_storage::meta::{end_reconciliation_epoch, reconciliation_epochs, restore_generation};
 use rizzy_storage::tables::TABLES;
@@ -646,11 +647,27 @@ fn backup_wipe_restore_drill() {
             Err(ServeError::Secrets(_))
         ));
 
-        // 5. Restore: the secrets from their encrypted backup, then the database.
+        // 5. Restore: the secrets from their encrypted backup with `secrets restore` (ADR 0047;
+        //    the empty database has nothing to check it against), byte for byte, then the
+        //    database, which checks the secrets against the backup.
         let file = std::fs::read(&secrets_backup_path).unwrap();
         let opened = secrets_backup::open(&file, PASSPHRASE.trim_end()).unwrap();
         assert_eq!(opened.expose_secret(), original_secrets.as_slice());
-        fsutil::write_new_private(&secrets_path, opened.expose_secret()).unwrap();
+        let restored = admin::secrets_restore(&config, &secrets_backup_path, &passphrase_file)
+            .await
+            .unwrap();
+        assert!(restored.created && restored.database_empty);
+        assert!(restored.missing_setups.is_empty());
+        assert_eq!(std::fs::read(&secrets_path).unwrap(), original_secrets);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&secrets_path)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the restored secrets file is private");
+        }
         let report = admin::restore(&config, &backup_path).await.unwrap();
         assert_eq!(report.rows, u64::try_from(backed_up_rows).unwrap());
         assert_eq!(report.accounts_in_reconciliation, ACCOUNTS.len() as u64);

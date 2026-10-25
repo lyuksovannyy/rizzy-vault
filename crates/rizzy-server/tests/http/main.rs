@@ -7,7 +7,9 @@
 //! `SQLite` with the data-key rotation end to end (`worker`: `secrets rotate --data-key`, the
 //! worker's re-seal, the old key dropped; and the recovery-wait setting), and key rotation end to end with `rizzy-client` (`rotation`: standard and full
 //! rotation, the revocation of CRYPTO.md §11.8, the `state_conflict` retry, ADR 0025). Retiring old OPAQUE
-//! setups end to end (`setups`, ADR 0031). The per-account storage quota (`quota`, ADR 0048): the
+//! setups end to end (`setups`, ADR 0031). The OPAQUE secrets operator commands end to end
+//! (`secrets_ops`, ADR 0047): `secrets restore` and both cases of `secrets invalidate`, with a
+//! crash and re-run. The per-account storage quota (`quota`, ADR 0048): the
 //! exact boundary, `quota_exceeded` on the wire, the reconciliation and the backfill. Threat model INV-1 over captured request bodies
 //! (`password_equivalents`): registration, login and password change send only OPAQUE messages.
 //! A paged Fetch splitting a tombstone cover from its purge across a small page budget, end to
@@ -49,6 +51,7 @@ mod password_equivalents;
 mod quota;
 mod recovery;
 mod rotation;
+mod secrets_ops;
 mod sessions;
 mod setups;
 mod signing;

@@ -43,7 +43,7 @@ use crate::rotation::{
 };
 
 /// `(setup_id, retired_at_ms)` of every recorded setup.
-async fn setup_rows(server: &Server) -> Vec<(i64, Option<i64>)> {
+pub(crate) async fn setup_rows(server: &Server) -> Vec<(i64, Option<i64>)> {
     let dump = server.services.db.dump().await.unwrap();
     let table = dump
         .tables
@@ -67,7 +67,7 @@ async fn setup_rows(server: &Server) -> Vec<(i64, Option<i64>)> {
 }
 
 /// The `setup_id` every record names, by account id.
-async fn record_setups(server: &Server) -> Vec<i64> {
+pub(crate) async fn record_setups(server: &Server) -> Vec<i64> {
     let dump = server.services.db.dump().await.unwrap();
     let table = dump
         .tables
@@ -113,7 +113,7 @@ async fn login_start_shape(
 
 /// Whether a whole OPAQUE login of `name` with `password` and `sk` succeeds, and its
 /// `reregister` flag.
-async fn try_login(
+pub(crate) async fn try_login(
     server: &Server,
     rng: &mut ChaCha20Rng,
     name: &str,
@@ -138,7 +138,7 @@ async fn try_login(
 }
 
 /// The same-password re-registration of `client` over its device session (ADR 0031 point 2).
-async fn reregister_device(server: &Server, rng: &mut ChaCha20Rng, client: &mut Client) {
+pub(crate) async fn reregister_device(server: &Server, rng: &mut ChaCha20Rng, client: &mut Client) {
     let account = client.refresh(server).await;
     let (started, request) = start_device_reregistration(rng, &client.state, PASSWORD).unwrap();
     let reply = post(
@@ -164,7 +164,7 @@ async fn reregister_device(server: &Server, rng: &mut ChaCha20Rng, client: &mut 
 
 /// The configuration of a test instance with a recovery wait of 0, its secrets file written by
 /// `secrets init`.
-fn instance(dir: &TempDir) -> Config {
+pub(crate) fn instance(dir: &TempDir) -> Config {
     let config = config_in(dir, &[(config::RECOVERY_WAIT_HOURS, "0")]);
     admin::secrets_init(&config).unwrap();
     config

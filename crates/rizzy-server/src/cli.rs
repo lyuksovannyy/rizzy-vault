@@ -1027,7 +1027,12 @@ mod tests {
                 config: Some(PathBuf::from("/etc/rv"))
             })
         );
-        // ADR 0047.
+    }
+
+    /// `secrets restore` and `secrets invalidate` (ADR 0047); their refusals are in
+    /// `refusals`.
+    #[test]
+    fn secrets_operator_commands() {
         for (input, passphrase) in [("s.json", "-"), ("-", "p"), ("s.json", "p")] {
             assert_eq!(
                 parse(&args(&[
