@@ -32,7 +32,7 @@ So the binding list and the shipped parser disagree today, and nothing would not
 | ADR (all Proposed) | What it does to the sentence |
 |---|---|
 | [0066](0066-share-email-otp-verification.md), "What this ADR supersedes" | Adds `RIZZY_SMTP_URL`, `RIZZY_SMTP_FROM`, quoting ADR 0028's older clause (without `RIZZY_ACCOUNT_QUOTA_BYTES`); also replaces item 12's secret-boundary passage |
-| [0087](0087-invite-only-signup-tokens.md) §10.1 | `RIZZY_SIGNUP` gains `invite`; its open question 2 may move the default to `invite` |
+| [0087](0087-invite-only-signup-tokens.md) §10.1 | `RIZZY_SIGNUP` gains `invite`, and the default moves to `invite` (owner answer 2, 2026-10-25) |
 | [0104](0104-metrics-endpoint.md) §11 | Adds `RIZZY_METRICS` (`off`\|`on`) and `RIZZY_METRICS_TOKEN_SHA256` |
 | [0106](0106-agpl-source-url.md) §7.2 | Adds `RIZZY_SOURCE_URL` |
 | [0113](0113-breach-check-endpoint.md) §9.3 | Adds `RIZZY_BREACH_CHECK`, `RIZZY_ICON_CACHE_DIR`, `_TTL_SECS` and `_MAX_BYTES`, the names already shipped |
@@ -101,7 +101,7 @@ ADR 0100 (Proposed) recommends that ADR 0066 drop both names in favour of ADR 00
 
 | Name | Type and grammar | Default | Bounds | Used by | Decided by |
 |---|---|---|---|---|---|
-| `RIZZY_SIGNUP` | `closed`, `invite` or `open`, exact lowercase | `closed`; `invite` if the owner accepts ADR 0087's open question 2 | none | `api` (signup); `worker` builds the same services | ADR 0028 item 12; `invite`: ADR 0087 §10.1 |
+| `RIZZY_SIGNUP` | `closed`, `invite` or `open`, exact lowercase | `invite` (ADR 0087 owner answer 2, 2026-10-25) | none | `api` (signup); `worker` builds the same services | ADR 0028 item 12; `invite` and the default: ADR 0087 §10.1 |
 
 **ADR 0104** (metrics endpoint): two new rows.
 
