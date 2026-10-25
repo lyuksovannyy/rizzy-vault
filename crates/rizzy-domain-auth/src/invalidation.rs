@@ -7,7 +7,7 @@
 //! # The two diagnosed cases (step 2)
 //!
 //! The caller (`rizzy-server`'s `admin`) diagnoses; this module only carries a case out:
-//! - [`LossCase::SetupOnly`]: the file loads, and [`ServerSecrets::check_database_dry_run`]
+//! - [`LossCase::SetupOnly`]: the file loads, and [`ServerSecrets::check_database_dry_run`](crate::ServerSecrets::check_database_dry_run)
 //!   answers `SetupMismatch` or `NoRecordedSetup`. Only the setup is wrong: `enum_key`, the
 //!   data keys and the bootstrap token carry forward, so no TOTP row is deleted.
 //! - [`LossCase::Whole`]: the file is absent or unparsable. Nothing carries forward, so every
