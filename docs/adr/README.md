@@ -169,6 +169,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0112 | [Core dumps and crash reports for `rv` on Windows and macOS: a panic-exit hook on every OS, `RLIMIT_CORE` on macOS, no Win32 call, and accepted risk AR-31 (supersedes ADR 0024 Decision 3 in part)](0112-core-dumps-windows-macos.md) | Proposed | M1 |
 | 0103 | [Disabled accounts: the `disabled_at_ms` state, what it refuses, the `account_disabled` code, and enabling again](0103-disable-user.md) | Proposed | M3 |
 | 0105 | [Secret Key QR: payload, encoding, display gate and scanner validation](0105-secret-key-qr.md) | Proposed | M3 / M7 |
+| 0114 | [One server settings register: the `RIZZY_*` names the shipped code reads, one rule for adding a name, and a CI check (supersedes ADR 0048 §1's last sentence)](0114-server-settings-list.md) | Proposed | M3 |
 
 ## Gates
 
