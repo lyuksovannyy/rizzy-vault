@@ -105,6 +105,17 @@ RUN cargo build --locked --release -p rizzy-server --bin rizzy-vault --features 
 # ---- runtime: distroless, no shell, no package manager -----------------------------------------
 FROM ${RUNTIME_IMAGE}
 
+# The OCI labels ADR 0017 §7 requires: "OCI images carry the `org.opencontainers.image.source`
+# and `org.opencontainers.image.revision` labels." A CI or release build passes the commit it
+# builds, `--build-arg RIZZY_BUILD_COMMIT="$(git rev-parse HEAD)"`; the defaults keep a plain
+# local build working: the upstream repository, and an empty revision (no commit claimed). A
+# build of modified source passes its own repository in RIZZY_IMAGE_SOURCE. The commit is only a
+# label here; nothing passes it to `cargo build`.
+ARG RIZZY_IMAGE_SOURCE=https://github.com/lyuksovannyy/rizzy-vault
+ARG RIZZY_BUILD_COMMIT=
+LABEL org.opencontainers.image.source="${RIZZY_IMAGE_SOURCE}" \
+      org.opencontainers.image.revision="${RIZZY_BUILD_COMMIT}"
+
 COPY --from=build /out/rizzy-vault /usr/local/bin/rizzy-vault
 
 # The two writable paths, owned by the non-root user so that an empty named volume mounted
