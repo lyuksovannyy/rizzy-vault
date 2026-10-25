@@ -28,7 +28,7 @@ Every draft below came out of the [2026-10-25 gap review](2026-10-25-adr-gap-rev
 | [0088](../adr/0088-device-state-record-grammar.md) | **One device-state grammar (blocker B1)** | also replace ADR 0057 §2's partial grammar (rec yes) |
 | [0095](../adr/0095-owner-answers-0023-0028-recorded.md) | Owner answers recorded only in commits (0023–0028) | accept the `Retry-After` details the code adds (rec yes) |
 | [0098](../adr/0098-security-key-limits-and-endpoints.md) | Security-key caps and the six endpoints | 32 keys × 1,984 B (rec) vs 16 × 4,032 B; no assertion needed to remove a key (rec no) |
-| [0109](../adr/0109-sync-c‍ursor-held-header.md) | Sync c‍ursor past a held header: no stall exists, the code's rule is written down | clarification only (rec yes); healing guard (rec yes) |
+| [0109](../adr/0109-sync-cursor-held-header.md) | Sync cursor past a held header: no stall exists, the code's rule is written down | clarification only (rec yes); healing guard (rec yes) |
 | [0113](../adr/0113-breach-check-endpoint.md) | Breach endpoint as shipped | upstream failure stays 500 (rec yes); shared 14-day TTL (rec yes) |
 
 ## Fixes for real gaps (code changes after acceptance)
