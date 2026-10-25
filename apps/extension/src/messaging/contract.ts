@@ -1061,7 +1061,14 @@ export type PopupRequest =
   | { readonly type: "get_status" }
   /** The icon of an item's website host (ADR 0052 point 6), fetched by the core from the
    * account's server; only the hostname leaves the browser. */
-  | { readonly type: "item_icon"; readonly websiteHost: string };
+  | { readonly type: "item_icon"; readonly websiteHost: string }
+  /** "Remove this device", step 1 (ADR 0026 §5 as ADR 0095 §D replaces it): the refusal under
+   * an alarm, or, while unlocked, the byte-identical upload of the unsent own rows and what is
+   * still unacknowledged after it. Deletes nothing. */
+  | { readonly type: "removal_check" }
+  /** "Remove this device", step 2, after the user confirmed: deletes the local data (refused
+   * again under alarm 1, 2 or 3, read from the cache itself). */
+  | { readonly type: "remove_device" };
 
 export interface GeneratorOptions {
   readonly kind: "password" | "passphrase";
@@ -1107,6 +1114,9 @@ export type PopupResponse =
       readonly serverOrigin?: string;
       /** While unlocked: the notice of the session's last account answer, if it had one. */
       readonly recoveryNotice?: PopupRecoveryNotice;
+      /** While unlocked: the alarms the device holds, by code (ADR 0026 §3 kind 7); every vault
+       * is read-only while one is, across restarts. Absent when none is held. */
+      readonly alarms?: readonly string[];
     }
   | { readonly type: "enrolled" }
   | { readonly type: "unlocked" }
@@ -1119,6 +1129,20 @@ export type PopupResponse =
   | { readonly type: "fields"; readonly fields: readonly ItemFieldSummary[] }
   | { readonly type: "revealed"; readonly value: string }
   | { readonly type: "generated"; readonly value: string }
+  /** `removal_check`'s answer. `refusal`: the code of the alarm that refuses removal
+   * (`rollback`, `fork`, `identity_change_unconfirmed`, `alarm_unknown`). `unlocked`: whether
+   * the unsent own rows could be verified and uploaded first; when it is, `uploaded` says
+   * whether the upload ran, and `unsentChanges`/`unsentSnapshots` what is still not on the
+   * server and would be lost. */
+  | {
+      readonly type: "removal_check";
+      readonly unlocked: boolean;
+      readonly refusal?: string;
+      readonly uploaded?: boolean;
+      readonly unsentChanges?: number;
+      readonly unsentSnapshots?: number;
+    }
+  | { readonly type: "removed" }
   | { readonly type: "error"; readonly code: string };
 
 /** Every message type this contract defines, used by `validate.ts` to size-check before shape
@@ -1157,6 +1181,8 @@ export const MESSAGE_TYPES = [
   "generate_password",
   "get_status",
   "item_icon",
+  "removal_check",
+  "remove_device",
   "status",
   "enrolled",
   "unlocked",
@@ -1167,5 +1193,6 @@ export const MESSAGE_TYPES = [
   "revealed",
   "generated",
   "icon",
+  "removed",
   "error",
 ] as const;

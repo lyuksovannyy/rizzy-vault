@@ -31,6 +31,20 @@ crypto and store decision still happens inside `DurableSession`/`rizzy-wasm`).
   generator; the item list with search, detail, reveal-and-copy with clipboard clearing; "open
   web vault"; lock, and the messaging/sender/lifecycle plumbing the "found empirically" sections
   below cover.
+- **Alarms and "Remove this device" (ADR 0026 §3–§5; ADR 0095 §C, §D):** a rollback or fork of
+  the account answer or of a vault key, and an older copy of this device's own history (a
+  restored browser profile: "device state outdated"), are written into the cache as alarm rows
+  with the answer that raised them, exactly as `rv` writes them. While one is held every vault
+  is read-only and the popup says so, and a browser restart keeps it read-only; a fork and an
+  outdated device state also refuse sync. "Remove this device" (on the locked view and the
+  unlocked menu) is refused, naming the alarm, under a rollback, a fork, an unconfirmed identity
+  change or an alarm this build does not know (read without any key while locked); otherwise,
+  while unlocked, it first uploads the changes the server never acknowledged, byte for byte,
+  says how many are still not on the server, and deletes the local data only after the user
+  confirms. Afterwards, revoke the old device from another device. Not here: the extension has
+  no flow that confirms an identity change (the sync ends with `identity_change_unconfirmed` and
+  writes no alarm) or heals a rolled-back server; `rv` and the web vault have them.
+  `e2e/device-removal.spec.ts` covers it.
 - **A known residual, not fixed here:** a login form whose submit commits a real top-level
   navigation *before* the extension's `save_prompt` answer comes back gets no save/update offer
   at all — found directly while writing `e2e/autofill-and-save.spec.ts` (see bug 7 below). The

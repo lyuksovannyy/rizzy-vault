@@ -12,9 +12,12 @@ import type { ExtensionClient } from "../../core/client.ts";
 export interface LockedViewProps {
   readonly client: ExtensionClient;
   readonly onUnlocked: () => void;
+  /** Opens "Remove this device" (`RemoveDevice.tsx`): offered here too, for a device whose
+   * master password is lost or whose cache no longer unlocks (ADR 0026 §5). */
+  readonly onRemove: () => void;
 }
 
-export function LockedView({ client, onUnlocked }: LockedViewProps) {
+export function LockedView({ client, onUnlocked, onRemove }: LockedViewProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | undefined>(undefined);
   const [pending, setPending] = useState(false);
@@ -51,6 +54,9 @@ export function LockedView({ client, onUnlocked }: LockedViewProps) {
             : error}
         </p>
       ) : undefined}
+      <button type="button" onClick={onRemove} disabled={pending}>
+        Remove this device
+      </button>
     </form>
   );
 }

@@ -9,7 +9,7 @@
 // messages to whichever entry point is running.
 import { generatePassphraseWithOptions, generatePasswordWithOptions, registrableDomainOf } from "@rizzy-vault/core";
 
-import { readAccountConfig, saveAccountConfig } from "./account-config.ts";
+import { deleteAccountConfig, readAccountConfig, saveAccountConfig } from "./account-config.ts";
 import { createSavePromptLocationIndex } from "./save-prompt-location.ts";
 import {
   type AddPasskeyInput,
@@ -18,6 +18,7 @@ import {
   type MatchCandidate,
   type MatchFrameInfo,
   addPasskeyChange,
+  cacheRemovalRefusal,
   cacheStoreNames,
   createPasskey,
   decideCandidates,
@@ -37,7 +38,7 @@ import {
   unlockDevice,
   updateLoginChangeset,
 } from "./bindings.ts";
-import { ExtensionCache } from "../cache/idb.ts";
+import { ExtensionCache, deleteCache } from "../cache/idb.ts";
 import { AutoLockTimer, readAutoLockMs } from "./lifecycle.ts";
 import { createIframeInstanceStore } from "./iframe-instance.ts";
 import { type OfferRecord, type OfferRefusal, type OfferedItem, createOfferStore } from "./offer-store.ts";
@@ -926,12 +927,14 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
       // small IndexedDB database — not the durable-device cache, and not `chrome.storage`.
       const { serverOrigin } = await readAccountConfig();
       const notice = recoveryNoticeOf(session);
+      const alarms = alarmsOf(session);
       return {
         type: "status",
         locked: session === undefined,
         enrolled: serverOrigin !== undefined,
         ...(serverOrigin !== undefined ? { serverOrigin } : {}),
         ...(notice !== undefined ? { recoveryNotice: notice } : {}),
+        ...(alarms.length > 0 ? { alarms } : {}),
       };
     }
     case "enrol": {
@@ -1016,6 +1019,10 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
         return { type: "error", code: errorCode(e, "item_icon_failed") };
       }
     }
+    case "removal_check":
+      return removalCheck();
+    case "remove_device":
+      return removeDevice(ext);
     case "item_fields":
       if (session === undefined) {
         return { type: "error", code: "locked" };
@@ -1048,6 +1055,85 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
       } catch {
         return { type: "error", code: "generate_failed" };
       }
+  }
+}
+
+/** The alarms the unlocked session holds, by code; none while locked. */
+function alarmsOf(current: DurableSession | undefined): readonly string[] {
+  if (current === undefined) {
+    return [];
+  }
+  try {
+    return current.alarms;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * "Remove this device", step 1 (ADR 0026 §5 as ADR 0095 §D replaces it; `rv device forget`).
+ * Under alarm 1, 2 or 3, or an alarm key this build does not know, removal is refused and the
+ * alarm named: read from the unlocked session, or, while locked, from the cache's cleartext
+ * alarm rows without any key. While unlocked, the own ops and snapshots the server never
+ * acknowledged are uploaded first, byte for byte (`DurableSession.uploadUnsentForRemoval`);
+ * if that cannot run (no network, a refused authentication), nothing more is tried, and the
+ * answer says so. Then it reports what removal would still lose. Deletes nothing.
+ */
+async function removalCheck(): Promise<PopupResponse> {
+  try {
+    const { serverOrigin } = await readAccountConfig();
+    if (serverOrigin === undefined) {
+      return { type: "error", code: "not_enrolled" };
+    }
+    const current = session;
+    if (current === undefined) {
+      const refusal = await cacheRemovalRefusal(await ensureCache());
+      return { type: "removal_check", unlocked: false, ...(refusal !== undefined ? { refusal } : {}) };
+    }
+    const held = current.removalRefusal;
+    if (held !== undefined) {
+      return { type: "removal_check", unlocked: true, refusal: held };
+    }
+    let uploaded = true;
+    try {
+      await current.uploadUnsentForRemoval();
+    } catch {
+      uploaded = false;
+    }
+    return {
+      type: "removal_check",
+      unlocked: true,
+      uploaded,
+      unsentChanges: current.unsentChanges,
+      unsentSnapshots: current.unsentSnapshots,
+    };
+  } catch (e) {
+    return { type: "error", code: errorCode(e, "removal_check_failed") };
+  }
+}
+
+/**
+ * "Remove this device", step 2, after the user confirmed in the popup: the alarm check again,
+ * from the cache itself and from the session, then the session is locked, the cache database
+ * deleted and, last, the saved account configuration (`deleteCache`'s docs). The next use is
+ * a new enrolment with a new device id (CRYPTO.md §11.2); the old device is revoked from
+ * another device.
+ */
+async function removeDevice(ext: WebExtNamespace): Promise<PopupResponse> {
+  try {
+    const store = await ensureCache();
+    const refusal = session?.removalRefusal ?? (await cacheRemovalRefusal(store));
+    if (refusal !== undefined) {
+      return { type: "error", code: refusal };
+    }
+    await lock(ext);
+    store.close();
+    cache = undefined;
+    await deleteCache();
+    await deleteAccountConfig();
+    return { type: "removed" };
+  } catch (e) {
+    return { type: "error", code: errorCode(e, "remove_device_failed") };
   }
 }
 

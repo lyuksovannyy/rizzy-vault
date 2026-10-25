@@ -146,16 +146,15 @@ export class ExtensionCache implements CacheStore {
   }
 }
 
-/** Deletes the whole durable-device cache (ADR 0026 §5 "removal"). Not wired to any caller yet
- * (`core-context.ts` has no reset/purge path today — checked while writing this change, since
- * its doc used to claim otherwise); when one is added, per the open question's recommendation in
- * ADR 0026 — itself unresolved — it should call this only after any unsent own rows have been
- * handled, since this function only removes and does not implement the "upload unsent own ops
- * first" step. **It must also clear `account-config.ts`'s own database** (a separate IndexedDB
- * database, not a store inside this one): leaving the saved server origin behind while this
- * cache is gone would make `get_status` report `enrolled: true` forever with nothing in the
- * cache to unlock — a wedge with no UI escape, since the enrol form only shows up when
- * `enrolled` is `false`. */
+/** Deletes the whole durable-device cache (ADR 0026 §5 "remove this device"). Its one caller is
+ * `core-context.ts`'s `remove_device`, which runs it only after the removal check (the refusal
+ * under alarm 1, 2 or 3, and while unlocked the byte-identical upload of the unsent own rows,
+ * ADR 0095 §D) and the user's confirmation, with every connection to this database closed
+ * first (a delete waits for them). **It must also clear `account-config.ts`'s own database**
+ * (a separate IndexedDB database, not a store inside this one), after this one: leaving the
+ * saved server origin behind while this cache is gone makes `get_status` report
+ * `enrolled: true` with nothing to unlock, from which "Remove this device" (offered on the
+ * locked view) is the way out. */
 export function deleteCache(factory: IDBFactory = globalThis.indexedDB): Promise<void> {
   return new Promise((resolve, reject) => {
     const req = factory.deleteDatabase(CACHE_DATABASE_NAME);

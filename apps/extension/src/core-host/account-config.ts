@@ -117,3 +117,15 @@ export async function readAccountConfig(
     db.close();
   }
 }
+
+/** Deletes the saved server origin and login name ("remove this device", ADR 0026 §5): called
+ * only after the durable-device cache itself is gone (`cache/idb.ts`'s `deleteCache`), so a
+ * failure in between leaves "enrolled" with no cache, from which the popup's "Remove this
+ * device" runs again (no alarm row can remain), never a cache without its configuration. */
+export function deleteAccountConfig(factory: IDBFactory = globalThis.indexedDB): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const req = factory.deleteDatabase(DATABASE_NAME);
+    req.addEventListener("success", () => resolve());
+    req.addEventListener("error", () => reject(new AccountConfigError(`deleting account config: ${String(req.error)}`)));
+  });
+}

@@ -40,11 +40,12 @@ import {
   init,
   newElementId,
   normalizePageUrl,
+  cacheRemovalRefusal,
   unlockDurableDevice,
 } from "@rizzy-vault/core";
 
 export type { CacheStore, Clock, CreatedPasskey, DurableSession, FieldView, ItemChange, ItemSummary, MatchCandidate, MatchFrameInfo, PasskeyAssertionResult, VaultInfo };
-export { MatchMode, PASSKEY_ALG_ES256, cacheStoreNames, decideMatchCandidates, newElementId, normalizePageUrl };
+export { MatchMode, PASSKEY_ALG_ES256, cacheRemovalRefusal, cacheStoreNames, decideMatchCandidates, newElementId, normalizePageUrl };
 
 /** `passkey/<id>/*` field-key parts (`crates/rizzy-core/src/item/schema.rs`'s `LIST_PASSKEY`/
  * `ATTR_*` constants, mirrored here the same way `LOGIN_USERNAME_KEY` etc. already are — see

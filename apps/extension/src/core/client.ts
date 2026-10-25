@@ -46,6 +46,15 @@ export class ClientError extends Error {
 
 /** One call per action (ADR 0036 §4), each throwing {@link ClientError} on an `"error"`
  * response rather than returning a tagged union the UI has to switch on for every call. */
+/** {@link ExtensionClient.removalCheck}'s answer (`messaging/contract.ts`'s `removal_check`). */
+export interface RemovalCheck {
+  readonly unlocked: boolean;
+  readonly refusal?: string;
+  readonly uploaded?: boolean;
+  readonly unsentChanges?: number;
+  readonly unsentSnapshots?: number;
+}
+
 export class ExtensionClient {
   readonly #transport: Transport;
 
@@ -58,18 +67,45 @@ export class ExtensionClient {
     enrolled: boolean;
     serverOrigin?: string;
     recoveryNotice?: PopupRecoveryNotice;
+    alarms?: readonly string[];
   }> {
     const response = await this.#transport({ type: "get_status" });
     if (response.type !== "status") {
       throw this.#unexpected(response);
     }
     const notice = recoveryNotice(response.recoveryNotice);
+    const alarms = Array.isArray(response.alarms) ? response.alarms.filter((a) => typeof a === "string") : [];
     return {
       locked: response.locked,
       enrolled: response.enrolled,
       ...(response.serverOrigin !== undefined ? { serverOrigin: response.serverOrigin } : {}),
       ...(notice !== undefined ? { recoveryNotice: notice } : {}),
+      ...(alarms.length > 0 ? { alarms } : {}),
     };
+  }
+
+  /** "Remove this device", step 1: the refusal under an alarm, or the upload of the unsent own
+   * rows (while unlocked) and what removal would still lose. Deletes nothing. */
+  async removalCheck(): Promise<RemovalCheck> {
+    const response = await this.#transport({ type: "removal_check" });
+    if (response.type !== "removal_check") {
+      throw this.#unexpected(response);
+    }
+    return {
+      unlocked: response.unlocked,
+      ...(response.refusal !== undefined ? { refusal: response.refusal } : {}),
+      ...(response.uploaded !== undefined ? { uploaded: response.uploaded } : {}),
+      ...(response.unsentChanges !== undefined ? { unsentChanges: response.unsentChanges } : {}),
+      ...(response.unsentSnapshots !== undefined ? { unsentSnapshots: response.unsentSnapshots } : {}),
+    };
+  }
+
+  /** "Remove this device", step 2, after the user confirmed: deletes the local data. */
+  async removeDevice(): Promise<void> {
+    const response = await this.#transport({ type: "remove_device" });
+    if (response.type !== "removed") {
+      throw this.#unexpected(response);
+    }
   }
 
   async enrol(input: {
