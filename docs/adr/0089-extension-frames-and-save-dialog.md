@@ -194,8 +194,10 @@ The save dialog gets the inline menu's three gates, with the same functions and 
    unless `event.isTrusted` is true and the latest IOv2 entry for that element is not
    `isVisible === false`. Where IOv2 is absent (Firefox), only `isTrusted` is checked here.
 3. **Gate B, authoritative, after the round trip.** On a `save_dialog_resolve` that passed §2.4 and
-   §3.2, the long-lived context sends `save_dialog_gate { instanceToken }` to frame 0 of that tab and
-   waits for `save_dialog_gate_result { allowed: boolean }`. The content script answers
+   §3.2, the long-lived context has `save_dialog_gate { instanceToken }` sent to frame 0 of that tab
+   (on Chromium the offscreen document routes it through the background service worker, which
+   alone can call `tabs.sendMessage`; on Firefox the background page sends it) and waits for
+   `save_dialog_gate_result { allowed: boolean }`. The 1000 ms below runs from the send. The content script answers
    `allowed: true` only if it holds a live dialog with that `instanceToken` and
    `isFillAllowed(state, now, 1000)` is true. No answer within 1000 ms, or `allowed: false`,
    refuses the resolve with `save_dialog_resolve: not visible` and does **not** take the token, so
