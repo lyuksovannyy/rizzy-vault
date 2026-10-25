@@ -159,6 +159,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0106 | [AGPL §13 source link: `RIZZY_SOURCE_URL`, the `/api/meta` `source_url` member and the "Source" link (supersedes ADR 0028 item 14 and ADR 0048 §1 in part)](0106-agpl-source-url.md) | Proposed | M1 |
 | 0109 | [Sync cursor past a held header: derived, never stored, rewound on lapse (erratum to ADR 0050)](0109-sync-cursor-held-header.md) | Proposed | M1 |
 | 0110 | [Passkey user verification: the `UV` flag reflects a recent master-password verification, and `userVerification: "required"` gets one in the toolbar popup](0110-passkey-user-verification.md) | Proposed | M2 |
+| 0102 | [Native client TLS: who terminates TLS per platform, the TLS 1.3 floor, trust anchors, a private CA through the core, and what the core checks regardless of TLS](0102-native-client-tls.md) | Proposed | M3 |
 
 ## Gates
 
