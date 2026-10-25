@@ -9,51 +9,49 @@
 
 ## Context
 
-**Why this ADR exists.** ADR 0017 and ADR 0019 (both Accepted) defer the licensing of the native-client repositories to an ADR that was never written. The 2026-10-25 ADR gap review flagged this ([summary](../reviews/2026-10-25-adr-gap-review.md), finding M3; raw findings G02-6, G03-1 and G10-27 in [docs/reviews/2026-10-25-raw/](../reviews/2026-10-25-raw/)). M3 native-client work needs it. The owner said "start" on 2026-10-25.
+**Why this ADR exists.** ADR 0017 and ADR 0019 (both Accepted) leave the licensing of the native-client repositories to an ADR that was never written. M3 native-client work needs it. The 2026-10-25 ADR gap review flagged this ([summary](../reviews/2026-10-25-adr-gap-review.md), finding M3; raw findings G02-6, G03-1 and G10-27 in [docs/reviews/2026-10-25-raw/](../reviews/2026-10-25-raw/)), and the owner said "start" the same day.
 
 **What the Accepted ADRs say (V, read in this tree on 2026-10-25).**
 
-- [ADR 0017](0017-licensing.md) (Accepted 2026-09-27; Partially superseded by ADR 0073 (§7 in part)) leaves out "the licensing items [ADR 0019](0019-native-clients.md) §15 lists for the native-client repositories". ADR 0019 §15 lists eleven of them.
+- [ADR 0017](0017-licensing.md) (Accepted 2026-09-27; Partially superseded by ADR 0073 (§7 in part)) leaves out "the licensing items [ADR 0019](0019-native-clients.md) §15 lists for the native-client repositories" (eleven items).
 - ADR 0019 §2 makes the Mac App Store, the Microsoft Store, Qt's LGPLv3 modules on Linux and Google Play wait for this ADR. §15 item 7 needs Swift, NuGet and C++/Qt licence gates from each client's first M3 release. §9's publish-together policy waits for ADR 0017's legal review (U).
-- ADR 0019 §6: client repositories hold no Rust, consume only released core artifacts (§7), get their licence and DCO policy from ADR 0017, and are created when real code goes in. None of the four exists yet (U: not checked on GitHub).
-- ADR 0017 §5 bans third-party LGPL: only that code's holder could grant a store permission, so it would block App Store builds and any later relicensing. Owner decision 6 admits a copyleft exception "only if it is never reachable from an app-store client build".
-- ADR 0017 §3: the store permission must be in place before the first external code contribution is merged; adding it later "needs every code contributor's consent"; a lawyer drafts and reviews it first. It is not committed yet. This rule applies to the client repositories too (G02-6).
+- ADR 0019 §6: client repositories hold no Rust, consume only released core artifacts, take their licence and DCO policy from ADR 0017, and are created when real code goes in. None of the four exists yet (U: not checked on GitHub).
+- ADR 0017 §5 bans third-party LGPL: only its holder could grant a store permission, so it would block App Store builds and later relicensing. Owner decision 6 allows copyleft only "if it is never reachable from an app-store client build".
+- ADR 0017 §3: a lawyer-reviewed store permission must be in place before the first external code contribution is merged; adding it later "needs every code contributor's consent". It is not committed yet. The rule applies to the client repositories too (G02-6).
 
-**The window is still open (V, `git log`, 2026-10-25).** The only commit authors are `lyuksovannyy` (two addresses) and two AI coding agents working for the owner (`Agent <agent@rizzy.dev>`, `Claude <noreply@anthropic.com>`). So the owner can still choose any terms, here and in the client repositories. Whether AI-generated code carries copyright, and for whom, is U; it does not change this.
+**The window is still open (V, `git log`, 2026-10-25).** The only commit authors are `lyuksovannyy` (two addresses) and two AI coding agents working for the owner (`Agent <agent@rizzy.dev>`, `Claude <noreply@anthropic.com>`). So the owner can still choose any terms. Whether AI-generated code carries copyright, and for whom, is U; it does not change this.
 
 **Terms, defined once.**
 
-- **AGPL §7 additional permission:** an extra right the copyright holders add on top of the AGPL. It counts as part of the licence, and any recipient may remove it from their copy (V, [LICENSE](../../LICENSE) §7).
+- **AGPL §7 additional permission:** an extra right the copyright holders add to the AGPL. It counts as part of the licence, and any recipient may remove it from their copy (V, [LICENSE](../../LICENSE)).
 - **System Library:** a part of the operating system's normal packaging that only lets programs use the OS (AGPL §1, V). Its source need not be offered.
 - **Corresponding Source:** the source that must be offered with a build. It excludes System Libraries but includes shared libraries the work is designed to require (AGPL §1, V).
-- **Distribution Platform:** a third-party service, such as an app store, that delivers software under its own extra terms (exact definition: element A1). **Platform Library:** an OS vendor's own SDK library (exact definition: element B1).
-- **DCO:** the Developer Certificate of Origin 1.1. A contributor certifies it with a `Signed-off-by:` trailer on each commit (ADR 0017 Decision 4). Only a human can.
+- **Distribution Platform:** a third-party service, such as an app store, that delivers software under its own extra terms (exact wording: element A1). **Platform Library:** an OS vendor's own SDK library (element B1).
+- **DCO:** the Developer Certificate of Origin 1.1, certified by a `Signed-off-by:` trailer on each commit (ADR 0017 Decision 4). Only a human can certify it.
 - **MSLT:** the Microsoft Software License Terms of the Windows App SDK NuGet package.
 
-**Licence facts this ADR relies on.**
+**Licence facts** (from ADR 0017 Context and ADR 0019 §2, §7 and §15 unless stated):
 
-- AGPL §10 forbids further restrictions; under §12 a program that cannot meet it may not be conveyed at all (V). Apple's App Store rules are such restrictions (the FSF's reading), and the VLC removal of 2011: U.
-- The Mac App Store uses the same Apple agreement and Standard EULA as the iOS App Store: L. Apple accepts a provider's own licence instead: V. Whether an AGPL custom EULA settles §10: U.
-- Microsoft Store policies have no open-source-specific rule: L. Whether a submitter may supply its own licence terms: U.
+- AGPL §10 forbids further restrictions; §12 then says a program that cannot comply "may not" be conveyed "at all" (V). That Apple's App Store rules are such restrictions (the FSF's reading), and the VLC removal of 2011: U.
+- The Mac App Store has the same Apple agreement and Standard EULA as iOS: L. Apple accepts a provider's own licence instead: V. Whether an AGPL custom EULA settles §10: U.
+- Microsoft Store policies have no open-source rule: L. Whether a submitter may supply its own licence terms: U.
 - Google Play's agreement prevails over the developer's EULA: U. F-Droid builds from source: V.
-- The Windows App SDK NuGet package is under the MSLT (its GitHub repository is MIT). The MSLT makes distributors bind end users to terms that protect Microsoft, indemnify Microsoft, and keep the SDK out of source-disclosure licences (V). Whether it is a System Library: U; our working reading is that it is not (U).
-- Qt: modules under LGPLv3, 14 of them GPL-only, including Qml Compiler, Quick Timeline and Virtual Keyboard (V). Its tools are GPLv3 with the Qt exception, and Qt warns that app stores may conflict with LGPL (V). A bundled Qt binary needs Qt's source shipped (L). The exact open-source licence options of the LGPL modules: U.
-- MPL-2.0 (e.g. `uniffi`) lets compiled code ship under other terms (U, our reading). JNA on its Apache-2.0 option: V. Sparkle is MIT: L. The licence of code generated from MPL-2.0 templates: U.
+- The Windows App SDK NuGet package is under the MSLT (its GitHub repository is MIT). The MSLT makes distributors bind end users to terms that protect Microsoft, indemnify Microsoft, and keep the SDK out of source-disclosure licences (V). Whether it is a System Library: U; our working reading is no (U).
+- Qt offers its modules under LGPLv3, except 14 GPL-only ones such as Qml Compiler, Quick Timeline and Virtual Keyboard (V). Its tools are GPLv3 with the Qt exception, and Qt warns that app stores may conflict with LGPL (V). A bundled Qt binary needs Qt's source shipped (L). The exact licence options of the LGPL modules: U.
+- MPL-2.0 (e.g. `uniffi`) lets compiled code ship under other terms: U (our reading). JNA on its Apache-2.0 option: V. Sparkle is MIT: L. The licence of code generated from MPL-2.0 templates: U.
 - How SPDX 3 `AdditionRef-` expressions and scanners handle a custom addition: U.
-- A "linking exception" (a §7 permission to combine with named non-free libraries) is the usual fix for a non-free platform library: L.
-
-Sources for these facts: ADR 0017 Context and ADR 0019 §2, §7 and §15, unless stated.
+- A "linking exception" (a §7 permission to combine with named non-free libraries) is the usual fix for a non-free platform library: L (FSF FAQ).
 
 **Constraints.**
 
-- Every client build is one combined work containing the AGPL core. A client licence cannot remove a store conflict; only every copyright holder's permission can.
-- A permission can be widened later only with every contributor's consent, and any recipient can narrow it. So the scope chosen now is the widest the project will ever have for community code.
-- ADR 0017 owner decision 4: M10 stays all-AGPL; community code is never sold under other terms. This ADR does not protect relicensing.
-- This ADR is not legal advice. Every legal judgement in it is our reading, tagged U or L, and is on the paid review's list (§9).
+- Every client build is one combined work with the AGPL core. A client licence cannot remove a store conflict; only every copyright holder can.
+- A permission can be widened later only with every contributor's consent, and any recipient can narrow it. So what we choose now is the widest it will ever be for community code.
+- ADR 0017 owner decision 4: M10 stays all-AGPL; community code is never sold under other terms. Relicensing is not protected here.
+- This ADR is not legal advice. Each legal judgement is our reading, tagged U or L, and is on the paid review's list (§9).
 
 ## Decision
 
-**In short.** All five repositories (this one and the four native-client ones) use one licence, AGPL-3.0-only, plus one shared file of extra permissions that a lawyer words. Part A lets anyone ship the apps through app stores, as long as each build's exact source is public. Part B lets the apps use the OS vendors' own libraries, such as Microsoft's Windows App SDK. The Linux app may use Qt's LGPLv3 modules, linked dynamically, on strict conditions. Every client uses this repository's DCO sign-off rule and checks, gates its dependencies' licences, ships only through listed channels, and publishes its full source before each release. One paid legal review comes before any outside code is merged and before any store submission. §10 lists what this replaces in ADR 0017; §12 says why.
+**In short.** All five repositories (this one and the four native-client ones) use one licence, AGPL-3.0-only, plus one shared file of extra permissions that a lawyer words. Part A lets anyone ship the apps through app stores, as long as each build's exact source is public. Part B lets the apps use the OS vendors' own libraries, such as Microsoft's Windows App SDK. The Linux app may use Qt's LGPLv3 modules, linked dynamically, on strict conditions. Every client uses this repository's DCO sign-off rule and checks, gates its dependencies' licences, ships only through listed channels, and publishes its full source before each release. One paid legal review checks the text and the open legal questions before any outside code is merged and before any store submission. §10 lists what this replaces in ADR 0017; §12 says why.
 
 ### 1. One licence for every repository
 
@@ -88,8 +86,7 @@ Sources for these facts: ADR 0017 Context and ADR 0019 §2, §7 and §15, unless
 - **B2.** The work's Corresponding Source need not include a Platform Library's source, and the vendor's terms on the Platform Library itself are not further restrictions under AGPL §10 for conveying the combination.
 - **B3.** Part B covers no other non-free code. Each Platform Library in use is listed in `client-allow.toml` as an exception of kind `platform-library` (§5.2), so the set in use is reviewed and visible; the list neither narrows nor widens B1.
 
-**Why both parts are in every repository, the core included.** A store app contains the core's code, so the core's holders must grant Part A. The Windows app combines the core with the Windows App SDK, so the core's holders must grant Part B too. One identical file means no holder grants less than the combined work needs.
-
+Both parts are in every repository, the core included (why: §12).
 
 **Kept from ADR 0017 §3, unchanged:** the permissions spread through inbound = outbound DCO contributions ("How it spreads."); a recipient may remove them, and we do not merge code from a fork that removed them ("Downstream."); a lawyer drafts and reviews the text before it is committed ("Wording.").
 
@@ -110,7 +107,7 @@ Sources for these facts: ADR 0017 Context and ADR 0019 §2, §7 and §15, unless
 - **The check is this repository's `cargo xtask check-signoff`**, run unchanged, never reimplemented (why: §12). Client CI checks out `rizzy-vault` at the commit in its `rizzy-core.pin`, into `$RUNNER_TEMP/rizzy-vault` outside the client tree, and installs that commit's `rust-toolchain.toml`. It runs `cargo xtask check-signoff --repo <client checkout> <base>..<head>` on pull requests, and the squash-commit mode on `main`. No Rust enters the client repository (ADR 0019 §6); the "no Rust" check scans only the client tree.
 - **`--repo <path>` is new** (implementation step 2): it runs the same `git` commands with `-C <path>`. Without it, nothing changes.
 - **Repository settings** (owner action, per client, as ADR 0017 §4): squash default "Pull request title and commit details" (`PR_TITLE`, `COMMIT_MESSAGES`); merge commits and rebase merging off; "Require contributors to sign off on web-based commits" on.
-- **AI agents never sign off.** Each client's `CONTRIBUTING.md` "Sign-off" section, and its agent-instructions file if any, say so: the human who opens the PR adds `Signed-off-by` after review, and AI help is marked with a `Co-Authored-By:` trailer.
+- **AI agents never sign off.** Each client's `CONTRIBUTING.md` "Sign-off" section, and its agent-instructions file if any, say: AI coding agents never add `Signed-off-by`; the human who opens the PR adds it after review; AI assistance is marked with a `Co-Authored-By:` trailer.
 
 #### 3.1 `rizzy-core.pin` (format version 1)
 
@@ -372,7 +369,7 @@ All rejected; reasons in §12 unless given.
 - **A different permission text per repository:** the core's holders must grant everything anyway.
 - **Rely on the System Library exception for the Windows App SDK:** a reading we think is wrong (U).
 - **Drop WinUI 3 for a freely licensed toolkit:** reopens ADR 0019 owner decision 2; kept only as open question 4's fallback.
-- **Ban Qt and use GTK:** reopens ADR 0019 owner decision 2 (Qt over GTK) for no reason (§12).
+- **Ban Qt and use GTK:** reopens ADR 0019 owner decision 2 (Qt over GTK), though ADR 0017 §5's reasons do not apply to the Linux channels (§12).
 - **Reimplement the sign-off and SPDX checks per client:** faster CI, but the copies drift.
 - **A CLA in the client repositories:** contradicts ADR 0017 owner decisions 2 and 4.
 
@@ -383,7 +380,7 @@ All rejected; reasons in §12 unless given.
 3. **Store timing (§6):** Recommended: the Mac App Store not before M7, with iOS (one review, one Apple pipeline; Developer ID covers M3). The Microsoft Store in M3 once R1 and R4 say yes, as it signs submissions and Azure Artifact Signing is restricted (ADR 0019 §2).
 4. **Windows App SDK (§4.4):** accept its MSLT, indemnity and end-user terms included, under Part B? Recommended: yes, if R4 allows; otherwise a new ADR reopens WinUI 3 (ADR 0019 owner decision 2), and nothing ships without a basis.
 5. **Qt (§4.3):** its LGPL-3.0-only modules, Linux client only, on the eight conditions? Recommended: yes; ADR 0017 §5's reasons do not apply there.
-6. **Legal review (§10 entry 14):** one review of Parts A and B and R1–R9, before any external code contribution and any Part A submission? Recommended: yes, as the text cannot be cheaply revised later; it costs more than the budgeted three-document review (amount U).
+6. **Legal review (§10 entry 14, replacing ADR 0017 owner decision 5):** one review of Parts A and B and R1–R9, before any external code contribution and any Part A submission? Recommended: yes, as the text cannot be cheaply revised later; it costs more than the budgeted three-document review (amount U).
 
 ## On acceptance
 
