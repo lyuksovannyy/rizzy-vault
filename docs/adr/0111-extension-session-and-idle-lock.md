@@ -18,6 +18,12 @@ And on [ADR 0110](0110-passkey-user-verification.md), whose lock settings this A
 
 What this redraft does with them: §2.4 applies the rule (Chromium stays MV3; Firefox moves to MV2, because MV3 Firefox lacks a mandatory ability) and closes Open question 1. §3 takes the idle interval, the master toggle and the sleep option from ADR 0110's settings record instead of the code-only `rizzy.auto_lock_minutes` number.
 
+On the order of acceptance, the owner's form answer of 2026-10-25, verbatim:
+
+> "Accept 0110 and 0111 together, and 0111 before 0096: On"
+
+This answers Open questions 2 and 3. ADR 0096's restated item 20 now carries §6 B's "none" text, as Open question 2 asked.
+
 ## Context
 
 The 2026-10-25 gap review ([docs/reviews/2026-10-25-adr-gap-review.md](../reviews/2026-10-25-adr-gap-review.md), item **S5**, "erratum") found two majors in [ADR 0036](0036-browser-extension-architecture-and-key-custody.md) (Accepted). Raw findings: [G04.md](../reviews/2026-10-25-raw/G04.md), G04-13 and G04-14.
@@ -189,7 +195,7 @@ Every step is gated on this ADR being Accepted. Tests use the existing runners (
 1. ADR 0036 Status line: add "[ADR 0111](0111-extension-session-and-idle-lock.md) (§2 first and fourth bullets, §3 "Auto-lock" bullet, Negative first bullet, Risks)". ADR 0013 Status line: add "ADR 0111 (§3 rule 2 in part, §4 in part, Risks in part)". ADR 0019 Status: "Partially superseded by ADR 0111 (§1.4 in part)". Owner's act.
 2. [THREAT_MODEL.md](../THREAT_MODEL.md) INV-63, replaced by: "In the browser extension, unlocked key material (account, vault, item and device private keys, `pw_in`, unlock keys) exists only in memory in the long-lived context of ADR 0036 §2 (the offscreen document on Chromium, the background page on Firefox). The MV3 service worker routes messages and holds no key material (ADR 0036 §2, a MUST). It is never written to `storage.local`, `storage.sync`, `storage.session` or IndexedDB. Only wrapped device state is persisted. A torn-down long-lived context is locked (ADR 0111)." Verified-by column: "Test that inspects every extension storage area after unlock, after a worker restart, after lock and after an offscreen-document teardown; review checklist: the service worker imports no `@rizzy-vault/core`." This also closes G04-15.
 3. THREAT_MODEL §8: add INV-124 (§5) with its final number; §7.2 "Key custody in the extension (M2)" paragraph and the References row on "`chrome.storage` access levels": drop the `storage.session` reliance.
-4. [ADR 0096](0096-binding-secrets-and-kdbx-worker.md) (Proposed) restates rule 2 in full; its item 20 is replaced by §6 B's text before either ADR is accepted (Open question 2).
+4. [ADR 0096](0096-binding-secrets-and-kdbx-worker.md) (Proposed) restates rule 2 in full; its item 20 is replaced by §6 B's text before either ADR is accepted (Open question 2). Done on 2026-10-25: ADR 0096's item 20 now carries that text.
 5. CLAUDE.md's Accepted list and the [ADR index](README.md) row, by the owner.
 6. [CRYPTO.md](../CRYPTO.md): no change (it does not mention `storage.session` or idle lock; V, grep 2026-10-25).
 7. Together with [ADR 0110](0110-passkey-user-verification.md) (Open question 3): its On-acceptance edits (ADR 0036's owner-answers paragraph, THREAT_MODEL A5b, CRYPTO.md §11.4) are made in the same docs change.
@@ -228,8 +234,8 @@ Every step is gated on this ADR being Accepted. Tests use the existing runners (
 ## Open questions for the owner
 
 1. **Firefox manifest version.** *Closed by the owner's answer of 2026-10-25* ("prefer latest Manifest V3, but if V2 has mandatory abilities that V3 does not - stick to V2 as you recommended"). Applied in §2.4: Chromium MV3 (offscreen document), Firefox MV2 (persistent background page), because Firefox MV3 has no context that can hold the keys for the user's idle time.
-2. **Order with ADR 0096.** ADR 0096 (Proposed) restates ADR 0013 §3 rule 2 with the `storage.session` entry as item 20. Recommendation: accept this ADR first, or together, and drop item 20 from ADR 0096 (replace it with §6 B's "none" text) before accepting ADR 0096.
-3. **Accept together with ADR 0110.** §3 and §6 D refer to ADR 0110's settings record, and ADR 0110 §4.1 relies on §1 here (no keys in any extension storage). *Recommendation:* accept both the same day; either one alone leaves a cross-reference to a Proposed ADR.
+2. **Order with ADR 0096.** *Answered (2026-10-25):* accept ADR 0110 and ADR 0111 together, and ADR 0111 before ADR 0096. ADR 0096's item 20 now carries §6 B's "none" text. ADR 0096 (Proposed) restates ADR 0013 §3 rule 2 with the `storage.session` entry as item 20. Recommendation: accept this ADR first, or together, and drop item 20 from ADR 0096 (replace it with §6 B's "none" text) before accepting ADR 0096.
+3. **Accept together with ADR 0110.** *Answered (2026-10-25):* accept ADR 0110 and ADR 0111 together, and ADR 0111 before ADR 0096. §3 and §6 D refer to ADR 0110's settings record, and ADR 0110 §4.1 relies on §1 here (no keys in any extension storage). *Recommendation:* accept both the same day; either one alone leaves a cross-reference to a Proposed ADR.
 
 ## References
 
