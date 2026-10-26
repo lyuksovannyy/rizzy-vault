@@ -15,6 +15,20 @@ The owner, on this ADR, verbatim:
 
 What this redraft does with it: §1–§4 are new (the settings, the dialog, the storage, what each client can honour). The passkey part (§5–§10) now uses the lock settings as the freshness bound for `UV` instead of a fixed 2-minute window. The 2-minute decision is removed; a short re-verification window survives only for the case where the user has weakened locking (§6). On ADR 0111 the owner said: "prefer latest Manifest V3, but if V2 has mandatory abilities that V3 does not - stick to V2 as you recommended". ADR 0111 applies that rule; §4 here relies on its outcome.
 
+The owner then answered this ADR's open questions on 2026-10-25 (form answers, verbatim):
+
+> "Passkey sign-ins count as verified while unlocked when the idle lock is at most…: 5 minutes"
+>
+> "Site prefers (doesn't require) verification and it isn't fresh: Sign without the verified flag, no prompt (recommended)"
+>
+> "\"Lock on restart\" until a key-storage ADR exists: Shown on and greyed out (recommended)"
+>
+> "Screen lock counts under the sleep option (no fifth switch): On"
+>
+> "Accept 0110 and 0111 together, and 0111 before 0096: On"
+
+What changed with them: the bounding threshold `UV_POLICY_MAX_IDLE_MINUTES` is 5 minutes (1, 2 or 5), not the 15 this draft recommended (§6, §9, §10). The other answers are the draft's recommendations, which §4.1, §4.3 and §6 already carried. "Open questions for the owner" keeps each question, marked Answered.
+
 ## Context
 
 ### Locking today (V unless marked)
@@ -73,7 +87,7 @@ The code does exactly that: `crates/rizzy-client/src/passkey/wire.rs` writes `FL
 > The owner accepted this ADR with the recommendations of "Open questions for the owner": the device kind is 2 (§1); the Chromium offscreen document uses reason `WORKERS`, and the justification string the Chrome Web Store accepts is recorded with the M2 code. Auto-lock is user-configurable, with the settings and defaults of [ADR 0110](0110-passkey-user-verification.md) §1 (lock after 5 minutes idle by default; owner answer of 2026-10-25).
 
 Not superseded, and why:
-- **ADR 0036 §3, "Auto-lock" bullet.** [ADR 0111](0111-extension-session-and-idle-lock.md) §6 D replaces it in full, and its replacement text defers to this ADR's §1 for the settings. Replacing it here as well would give one part two replacements. Open question 4 asks the owner to accept the two ADRs together.
+- **ADR 0036 §3, "Auto-lock" bullet.** [ADR 0111](0111-extension-session-and-idle-lock.md) §6 D replaces it in full, and its replacement text defers to this ADR's §1 for the settings. Replacing it here as well would give one part two replacements. The owner answered Open question 4: the two ADRs are accepted together.
 - **The web vault's lock.** No ADR holds it (Context), so there is nothing to supersede. On acceptance, CRYPTO.md §11.4's "Storage" bullet is amended to name the settings record (On acceptance, item 4). That is a fix to a doc's mechanism, not a change of goal.
 - [ADR 0057](0057-device-state-v2-keystore.md), [ADR 0013](0013-shared-client-core.md), INV-40, INV-63 and INV-64 do not change.
 
@@ -137,7 +151,7 @@ Keeping a vault unlocked across a restart means key material outlives the proces
 - extension and web vault: "This browser cannot keep the vault unlocked after a restart."
 - native: "This app cannot keep the vault unlocked after it restarts."
 
-Its stored value is always written as `true`. A client may make the option editable only after an Accepted ADR defines key storage that survives a restart (Open question 3). For the web vault, a page reload counts as a restart.
+Its stored value is always written as `true`. A client may make the option editable only after an Accepted ADR defines key storage that survives a restart (Open question 3, answered: shown on and greyed out). For the web vault, a page reload counts as a restart.
 
 #### 4.2 Lock when the computer sleeps or hibernates
 
@@ -160,8 +174,8 @@ Its stored value is always written as `true`. A client may make the option edita
 
 ### 6. `UV` under the lock settings
 
-1. **The lock policy is the freshness bound.** While the vault is unlocked and the policy is **bounding**, the unlock counts as user verification: every ceremony is signed with `UV=1`, whatever the request's requirement. The policy is bounding if and only if automatic locking is on **and** `idle_minutes ≤ UV_POLICY_MAX_IDLE_MINUTES = 15` (Open question 1), and the session's last unlock was by master password (point 4). The vault is then unlocked only if someone typed the master password, and gave input within the last N ≤ 15 minutes. That is the meaning this ADR gives `UV`.
-2. **Not bounding** (locking off, or 30, 60 or 240 minutes): the unlock alone is not user verification. A recent master-password verification is: `verified_at` (point 4), fresh within `UV_FRESH_MS = 300 000` (5 minutes, the default idle time and [ADR 0034](0034-export-reauth-and-plaintext-hold.md)'s `REAUTH_WINDOW_MS`).
+1. **The lock policy is the freshness bound.** While the vault is unlocked and the policy is **bounding**, the unlock counts as user verification: every ceremony is signed with `UV=1`, whatever the request's requirement. The policy is bounding if and only if automatic locking is on **and** `idle_minutes ≤ UV_POLICY_MAX_IDLE_MINUTES = 5` (1, 2 or 5 minutes; the owner's answer to Open question 1), and the session's last unlock was by master password (point 4). The vault is then unlocked only if someone typed the master password, and gave input within the last N ≤ 5 minutes. That is the meaning this ADR gives `UV`.
+2. **Not bounding** (locking off, or 10, 15, 30, 60 or 240 minutes): the unlock alone is not user verification. A recent master-password verification is: `verified_at` (point 4), fresh within `UV_FRESH_MS = 300 000` (5 minutes, the default idle time and [ADR 0034](0034-export-reauth-and-plaintext-hold.md)'s `REAUTH_WINDOW_MS`).
 3. **The sleep and restart options do not enter the rule.** A restart always locks (§4.1). With sleep detection off, a sleep longer than N still passes the idle deadline (§4.3), so the bound holds.
 4. **`verified_at: Option<u64>`** (milliseconds since the Unix epoch, host clock) is held in the unlocked core session of the long-lived context and nowhere else; it is never written to any storage area. Lock, auto-lock and the end of the context drop it with the session. It is set to `now` by two events only: a successful unlock **with the master password** (the local unlock of [CRYPTO.md §11.3](../CRYPTO.md#113-unlock-on-an-enrolled-device), `StoredDevice::unlock(password)`, or the master-password OPAQUE login at enrolment), and a successful re-verification (§7). Nothing else sets it: not the device-key online authentication, not a keystore-gated unlock (`unlock_keystore`, until an Accepted ADR states that the keystore's gate verifies the user and amends this list), not a recovery-code flow. A session unlocked by any of those is never bounding either. `verified_at` is fresh at `now` if and only if it is `Some(t)` and `0 ≤ now − t ≤ UV_FRESH_MS`; a clock that went back is not fresh (ADR 0034 point 2).
 5. **Decided at signing time, in Rust.** `passkey_assertion` and `create_passkey` gain three arguments: the requirement, `now_ms`, and the current lock settings (the parsed record of §3 as the host holds it at that moment). The rule is one function in `rizzy-client`. No earlier evaluation (at request time, at the consent click) is used.
@@ -172,7 +186,7 @@ Its stored value is always written as `true`. A client may make the option edita
 | not bounding | Required | yes | Sign. `UV=1`. |
 | not bounding | Required | no | Do not sign. The call returns `UvRequired` (§7 starts the re-verification). Never `UV=0`. |
 | not bounding | Preferred | yes | Sign. `UV=1`. |
-| not bounding | Preferred | no | Sign. `UV=0`. No prompt (Open question 2). |
+| not bounding | Preferred | no | Sign. `UV=0`. No prompt (Open question 2, answered). |
 | not bounding | Discouraged | yes / no | Sign. `UV=1` / `UV=0`. No prompt. |
 
 The flags byte is exactly one of:
@@ -182,9 +196,9 @@ The flags byte is exactly one of:
 | Assertion (`UP`, `BE`, `BS`; never `AT`, never `ED`) | `0x1D` | `0x19` |
 | Registration (`UP`, `BE`, `BS`, `AT`; never `ED`) | `0x5D` | `0x59` |
 
-`UP` is always 1 (the gesture). `BE`/`BS` and the zero signature counter of ADR 0039 §2 do not change. Under the default settings (on, 5 minutes) every ceremony gets `UV=1` and nobody is prompted. That is today's behaviour, now bounded by a 5-minute idle lock instead of 15.
+`UP` is always 1 (the gesture). `BE`/`BS` and the zero signature counter of ADR 0039 §2 do not change. Under the default settings (on, 5 minutes) every ceremony gets `UV=1` and nobody is prompted. That is today's behaviour, now bounded by a 5-minute idle lock instead of 15. The default of 5 minutes is the largest bounding value, so the default settings are bounding.
 
-6. **Weakening never buys `UV`.** Turning locking off or raising N above 15 makes the policy not bounding, which can only lower `UV` or add a prompt. Making it bounding again (locking on, or N ≤ 15) re-checks the idle deadline at once (§1 points 3 and 5), so a vault idle for longer than the new N locks before it can sign as bounding.
+6. **Weakening never buys `UV`.** Turning locking off or raising N above 5 makes the policy not bounding, which can only lower `UV` or add a prompt. Making it bounding again (locking on, or N ≤ 5) re-checks the idle deadline at once (§1 points 3 and 5), so a vault idle for longer than the new N locks before it can sign as bounding.
 
 ### 7. Re-verification for "required" in the toolbar popup
 
@@ -214,7 +228,7 @@ The master password is entered only in the toolbar popup, the surface unlock alr
 
 ### 9. Invariants (provisional numbers)
 
-> **INV-123.** A passkey provider sets `UV` in `authenticatorData` only when (a) the vault was unlocked with the master password and its lock settings are bounding (automatic locking on, idle time at most `UV_POLICY_MAX_IDLE_MINUTES`) at signing, or (b) a master-password verification (a password unlock or a re-verification in the toolbar popup) succeeded in the same unlocked session no more than `UV_FRESH_MS` before signing, by the host clock, a clock that went back counting as not fresh. A request with `userVerification: "required"` is never answered with `UV=0`: it is either verified or not signed. The master password for re-verification is entered only in the toolbar popup. *Milestone:* M2. *Verified by:* Rust unit tests of §6's table and its boundaries (15 minutes bounding, 30 not, locking off not; `UV_FRESH_MS` fresh, one millisecond more stale, clock back stale; a keystore-unlocked session not bounding); extension unit tests that a non-popup sender cannot submit a verification and that five wrong passwords decline; the e2e of the Implementation plan, step 6.
+> **INV-123.** A passkey provider sets `UV` in `authenticatorData` only when (a) the vault was unlocked with the master password and its lock settings are bounding (automatic locking on, idle time at most `UV_POLICY_MAX_IDLE_MINUTES`, 5 minutes) at signing, or (b) a master-password verification (a password unlock or a re-verification in the toolbar popup) succeeded in the same unlocked session no more than `UV_FRESH_MS` before signing, by the host clock, a clock that went back counting as not fresh. A request with `userVerification: "required"` is never answered with `UV=0`: it is either verified or not signed. The master password for re-verification is entered only in the toolbar popup. *Milestone:* M2. *Verified by:* Rust unit tests of §6's table and its boundaries (5 minutes bounding, 10 not, locking off not; `UV_FRESH_MS` fresh, one millisecond more stale, clock back stale; a keystore-unlocked session not bounding); extension unit tests that a non-popup sender cannot submit a verification and that five wrong passwords decline; the e2e of the Implementation plan, step 6.
 
 > **INV-127** (number assigned at acceptance). Every client applies the lock settings of ADR 0110 §1 from one per-device record. A missing, oversized, malformed or unknown-version record means the defaults (locking on, 5 minutes, restart on, sleep on). The settings UI turns locking off only through the delayed-confirm dialog of §2. No client keeps a vault unlocked across a restart. *Milestone:* M2 (web vault, extension), M3 (macOS). *Verified by:* the `lock_settings` parser tests and fuzz target; the dialog and dimmed-state e2e; the restart e2e (Implementation plan, steps 1, 5).
 
@@ -222,7 +236,7 @@ Mobile providers (M7) are out of scope. There the OS's own per-ceremony verifica
 
 ### 10. Accepted residuals (new THREAT_MODEL AR rows, numbers next free at acceptance)
 
-> **Passkey user verification by the lock policy.** With the default settings the extension sets `UV=1` for any ceremony while the vault is unlocked, without asking again. Someone at the unlocked browser within the idle time (at most 15 minutes when the policy is bounding) gets `UV=1` assertions, including for `userVerification: "required"`, with one click. With locking weakened, an unattended unlocked browser yields `UP=1, UV=0` for `"preferred"` and `"discouraged"`, and an RP that accepts a passkey without `UV` as a full login is exposed for as long as the vault stays unlocked, as with a filled password (NG-1). A page-opened window can imitate the re-verification prompt; the toolbar popup, anchored to the browser's own toolbar, is the defence, as for unlock. Accepted because the owner chose the lock policy as the bound, and a prompt on every ceremony would make passkeys slower than the password they replace.
+> **Passkey user verification by the lock policy.** With the default settings the extension sets `UV=1` for any ceremony while the vault is unlocked, without asking again. Someone at the unlocked browser within the idle time (at most 5 minutes when the policy is bounding) gets `UV=1` assertions, including for `userVerification: "required"`, with one click. With locking weakened, an unattended unlocked browser yields `UP=1, UV=0` for `"preferred"` and `"discouraged"`, and an RP that accepts a passkey without `UV` as a full login is exposed for as long as the vault stays unlocked, as with a filled password (NG-1). A page-opened window can imitate the re-verification prompt; the toolbar popup, anchored to the browser's own toolbar, is the defence, as for unlock. Accepted because the owner chose the lock policy as the bound, and a prompt on every ceremony would make passkeys slower than the password they replace.
 
 > **Locking can be turned off, and the settings sit in unprotected local storage.** A user may disable automatic locking after the 5-second warning; the vault then stays unlocked until it is closed. The record is plain `localStorage`, `storage.local` or app preferences: server-served web vault code, a script with access to the extension's `storage.local` (content scripts can use `storage.local`, L) or local malware can rewrite it, to "off" included, without the dialog. Mitigations: a broken record means the defaults; weakening never yields more `UV` (§6 point 6); NG-1 already concedes an attacker with that access. Sleep detection misses sleeps under 2 minutes and may lock on a clock jump.
 
@@ -230,11 +244,13 @@ Mobile providers (M7) are out of scope. There the OS's own per-ceremony verifica
 
 **Positive**
 - One lock model on every client, with the owner's defaults (5 minutes; restart and sleep on), and an honest UI where a platform cannot honour an option.
-- `UV=1` now means "this vault would have locked after at most 15 idle minutes" or "the master password was typed within 5 minutes". G04-20 closes with a mitigation, a residual and tests. The flags stay honest for `"preferred"` and `"discouraged"`.
+- **The default is bounding.** Locking on with 5 idle minutes meets §6's rule (N ≤ 5), so a user on the default settings who unlocked with the master password is never prompted again for a passkey: every ceremony gets `UV=1`, `"required"` included.
+- `UV=1` now means "this vault would have locked after at most 5 idle minutes" or "the master password was typed within 5 minutes". G04-20 closes with a mitigation, a residual and tests. The flags stay honest for `"preferred"` and `"discouraged"`.
 - Client-side only: no server, wire or server-storage change, no new crypto, no new secret. The re-verification reuses the local unlock primitive (one Argon2id run per attempt, which also rate-limits guessing). INV-40 is kept.
 
 **Negative**
 - The default drops from 15 to 5 minutes, so users unlock more often.
+- A user who chooses 10 or 15 minutes, the previous default, is not bounding: `"required"` asks for the master password in the toolbar popup when no verification is under 5 minutes old, and `"preferred"` gets `UV=0`. This includes an extension user whose stored `rizzy.auto_lock_minutes` migrates to 10 or 15 (§3), for example a saved 15, the code's previous default.
 - "Lock after restart" is a control nobody can change yet (§4.1). It is shown so that the model is the same on every client, and so that the user sees why.
 - Sleep detection is a heuristic; sleeps under 2 minutes go unnoticed (the idle time still bounds them).
 - More client state: a settings record with a parser and a fuzz target, a dialog, one ceremony state (`awaiting_verification`), two popup messages, six reply codes, a badge.
@@ -247,6 +263,7 @@ Mobile providers (M7) are out of scope. There the OS's own per-ceremony verifica
 ## Alternatives considered
 
 - **A fixed 2-minute `UV` window after the last master-password entry** (this ADR's first draft). Replaced at the owner's direction: the lock policy is the bound. A 5-minute window survives only for weakened locking (§6 point 2).
+- **Bounding up to 15 idle minutes** (1, 2, 5, 10, 15; the previous Accepted default, and this draft's recommendation). Not chosen: the owner's answer of 2026-10-25 sets the bound at 5 minutes. With 10 or 15, someone at an unattended unlocked browser would get `UV=1` for up to 15 minutes after the last input.
 - **Keep `UV=1` from the unlock in every case.** Not chosen: with locking off, `"required"` would mean "unlocked at some point since the browser started".
 - **Sync the lock settings through the encrypted account settings** (as the identity-generator defaults are synced, `ACCOUNT_SETTINGS`). Rejected: a vault-format change, which the owner ruled out, for a policy that is per device (§3 point 1).
 - **Hide the sub-options when locking is off, or hide the restart option where it cannot work.** Rejected: the owner asked for dimmed and disabled controls, and a hidden control explains nothing.
@@ -259,27 +276,29 @@ Mobile providers (M7) are out of scope. There the OS's own per-ceremony verifica
 
 ## Open questions for the owner
 
-1. **Which idle times count as "bounding" for `UV`?** *Recommendation:* **at most 15 minutes** (1, 2, 5, 10, 15), the previous Accepted default. With 30, 60, 240 or locking off, `"required"` asks for the master password in the toolbar popup (§7) and a verification counts for 5 minutes. Alternatives: bounding only at 5 minutes or less; or never bounding, so that `"required"` always asks unless a verification is under 5 minutes old.
-2. **What does `"preferred"` get when the policy is not bounding and no fresh verification exists?** *Recommendation:* **`UV=0`, no prompt** (§6). `"preferred"` is the WebAuthn default, so a prompt would ask on most sign-ins of a user who weakened locking.
-3. **Lock after restart.** *Recommendation:* **shown on and disabled on every client**, with the explanatory line (§4.1), until an Accepted key-storage ADR exists. The only plausible route is a native-only ADR (an OS-keystore item opened at app start without a user gesture). Not recommended now: it would turn every restart into an unlock without the user.
-4. **Accept together with ADR 0111.** *Recommendation:* **yes, the same day.** ADR 0111 §6 D replaces ADR 0036 §3's Auto-lock bullet with text that refers to this ADR, and this ADR relies on ADR 0111's "no keys in extension storage" for §4.1. Either one accepted alone leaves a cross-reference to a Proposed ADR.
-5. **Screen lock under the sleep option.** *Recommendation:* **yes:** a `"locked"` state locks when "Lock when the computer sleeps or hibernates" is on. Many OSes lock the screen on sleep, and the vault cannot tell the two apart. Alternative: a fifth switch, "Lock when the screen locks".
+All five were answered by the owner on 2026-10-25 (Owner answers, above). They stay listed for the record. No open question remains.
+
+1. **Which idle times count as "bounding" for `UV`?** *Answered:* **at most 5 minutes** (1, 2, 5), the owner's choice; 10, 15, 30, 60, 240 and locking off are not bounding (§6). *Recommendation in the draft:* at most 15 minutes (1, 2, 5, 10, 15), the previous Accepted default. With 30, 60, 240 or locking off, `"required"` asks for the master password in the toolbar popup (§7) and a verification counts for 5 minutes. Alternatives: bounding only at 5 minutes or less; or never bounding, so that `"required"` always asks unless a verification is under 5 minutes old.
+2. **What does `"preferred"` get when the policy is not bounding and no fresh verification exists?** *Answered:* sign without the verified flag, no prompt (the recommendation). *Recommendation:* **`UV=0`, no prompt** (§6). `"preferred"` is the WebAuthn default, so a prompt would ask on most sign-ins of a user who weakened locking.
+3. **Lock after restart.** *Answered:* shown on and greyed out (the recommendation). *Recommendation:* **shown on and disabled on every client**, with the explanatory line (§4.1), until an Accepted key-storage ADR exists. The only plausible route is a native-only ADR (an OS-keystore item opened at app start without a user gesture). Not recommended now: it would turn every restart into an unlock without the user.
+4. **Accept together with ADR 0111.** *Answered:* yes, accept ADR 0110 and ADR 0111 together, and ADR 0111 before ADR 0096. *Recommendation:* **yes, the same day.** ADR 0111 §6 D replaces ADR 0036 §3's Auto-lock bullet with text that refers to this ADR, and this ADR relies on ADR 0111's "no keys in extension storage" for §4.1. Either one accepted alone leaves a cross-reference to a Proposed ADR.
+5. **Screen lock under the sleep option.** *Answered:* yes, screen lock counts under the sleep option; no fifth switch (the recommendation). *Recommendation:* **yes:** a `"locked"` state locks when "Lock when the computer sleeps or hibernates" is on. Many OSes lock the screen on sleep, and the vault cannot tell the two apart. Alternative: a fifth switch, "Lock when the screen locks".
 
 ## On acceptance
 
 Not made now. The owner's acceptance triggers them, in one docs change:
 1. [ADR 0039](0039-passkeys-vault-and-extension.md) Status line: "Partially superseded by ADR 0110 (§2, "User verification and presence")". [ADR 0036](0036-browser-extension-architecture-and-key-custody.md) Status line: add "ADR 0110 ("Owner answers at acceptance", in full)". Set by the owner (ADR 0020 points 3, 4, 9).
-2. [THREAT_MODEL](../THREAT_MODEL.md) "Passkey provider (M2; ADR 0039)": add a sixth mitigation bullet: "`UV` is set only while the lock settings bound the unlocked time to at most 15 idle minutes, or within `UV_FRESH_MS` of a master-password verification; otherwise `userVerification: "required"` is re-verified in the toolbar popup or not signed ([INV-123](#8-security-invariants), [ADR 0110](adr/0110-passkey-user-verification.md))." A5b "What we do": "Auto-lock after 5 minutes idle by default; lock on OS lock and sleep where detected (ADR 0110). The user may turn locking off after a delayed warning."
+2. [THREAT_MODEL](../THREAT_MODEL.md) "Passkey provider (M2; ADR 0039)": add a sixth mitigation bullet: "`UV` is set only while the lock settings bound the unlocked time to at most 5 idle minutes, or within `UV_FRESH_MS` of a master-password verification; otherwise `userVerification: "required"` is re-verified in the toolbar popup or not signed ([INV-123](#8-security-invariants), [ADR 0110](adr/0110-passkey-user-verification.md))." A5b "What we do": "Auto-lock after 5 minutes idle by default; lock on OS lock and sleep where detected (ADR 0110). The user may turn locking off after a delayed warning."
 3. THREAT_MODEL §8: add INV-123 and INV-127 (§9) with their final numbers; add "; the `UV` cases of INV-123" to INV-64's "Verified by". §9: add the two residuals of §10.
 4. [CRYPTO.md §11.4](../CRYPTO.md#114-web-vault), "Storage": "… The other values kept in browser storage are the non-secret theme choice and the non-secret lock settings record of ADR 0110 §3. They reveal nothing about the vault."
 5. [docs/adr/README.md](README.md): the row's status column; the CLAUDE.md status list (the lead's change).
-6. The answers to the open questions, recorded here as owner answers, with `UV_POLICY_MAX_IDLE_MINUTES`, `UV_FRESH_MS` and §6's table adjusted if the answers differ.
+6. The answers to the open questions are already recorded (Owner answers, 2026-10-25), and §6 carries them: `UV_POLICY_MAX_IDLE_MINUTES = 5`, `UV_FRESH_MS = 300 000` unchanged. Nothing is left to adjust unless the owner changes an answer at acceptance.
 
 ## Implementation plan
 
 Only after acceptance. Tests use the existing runners (Rust unit tests, `vitest`, Playwright in `apps/web/e2e` and `apps/extension/e2e`, and the existing axe helpers in `e2e/a11y.ts`). No new dependency.
 1. **`rizzy-client`, `lock_settings.rs`.** The record type, `parse` (§3 rules), `encode`, `is_bounding` and the `IDLE_MINUTES` list. Tests: the default record round-trips byte for byte; each broken case gives the defaults (257 bytes, `v: 2`, `idle_minutes: 3`, `"auto_lock": "no"`, a missing field, an array, invalid UTF-8); `lock_on_restart: false` reads as `true`; an unknown field is ignored. Fuzz target `client_lock_settings`.
-2. **`rizzy-client` passkey code (`passkey/wire.rs`, `passkey.rs`).** `authenticator_data_*` take a `UserVerified` flag instead of hard-coding `FLAG_UV`; a `UvRequirement` parser (§5); the §6 decision function. Tests: flag bytes `0x1D`/`0x19`/`0x5D`/`0x59`; §6's table as a table test; bounding at 15, not at 30 or with locking off; freshness at `t` and `t + UV_FRESH_MS` (fresh), `t + UV_FRESH_MS + 1` and `t − 1` (stale), `None` (stale); a keystore-unlocked session is not bounding; parser cases `"required"`, `"discouraged"`, `"preferred"`, `"REQUIRED"` (→ Preferred), absent.
+2. **`rizzy-client` passkey code (`passkey/wire.rs`, `passkey.rs`).** `authenticator_data_*` take a `UserVerified` flag instead of hard-coding `FLAG_UV`; a `UvRequirement` parser (§5); the §6 decision function. Tests: flag bytes `0x1D`/`0x19`/`0x5D`/`0x59`; §6's table as a table test; bounding at 1, 2 and 5, not at 10, 15, 30, 60 or 240 or with locking off; freshness at `t` and `t + UV_FRESH_MS` (fresh), `t + UV_FRESH_MS + 1` and `t − 1` (stale), `None` (stale); a keystore-unlocked session is not bounding; parser cases `"required"`, `"discouraged"`, `"preferred"`, `"REQUIRED"` (→ Preferred), absent.
 3. **Lock controllers** (web vault, next to `autolock.ts`; extension long-lived context, ADR 0111 §3). Unit tests with an injected clock: the idle deadline fires by the monotonic and by the wall clock; a 120 s wall-clock jump locks with sleep on and not with sleep off; a 119 s jump and a backward jump do not lock; with the master toggle off no trigger locks; a settings change re-checks the deadline at once; the extension migration of `rizzy.auto_lock_minutes` (3 → 2, 180 → 60, 0 → 1, absent → defaults).
 4. **Settings UI** (the web vault's Settings view and the extension's options page, one shared component in `packages/ui`). Unit tests: the dimmed state sets `aria-disabled` and ignores activation; the restart switch is on and disabled, with its line; with fake timers, Confirm ignores click, Enter and Space before 5 000 ms and works at 5 000 ms; Cancel works at 0 ms.
 5. **E2E: dialog timing and dimmed state** (web vault and extension). Open the dialog: Confirm is `aria-disabled`, and a click at 4.5 s changes nothing; the label counts down; the live region's two messages appear; at 5 s or later Confirm turns locking off, and the three sub-options become `aria-disabled="true"` while staying visible and focusable. Turning locking on again shows no dialog and restores the kept values. Escape and Cancel at 0 s leave locking on. Reopening restarts the countdown at 5. Restart: unlock, then reload (web vault) or close the offscreen document (extension, ADR 0111 §7 step 2): the vault is locked. Idle: with `idle_minutes: 1` and no input, the vault locks after one minute plus one tick.
