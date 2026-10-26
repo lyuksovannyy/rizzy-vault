@@ -5,7 +5,7 @@
 - Deciders: project owner
 - Milestone: M3 (must be Accepted before the first commit to any client repository; the legal review of ADR 0017 owner decision 5, as replaced by §10, before the first external code contribution to any repository and before the first submission to a channel of §6 that needs Part A)
 
-**Owner note (2026-10-25).** The owner wrote "0101: re-phase". This version reads it as "rephrase": the same decisions in plainer words. The lead asked the owner to confirm, in case he meant "reschedule to a later phase" instead.
+**Owner note (2026-10-25).** The owner wrote "0101: re-phase". This version reads it as "rephrase": the same decisions in plainer words. The owner confirmed "rephrase" on 2026-10-25: "0101 \"re-phase\" meant: Rephrase (done)".
 
 ## Context
 
