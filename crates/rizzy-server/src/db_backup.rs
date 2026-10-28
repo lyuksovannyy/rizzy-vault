@@ -26,9 +26,10 @@
 //! - The header is [`HEADER_LEN`] = 64 bytes. `backup_id` is 16 fresh random bytes per run.
 //! - `plaintext_len` is the exact length of the format version 1 file; `chunk_count =
 //!   ceil(plaintext_len / CHUNK_LEN)`. Chunk *i* holds bytes `[i × CHUNK_LEN, (i + 1) ×
-//!   CHUNK_LEN)` of it, the last chunk the shorter rest. Opening every chunk in order and
-//!   concatenating them gives the format version 1 file byte for byte (the truncation to
-//!   `plaintext_len` of §9.8 removes nothing, since no chunk carries padding).
+//!   CHUNK_LEN)` of it, the last chunk the shorter rest. Opening every chunk in order, each
+//!   at the exact envelope length [`parse_header`]/[`open`] derive from `plaintext_len`, and
+//!   concatenating them gives the format version 1 file byte for byte; the concatenation is
+//!   exactly `plaintext_len` bytes and there is no truncation step (ADR 0083).
 //! - No outer digest: the per-chunk AEAD tags cover every byte (ADR 0071 "Size").
 //!
 //! # What binds what
@@ -38,15 +39,13 @@
 //!   an edited clear `chunk_count`, or a chunk spliced in from another backup (another
 //!   `backup_id`) fails the commitment of a chunk the reader opens. An edited `backup_id`,
 //!   `created_at_ms` or `backup_key_id` fails it too, or names a key the secrets file lacks.
-//! - **`plaintext_len` is in no AAD.** ADR 0071 says an edit to it "fails every surviving
-//!   chunk's commitment check"; for the construction as written it does not, since the
-//!   commitment covers only the key, the nonce and the AAD. What refuses such an edit here is
-//!   the framing: the reader derives every chunk's exact length from `plaintext_len` and
-//!   requires the file to end exactly after the last chunk, so an edit that keeps
-//!   `chunk_count` consistent either misframes the file (refused before any crypto) or, with
-//!   the last chunk cut to fit, fails that chunk's Poly1305 tag. The format version 1 digest
-//!   behind it would also catch a shortened payload. Whether `plaintext_len` should be bound
-//!   in the ctx is a construction question for the owner, not answered here.
+//! - **`plaintext_len` is in no AAD.** No commitment binds it: the 0x01 commitment covers
+//!   only the key, the nonce and the AAD, and `plaintext_len` is in no chunk's ctx. What
+//!   refuses such an edit here is the framing (ADR 0083): the reader derives every chunk's
+//!   exact length from `plaintext_len` and requires the file to end exactly after the last
+//!   chunk, so an edit that keeps `chunk_count` consistent either misframes the file (refused
+//!   before any crypto) or, with the last chunk cut to fit, fails that chunk's Poly1305 tag.
+//!   The format version 1 digest behind it would also catch a shortened payload.
 //!
 //! # Reading (strict, canonical)
 //!
