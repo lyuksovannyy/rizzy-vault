@@ -2392,6 +2392,55 @@ fn forget_uploads_unsent_edits_first_and_is_refused_under_an_alarm() {
     assert_eq!(a.items().len(), 1);
 }
 
+/// ADR 0026 §5 and the owner's decision on open question 5 (ADR 0095 §2 part A, §6 item 2):
+/// an alarm row whose key byte is one `rv` does not know (here `[9]`) makes `device forget`
+/// refuse, as the conservative reading of the owner's decision — deleting evidence is not
+/// undone, so a newer `rv` must handle it. The refusal stands with and without the password,
+/// and the file stays.
+#[test]
+fn an_unknown_alarm_blocks_forget() {
+    use rizzy_client::store::rows::{Changeset, ObjectRow, Write, kind};
+
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("ua");
+    let (_sk, _) = sign_up(&a, &origin, "alice");
+    create_note(&a, "Kept");
+
+    // An alarm row with an unknown key byte, written directly to the cache.
+    let file = cache_file(&a);
+    a.runtime.block_on(async {
+        let mut db = rizzy_cli::db::Db::open(&file).await.unwrap();
+        let unknown: Changeset = [Write::PutObject(ObjectRow {
+            kind: kind::ALARM,
+            key: vec![9],
+            bytes: Vec::new(),
+        })]
+        .into_iter()
+        .collect();
+        db.write(&unknown).await.unwrap();
+        db.close().await;
+    });
+
+    // With the password: `rv` sees the unknown alarm byte and refuses, naming the gap.
+    let (outcome, refused) = a.try_run(&["device", "forget"], &[PASSWORD], &["FORGET"], &[]);
+    assert!(matches!(outcome, Err(CliError::BadInput(_))), "{outcome:?}");
+    assert!(!refused.noted("Removed"));
+    assert!(file.exists());
+
+    // Without the password: the alarm rows are cleartext, so the same refusal applies even
+    // when the cache does not unlock. Deleting the evidence this way is also refused.
+    let (outcome, refused) = a.try_run(
+        &["device", "forget"],
+        &["not the password"],
+        &["FORGET"],
+        &[],
+    );
+    assert!(matches!(outcome, Err(CliError::BadInput(_))), "{outcome:?}");
+    assert!(!refused.noted("Removed"));
+    assert!(file.exists());
+}
+
 /// CRYPTO.md §11 "Secrets before commit" and ADR 0028 "Retry after an unknown outcome",
 /// behind a reverse proxy that answers `502` to a commit: the answer is no refusal, so the
 /// stage-2 signup and the pending rotation stay in the cache, whether the server applied the

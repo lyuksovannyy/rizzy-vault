@@ -1409,6 +1409,74 @@ fn a_quota_refusal_keeps_the_op_and_resends_it() {
     assert_eq!(again.records.as_slice()[0], up.records.as_slice()[0]);
 }
 
+/// ADR 0026 §4 step 6 and the owner's decision on open question 5 (ADR 0095 §2 part A, §6
+/// item 4): a `record_conflict` answer at an own dot sets `own_conflict`, leaves the row
+/// unchanged and no new signature is made for the dot. The host (CLI, ADR 0026 §4 step 7)
+/// writes the alarm-4 row in the changeset that absorbs the Fetch after the conflict; the
+/// sync engine itself does not re-sign.
+#[test]
+fn a_record_conflict_at_an_own_dot_leaves_the_row_and_signs_nothing_new() {
+    let mut rng = ChaCha20Rng::seed_from_u64(9510);
+    let mut server = Server::new(9511);
+    let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    a.create(&mut rng, "conflict");
+    let up = a
+        .vault
+        .upload_request(&mut rng, &a.unlocked)
+        .unwrap()
+        .unwrap();
+    a.flush();
+    let sent_row = a
+        .cache
+        .rows
+        .ops
+        .iter()
+        .find(|o| o.own == own::SENT)
+        .unwrap()
+        .clone();
+    // The server answers `record_conflict` at the own dot: the chain holds other bytes there.
+    let refused = UploadResponse {
+        restore_generation: Fixed::from_bytes(server.generation),
+        results: List::new(
+            up.records
+                .as_slice()
+                .iter()
+                .map(|_| UploadResult::Rejected {
+                    error: ErrorCode::RecordConflict,
+                })
+                .collect(),
+        )
+        .unwrap(),
+    };
+    let outcome = a.vault.apply_upload_response(&refused).unwrap();
+    a.flush();
+    assert_eq!(
+        outcome.rejected,
+        vec![ErrorCode::RecordConflict; up.records.len()]
+    );
+    assert!(
+        outcome.own_conflict,
+        "a record_conflict at an own dot sets own_conflict"
+    );
+    // The row is unchanged: no new bytes were signed for the dot (same statement, same body).
+    let after = a
+        .cache
+        .rows
+        .ops
+        .iter()
+        .find(|o| o.own == own::SENT)
+        .unwrap();
+    assert_eq!(*after, sent_row, "no row is rewritten under a conflict");
+    // Nothing new is sent either: a re-request would be the same bytes.
+    let again = a
+        .vault
+        .upload_request(&mut rng, &a.unlocked)
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.records.as_slice()[0], up.records.as_slice()[0]);
+}
+
 /// ADR 0026 §4 step 6: a stale answer changes no row; the re-issue replaces the row under the
 /// same `device_seq` in a transaction committed before the new bytes are sent; a crash before
 /// it resends the old bytes. And §4 step 7 with the owner's decision on open question 5: a
@@ -2187,10 +2255,17 @@ fn the_load_refuses_tampered_rows() {
         .unwrap();
     bundle.key = 5u64.to_be_bytes().to_vec();
     corrupt(&t);
+    // Every alarm key byte that `Alarm::from_u8` does not know (ADR 0026 §3 kinds 1–3, owner
+    // decision on open question 5 adds kind 4) is corrupt, as is a key that is not one byte.
+    // ADR 0095 §6 item 1.
     for (kind, key) in [
         (8, vec![1]),
+        (kind::ALARM, vec![0]),
+        (kind::ALARM, vec![5]),
         (kind::ALARM, vec![9]),
+        (kind::ALARM, Vec::new()),
         (kind::ALARM, vec![1, 2]),
+        (kind::ALARM, vec![4, 0]),
     ] {
         let mut t = rows();
         t.objects.push(ObjectRow {
@@ -2603,4 +2678,45 @@ fn a_corrupt_item_index_never_fails_the_load() {
         assert_eq!(rows.meta, before.meta);
         assert_eq!(rows.objects.len(), before.objects.len());
     }
+}
+
+/// ADR 0026 §3 and the owner's decision on open question 5 (ADR 0095 §2 part A, §6 item 1):
+/// alarm kind 4 is `Alarm::DeviceStateOutdated`. The row `(kind 7, key [4], bytes [])` is the
+/// known-answer form, round-trips through [`store::alarm_write`] and `CacheRows::apply`
+/// unchanged, and a cache that holds it loads with alarm 4 raised and read-only.
+#[test]
+fn alarm_kind_4_is_the_device_state_outdated_known_answer() {
+    // The key byte is 4 both ways: a round trip through the enum stays at 4.
+    assert_eq!(Alarm::DeviceStateOutdated.to_u8(), 4);
+    assert_eq!(Alarm::from_u8(4), Some(Alarm::DeviceStateOutdated));
+
+    // The row the host writes: kind 7, key [4], bytes empty (no conflicting statements).
+    let write = store::alarm_write(Alarm::DeviceStateOutdated, &[]).unwrap();
+    let Write::PutObject(expected) = &write else {
+        panic!("alarm_write produces a PutObject");
+    };
+    assert_eq!(expected.kind, kind::ALARM);
+    assert_eq!(expected.key, vec![4u8]);
+    assert!(expected.bytes.is_empty());
+
+    // A cache that holds this row loads with alarm 4 and read-only vaults; the row round-trips
+    // byte for byte through `apply`.
+    let mut rng = ChaCha20Rng::seed_from_u64(9500);
+    let mut server = Server::new(9501);
+    let (mut dev, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    dev.fetch(&server);
+    let changeset: Changeset = [write].into_iter().collect();
+    dev.cache.commit(changeset);
+    let stored = dev
+        .cache
+        .rows
+        .objects
+        .iter()
+        .find(|o| o.kind == kind::ALARM)
+        .expect("the alarm row");
+    assert_eq!(stored.key, vec![4u8]);
+    assert!(stored.bytes.is_empty());
+    let loaded = dev.reload();
+    assert!(loaded.alarms.contains(&Alarm::DeviceStateOutdated));
+    assert!(loaded.vaults[0].is_read_only());
 }
