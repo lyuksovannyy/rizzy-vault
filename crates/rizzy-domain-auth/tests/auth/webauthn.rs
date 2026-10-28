@@ -1081,7 +1081,7 @@ fn thirty_third_security_key_is_refused() {
             .svc
             .webauthn_enrol_start(&mut env.rng, &session, env.now)
             .await;
-        let err = third.err().expect("enrol/start must refuse the 33rd key");
+        let err = third.expect_err("enrol/start must refuse the 33rd key");
         assert!(matches!(err, AuthError::Conflict));
         assert_eq!(err.code(), rizzy_proto::error::ErrorCode::InvalidRequest);
 

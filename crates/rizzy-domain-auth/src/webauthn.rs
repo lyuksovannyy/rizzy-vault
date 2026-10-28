@@ -829,10 +829,13 @@ mod tests {
     /// built from max-size keys never exceeds it.
     #[test]
     fn size_bounds_fit_login_state() {
-        assert!(
-            MAX_WEBAUTHN_CREDENTIALS * MAX_WEBAUTHN_SECURITY_KEY_LEN + 2_048 <= MAX_STORED_JSON_LEN,
-            "per-key and per-account limits must keep the login state inside 64 KiB"
-        );
+        const {
+            assert!(
+                MAX_WEBAUTHN_CREDENTIALS * MAX_WEBAUTHN_SECURITY_KEY_LEN + 2_048
+                    <= MAX_STORED_JSON_LEN,
+                "per-key and per-account limits must keep the login state inside 64 KiB"
+            );
+        }
     }
 
     /// ADR 0098 §2: a stored key JSON above [`MAX_WEBAUTHN_SECURITY_KEY_LEN`] is refused with

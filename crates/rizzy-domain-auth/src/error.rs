@@ -102,7 +102,7 @@ impl AuthError {
     /// The API error code for this error (ADR 0002 point 3; `rizzy-proto`'s [`ErrorCode`]).
     ///
     /// `StateFork` answers `state_conflict`, `SignupRefused` answers `unauthorized`,
-    /// `Conflict` answers `invalid_request` on the WebAuthn enrol paths ([ADR 0098](https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0098-security-key-limits-and-endpoints.md)
+    /// `Conflict` answers `invalid_request` on the `WebAuthn` enrol paths ([ADR 0098](https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0098-security-key-limits-and-endpoints.md)
     /// §1) and on the other paths (no Accepted ADR names a different code), and
     /// `RecoveryWaiting` answers `rate_limited`: the client retries after the waiting period.
     #[must_use]
