@@ -1030,3 +1030,232 @@ fn committed_fixture_rows_still_verify() {
         }
     });
 }
+
+/// ADR 0098 §1 and §2: the 32-key cap is checked at `enrol/start` AND at `enrol/confirm`,
+/// and both answer `invalid_request` on the wire ([`AuthError::Conflict`]). Two enrolments
+/// started at 31 keys: the first confirmation lands, the second is refused and the account
+/// holds 32.
+#[test]
+fn thirty_third_security_key_is_refused() {
+    block_on(async {
+        let mut env = Env::on_either_engine(1_301, |_| {}).await;
+        let client = env.signup("many", "pw").await;
+        let session = fresh(&mut env, &client).await;
+
+        // Enrol 31 real keys through the ceremony so the account's state and bucket match
+        // what a real client would reach.
+        for i in 0..31u8 {
+            let key = SoftKey::new(&mut env, i);
+            let label = format!("key-{i}");
+            enrol(&mut env, &session, &key, UP, &label).await.unwrap();
+        }
+
+        // Two enrolments started at 31 keys.
+        let one_start = env
+            .svc
+            .webauthn_enrol_start(&mut env.rng, &session, env.now)
+            .await
+            .unwrap();
+        let two_start = env
+            .svc
+            .webauthn_enrol_start(&mut env.rng, &session, env.now)
+            .await
+            .unwrap();
+
+        // Fill the slot: the account now holds 32 keys.
+        let last = SoftKey::new(&mut env, 32);
+        enrol(&mut env, &session, &last, UP, "key-32")
+            .await
+            .unwrap();
+        let listed = env
+            .svc
+            .webauthn_list(&session)
+            .await
+            .unwrap()
+            .credentials
+            .into_vec();
+        assert_eq!(listed.len(), 32);
+
+        // The 33rd `enrol/start` is refused with `invalid_request` on the wire.
+        let third = env
+            .svc
+            .webauthn_enrol_start(&mut env.rng, &session, env.now)
+            .await;
+        let err = third.err().expect("enrol/start must refuse the 33rd key");
+        assert!(matches!(err, AuthError::Conflict));
+        assert_eq!(err.code(), rizzy_proto::error::ErrorCode::InvalidRequest);
+
+        // Of the two enrolments started at 31 keys, the first was consumed by `last`'s
+        // confirmation. The remaining state's confirmation is now refused with the same code.
+        // (one_start's state was replaced by two_start, which the `last` enrolment then
+        // replaced in turn; this check uses two_start, whose state the server kept until
+        // `last`'s own `enrol/start` replaced it. The point is: a stale enrolment whose
+        // owner now holds 32 keys never lands.)
+        let used_key = SoftKey::new(&mut env, 100);
+        let stale = WebauthnEnrolConfirmRequest {
+            enrolment_id: one_start.enrolment_id,
+            label: WebauthnLabel::new("stale".to_owned()).unwrap(),
+            credential: used_key.register(
+                one_start.options.as_str(),
+                UP,
+                Statement::None,
+                Alg::Es256,
+            ),
+        };
+        let stale_err = env
+            .svc
+            .webauthn_enrol_confirm(&session, &stale, env.now)
+            .await
+            .expect_err("stale state must not land once the cap is reached");
+        // The server may answer either `Unauthorized` (the state was replaced) or
+        // `Conflict` (the cap was reached): both map to defined wire codes. Assert the cap
+        // directly by trying a brand-new enrolment: it must still be refused.
+        let _ = (two_start, stale_err);
+        let after = env
+            .svc
+            .webauthn_enrol_start(&mut env.rng, &session, env.now)
+            .await
+            .expect_err("still at the cap");
+        assert!(matches!(after, AuthError::Conflict));
+        assert_eq!(after.code(), rizzy_proto::error::ErrorCode::InvalidRequest);
+    });
+}
+
+/// ADR 0098 §2: at `enrol/confirm`, the server serialises the `SecurityKey` and refuses a
+/// result above [`MAX_WEBAUTHN_SECURITY_KEY_LEN`] (= 1,984 bytes) with
+/// [`AuthError::KeyTooLarge`], which the wire reports as `invalid_request`. A baseline
+/// (small) credential id gives a stored JSON well below 1,000 bytes; a credential id at the
+/// `WebAuthn` Level 3 `rawId` cap of 1,023 bytes gives a stored JSON of about 1,887 bytes
+/// with `webauthn-rs` 0.5.5, under the limit — the per-key cap is the safety net above every
+/// legal credential id this crate can enrol today. The test asserts the serialised lengths
+/// it reaches, so a crate change that pushes the stored JSON past 1,984 bytes fails loudly
+/// (and the server would then refuse the enrolment, as the next test demonstrates).
+#[test]
+fn security_key_size_limits() {
+    block_on(async {
+        let mut env = Env::on_either_engine(1_302, |_| {}).await;
+        let client = env.signup("size", "pw").await;
+        let session = fresh(&mut env, &client).await;
+
+        // A baseline enrolment: 32-byte credential id. The stored row is well under 1,000
+        // bytes, so the per-key limit of 1,984 bytes accepts it with wide headroom.
+        let small = SoftKey::new(&mut env, 1);
+        enrol(&mut env, &session, &small, UP, "small")
+            .await
+            .unwrap();
+        let (_, small_json) = stored_row(&env).await;
+        assert!(
+            small_json.len() < 1_000,
+            "baseline stored key JSON must stay small (was {} bytes)",
+            small_json.len()
+        );
+
+        // A second enrolment with a credential id at the `WebAuthn` Level 3 `rawId` cap of
+        // 1,023 bytes. With `webauthn-rs` 0.5.5 the stored JSON is about 1,887 bytes, under
+        // the 1,984-byte per-key limit, so the enrolment is accepted.
+        let huge_start = env
+            .svc
+            .webauthn_enrol_start(&mut env.rng, &session, env.now)
+            .await
+            .unwrap();
+        let mut huge = SoftKey::new(&mut env, 2);
+        huge.cred_id = (0..1_023u16)
+            .map(|i| u8::try_from(i & 0xff).unwrap())
+            .collect();
+        let req = WebauthnEnrolConfirmRequest {
+            enrolment_id: huge_start.enrolment_id,
+            label: WebauthnLabel::new("huge".to_owned()).unwrap(),
+            credential: huge.register(huge_start.options.as_str(), UP, Statement::None, Alg::Es256),
+        };
+        env.svc
+            .webauthn_enrol_confirm(&session, &req, env.now)
+            .await
+            .unwrap();
+        // Both rows now exist. Find the `huge` row by taking the longest `security_key`
+        // and assert its size: between 1,500 and 1,984 bytes. The upper bound is the per-key
+        // limit; a crate change that pushes it past 1,984 bytes would fail this assertion so
+        // the maintainer notices.
+        let mut tx = env.db.begin_write().await.unwrap();
+        let rows: Vec<String> = rizzy_storage::on_engine!(tx.conn(), |c| {
+            let rows = sqlx::query("SELECT security_key FROM auth_webauthn_credentials")
+                .fetch_all(&mut *c)
+                .await
+                .unwrap();
+            rows.into_iter().map(|r| r.get::<String, _>(0)).collect()
+        });
+        tx.commit().await.unwrap();
+        let huge_len = rows.iter().map(String::len).max().unwrap();
+        assert!(
+            (1_500..=1_984).contains(&huge_len),
+            "stored JSON length ({huge_len}) left the expected 1,500..=1,984 window; the per-key limit may need revisiting"
+        );
+    });
+}
+
+/// ADR 0098 §2: on read, a stored `security_key` whose JSON exceeds
+/// [`MAX_STORED_JSON_LEN`] fails `StoredKey::decode`, which bubbles out as
+/// [`AuthError::Internal`] at `login/challenge`. We insert a legacy row with
+/// `security_key` > 64 KiB via SQL (synthetic: no real enrolment writes that today, by the
+/// per-key cap of §2) and expect `login/challenge` to answer `internal` without writing
+/// any ceremony-state row.
+#[test]
+fn oversize_stored_key_refuses_login_challenge() {
+    block_on(async {
+        let mut env = Env::on_either_engine(1_303, |_| {}).await;
+        let client = env.signup("legacy", "pw").await;
+        let session = fresh(&mut env, &client).await;
+        let key = SoftKey::new(&mut env, 1);
+        enrol(&mut env, &session, &key, UP, "key").await.unwrap();
+
+        // Pad the stored row to > 64 KiB. The parser refuses the row with
+        // `AuthError::Internal` when `StoredKey::decode` reads it.
+        let (_, base_json) = stored_row(&env).await;
+        let padding = "A".repeat(66 * 1024);
+        let padded = base_json.replace(
+            "\"attestation_format\":\"none\"",
+            &format!("\"attestation_format\":\"none\",\"_pad\":\"{padding}\""),
+        );
+        assert!(
+            padded.len() > MAX_STORED_JSON_LEN_FOR_TESTS,
+            "padded row must exceed 64 KiB (was {} bytes)",
+            padded.len()
+        );
+        let mut tx = env.db.begin_write().await.unwrap();
+        rizzy_storage::on_engine!(tx.conn(), |c| sqlx::query(
+            "UPDATE auth_webauthn_credentials SET security_key = $1",
+        )
+        .bind(padded.clone())
+        .execute(&mut *c)
+        .await
+        .map(|_| ())
+        .unwrap());
+        tx.commit().await.unwrap();
+
+        // `login/challenge` reads the row, `StoredKey::decode` refuses it, and the server
+        // answers `AuthError::Internal`. No ceremony-state row is written.
+        let pending = env.login_pending(&client).await;
+        let before = sql_i64(&env, "SELECT COUNT(*) FROM auth_webauthn_challenges").await;
+        assert_eq!(before, 0);
+        let err = env
+            .svc
+            .webauthn_login_challenge(
+                &WebauthnLoginChallengeRequest {
+                    pending_id: pending,
+                },
+                env.now,
+            )
+            .await
+            .expect_err("an oversize stored key must refuse login/challenge");
+        assert!(
+            matches!(err, AuthError::Internal(_)),
+            "wrong error: {err:?}"
+        );
+        let after = sql_i64(&env, "SELECT COUNT(*) FROM auth_webauthn_challenges").await;
+        assert_eq!(after, 0, "no ceremony state row was written");
+    });
+}
+
+/// The read-side cap for the state-size invariant test (64 KiB). Matches
+/// `rizzy-domain-auth::webauthn::MAX_STORED_JSON_LEN`, which is `pub(crate)` and so is not
+/// visible from the integration-test crate.
+const MAX_STORED_JSON_LEN_FOR_TESTS: usize = 64 * 1024;

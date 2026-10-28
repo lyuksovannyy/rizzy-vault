@@ -80,6 +80,10 @@ pub enum AuthError {
     /// A security key chose another signature algorithm than ES256 at enrolment (ADR 0077 §6).
     /// On the wire `invalid_request`: ADR 0028 item 3's code table has no closer code.
     KeyAlgorithm,
+    /// A stored security key's serialised JSON exceeded the per-key byte limit at
+    /// `enrol/confirm` ([ADR 0098](https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0098-security-key-limits-and-endpoints.md)
+    /// §2: `MAX_WEBAUTHN_SECURITY_KEY_LEN`). On the wire `invalid_request` (ADR 0098 §1).
+    KeyTooLarge,
     /// A security key's sign counter did not advance (INV-83, ADR 0058 point 5): a possible
     /// clone. On the wire `unauthorized`; the server records it as a security event.
     PossibleClone {
@@ -97,13 +101,16 @@ pub enum AuthError {
 impl AuthError {
     /// The API error code for this error (ADR 0002 point 3; `rizzy-proto`'s [`ErrorCode`]).
     ///
-    /// `StateFork` answers `state_conflict`, `Conflict` and `SignupRefused` answer
-    /// `invalid_request` and `unauthorized` (no Accepted ADR names a code for them), and
+    /// `StateFork` answers `state_conflict`, `SignupRefused` answers `unauthorized`,
+    /// `Conflict` answers `invalid_request` on the WebAuthn enrol paths ([ADR 0098](https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0098-security-key-limits-and-endpoints.md)
+    /// §1) and on the other paths (no Accepted ADR names a different code), and
     /// `RecoveryWaiting` answers `rate_limited`: the client retries after the waiting period.
     #[must_use]
     pub const fn code(&self) -> ErrorCode {
         match self {
-            Self::InvalidRequest | Self::Conflict | Self::KeyAlgorithm => ErrorCode::InvalidRequest,
+            Self::InvalidRequest | Self::Conflict | Self::KeyAlgorithm | Self::KeyTooLarge => {
+                ErrorCode::InvalidRequest
+            }
             Self::Unauthorized | Self::SignupRefused | Self::PossibleClone { .. } => {
                 ErrorCode::Unauthorized
             }
@@ -149,6 +156,7 @@ impl fmt::Display for AuthError {
             Self::SetupRetired => f.write_str("OPAQUE setup retired or unknown"),
             Self::CredentialsStale => f.write_str("OPAQUE record lags the signed state"),
             Self::KeyAlgorithm => f.write_str("security key chose an unsupported algorithm"),
+            Self::KeyTooLarge => f.write_str("security key serialised JSON exceeds the limit"),
             Self::PossibleClone { .. } => f.write_str("security key counter did not advance"),
             Self::RecoveryWaiting { .. } => f.write_str("recovery waiting period not over"),
             Self::Storage(e) => write!(f, "storage: {e}"),

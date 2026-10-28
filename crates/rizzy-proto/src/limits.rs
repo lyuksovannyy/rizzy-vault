@@ -160,11 +160,16 @@ pub const MAX_SESSIONS_LISTED: usize = 256;
 /// Byte limit: a `WebAuthn` credential id. `WebAuthn` Level 3 §5.1 caps `rawId` at 1023 bytes.
 pub const MAX_WEBAUTHN_CREDENTIAL_ID_LEN: usize = 1023;
 
-/// Count limit (this crate's choice): security keys one account may enrol (ADR 0058). It bounds
-/// `excludeCredentials` and `allowCredentials`, and the list an account sees.
+/// Count limit: security keys one account may enrol ([ADR 0058] as [ADR 0098] §2 cites it). It
+/// bounds `excludeCredentials` and `allowCredentials`, and the list an account sees.
+///
+/// [ADR 0058]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0058-webauthn-2fa-second-factor.md
+/// [ADR 0098]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0098-security-key-limits-and-endpoints.md
 pub const MAX_WEBAUTHN_CREDENTIALS: usize = 32;
 
-/// Byte limit (this crate's choice): a security key's label, UTF-8.
+/// Byte limit: a security key's label, UTF-8 ([ADR 0098] §1).
+///
+/// [ADR 0098]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0098-security-key-limits-and-endpoints.md
 pub const MAX_WEBAUTHN_LABEL_LEN: usize = 64;
 
 /// Byte limit (this crate's choice): the PNG of one re-encoded icon in an `icons/fetch` answer

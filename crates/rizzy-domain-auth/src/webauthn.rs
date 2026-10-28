@@ -90,6 +90,13 @@ pub(crate) const SECURITY_KEY_FORMAT: u16 = 1;
 /// The largest stored ceremony state or `SecurityKey` read back (ADR 0077 §2: 64 KiB).
 pub(crate) const MAX_STORED_JSON_LEN: usize = 64 * 1024;
 
+/// The largest `SecurityKey` JSON written at `enrol/confirm` ([ADR 0098] §2: 1,984 bytes). Chosen
+/// so that `MAX_WEBAUTHN_CREDENTIALS` of them, plus `webauthn-rs`'s per-state header, stay inside
+/// `MAX_STORED_JSON_LEN`: the bound is checked by `size_bounds_fit_login_state` below.
+///
+/// [ADR 0098]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0098-security-key-limits-and-endpoints.md
+pub(crate) const MAX_WEBAUTHN_SECURITY_KEY_LEN: usize = 1_984;
+
 /// `alg` of an ES256 credential: ADR 0039 §1's value, the only one stored (ADR 0077 §6).
 const ALG_ES256: i64 = 1;
 
@@ -241,7 +248,11 @@ fn expiry(now_ms: u64) -> Result<u64, AuthError> {
         .ok_or(AuthError::Internal("clock overflow"))
 }
 
-/// Stores a ceremony state (ADR 0077 §2).
+/// Stores a ceremony state (ADR 0077 §2). Refuses `state` above [`MAX_STORED_JSON_LEN`] with
+/// [`AuthError::Internal`] *before* the insert, so the `auth_webauthn_challenges` row never
+/// holds a state the single read bound would refuse ([ADR 0098] §2: fail closed on write too).
+///
+/// [ADR 0098]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0098-security-key-limits-and-endpoints.md
 async fn put_state(
     tx: &mut WriteTx,
     challenge_id: &[u8; 16],
@@ -250,6 +261,9 @@ async fn put_state(
     state: &str,
     now_ms: u64,
 ) -> Result<(), AuthError> {
+    if state.len() > MAX_STORED_JSON_LEN {
+        return Err(AuthError::Internal("webauthn state exceeds its limit"));
+    }
     exec!(
         tx.conn(),
         sql::WEBAUTHN_CHALLENGE_INSERT,
@@ -326,7 +340,8 @@ impl<V: VaultPort> AuthService<V> {
     ///
     /// # Errors
     /// [`AuthError::FreshSessionRequired`] without a fresh OPAQUE session;
-    /// [`AuthError::Conflict`] at [`MAX_WEBAUTHN_CREDENTIALS`] keys; [`AuthError::NotFound`] when
+    /// [`AuthError::Conflict`] when the account already holds [`MAX_WEBAUTHN_CREDENTIALS`]
+    /// keys (ADR 0098 §1 maps it to `invalid_request`, like `enrol/confirm`); [`AuthError::NotFound`] when
     /// this server cannot be a relying party; storage errors.
     pub async fn webauthn_enrol_start<R: CryptoRng + Send + ?Sized>(
         &self,
@@ -394,7 +409,10 @@ impl<V: VaultPort> AuthService<V> {
     /// used enrolment, or a response the ceremony refuses (type, challenge, origin, RP ID hash,
     /// a failing attestation statement); [`AuthError::InvalidRequest`] for a credential that is
     /// not `WebAuthn` JSON; [`AuthError::KeyAlgorithm`] for a key that chose another algorithm
-    /// than ES256; [`AuthError::Conflict`] for a key already enrolled or one above the limit;
+    /// than ES256 (ADR 0077 §6); [`AuthError::KeyTooLarge`] for a stored key JSON above
+    /// [`MAX_WEBAUTHN_SECURITY_KEY_LEN`] (ADR 0098 §2); [`AuthError::Conflict`] for a credential id
+    /// already enrolled on the account or when the account already holds
+    /// [`MAX_WEBAUTHN_CREDENTIALS`] keys (ADR 0098 §1 maps it to `invalid_request`);
     /// [`AuthError::NotFound`]; storage errors.
     pub async fn webauthn_enrol_confirm(
         &self,
@@ -457,6 +475,7 @@ impl<V: VaultPort> AuthService<V> {
             return Err(AuthError::Conflict);
         }
         let json = to_json(&key)?;
+        check_security_key_size(&json)?;
         let sign_count = enrolled_counter(&json)?;
         exec!(
             tx.conn(),
@@ -746,6 +765,19 @@ pub(crate) const fn counter_accepted(stored: u32, received: u32) -> bool {
     stored == 0 || received > stored
 }
 
+/// Refuses a serialised `SecurityKey` above the per-key limit ([ADR 0098] §2:
+/// [`MAX_WEBAUTHN_SECURITY_KEY_LEN`] = 1,984 bytes) with [`AuthError::KeyTooLarge`]. Called
+/// after the ES256 check in `enrol_confirm_locked` so a key that would push the aggregate
+/// login state above 64 KiB is refused before any row is written.
+///
+/// [ADR 0098]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0098-security-key-limits-and-endpoints.md
+fn check_security_key_size(json: &str) -> Result<(), AuthError> {
+    if json.len() > MAX_WEBAUTHN_SECURITY_KEY_LEN {
+        return Err(AuthError::KeyTooLarge);
+    }
+    Ok(())
+}
+
 /// The counter a new `SecurityKey` enrolled with, read from the JSON being stored (the facade
 /// does not expose it without `danger-credential-internals`). Missing means the JSON's shape is
 /// not `webauthn-rs` 0.5.x's, which the fixture test catches first: fail closed.
@@ -790,5 +822,44 @@ mod tests {
         let big = format!("\"{}\"", "a".repeat(MAX_STORED_JSON_LEN));
         assert!(decode_security_key(SECURITY_KEY_FORMAT, &big).is_none());
         assert_eq!(fuzz_stored_json(SECURITY_KEY_FORMAT, "[]"), 0);
+    }
+
+    /// ADR 0098 §8 bound by construction: 32 keys at the per-key limit plus the per-state
+    /// header of `webauthn-rs` fit inside the 64 KiB ceremony state limit, so a login state
+    /// built from max-size keys never exceeds it.
+    #[test]
+    fn size_bounds_fit_login_state() {
+        assert!(
+            MAX_WEBAUTHN_CREDENTIALS * MAX_WEBAUTHN_SECURITY_KEY_LEN + 2_048 <= MAX_STORED_JSON_LEN,
+            "per-key and per-account limits must keep the login state inside 64 KiB"
+        );
+    }
+
+    /// ADR 0098 §2: a stored key JSON above [`MAX_WEBAUTHN_SECURITY_KEY_LEN`] is refused with
+    /// [`AuthError::KeyTooLarge`], and a 1,984-byte (and a 1,000-byte) JSON is accepted. No
+    /// legal `webauthn-rs` 0.5.5 enrolment reaches 1,984 bytes today (the integration test
+    /// `security_key_size_limits` measures the actual size at the `rawId` cap); the check
+    /// is a safety net that stays correct against crate changes that make the stored JSON
+    /// larger.
+    #[test]
+    fn check_security_key_size_boundary() {
+        // Well under the limit: accepted. Models the "1,000-byte key is accepted" case.
+        let small = "x".repeat(1_000);
+        check_security_key_size(&small).unwrap();
+        // Exactly at the limit: accepted.
+        let at_limit = "y".repeat(MAX_WEBAUTHN_SECURITY_KEY_LEN);
+        check_security_key_size(&at_limit).unwrap();
+        // One byte above the limit: refused with KeyTooLarge. Models the "2,000-byte key is
+        // refused" case (2,000 > 1,984).
+        let over = "z".repeat(MAX_WEBAUTHN_SECURITY_KEY_LEN + 1);
+        assert!(matches!(
+            check_security_key_size(&over),
+            Err(AuthError::KeyTooLarge)
+        ));
+        let two_thousand = "w".repeat(2_000);
+        assert!(matches!(
+            check_security_key_size(&two_thousand),
+            Err(AuthError::KeyTooLarge)
+        ));
     }
 }

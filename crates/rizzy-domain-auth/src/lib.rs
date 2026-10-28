@@ -361,6 +361,7 @@ pub(crate) const fn is_refusal(e: &AuthError) -> bool {
             | AuthError::SecondFactorRequired
             | AuthError::CredentialsStale
             | AuthError::KeyAlgorithm
+            | AuthError::KeyTooLarge
             | AuthError::PossibleClone { .. }
             | AuthError::RateLimited { .. }
     )
