@@ -1,6 +1,6 @@
 # ADR 0103: Disabled accounts: the `disabled_at_ms` state, what it refuses, the `account_disabled` code, and enabling again
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3

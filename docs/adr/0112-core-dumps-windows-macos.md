@@ -1,6 +1,6 @@
 # ADR 0112: Core dumps and crash reports for `rv` on Windows and macOS: a panic-exit hook on every OS, `RLIMIT_CORE` on macOS, no Win32 call, and accepted risk AR-31
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M1 (`rv`, `crates/rizzy-cli`)

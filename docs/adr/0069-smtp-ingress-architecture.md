@@ -1,6 +1,6 @@
 # ADR 0069: SMTP ingress architecture: own listener vs MTA handoff, and the smtp↔api protocol
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M6

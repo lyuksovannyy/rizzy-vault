@@ -1,6 +1,6 @@
 # ADR 0065: Share recipient page origin and CSP
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M5

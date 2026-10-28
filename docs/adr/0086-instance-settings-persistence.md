@@ -1,6 +1,6 @@
 # ADR 0086: Instance settings persistence: the `auth_instance_settings` table, precedence over configuration, and the sealed SMTP credential (`SERVER_SMTP_CREDENTIAL`, 0x0103)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-24
 - Deciders: project owner
 - Milestone: M3 (`rizzy-domain-auth`, `rizzy-storage` migrations, `rizzy-server` admin panel and `rizzy-vault settings`, `rizzy-core` `server_seal`)

@@ -1,6 +1,6 @@
 # ADR 0108: An exit from an interrupted recovery whose new master password is lost (`rv recovery abandon`)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M1

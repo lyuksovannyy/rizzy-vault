@@ -1,6 +1,6 @@
 # ADR 0085: Admin authentication: operator accounts, the bootstrap token, mandatory TOTP and admin sessions
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-24
 - Deciders: project owner
 - Milestone: M3 (`rizzy-domain-auth`, `rizzy-storage`, `rizzy-server` `http/admin_panel/` and CLI)

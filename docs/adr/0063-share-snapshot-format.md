@@ -1,6 +1,6 @@
 # ADR 0063: Share snapshot plaintext layout and link/fragment grammar
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M5

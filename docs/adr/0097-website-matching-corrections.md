@@ -1,6 +1,6 @@
 # ADR 0097: Website matching corrections: the compared URL, the *Regex* mode, and reading ACCOUNT_SETTINGS independently of the reader's PSL
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M2

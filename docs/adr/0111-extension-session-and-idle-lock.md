@@ -1,6 +1,6 @@
 # ADR 0111: The extension's unlocked state: no `storage.session` fallback, and idle and screen-lock auto-lock on Chromium and Firefox
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M2

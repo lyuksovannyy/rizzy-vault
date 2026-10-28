@@ -1,6 +1,6 @@
 # ADR 0099: Website icons: a per-account setting, on by default, and no request while the setting or the `icons` role is off (erratum to ADR 0052)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3 (`rizzy-client`, `rizzy-wasm`, `packages/core`, `packages/ui`, web vault, extension)

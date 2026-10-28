@@ -1,6 +1,6 @@
 # ADR 0101: Native-client repository licensing: AGPL-3.0-only with two §7 permissions, store channels, the Windows App SDK, Qt LGPLv3, DCO and licence gates in the client repositories
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3 (must be Accepted before the first commit to any client repository; the legal review of ADR 0017 owner decision 5, as replaced by §10, before the first external code contribution to any repository and before the first submission to a channel of §6 that needs Part A)

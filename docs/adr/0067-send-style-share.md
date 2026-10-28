@@ -1,6 +1,6 @@
 # ADR 0067: Send-style text/file share
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M5

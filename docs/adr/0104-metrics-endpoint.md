@@ -1,6 +1,6 @@
 # ADR 0104: Metrics endpoint: `GET /metrics` on the admin listener, a closed Prometheus metric set, and an optional scrape token
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3

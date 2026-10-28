@@ -1,6 +1,6 @@
 # ADR 0090: Per-account security event log: `auth_security_events`, event kinds, the `security-events/list` endpoint and the alert summary
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3 (`rizzy-proto`, `rizzy-storage` migration and backup `TABLES`, `rizzy-domain-auth`, `rizzy-server`, `rizzy-client`/`rizzy-wasm`, web vault, extension, `rv`)

@@ -1,6 +1,6 @@
 # ADR 0088: Erratum to ADRs 0046 and 0057: one device-state record grammar (record version 1 or 2, stages 1–3)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M1

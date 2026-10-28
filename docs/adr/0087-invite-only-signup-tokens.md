@@ -1,6 +1,6 @@
 # ADR 0087: Invite-only signup: invite tokens, issuance, delivery and redemption
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-24
 - Deciders: project owner
 - Milestone: M3 (`rizzy-domain-auth`, `rizzy-storage`, `rizzy-server` admin panel and operator CLI, `rizzy-client`, `rizzy-wasm`, web vault, `rv`)

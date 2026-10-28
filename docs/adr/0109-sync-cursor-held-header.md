@@ -1,6 +1,6 @@
 # ADR 0109: Sync cursor past a held header: derived, never stored, rewound on lapse (erratum to ADR 0050)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M1

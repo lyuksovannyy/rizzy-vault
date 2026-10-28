@@ -1,6 +1,6 @@
 # ADR 0070: Crypto-crate approval: mail-auth for SPF/DKIM/DMARC verification
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M6

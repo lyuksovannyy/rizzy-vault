@@ -1,6 +1,6 @@
 # ADR 0094: Database backup container limits: a streaming writer and reader, a 1 TiB file cap, and ADR 0007's stale "backup files are JSON" sentence
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3 (must land before attachments ship; the format_version 2 parts apply from M8)

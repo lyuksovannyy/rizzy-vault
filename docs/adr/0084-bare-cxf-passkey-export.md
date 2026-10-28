@@ -1,6 +1,6 @@
 # ADR 0084: Bare, unencrypted CXF passkey export (answers ADR 0074 open question 4)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-24
 - Deciders: project owner
 - Milestone: M8 (`rizzy-client` `export::cxf`, `rizzy-wasm`, `rv`, web vault)

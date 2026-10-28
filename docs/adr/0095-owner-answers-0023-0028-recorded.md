@@ -1,6 +1,6 @@
 # ADR 0095: The owner's answers to ADRs 0023–0028, recorded from their acceptance commits, and the ADR 0026, 0027 and 0028 text they contradict
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M1 (`rizzy-client` cache and `rv` removal flow, `rizzy-server` configuration and `429` answers; every decision below is already shipped code, so this ADR changes no behaviour)

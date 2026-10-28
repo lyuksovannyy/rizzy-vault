@@ -1,6 +1,6 @@
 # ADR 0107: Backup-key retention: keys are kept until an explicit, evidence-gated `secrets backup-key retire`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M8

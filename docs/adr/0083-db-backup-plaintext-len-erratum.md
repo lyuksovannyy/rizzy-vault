@@ -1,6 +1,6 @@
 # ADR 0083: Erratum to ADR 0071: `plaintext_len` is bound by the canonical reader's framing, not by chunk AAD
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-24
 - Deciders: project owner
 - Milestone: M8 (`rizzy-server` `db_backup`; documentation only, no format or code change)

@@ -1,6 +1,6 @@
 # ADR 0093: Attachment lifecycle: cleanup after Purge, export and import, and unsupported items on move
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3

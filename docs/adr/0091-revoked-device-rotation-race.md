@@ -1,6 +1,6 @@
 # ADR 0091: Device revocation: the revocation window, the revoked-device rotation race and its accepted residual
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3

@@ -1,6 +1,6 @@
 # ADR 0089: Extension-origin frames: one content-script message list, the save-dialog instance token, the save-prompt token and the save dialog's visibility gates
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3 (browser extension: the save dialog of [ADR 0076](0076-autocomplete-driven-autofill.md) §5; the reconciled message list also binds the M2 code already shipped)

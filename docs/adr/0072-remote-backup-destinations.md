@@ -1,6 +1,6 @@
 # ADR 0072: Remote backup destinations (WebDAV, S3) and destination-credential storage
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M8

@@ -1,6 +1,6 @@
 # ADR 0096: Secrets that cross the client binding (ADR 0013 §3 rule 2, restated in full), and KeePass KDBX import inside the web vault's one core Worker
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M1 (transport credentials, the second-factor code, the invite token, the 2FA enrolment secret, import files) / M2 (a new passkey's private key) / M3 (KDBX import, the breach-check candidate, the local unlock secret) / M5 (shares)

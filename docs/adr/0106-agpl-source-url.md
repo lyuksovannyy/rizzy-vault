@@ -1,6 +1,6 @@
 # ADR 0106: AGPL §13 source link: `RIZZY_SOURCE_URL`, the `/api/meta` `source_url` member and the "Source" link
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M1 (`rizzy-proto`, `rizzy-server`, `rizzy-wasm`/`packages/core`, web vault, `rv`, `deploy/Containerfile`, `docs/self-hosting.md`); M2 (extension options page); M3 (admin panel footer)

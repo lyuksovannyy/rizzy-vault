@@ -1,6 +1,6 @@
 # ADR 0098: Security keys: per-account and per-key limits, the six `webauthn` endpoints and `pending_id` (erratum to ADRs 0077 and 0028)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3 (`rizzy-domain-auth`, `rizzy-proto`, `rizzy-server`, web vault)

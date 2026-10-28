@@ -1,6 +1,6 @@
 # ADR 0113: Breach-check endpoint: path, JSON shapes, error codes, size caps, caching and the \`icons\` settings (erratum to ADRs 0053 and 0048)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3

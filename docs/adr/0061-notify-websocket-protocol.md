@@ -1,6 +1,6 @@
 # ADR 0061: notify role: WebSocket connect authentication and message envelope
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M3

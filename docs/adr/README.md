@@ -117,18 +117,18 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0058 | [WebAuthn/FIDO2 security keys as a server-side second factor](0058-webauthn-2fa-second-factor.md) | Partially superseded by [0077](0077-webauthn-rs-integration-fixes.md) (point 1 in part, points 2, 4 and 8, owner answer 3, "Owner answers at acceptance" closing paragraph in part) | M3 |
 | 0059 | [Crypto-crate approval: webauthn-rs for the FIDO2 2FA ceremony](0059-webauthn-rs-crate-approval.md) | Partially superseded by [0077](0077-webauthn-rs-integration-fixes.md) (Decision "Recommendation" in part, checklist item 7 in part, owner answers 1 and 6) | M3 |
 | 0060 | [Admin panel: web stack, directory and security boundary](0060-admin-panel-stack-boundary.md) | Accepted | M3 |
-| 0061 | [notify role: WebSocket connect authentication and message envelope](0061-notify-websocket-protocol.md) | Proposed | M3 |
+| 0061 | [notify role: WebSocket connect authentication and message envelope](0061-notify-websocket-protocol.md) | Accepted | M3 |
 | 0062 | [Markdown-in-notes rendering: sanitization and rendering rules](0062-markdown-notes-sanitization.md) | Accepted | M3 |
-| 0063 | [Share snapshot plaintext layout and link/fragment grammar](0063-share-snapshot-format.md) | Proposed | M5 |
-| 0064 | [Share API, storage and lifecycle](0064-share-api-storage-lifecycle.md) | Proposed | M5 |
-| 0065 | [Share recipient page origin and CSP](0065-share-page-origin-csp.md) | Proposed | M5 |
-| 0066 | [Recipient email verification by one-time code](0066-share-email-otp-verification.md) | Proposed | M5 |
-| 0067 | [Send-style text/file share](0067-send-style-share.md) | Proposed | M5 |
-| 0068 | [Alias identity model, storage, and no-enumeration lookup](0068-alias-identity-model.md) | Proposed | M6 |
-| 0069 | [SMTP ingress architecture: own listener vs MTA handoff, and the smtp↔api protocol](0069-smtp-ingress-architecture.md) | Proposed | M6 |
-| 0070 | [Crypto-crate approval: mail-auth for SPF/DKIM/DMARC verification](0070-mail-auth-crate-approval.md) | Proposed | M6 |
+| 0063 | [Share snapshot plaintext layout and link/fragment grammar](0063-share-snapshot-format.md) | Accepted | M5 |
+| 0064 | [Share API, storage and lifecycle](0064-share-api-storage-lifecycle.md) | Accepted | M5 |
+| 0065 | [Share recipient page origin and CSP](0065-share-page-origin-csp.md) | Accepted | M5 |
+| 0066 | [Recipient email verification by one-time code](0066-share-email-otp-verification.md) | Accepted | M5 |
+| 0067 | [Send-style text/file share](0067-send-style-share.md) | Accepted | M5 |
+| 0068 | [Alias identity model, storage, and no-enumeration lookup](0068-alias-identity-model.md) | Accepted | M6 |
+| 0069 | [SMTP ingress architecture: own listener vs MTA handoff, and the smtp↔api protocol](0069-smtp-ingress-architecture.md) | Accepted | M6 |
+| 0070 | [Crypto-crate approval: mail-auth for SPF/DKIM/DMARC verification](0070-mail-auth-crate-approval.md) | Accepted | M6 |
 | 0071 | [Encrypted scheduled database backup format (SERVER_DB_BACKUP envelope)](0071-encrypted-db-backup-format.md) | Accepted | M8 |
-| 0072 | [Remote backup destinations (WebDAV, S3) and destination-credential storage](0072-remote-backup-destinations.md) | Proposed | M8 |
+| 0072 | [Remote backup destinations (WebDAV, S3) and destination-credential storage](0072-remote-backup-destinations.md) | Accepted | M8 |
 | 0073 | [Signed release images, SBOM and supply-chain provenance](0073-signed-images-sbom-provenance.md) | Accepted | M8 |
 | 0074 | [Passkey import/export via the FIDO Credential Exchange Format (CXF)](0074-passkey-cxf-import-export.md) | Accepted | M8 |
 | 0075 | [Session management: listing and ending sessions under `/api/v1/sessions`](0075-session-listing-and-ending.md) | Accepted | M3 |
@@ -139,38 +139,38 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0080 | [Default site groups: seeding the signed global equivalence list from Vaultwarden's `global_domains.json`](0080-default-site-groups-vaultwarden-seed.md) | Accepted | M2 |
 | 0081 | [Multiple vaults per account: the Personal vault, user-created vaults, and sharing a vault with other users](0081-multiple-vaults-personal-and-shared.md) | Accepted | M3 (Part A) / M9 (Part B) |
 | 0082 | [Security keys: user presence only (`danger-user-presence-only-security-keys`)](0082-security-keys-user-presence-only.md) | Accepted | M3 |
-| 0083 | [Erratum to ADR 0071: `plaintext_len` is bound by the canonical reader's framing, not by chunk AAD](0083-db-backup-plaintext-len-erratum.md) | Proposed | M8 |
-| 0084 | [Bare, unencrypted CXF passkey export (answers ADR 0074 open question 4)](0084-bare-cxf-passkey-export.md) | Proposed | M8 |
-| 0085 | [Admin authentication: operator accounts, the bootstrap token, mandatory TOTP and admin sessions](0085-admin-authentication-bootstrap.md) | Proposed | M3 |
-| 0086 | [Instance settings persistence: the `auth_instance_settings` table, precedence over configuration, and the sealed SMTP credential (`SERVER_SMTP_CREDENTIAL`, 0x0103)](0086-instance-settings-persistence.md) | Proposed | M3 |
-| 0087 | [Invite-only signup: invite tokens, issuance, delivery and redemption (answers ADR 0060 open question 6)](0087-invite-only-signup-tokens.md) | Proposed | M3 |
-| 0088 | [Erratum to ADRs 0046 and 0057: one device-state record grammar (record version 1 or 2, stages 1–3)](0088-device-state-record-grammar.md) | Proposed | M1 |
-| 0089 | [Extension-origin frames: one content-script message list, the save-dialog instance token, the save-prompt token and the save dialog's visibility gates (reconciles ADRs 0043 and 0076)](0089-extension-frames-and-save-dialog.md) | Proposed | M3 |
-| 0090 | [Per-account security event log: `auth_security_events`, event kinds, the `security-events/list` endpoint and the alert summary](0090-per-account-security-event-log.md) | Proposed | M3 |
-| 0091 | [Device revocation: the revocation window, the revoked-device rotation race and its accepted residual](0091-revoked-device-rotation-race.md) | Proposed | M3 |
-| 0092 | [Rotation size limits: a write-time cap on wrap-set rows, the `rotation_limit` code, and staged rotation so revocation and recovery never fail on size](0092-rotation-size-limits.md) | Proposed | M3 |
-| 0093 | [Attachment lifecycle: cleanup after Purge (`attachments/delete-item`), export and import, and unsupported items on move (answers review D1, D2, D6)](0093-attachment-lifecycle.md) | Proposed | M3 |
-| 0094 | [Database backup container limits: a streaming writer and reader, a 1 TiB file cap, and ADR 0007's stale "backup files are JSON" sentence (erratum to ADRs 0023 and 0007)](0094-backup-container-limits.md) | Proposed | M3 |
-| 0095 | [The owner's answers to ADRs 0023–0028, recorded from their acceptance commits, and the ADR 0026, 0027 and 0028 text they contradict](0095-owner-answers-0023-0028-recorded.md) | Proposed | M1 |
-| 0096 | [Secrets that cross the client binding (ADR 0013 §3 rule 2, restated in full), and KeePass KDBX import inside the web vault's one core Worker](0096-binding-secrets-and-kdbx-worker.md) | Proposed | M1 / M3 |
-| 0097 | [Website matching corrections: the compared URL, the *Regex* mode, and reading ACCOUNT_SETTINGS independently of the reader's PSL](0097-website-matching-corrections.md) | Proposed | M2 |
-| 0098 | [Security keys: per-account and per-key limits, the six `webauthn` endpoints and `pending_id` (erratum to ADRs 0077 and 0028)](0098-security-key-limits-and-endpoints.md) | Proposed | M3 |
-| 0099 | [Website icons: a per-account setting, on by default, and no request while the setting or the `icons` role is off (erratum to ADR 0052)](0099-website-icons-opt-in.md) | Proposed | M3 |
-| 0100 | [Notification mail: the account email address, the `worker` sender and its outbox, and the recovery notices of ADR 0008 decision 5](0100-notification-mail.md) | Proposed | M3 |
-| 0101 | [Native-client repository licensing: AGPL-3.0-only with two §7 permissions, store channels, the Windows App SDK, Qt LGPLv3, DCO and licence gates in the client repositories (partially supersedes ADR 0017)](0101-native-client-licensing.md) | Proposed | M3 |
-| 0102 | [Native client TLS: who terminates TLS per platform, the TLS 1.3 floor, trust anchors, a private CA through the core, and what the core checks regardless of TLS](0102-native-client-tls.md) | Proposed | M3 |
-| 0103 | [Disabled accounts: the `disabled_at_ms` state, what it refuses, the `account_disabled` code, and enabling again](0103-disable-user.md) | Proposed | M3 |
-| 0104 | [Metrics endpoint: `GET /metrics` on the admin listener, a closed Prometheus metric set, and an optional scrape token](0104-metrics-endpoint.md) | Proposed | M3 |
-| 0105 | [Secret Key QR: payload, encoding, display gate and scanner validation](0105-secret-key-qr.md) | Proposed | M3 / M7 |
-| 0106 | [AGPL §13 source link: `RIZZY_SOURCE_URL`, the `/api/meta` `source_url` member and the "Source" link (supersedes ADR 0028 item 14 and ADR 0048 §1 in part)](0106-agpl-source-url.md) | Proposed | M1 |
-| 0107 | [Backup-key retention: keys are kept until an explicit, evidence-gated `secrets backup-key retire` (supersedes ADR 0071 owner answer 3 and one restore sentence, and ADR 0047 restore step 4 in part)](0107-backup-key-retention.md) | Proposed | M8 |
-| 0108 | [An exit from an interrupted recovery whose new master password is lost: `rv recovery abandon` and one live recovery-only session per account (erratum to ADRs 0046 and 0028)](0108-interrupted-recovery-exit.md) | Proposed | M1 |
-| 0109 | [Sync cursor past a held header: derived, never stored, rewound on lapse (erratum to ADR 0050)](0109-sync-cursor-held-header.md) | Proposed | M1 |
-| 0110 | [Vault lock settings on every client (lock automatically, after N minutes idle, on restart, on sleep; 5-minute default; delayed-confirm warning to turn locking off), and passkey user verification under them](0110-passkey-user-verification.md) | Proposed | M2 |
-| 0111 | [Extension unlocked state: no `storage.session` fallback (a torn-down long-lived context is locked), idle and screen-lock auto-lock relayed by the Chromium service worker under ADR 0110's lock settings, Chromium on MV3 and Firefox on a persistent MV2 background page by the owner's rule (MV2 only where MV3 lacks a mandatory ability) (erratum to ADRs 0036, 0013 and 0019)](0111-extension-session-and-idle-lock.md) | Proposed | M2 |
-| 0112 | [Core dumps and crash reports for `rv` on Windows and macOS: a panic-exit hook on every OS, `RLIMIT_CORE` on macOS, no Win32 call, and accepted risk AR-31 (supersedes ADR 0024 Decision 3 in part)](0112-core-dumps-windows-macos.md) | Proposed | M1 |
-| 0113 | [Breach-check endpoint: path, JSON shapes, error codes, size caps, caching and the `icons` settings (erratum to ADRs 0053 and 0048)](0113-breach-check-endpoint.md) | Proposed | M3 |
-| 0114 | [One server settings register: the `RIZZY_*` names the shipped code reads, one rule for adding a name, and a CI check (supersedes ADR 0048 §1's last sentence)](0114-server-settings-list.md) | Proposed | M3 |
+| 0083 | [Erratum to ADR 0071: `plaintext_len` is bound by the canonical reader's framing, not by chunk AAD](0083-db-backup-plaintext-len-erratum.md) | Accepted | M8 |
+| 0084 | [Bare, unencrypted CXF passkey export (answers ADR 0074 open question 4)](0084-bare-cxf-passkey-export.md) | Accepted | M8 |
+| 0085 | [Admin authentication: operator accounts, the bootstrap token, mandatory TOTP and admin sessions](0085-admin-authentication-bootstrap.md) | Accepted | M3 |
+| 0086 | [Instance settings persistence: the `auth_instance_settings` table, precedence over configuration, and the sealed SMTP credential (`SERVER_SMTP_CREDENTIAL`, 0x0103)](0086-instance-settings-persistence.md) | Accepted | M3 |
+| 0087 | [Invite-only signup: invite tokens, issuance, delivery and redemption (answers ADR 0060 open question 6)](0087-invite-only-signup-tokens.md) | Accepted | M3 |
+| 0088 | [Erratum to ADRs 0046 and 0057: one device-state record grammar (record version 1 or 2, stages 1–3)](0088-device-state-record-grammar.md) | Accepted | M1 |
+| 0089 | [Extension-origin frames: one content-script message list, the save-dialog instance token, the save-prompt token and the save dialog's visibility gates (reconciles ADRs 0043 and 0076)](0089-extension-frames-and-save-dialog.md) | Accepted | M3 |
+| 0090 | [Per-account security event log: `auth_security_events`, event kinds, the `security-events/list` endpoint and the alert summary](0090-per-account-security-event-log.md) | Accepted | M3 |
+| 0091 | [Device revocation: the revocation window, the revoked-device rotation race and its accepted residual](0091-revoked-device-rotation-race.md) | Accepted | M3 |
+| 0092 | [Rotation size limits: a write-time cap on wrap-set rows, the `rotation_limit` code, and staged rotation so revocation and recovery never fail on size](0092-rotation-size-limits.md) | Accepted | M3 |
+| 0093 | [Attachment lifecycle: cleanup after Purge (`attachments/delete-item`), export and import, and unsupported items on move (answers review D1, D2, D6)](0093-attachment-lifecycle.md) | Accepted | M3 |
+| 0094 | [Database backup container limits: a streaming writer and reader, a 1 TiB file cap, and ADR 0007's stale "backup files are JSON" sentence (erratum to ADRs 0023 and 0007)](0094-backup-container-limits.md) | Accepted | M3 |
+| 0095 | [The owner's answers to ADRs 0023–0028, recorded from their acceptance commits, and the ADR 0026, 0027 and 0028 text they contradict](0095-owner-answers-0023-0028-recorded.md) | Accepted | M1 |
+| 0096 | [Secrets that cross the client binding (ADR 0013 §3 rule 2, restated in full), and KeePass KDBX import inside the web vault's one core Worker](0096-binding-secrets-and-kdbx-worker.md) | Accepted | M1 / M3 |
+| 0097 | [Website matching corrections: the compared URL, the *Regex* mode, and reading ACCOUNT_SETTINGS independently of the reader's PSL](0097-website-matching-corrections.md) | Accepted | M2 |
+| 0098 | [Security keys: per-account and per-key limits, the six `webauthn` endpoints and `pending_id` (erratum to ADRs 0077 and 0028)](0098-security-key-limits-and-endpoints.md) | Accepted | M3 |
+| 0099 | [Website icons: a per-account setting, on by default, and no request while the setting or the `icons` role is off (erratum to ADR 0052)](0099-website-icons-opt-in.md) | Accepted | M3 |
+| 0100 | [Notification mail: the account email address, the `worker` sender and its outbox, and the recovery notices of ADR 0008 decision 5](0100-notification-mail.md) | Accepted | M3 |
+| 0101 | [Native-client repository licensing: AGPL-3.0-only with two §7 permissions, store channels, the Windows App SDK, Qt LGPLv3, DCO and licence gates in the client repositories (partially supersedes ADR 0017)](0101-native-client-licensing.md) | Accepted | M3 |
+| 0102 | [Native client TLS: who terminates TLS per platform, the TLS 1.3 floor, trust anchors, a private CA through the core, and what the core checks regardless of TLS](0102-native-client-tls.md) | Accepted | M3 |
+| 0103 | [Disabled accounts: the `disabled_at_ms` state, what it refuses, the `account_disabled` code, and enabling again](0103-disable-user.md) | Accepted | M3 |
+| 0104 | [Metrics endpoint: `GET /metrics` on the admin listener, a closed Prometheus metric set, and an optional scrape token](0104-metrics-endpoint.md) | Accepted | M3 |
+| 0105 | [Secret Key QR: payload, encoding, display gate and scanner validation](0105-secret-key-qr.md) | Accepted | M3 / M7 |
+| 0106 | [AGPL §13 source link: `RIZZY_SOURCE_URL`, the `/api/meta` `source_url` member and the "Source" link (supersedes ADR 0028 item 14 and ADR 0048 §1 in part)](0106-agpl-source-url.md) | Accepted | M1 |
+| 0107 | [Backup-key retention: keys are kept until an explicit, evidence-gated `secrets backup-key retire` (supersedes ADR 0071 owner answer 3 and one restore sentence, and ADR 0047 restore step 4 in part)](0107-backup-key-retention.md) | Accepted | M8 |
+| 0108 | [An exit from an interrupted recovery whose new master password is lost: `rv recovery abandon` and one live recovery-only session per account (erratum to ADRs 0046 and 0028)](0108-interrupted-recovery-exit.md) | Accepted | M1 |
+| 0109 | [Sync cursor past a held header: derived, never stored, rewound on lapse (erratum to ADR 0050)](0109-sync-cursor-held-header.md) | Accepted | M1 |
+| 0110 | [Vault lock settings on every client (lock automatically, after N minutes idle, on restart, on sleep; 5-minute default; delayed-confirm warning to turn locking off), and passkey user verification under them](0110-passkey-user-verification.md) | Accepted | M2 |
+| 0111 | [Extension unlocked state: no `storage.session` fallback (a torn-down long-lived context is locked), idle and screen-lock auto-lock relayed by the Chromium service worker under ADR 0110's lock settings, Chromium on MV3 and Firefox on a persistent MV2 background page by the owner's rule (MV2 only where MV3 lacks a mandatory ability) (erratum to ADRs 0036, 0013 and 0019)](0111-extension-session-and-idle-lock.md) | Accepted | M2 |
+| 0112 | [Core dumps and crash reports for `rv` on Windows and macOS: a panic-exit hook on every OS, `RLIMIT_CORE` on macOS, no Win32 call, and accepted risk AR-31 (supersedes ADR 0024 Decision 3 in part)](0112-core-dumps-windows-macos.md) | Accepted | M1 |
+| 0113 | [Breach-check endpoint: path, JSON shapes, error codes, size caps, caching and the `icons` settings (erratum to ADRs 0053 and 0048)](0113-breach-check-endpoint.md) | Accepted | M3 |
+| 0114 | [One server settings register: the `RIZZY_*` names the shipped code reads, one rule for adding a name, and a CI check (supersedes ADR 0048 §1's last sentence)](0114-server-settings-list.md) | Accepted | M3 |
 
 ## Gates
 

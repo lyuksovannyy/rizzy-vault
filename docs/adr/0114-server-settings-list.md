@@ -1,6 +1,6 @@
 # ADR 0114: One server settings register: the `RIZZY_*` names the shipped code reads, one rule for adding a name, and a CI check (supersedes ADR 0048 §1's last sentence)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3 (`docs/adr`, `crates/xtask`; no change to what `rizzy-server` accepts)

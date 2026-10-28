@@ -1,6 +1,6 @@
 # ADR 0100: Notification mail: the account email address, the `worker` sender and its outbox, and the recovery notices of ADR 0008 decision 5
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3 (`rizzy-proto`, `rizzy-storage` migration and backup `TABLES`, `rizzy-domain-auth`, `rizzy-server` (`api`, `worker`), `rizzy-client`/`rizzy-wasm`, web vault, extension, `rv`)

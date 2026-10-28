@@ -1,6 +1,6 @@
 # ADR 0102: Client TLS on the native clients: who terminates TLS per platform, the TLS 1.3 floor, trust anchors, a private CA through the core, and what the core checks regardless of TLS
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3 (macOS, Windows) / M7 (iOS, Android) / the Linux client's milestone (`rizzy-ffi-cpp`, [ADR 0019](0019-native-clients.md) owner decision 12)

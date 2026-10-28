@@ -1,6 +1,6 @@
 # ADR 0092: Rotation size limits: a write-time cap on wrap-set rows, the `rotation_limit` code, and staged rotation so revocation and recovery never fail on size
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3

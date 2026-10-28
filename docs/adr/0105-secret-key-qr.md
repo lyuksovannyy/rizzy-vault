@@ -1,6 +1,6 @@
 # ADR 0105: Secret Key QR: payload, encoding, display gate and scanner validation
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 - Deciders: project owner
 - Milestone: M3 (web vault and macOS app) / M7 (mobile scanners)

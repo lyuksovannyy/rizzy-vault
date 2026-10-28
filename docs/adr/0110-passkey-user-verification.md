@@ -1,6 +1,6 @@
 # ADR 0110: Vault lock settings on every client, and passkey user verification under them
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25 (redrafted the same day to the owner's answers)
 - Deciders: project owner
 - Milestone: M2 (web vault and extension); M3 (macOS app); mobile with its own ADR (M7)
