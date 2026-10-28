@@ -297,6 +297,19 @@ impl Dev {
         load_rows(&self.cache.rows, &self.unlocked).unwrap()
     }
 
+    /// Replaces `self`'s driver, state and authors with the ones a load from the cache
+    /// rebuilds, as a restarted process would: the cache rows and keys are kept, so the next
+    /// Fetch runs from the loaded cursor (ADR 0109 §2 C4).
+    fn restart(&mut self) {
+        let loaded = self.reload();
+        let mut vaults = loaded.vaults;
+        self.vault = vaults.remove(0);
+        self.vault.persist();
+        self.state = loaded.device;
+        self.authors = loaded.authors;
+        self.flush();
+    }
+
     /// The loaded cache is the live state: items, values, cursor, counter, queue.
     fn assert_loads(&self) {
         let loaded = self.reload();
@@ -872,7 +885,17 @@ fn a_held_cover_is_not_persisted_and_a_taken_one_is() {
         restarted.vaults[0].item_lifecycle(item),
         ItemLifecycle::Absent
     );
-    // The live device goes on: the purge with its body, and the retry takes the cover.
+    // ADR 0109 §5 probe 7a: drive the reloaded device against the same compacting
+    // two-op-page server to `ItemLifecycle::Purged`. Replace `c` by the loaded state
+    // (the previous assertion already checked a fresh load has cursor 0 and Absent).
+    c.restart();
+    assert_eq!(c.vault.cursor_of(writer), 0);
+    assert_eq!(c.vault.item_lifecycle(item), ItemLifecycle::Absent);
+    // Page 1 again: the two bodiless headers with the held cover.
+    let outcome = c.fetch(&server);
+    assert_eq!(outcome.held_covers, 1, "{outcome:?}");
+    assert_eq!(c.vault.cursor_of(writer), 2);
+    // Page 2: the purge with its body, and the retry takes the cover.
     server.compact = false;
     let outcome = c.fetch(&server);
     assert_eq!(
@@ -888,6 +911,65 @@ fn a_held_cover_is_not_persisted_and_a_taken_one_is() {
         c.reload().vaults[0].item_lifecycle(item),
         ItemLifecycle::Purged
     );
+}
+
+/// ADR 0109 §5 probe 7b: a device reloaded after every page, against the same compacting
+/// two-op-page server, never progresses past a held header, never reports a gap before the
+/// response sequence completes, and never shows the item in a lifecycle it does not have.
+/// The cursor stays at the `vault_prev_seq` of the first held bodiless header; the Fetch
+/// just serves the same two bodiless ops over and over. ADR 0050 owner answer 1 accepts
+/// this as an M1 liveness limit, revisit with M3 telemetry.
+#[test]
+fn adr_0109_probe_7b_a_restart_after_every_page_makes_no_progress() {
+    let mut rng = ChaCha20Rng::seed_from_u64(72);
+    let mut server = Server::new(73);
+    let (mut a, sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    let item = a.create(&mut rng, "doomed");
+    a.vault
+        .trash_item(&mut rng, &a.unlocked, item, T0 + 10)
+        .unwrap();
+    a.vault
+        .purge_item(&mut rng, &a.unlocked, item, T0 + 11)
+        .unwrap();
+    a.flush();
+    a.upload(&mut server, &mut rng);
+    let writer = a.unlocked.device_id;
+    server.compact = true;
+    server.page_len = 2;
+    let mut c = Dev::enrolled(&mut server, &mut rng, &sk);
+    for _ in 0..8 {
+        let outcome = c.fetch(&server);
+        assert_eq!(outcome.held_covers, 1, "{outcome:?}");
+        assert!(
+            outcome.reports.is_empty(),
+            "no gap report before the sequence completes: {outcome:?}",
+        );
+        assert_eq!(outcome.absorbed, 0, "{outcome:?}");
+        assert_eq!(c.vault.cursor_of(writer), 2);
+        assert_eq!(
+            c.vault.item_lifecycle(item),
+            ItemLifecycle::Absent,
+            "the item never shows a state it does not have",
+        );
+        c.restart();
+        assert_eq!(c.vault.cursor_of(writer), 0);
+        assert_eq!(c.vault.item_lifecycle(item), ItemLifecycle::Absent);
+    }
+    assert!(c.cache.rows.snapshots.iter().all(|s| s.own != own::SERVED));
+    // Once restarts stop, the sequence completes and the item settles to Purged.
+    let outcome = c.fetch(&server);
+    assert_eq!(outcome.held_covers, 1, "{outcome:?}");
+    assert!(outcome.reports.is_empty(), "{outcome:?}");
+    server.compact = false;
+    let outcome = c.fetch(&server);
+    assert_eq!(
+        (outcome.absorbed, outcome.refused_covers),
+        (1, 0),
+        "{outcome:?}"
+    );
+    assert_eq!(c.vault.item_lifecycle(item), ItemLifecycle::Purged);
+    c.assert_loads();
 }
 
 /// ADR 0026 §4 and §6 end to end: a device that persists every step, a second device, a
@@ -2720,3 +2802,143 @@ fn alarm_kind_4_is_the_device_state_outdated_known_answer() {
     assert!(loaded.alarms.contains(&Alarm::DeviceStateOutdated));
     assert!(loaded.vaults[0].is_read_only());
 }
+
+/// ADR 0109 §5 property test: injected restarts during a paged Fetch converge, with no
+/// false gap, no cursor past an uncovered persisted bodiless header, and every cache file
+/// loads. The scenario is the paged held-cover one of
+/// `a_held_cover_is_not_persisted_and_a_taken_one_is`: one writer device whose chain is
+/// create/trash/purge, a compacting server, a reader that fetches pages of a drawn length
+/// (1-4 ops) and is rebuilt from the cache rows with a drawn probability between pages, up
+/// to a drawn restart budget. After the budget is spent, the sequence runs uninterrupted
+/// and the item converges to [`ItemLifecycle::Purged`].
+///
+/// Properties checked (ADR 0109 §2):
+///
+/// - **P1 (C4):** after every reload, the loaded cursor for the writer is at most 2 (the
+///   purge header's `vault_prev_seq`), so it is at or below the `vault_prev_seq` of every
+///   persisted bodiless header no persisted cover covers.
+/// - **P2 (C1):** after every page, the next request's cursor is at most the writer's
+///   chain head and never passes a lapsed-or-rejected link whose cover is not absorbed.
+/// - **P3 (ADR 0012 §12 property 1):** once restarts stop, the reader converges within a
+///   bounded number of sequences.
+/// - **P4 (INV-74):** no `Gap` is ever reported during the run.
+/// - **P5:** every cache state loads (every `restart` or `assert_loads` call would panic
+///   otherwise).
+///
+/// Scope limit: the ADR writes "one to three writer devices"; the test uses one. The
+/// hold/restart dynamics the properties cover are exercised in full by one device; the
+/// multi-writer case shares the same control flow (one cursor entry per chain, C1 and C4
+/// per chain).
+fn adr_0109_one_restart_run(
+    page_len: usize,
+    restart_prob: u32,
+    max_restarts: usize,
+    seed: u64,
+) {
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    let mut server = Server::new(seed.wrapping_mul(31).wrapping_add(1));
+    let (mut a, sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    let item = a.create(&mut rng, "doomed");
+    a.vault
+        .trash_item(&mut rng, &a.unlocked, item, T0 + 10)
+        .unwrap();
+    a.vault
+        .purge_item(&mut rng, &a.unlocked, item, T0 + 11)
+        .unwrap();
+    a.flush();
+    a.upload(&mut server, &mut rng);
+    let writer = a.unlocked.device_id;
+    assert_eq!(a.vault.next_device_seq(), 4);
+
+    server.compact = true;
+    server.page_len = page_len.max(1);
+    let mut c = Dev::enrolled(&mut server, &mut rng, &sk);
+
+    let mut restarts = 0usize;
+    let mut pages = 0usize;
+    let mut budget_spent = false;
+    while pages < 32 {
+        let outcome = c.fetch(&server);
+        pages += 1;
+
+        for report in &outcome.reports {
+            assert!(
+                !matches!(report, rizzy_sync::causal::Report::Gap { .. }),
+                "P4 violated: unexpected Gap report {report:?}",
+            );
+        }
+        assert!(
+            c.vault.cursor_of(writer) <= 3,
+            "P2 violated: cursor_of(writer) = {} > 3",
+            c.vault.cursor_of(writer),
+        );
+        if outcome.absorbed == 0 {
+            assert_eq!(
+                c.vault.item_lifecycle(item),
+                ItemLifecycle::Absent,
+                "P2 corollary: item cannot be ahead of deliveries",
+            );
+        }
+
+        if outcome.absorbed > 0 {
+            break;
+        }
+
+        if !budget_spent && restarts < max_restarts && (rng.next_u32() % 100) < restart_prob {
+            c.restart();
+            restarts += 1;
+            assert!(
+                c.vault.cursor_of(writer) <= 2,
+                "P1 violated: loaded cursor_of(writer) = {} > 2",
+                c.vault.cursor_of(writer),
+            );
+            assert_eq!(
+                c.vault.item_lifecycle(item),
+                ItemLifecycle::Absent,
+                "P1 corollary: loaded item is Absent while the hold has not settled",
+            );
+        } else if restarts >= max_restarts {
+            budget_spent = true;
+            server.compact = false;
+        }
+    }
+    server.compact = false;
+    for _ in 0..6 {
+        if c.vault.item_lifecycle(item) == ItemLifecycle::Purged {
+            break;
+        }
+        let _ = c.fetch(&server);
+    }
+    assert_eq!(
+        c.vault.item_lifecycle(item),
+        ItemLifecycle::Purged,
+        "P3 violated: did not converge to Purged",
+    );
+    c.assert_loads();
+}
+
+mod adr_0109_restart_properties {
+    //! Proptest for ADR 0109 §5: restarts during a paged Fetch converge.
+    use proptest::prelude::*;
+    use proptest::test_runner::Config as ProptestConfig;
+
+    proptest! {
+        // Each case is a full paged Fetch with restarts; 8 cases keep the gate's test
+        // budget happy.
+        #![proptest_config(ProptestConfig::with_cases(8))]
+
+        /// Random page lengths, restart probabilities, restart budgets and RNG seeds all
+        /// converge; see [`super::adr_0109_one_restart_run`] for the properties checked.
+        #[test]
+        fn adr_0109_injected_restarts_converge(
+            page_len in 1usize..=4,
+            restart_prob in 0u32..=100,
+            max_restarts in 0usize..=6,
+            seed in any::<u64>(),
+        ) {
+            super::adr_0109_one_restart_run(page_len, restart_prob, max_restarts, seed);
+        }
+    }
+}
+
