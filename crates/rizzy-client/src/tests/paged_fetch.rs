@@ -160,3 +160,44 @@ fn a_hold_the_response_never_resolves_is_reported_when_it_completes() {
     let out = r.apply_fetch(&authors, &again, T0 + 30).unwrap();
     assert_eq!((out.held_covers, out.refused_covers), (1, 1), "{out:?}");
 }
+
+/// ADR 0109 §2 C5: a healing request is refused with [`ClientError::FetchRequired`] while a
+/// hold is open in the running `VaultSync`. The derived cursor passes a held link only for
+/// the next page of its own sequence; a healing request's cursor is not that cursor, so the
+/// range it would build could name a header the device holds no body for.
+#[test]
+fn adr_0109_c5_healing_request_is_refused_while_a_hold_is_open() {
+    let (mut server, writer, _a, mut b, authors, item) = purged();
+    let mut r = reader(&mut b, &writer);
+    server.page_len = 2;
+    // Page 1 opens a hold: the first two bodiless ops arrive with a cover whose recorded
+    // purge is above the page's cut (ADR 0050 §4), and `pending_covers` is nonempty.
+    let page1 = server.fetch(&r.fetch_request().unwrap());
+    assert!(!page1.complete);
+    let out = r.apply_fetch(&authors, &page1, T0 + 20).unwrap();
+    assert_eq!(out.held_covers, 1, "{out:?}");
+    assert_eq!(r.holds_for_tests(item).1, 1, "pending_covers nonempty");
+    // No healing is needed yet: with the sequence open and nothing wrong, the request is
+    // just `Ok(None)`.
+    assert!(r.healing_request().unwrap().is_none());
+    // Fake a "server behind" verdict to force `needs_healing` to true mid-sequence. Without
+    // the C5 guard, `healing_request` would build its ranges from the derived cursor, which
+    // passes the held link only for the next page of this sequence.
+    r.set_server_behind_for_tests(true);
+    assert!(r.needs_healing());
+    assert_eq!(
+        r.healing_request().unwrap_err(),
+        ClientError::FetchRequired,
+        "C5: no healing while a hold is open",
+    );
+    // The host clears the state the usual way (complete the sequence or load from the cache),
+    // and the guard releases.
+    r.set_server_behind_for_tests(false);
+    server.compact = false;
+    let page2 = server.fetch(&r.fetch_request().unwrap());
+    assert!(page2.complete);
+    let out = r.apply_fetch(&authors, &page2, T0 + 21).unwrap();
+    assert_eq!(out.held_covers, 0, "{out:?}");
+    assert_eq!(r.holds_for_tests(item).1, 0);
+    assert!(r.healing_request().unwrap().is_none(), "no hold, no need");
+}

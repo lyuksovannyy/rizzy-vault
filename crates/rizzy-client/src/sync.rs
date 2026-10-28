@@ -34,7 +34,7 @@
 //! CRYPTO.md §10.2 rule (c) and §11.8 step 4. Then the `causal` cycle: plan, absorb, commit,
 //! deliver.
 //!
-//! # Paged responses (ADR 0050)
+//! # Paged responses (ADR 0050 as ADR 0109 clarifies it)
 //!
 //! A page carries the covers of its own bodiless headers only, so a tombstone can arrive in a
 //! page before the header of the Purge it records, on its chain or another device's. A cover
@@ -44,9 +44,14 @@
 //! after each page whose commit advanced a chain and once more on the complete page
 //! ([`FetchOutcome::held_covers`]). A cover taken on a retry is journaled like any absorbed
 //! one. One still held when the sequence completes is given up (a refused cover, and a gap in
-//! the reports), and the next Fetch serves its headers again. A hold is kept in memory only:
-//! a restart in the middle of a sequence starts the next one from the persisted cursor (ADR
-//! 0050 open question 1).
+//! the reports), and the next Fetch serves its headers again. A hold is kept in memory only
+//! (ADR 0109 §2 C2): no cursor, no hold, no held cover and no held or lapsed link state is
+//! stored. The derived cursor passes a held link only for the next page of its own sequence;
+//! a restart in the middle of a sequence loads with no hold alive, and the next Fetch runs
+//! from a cursor at or below the first bodiless header's `vault_prev_seq` (ADR 0109 §2 C4;
+//! ADR 0050 owner answer 1 keeps the restart-every-page liveness limit for M1). A healing
+//! request mid-sequence is refused with [`ClientError::FetchRequired`] while a hold is open
+//! (ADR 0109 §2 C5).
 //!
 //! # Upload
 //!
@@ -2422,6 +2427,14 @@ impl VaultSync {
     /// The highest `device_seq` this device holds from `device` in this vault.
     pub(crate) fn cursor_of(&self, device: DeviceId) -> u64 {
         self.log.cursor().get(device)
+    }
+
+    /// Test-only hook for ADR 0109 §2 C5: fakes a "server behind" condition so a test can
+    /// exercise [`VaultSync::healing_request`]'s hold-open guard without running the full
+    /// stale-epoch upload path.
+    #[cfg(test)]
+    pub(crate) fn set_server_behind_for_tests(&mut self, value: bool) {
+        self.server_behind = value;
     }
 
     /// Test access to the ADR 0050 bookkeeping: the items whose cover the log holds, the

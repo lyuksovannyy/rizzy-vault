@@ -164,8 +164,12 @@ impl VaultSync {
     ///
     /// # Errors
     /// [`ClientError::ReadOnly`] while the host holds the vault read-only (an alarm);
-    /// [`ClientError::FetchRequired`] before the first Fetch; [`ClientError::CannotHeal`] when
-    /// no complete request can be built (module docs, "Readings"); [`ClientError::Internal`].
+    /// [`ClientError::FetchRequired`] before the first Fetch, or while the current Fetch
+    /// sequence is open with the merge still holding a cover (ADR 0109 §2 C5: the derived
+    /// cursor passes a held link only for the next page of its own sequence, which a healing
+    /// request's cursor is not; the host completes the Fetch sequence first);
+    /// [`ClientError::CannotHeal`] when no complete request can be built (module docs,
+    /// "Readings"); [`ClientError::Internal`].
     pub fn healing_request(&mut self) -> Result<Option<HealingRequest>, ClientError> {
         if self.host_read_only {
             return Err(ClientError::ReadOnly);
@@ -175,6 +179,14 @@ impl VaultSync {
         };
         if !self.needs_healing() {
             return Ok(None);
+        }
+        if !self.pending_covers.is_empty() {
+            // ADR 0109 §2 C5: a hold is open in the running `VaultSync`; the derived cursor
+            // passes the held link only for the next page of this sequence, which a healing
+            // request's cursor is not. Force a fresh Fetch first: by C4 a load, or the
+            // complete sequence, brings the cursor to the ordinary gap, and the subsequent
+            // healing request's range covers the held header with a body.
+            return Err(ClientError::FetchRequired);
         }
         let own_device = self.device_id;
         let cursor = self.log.cursor();

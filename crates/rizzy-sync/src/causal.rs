@@ -89,8 +89,13 @@
 //! - **Head:** the `device_seq` of the chain's last link, 0 if none.
 //! - **Cursor entry:** the head, unless a link's body was rejected after it was accepted, or
 //!   its hold lapsed, and no snapshot covers it yet; then the link before that one, so that the
-//!   next Fetch serves that link again (reading 8; ADR 0050 §2). A held link does not stop it. The cursor sent with a Fetch is every entry, the own
-//!   device's included (ADR 0012 §7 "Fetch": "the highest `device_seq` it has per device").
+//!   next Fetch serves that link again (reading 8; [ADR 0050] §2, [ADR 0109] §2 C1). A held
+//!   link does not stop it: the cursor passes a held link only for the next page of the
+//!   current response sequence, and a load, a lapse or a complete sequence rewinds it to the
+//!   first held link's `vault_prev_seq` ([ADR 0109] §2 C3-C4). The cursor is derived from
+//!   this log every time it is needed and never persisted ([ADR 0109] §2 C2). The cursor
+//!   sent with a Fetch is every entry, the own device's included (ADR 0012 §7 "Fetch": "the
+//!   highest `device_seq` it has per device").
 //! - **Settled VV** of an item: the join of the dots of the ops delivered on it and the parts
 //!   of absorbed snapshots the merge took ([`VaultLog::record_absorbed`]), each cut to the
 //!   chains' links (reading 7). It is the item VV of ADR 0012 §2 as this layer knows it; the
@@ -116,7 +121,7 @@
 //!   stays before it, so the next Fetch asks again. A cover's part past a gap is never
 //!   recorded (reading 7). The one exception is a held cover (below).
 //!
-//! **Held covers** ([ADR 0050] §2, INV-74). A page carries the covers of its own
+//! **Held covers** ([ADR 0050] §2 as [ADR 0109] clarifies it, INV-74). A page carries the covers of its own
 //! bodiless headers only, and the server cannot see which purge a tombstone records (G-1), so a
 //! tombstone cover can arrive in a page that does not yet carry, in any chain, the header of
 //! the Purge it records. The merge then refuses it as `Refusal::PurgeAboveCut`, a refusal that
@@ -227,6 +232,7 @@
 //! [ADR 0012]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0012-sync-engine.md
 //! [ADR 0021]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0021-server-compaction.md
 //! [ADR 0050]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0050-paged-fetch-tombstone-boundary.md
+//! [ADR 0109]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0109-sync-cursor-held-header.md
 
 use core::fmt;
 use core::ops::Bound;
@@ -732,11 +738,13 @@ impl VaultLog {
         self.chains.get(&device).map_or(0, |c| c.head)
     }
 
-    /// The Fetch cursor (ADR 0012 §7 "Fetch"): every chain's cursor entry, the own device's
-    /// included, so the server serves nothing of the own chain back (reading 5). An entry is the
-    /// chain's head, or, below a link whose body was rejected after it waited and that no
-    /// snapshot covers, the `vault_prev_seq` of that link, so the server serves it again
-    /// (reading 8).
+    /// The Fetch cursor (ADR 0012 §7 "Fetch" as [ADR 0109] §2 clarifies it): every chain's
+    /// cursor entry, the own device's included, so the server serves nothing of the own chain
+    /// back (reading 5). An entry is the chain's head, or, below a link whose body was
+    /// rejected after it waited and that no snapshot covers, the `vault_prev_seq` of that
+    /// link, so the server serves it again (reading 8). Derived every time it is needed and
+    /// never persisted ([ADR 0109] §2 C2); passes a held link only for the next page of the
+    /// current response sequence (C1).
     #[must_use]
     pub fn cursor(&self) -> VersionVector {
         self.chains
