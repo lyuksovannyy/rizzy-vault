@@ -365,3 +365,73 @@ fn a_hold_whose_purge_never_comes_is_reported_when_the_response_completes() {
         assert_eq!(c.log.cursor().get(a.id), 0);
     });
 }
+
+/// ADR 0109 §2 C6: two Fetch requests from the same cursor serve the same page. The
+/// server keeps no per-client cursor and the response is a function of the request's
+/// cursor alone (ADR 0021 §4), so a client restart between the first and the second page,
+/// with the loaded cursor equal to the first-page cursor, replays the first page byte for
+/// byte.
+#[test]
+fn adr_0109_c6_two_fetches_from_the_same_cursor_serve_the_same_page() {
+    block_on(async {
+        let env = Env::new(1).await;
+        let (a, b) = (Device::new(1), Device::new(2));
+        env.enrol(&[&a, &b]);
+        let x = item(1);
+        env.store(vec![
+            op(&a, x, 1, 0),
+            op(&a, x, 2, 1),
+            op(&a, x, 3, 2),
+            Record::Snapshot(sign_snapshot(&a, x, 1, &[(&a, 2)], 0)),
+        ])
+        .await;
+        env.domain.run_compaction(16, NOW).await.unwrap();
+        let budget = budget_for(&env, 2).await;
+        let domain = env.domain_with_page_bytes(budget);
+
+        // Page 1 at the empty cursor.
+        let empty = rizzy_proto::vault::SeqVector::new(Vec::new()).unwrap();
+        let first = fetch_page_with(&domain, &empty).await;
+        assert!(!first.response.complete, "page 1 is incomplete");
+        check_page(&first);
+
+        // The same request again: identical pages. The server records no cursor and the
+        // response is a function of the request's cursor and the stored state.
+        let again = fetch_page_with(&domain, &empty).await;
+        assert_eq!(again.response, first.response, "C6: identical pages");
+
+        // The next page is also stable under a repeat from its own cursor: a client that
+        // crashed between page 1 and page 2 and reloaded to the same mid-sequence cursor
+        // sees the same page 2 bytes it would have without the crash.
+        let mut cursor = empty.clone();
+        for op in first.response.ops.as_slice() {
+            let header = OpHeader::parse(header_bytes(op.statement.as_slice())).unwrap();
+            cursor = {
+                let mut v: Vec<_> = cursor.entries().to_vec();
+                let id = header.dot.device_id();
+                if let Some(entry) = v
+                    .iter_mut()
+                    .find(|e| e.device_id.to_bytes() == id.to_bytes())
+                {
+                    entry.seq = entry.seq.max(header.dot.seq());
+                } else {
+                    v.push(rizzy_proto::vault::SeqEntry {
+                        device_id: rizzy_proto::wire::Id::from_bytes(id.to_bytes()),
+                        seq: header.dot.seq(),
+                    });
+                }
+                rizzy_proto::vault::SeqVector::new(v).unwrap()
+            };
+        }
+        let page2_once = fetch_page_with(&domain, &cursor).await;
+        let page2_again = fetch_page_with(&domain, &cursor).await;
+        assert_eq!(
+            page2_again.response, page2_once.response,
+            "C6: identical pages across a restart-sized gap on page 2",
+        );
+
+        // Suppress unused-variable warning if b is not referenced further; the test uses
+        // only a's chain here.
+        let _ = &b;
+    });
+}
