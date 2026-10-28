@@ -391,7 +391,11 @@ fn adr_0109_c1_cursor_entry_per_link_state() {
     let _ = log.plan_covers(&page, core::slice::from_ref(&tomb));
     assert!(log.hold_cover(&tomb));
     let _ = log.commit(&page);
-    assert_eq!(log.cursor(), vv(&[(A, 2)]), "held link does not lower the entry");
+    assert_eq!(
+        log.cursor(),
+        vv(&[(A, 2)]),
+        "held link does not lower the entry"
+    );
 
     // release_hold lapses the links and the entry drops to the first lapsed link's prev_seq.
     assert!(log.release_hold(item(X)));
@@ -473,7 +477,11 @@ fn adr_0109_c1_cursor_entry_per_link_state() {
         verified(op(A, 2, 1, X, &[(A, 1)])),
     ];
     let _ = log.commit(&page);
-    assert_eq!(log.cursor(), vv(&[(A, 2)]), "a waiting link does not lower the entry");
+    assert_eq!(
+        log.cursor(),
+        vv(&[(A, 2)]),
+        "a waiting link does not lower the entry"
+    );
     log.body_rejected(dot(A, 1)).unwrap();
     assert_eq!(
         log.cursor(),

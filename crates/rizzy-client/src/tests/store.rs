@@ -2829,12 +2829,7 @@ fn alarm_kind_4_is_the_device_state_outdated_known_answer() {
 /// hold/restart dynamics the properties cover are exercised in full by one device; the
 /// multi-writer case shares the same control flow (one cursor entry per chain, C1 and C4
 /// per chain).
-fn adr_0109_one_restart_run(
-    page_len: usize,
-    restart_prob: u32,
-    max_restarts: usize,
-    seed: u64,
-) {
+fn adr_0109_one_restart_run(page_len: usize, restart_prob: u32, max_restarts: usize, seed: u64) {
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
     let mut server = Server::new(seed.wrapping_mul(31).wrapping_add(1));
     let (mut a, sk, _code) = Dev::signed_up(&mut server, &mut rng);
@@ -2941,4 +2936,3 @@ mod adr_0109_restart_properties {
         }
     }
 }
-
