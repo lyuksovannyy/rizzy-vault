@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The device-state record, record version 2 ([ADR 0057] §2, extending [ADR 0026] §2, with
-//! the recovery-pending stage of [ADR 0046] §1): the one opaque byte string a durable device
-//! persists for its enrolment (ADR 0013 §3 rule 2).
+//! The device-state record, record version 2 ([ADR 0088] §1, the combined grammar that is the
+//! erratum to [ADR 0057] §2 and [ADR 0046] §1 and the binding grammar at [ADR 0026] §2): the one
+//! opaque byte string a durable device persists for its enrolment (ADR 0013 §3 rule 2).
 //!
 //! ```text
 //! device_state = u16(record_version = 1 | 2)
@@ -60,6 +60,7 @@
 //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
 //! [ADR 0046]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0046-recovery-pending-device-stage.md
 //! [ADR 0057]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0057-device-state-v2-keystore.md
+//! [ADR 0088]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0088-device-state-record-grammar.md
 
 use core::fmt;
 

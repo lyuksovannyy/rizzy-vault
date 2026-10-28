@@ -556,6 +556,16 @@ fn device_record_refusals() {
         corrupt(&good[..cut]);
     }
     corrupt(&vec![0u8; MAX_DEVICE_STATE_LEN + 1]);
+    // ADR 0088 §2 rule R1 and §3: an oversized record is `CacheCorrupt`, even when its first
+    // bytes claim a newer record version. The size check runs before the version check, so a
+    // 4097-byte record whose first two bytes are `00 03` is `CacheCorrupt`, not
+    // `CacheUpdateRequired` (otherwise an attacker-chosen oversize would be reported as an
+    // upgradable record, ADR 0088 open question's resolution).
+    let mut oversize_newer = vec![0u8; MAX_DEVICE_STATE_LEN + 1];
+    oversize_newer[0] = 0x00;
+    oversize_newer[1] = 0x03;
+    assert_eq!(oversize_newer.len(), 4097);
+    corrupt(&oversize_newer);
     // A stage, kind or flag outside its values.
     for (at, value) in [(2usize, 0u8), (2, 3), (2, 4), (64, 0), (64, 4)] {
         let mut bad = good.clone();

@@ -159,6 +159,47 @@ fn recovery_pending_vector() {
     }
 }
 
+/// ADR 0088 §1 "stage 3 is valid in both": a version-1 stage-3 record (the stage-3 vector
+/// with `record_version = 1` and the `has_ks`/`forward_count` bytes removed) parses with
+/// `keystore_capable` false and true, gives [`Stage::RecoveryPending`], and encodes to exactly
+/// the committed version-2 stage-3 vector (ADR 0088 §1 "encode always writes version 2";
+/// ADR 0057 §3 upgrade on the first write).
+#[test]
+fn recovery_pending_v1_vector_upgrades_to_v2() {
+    let v2 = record_bytes(3, true, false, false);
+    assert_eq!(&v2[..2], &[0x00, 0x02]);
+    // The v1 vector: same bytes as the v2 stage-3 vector, with `00 02` → `00 01` at the start
+    // and the `has_ks = 0` and `forward_count = 0` bytes removed. Those two bytes sit right
+    // after `[local]` and before the `pending` flag; `[local]` ends at the last envelope byte,
+    // so they are the two bytes before the trailing `pending = 0` byte.
+    let mut v1 = v2.clone();
+    v1[0] = 0x00;
+    v1[1] = 0x01;
+    let pending_flag = v1.pop().unwrap();
+    assert_eq!(pending_flag, 0);
+    let forward_count = v1.pop().unwrap();
+    assert_eq!(forward_count, 0);
+    let has_ks = v1.pop().unwrap();
+    assert_eq!(has_ks, 0);
+    v1.push(pending_flag);
+    assert_eq!(v1.len(), v2.len() - 2);
+    assert_eq!(v1.len(), 297);
+    assert_eq!(hex(&v1[..7]), "00010300000019");
+
+    let v2_committed = record(Stage::RecoveryPending, true, false, false)
+        .encode()
+        .unwrap();
+    assert_eq!(hex(&v2_committed), hex(&v2));
+
+    for capable in [false, true] {
+        let parsed = DeviceRecord::parse(&v1, capable).unwrap();
+        assert_eq!(parsed.stage(), Stage::RecoveryPending);
+        assert!(parsed.has_local() && !parsed.has_pending() && !parsed.has_keystore());
+        // encode writes version 2, so a v1 record upgrades to the committed v2 vector.
+        assert_eq!(hex(&parsed.encode().unwrap()), hex(&v2_committed));
+    }
+}
+
 /// ADR 0046 §1 and ADR 0057 §2: stage 3 requires `E_local`, refuses a nested pending record
 /// and refuses `E_ks`, in the parser (`CacheCorrupt`) and in the encoder (`Internal`, so no
 /// such record is ever written). A stage byte above 3 is corrupt.
