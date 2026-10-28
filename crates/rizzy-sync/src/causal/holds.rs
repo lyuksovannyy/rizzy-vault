@@ -373,6 +373,115 @@ fn a_released_hold_lapses_at_once() {
     assert_eq!(log.cursor(), vv(&[(A, 2)]));
 }
 
+/// ADR 0109 §2 C1 (cursor entry per link state): the per-chain cursor rule is "head, unless
+/// a link at or after the frontier is in a serve-again state (`Rejected` or `Lapsed`) and
+/// its item's settled VV does not cover its dot; then the first such link's
+/// `vault_prev_seq`." A held link never lowers it; a cover absorbed later settles a lapsed
+/// link out; two lapsed links in one chain give the first's `vault_prev_seq`; and a held
+/// link past a learned revocation cut-off counts as rejected.
+#[test]
+fn adr_0109_c1_cursor_entry_per_link_state() {
+    // Held link does not lower the entry: it is the chain head.
+    let mut log = new_log();
+    let tomb = cover(B, X, &[(A, 3)]);
+    let page = [
+        bodiless(op(A, 1, 0, X, &[])),
+        bodiless(op(A, 2, 1, X, &[(A, 1)])),
+    ];
+    let _ = log.plan_covers(&page, core::slice::from_ref(&tomb));
+    assert!(log.hold_cover(&tomb));
+    let _ = log.commit(&page);
+    assert_eq!(log.cursor(), vv(&[(A, 2)]), "held link does not lower the entry");
+
+    // release_hold lapses the links and the entry drops to the first lapsed link's prev_seq.
+    assert!(log.release_hold(item(X)));
+    assert_eq!(
+        log.cursor(),
+        VersionVector::new(),
+        "the first lapsed link's vault_prev_seq is 0 (nothing in the chain before A1)",
+    );
+
+    // end_holds has the same effect (asserted here on a fresh log).
+    let mut log = new_log();
+    let _ = log.plan_covers(&page, core::slice::from_ref(&tomb));
+    assert!(log.hold_cover(&tomb));
+    let _ = log.commit(&page);
+    assert_eq!(log.cursor(), vv(&[(A, 2)]));
+    log.end_holds();
+    assert_eq!(
+        log.cursor(),
+        VersionVector::new(),
+        "end_holds lapses the hold and drops the entry below the first held link",
+    );
+
+    // A later absorbed cover settles the lapsed link, and the entry returns to head.
+    let plan = log.plan_covers(&page, core::slice::from_ref(&tomb));
+    assert_eq!(plan.absorb, [0]);
+    let _ = log.record_absorbed(&plan, item(X), &vv(&[(A, 2)]));
+    let _ = log.commit(&page);
+    assert_eq!(
+        log.cursor(),
+        vv(&[(A, 2)]),
+        "a settled cover covers the lapsed link's dot; the entry returns to head",
+    );
+
+    // Two lapsed links in one chain: the entry stops at the first one's vault_prev_seq.
+    // Build a chain A1,A2 held; A3,A4 (also bodiless on item X, held by the same tombstone's
+    // retry at the end of the sequence) also lapse. Then make a later cover that only
+    // covers A1 (through the covered VV) and absorb it: the second lapsed link (A2) is now
+    // the first uncovered lapsed link, so the entry is A1 (its vault_prev_seq).
+    let mut log = new_log();
+    let tomb = cover(B, X, &[(A, 4)]);
+    let page = [
+        bodiless(op(A, 1, 0, X, &[])),
+        bodiless(op(A, 2, 1, X, &[(A, 1)])),
+        bodiless(op(A, 3, 2, X, &[(A, 2)])),
+        bodiless(op(A, 4, 3, X, &[(A, 3)])),
+    ];
+    let _ = log.plan_covers(&page, core::slice::from_ref(&tomb));
+    assert!(log.hold_cover(&tomb));
+    let _ = log.commit(&page);
+    assert_eq!(log.cursor(), vv(&[(A, 4)]));
+    assert!(log.release_hold(item(X)));
+    assert_eq!(
+        log.cursor(),
+        VersionVector::new(),
+        "every link is lapsed and uncovered; the entry is 0 (A1's vault_prev_seq)",
+    );
+    // Serve the same page with a cover that only covers A1. The second lapsed link (A2) is
+    // the first uncovered one, so the entry is now A2's `vault_prev_seq` (= 1).
+    let partial = cover(B, X, &[(A, 1)]);
+    let plan = log.plan_covers(&page, core::slice::from_ref(&partial));
+    assert_eq!(plan.absorb, [0]);
+    let _ = log.record_absorbed(&plan, item(X), &vv(&[(A, 1)]));
+    let _ = log.commit(&page);
+    assert_eq!(
+        log.cursor(),
+        vv(&[(A, 1)]),
+        "with A1 covered, the first uncovered lapsed link is A2; the entry is 1 (A2's prev_seq)",
+    );
+
+    // Serve-again mirrored on the `Rejected` state (ADR 0109 C1 treats `Rejected` and
+    // `Lapsed` alike, both as "serves again"): a waiting header whose body is rejected
+    // after waiting, with no snapshot covering it, lowers the entry to its `vault_prev_seq`.
+    let mut log = new_log();
+    let page = [
+        ServedOp {
+            header: op(A, 1, 0, X, &[]),
+            body: BodyStatus::Waiting,
+        },
+        verified(op(A, 2, 1, X, &[(A, 1)])),
+    ];
+    let _ = log.commit(&page);
+    assert_eq!(log.cursor(), vv(&[(A, 2)]), "a waiting link does not lower the entry");
+    log.body_rejected(dot(A, 1)).unwrap();
+    assert_eq!(
+        log.cursor(),
+        VersionVector::new(),
+        "a rejected link below the frontier lowers the entry to its vault_prev_seq (0)",
+    );
+}
+
 /// The hold's bounds: a cover of another vault, or past its author's cut-off, is never held,
 /// and past [`MAX_HELD_ITEMS`] distinct items a refusal is final at once (ADR 0050 "Risks").
 #[test]
