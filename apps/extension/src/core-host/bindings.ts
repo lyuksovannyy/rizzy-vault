@@ -439,21 +439,33 @@ export function matchModeOf(raw: string | undefined): MatchModeValue {
  * the web vault already writes it (`apps/web/src/views/ItemEditor.tsx`), so `mode` reflects
  * whatever the item actually has stored, decoded through {@link matchModeOf} — never a hardcoded
  * value. */
-export function itemUriFields(fields: readonly FieldView[]): ReadonlyArray<{ uriId: string; value: string; mode: MatchModeValue }> {
+export function itemUriFields(
+  fields: readonly FieldView[],
+): ReadonlyArray<{ uriId: string; value: string; mode: MatchModeValue; pattern: string | undefined }> {
   // `FieldKey`'s grammar (`crates/rizzy-core/src/item/key.rs`): `list()` is the repeated group's
   // name ("uri"), `element()` its per-entry hex id, `attribute()` which column
   // ("value"/"match"/"order"). `match` is collected first so the loop below can resolve it while
   // building each URI's entry, in the `value` fields' own order.
+  // `pattern` (ADR 0097 §3.1) is carried alongside: the core uses it only in Regex mode.
   const matchByElement = new Map<string, string | undefined>();
+  const patternByElement = new Map<string, string | undefined>();
   for (const field of fields) {
     if (field.list === "uri" && field.attribute === "match" && field.element !== undefined) {
       matchByElement.set(field.element, field.value);
     }
+    if (field.list === "uri" && field.attribute === "pattern" && field.element !== undefined) {
+      patternByElement.set(field.element, field.value);
+    }
   }
-  const out: Array<{ uriId: string; value: string; mode: MatchModeValue }> = [];
+  const out: Array<{ uriId: string; value: string; mode: MatchModeValue; pattern: string | undefined }> = [];
   for (const field of fields) {
     if (field.list === "uri" && field.attribute === "value" && field.element !== undefined && field.value !== undefined) {
-      out.push({ uriId: field.element, value: field.value, mode: matchModeOf(matchByElement.get(field.element)) });
+      out.push({
+        uriId: field.element,
+        value: field.value,
+        mode: matchModeOf(matchByElement.get(field.element)),
+        pattern: patternByElement.get(field.element),
+      });
     }
   }
   return out;
@@ -467,7 +479,7 @@ export function sessionItemUris(session: DurableSession): readonly MatchUriInput
   const out: MatchUriInput[] = [];
   for (const item of session.items()) {
     for (const uri of itemUriFields(session.fields(item.id))) {
-      out.push({ itemId: item.id, uriId: uri.uriId, value: uri.value, mode: uri.mode });
+      out.push({ itemId: item.id, uriId: uri.uriId, value: uri.value, mode: uri.mode, pattern: uri.pattern });
     }
   }
   return out;
@@ -477,8 +489,10 @@ export function sessionItemUris(session: DurableSession): readonly MatchUriInput
  * the account's own match settings (ADR 0042 §6: the match default, the disabled global groups
  * and the user-defined groups, read by the core from the account's `ACCOUNT_SETTINGS`): one call
  * wrapping `sessionItemUris` + the session's `decideMatchCandidates` so `content-handler.ts` never
- * touches `@rizzy-vault/core` shapes directly either. Settings the core cannot read (written by
- * a newer rizzy-vault) throw, so no candidate is offered under settings it could not apply. */
+ * touches `@rizzy-vault/core` shapes directly either. Settings the core cannot read (unreadable,
+ * or written by a newer rizzy-vault) decide under the fail-closed view of ADR 0097 §4.3 (default
+ * Never, no site group) with its warning, so no candidate is offered under settings it could not
+ * apply. */
 export function decideCandidates(
   session: DurableSession,
   pageUrl: string,

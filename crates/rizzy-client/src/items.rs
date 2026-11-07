@@ -107,6 +107,7 @@ use zeroize::Zeroizing;
 use crate::autofill::{CheckMode, check_custom_fields};
 use crate::device::UnlockedDevice;
 use crate::error::ClientError;
+use crate::matching::check_regex_writes;
 use crate::sync::{OwnChange, VaultSync};
 
 /// One field write: the final key and the encoded value. Both are user content (ADR 0018 §2).
@@ -362,8 +363,9 @@ impl VaultSync {
     /// `item.type`). Returns the new item's id.
     ///
     /// # Errors
-    /// [`ClientError::InvalidEdit`] for a write the schema refuses; the errors of the own-op
-    /// writer ([`ClientError::ReadOnly`] among them).
+    /// [`ClientError::InvalidEdit`] for a write the schema refuses;
+    /// [`ClientError::RegexInvalid`] for a *Regex* URI without a valid pattern (ADR 0097 §3.5);
+    /// the errors of the own-op writer ([`ClientError::ReadOnly`] among them).
     pub fn create_item<R: CryptoRng + ?Sized>(
         &mut self,
         rng: &mut R,
@@ -388,6 +390,8 @@ impl VaultSync {
         .map_err(|_| ClientError::InvalidEdit)?;
         // ADR 0076 §2.3: W1–W5 on the new item's custom fields.
         check_custom_fields(&writes, CheckMode::Write)?;
+        // ADR 0097 §3.5: no Regex URI is saved with an invalid pattern.
+        check_regex_writes(&writes, |_| None)?;
         let item = ItemId::generate(rng);
         self.write_op(
             rng,
@@ -582,6 +586,8 @@ impl VaultSync {
     /// # Errors
     /// [`ClientError::UnknownItem`] if the item is not active; [`ClientError::InvalidEdit`] for
     /// no field, an item type this client does not support, or a write the schema refuses;
+    /// [`ClientError::RegexInvalid`] for a *Regex* URI the edit leaves without a valid pattern
+    /// (ADR 0097 §3.5–§3.6);
     /// the errors of the own-op writer.
     pub fn edit_item<R: CryptoRng + ?Sized>(
         &mut self,
@@ -612,6 +618,8 @@ impl VaultSync {
         // ADR 0076 §2.3: W1–W5 against the item's custom fields as they display now. Conflict
         // resolution and history restore edit through here, so they run them too.
         self.check_custom_field_edit(item, &writes)?;
+        // ADR 0097 §3.5–§3.6: a Regex URI the edit touches keeps a valid pattern.
+        check_regex_writes(&writes, |key| self.field_value(item, key))?;
         self.write_op(
             rng,
             unlocked,

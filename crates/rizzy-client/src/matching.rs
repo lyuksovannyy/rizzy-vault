@@ -37,7 +37,7 @@ use rizzy_match::security::frame_may_request_candidates;
 
 use rizzy_core::item::schema::{ATTR_MATCH, ATTR_PATTERN, ATTR_VALUE, LIST_URI};
 use rizzy_core::item::types::ItemType;
-use rizzy_core::item::value::ValueRef;
+use rizzy_core::item::value::{Value, ValueRef};
 use rizzy_sync::merge::ItemLifecycle;
 use zeroize::Zeroizing;
 
@@ -392,6 +392,70 @@ pub fn decide_fail_closed(
     )?;
     decision.warnings.push(SETTINGS_UNREADABLE_WARNING);
     Ok(decision)
+}
+
+/// The *Regex* save check ([ADR 0097] §3.5–§3.6): every URI whose `match` or `pattern` an
+/// op writes, and that is left in *Regex* mode (`0x0005`, written or current), must be left with
+/// a pattern that compiles ([`rizzy_match::pattern::compile`]). `current` reads a field as the
+/// item displays it before the op. A URI the op does not touch in those two attributes is not
+/// checked, so a synced pattern this build finds invalid is kept verbatim until the user edits
+/// it (§3.6). A URI on the account default is not checked: its mode is resolved at match time.
+///
+/// # Errors
+/// [`ClientError::RegexInvalid`].
+///
+/// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
+pub(crate) fn check_regex_writes(
+    writes: &[(&str, &[u8])],
+    current: impl Fn(&str) -> Option<Value>,
+) -> Result<(), ClientError> {
+    let written = |key: &str| {
+        writes
+            .iter()
+            .rev()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
+    };
+    for (key, _) in writes {
+        let Some((element, attribute)) = key
+            .strip_prefix(LIST_URI)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .and_then(|rest| rest.split_once('/'))
+        else {
+            continue;
+        };
+        if attribute != ATTR_MATCH && attribute != ATTR_PATTERN {
+            continue;
+        }
+        let match_key = format!("{LIST_URI}/{element}/{ATTR_MATCH}");
+        let is_regex = |encoded: &[u8]| {
+            matches!(ValueRef::decode(encoded), Ok(ValueRef::Enum(n))
+                if MatchMode::from_wire(n) == Some(MatchMode::Regex))
+        };
+        let regex = match written(&match_key) {
+            Some(encoded) => is_regex(encoded),
+            None => current(&match_key).is_some_and(|v| is_regex(v.expose_secret())),
+        };
+        if !regex {
+            continue;
+        }
+        let pattern_key = format!("{LIST_URI}/{element}/{ATTR_PATTERN}");
+        let text = |encoded: &[u8]| match ValueRef::decode(encoded) {
+            Ok(ValueRef::Text(t)) => Some(Zeroizing::new(t.to_owned())),
+            _ => None,
+        };
+        let pattern = match written(&pattern_key) {
+            Some(encoded) => text(encoded),
+            None => current(&pattern_key).and_then(|v| text(v.expose_secret())),
+        };
+        let valid = pattern
+            .as_ref()
+            .is_some_and(|p| rizzy_match::pattern::compile(p).is_ok());
+        if !valid {
+            return Err(ClientError::RegexInvalid);
+        }
+    }
+    Ok(())
 }
 
 /// One saved URI of a vault item, owned, as [`vault_item_uris`] collects them: what an
@@ -999,5 +1063,113 @@ pub(crate) mod tests {
         // site and the saved site in the equivalence-only warning.
         assert_eq!(decision.page_host, "example.com");
         assert_eq!(decision.candidates[0].saved_host, "example.net");
+    }
+
+    #[test]
+    fn one_call_evaluates_at_most_32_regex_uris_and_warns_once() {
+        // ADR 0097 §3.4 / plan step 4: 33 same-site Regex URIs → 32 evaluated, one warning.
+        let page = "https://example.com/login";
+        let uris: Vec<ItemUri<'_>> = (0..33u8)
+            .map(|i| ItemUri {
+                item_id: [i; 16],
+                pattern: Some("^https://example\\.com/"),
+                ..uri("https://example.com/", MatchMode::Regex)
+            })
+            .collect();
+        let decision = decide_candidates(
+            page,
+            &top(page),
+            MatchMode::BaseDomain,
+            &uris,
+            &EquivalenceView::empty(),
+        )
+        .unwrap();
+        assert_eq!(decision.candidates.len(), 32);
+        assert_eq!(
+            decision.warnings,
+            ["matching: more than 32 Regex URIs for this site; the rest were not evaluated"]
+        );
+        // A pattern on another site costs nothing: a 34th, foreign URI does not move the count.
+        let mut mixed = vec![ItemUri {
+            pattern: Some(".*"),
+            ..uri("https://other.example/", MatchMode::Regex)
+        }];
+        mixed.extend(uris.iter().take(32).map(|u| ItemUri { ..*u }));
+        let decision = decide_candidates(
+            page,
+            &top(page),
+            MatchMode::BaseDomain,
+            &mixed,
+            &EquivalenceView::empty(),
+        )
+        .unwrap();
+        assert_eq!(decision.candidates.len(), 32);
+        assert!(decision.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_regex_uri_is_saved_only_with_a_valid_pattern() {
+        // ADR 0097 §3.5–§3.6.
+        const MATCH: &str = "uri/00112233445566778899aabbccddeeff/match";
+        const PATTERN: &str = "uri/00112233445566778899aabbccddeeff/pattern";
+        const VALUE: &str = "uri/00112233445566778899aabbccddeeff/value";
+        let regex = Value::enumeration(0x0005);
+        let host = Value::enumeration(0x0003);
+        let good = Value::text(r"^https://example\.com/login$").unwrap();
+        let bad = Value::text("(").unwrap();
+        let cleared = Value::cleared();
+        let site = Value::text("https://example.com/").unwrap();
+        let none = |_: &str| None;
+        let w = |pairs: &[(&'static str, &Value)]| -> Vec<(&'static str, Vec<u8>)> {
+            pairs
+                .iter()
+                .map(|(k, v)| (*k, v.expose_secret().to_vec()))
+                .collect()
+        };
+        let check = |pairs: &[(&'static str, &Value)], current: &dyn Fn(&str) -> Option<Value>| {
+            let owned = w(pairs);
+            let writes: Vec<(&str, &[u8])> =
+                owned.iter().map(|(k, v)| (*k, v.as_slice())).collect();
+            check_regex_writes(&writes, current)
+        };
+        // A create: Regex with a valid pattern saves; without one, or with an invalid one, not.
+        assert_eq!(check(&[(MATCH, &regex), (PATTERN, &good)], &none), Ok(()));
+        for p in [
+            &bad,
+            &cleared,
+            &Value::text("").unwrap(),
+            &Value::text("é").unwrap(),
+        ] {
+            assert_eq!(
+                check(&[(MATCH, &regex), (PATTERN, p)], &none),
+                Err(ClientError::RegexInvalid)
+            );
+        }
+        assert_eq!(
+            check(&[(MATCH, &regex)], &none),
+            Err(ClientError::RegexInvalid)
+        );
+        // Another mode ignores the pattern; switching away clears it.
+        assert_eq!(check(&[(MATCH, &host), (PATTERN, &cleared)], &none), Ok(()));
+        assert_eq!(check(&[(MATCH, &host), (PATTERN, &bad)], &none), Ok(()));
+        // An edit: the current mode and pattern count for the attribute not written.
+        let stored_regex = |k: &str| match k {
+            MATCH => Some(Value::enumeration(0x0005)),
+            PATTERN => Some(Value::text("(").unwrap()),
+            _ => None,
+        };
+        assert_eq!(check(&[(PATTERN, &good)], &stored_regex), Ok(()));
+        assert_eq!(
+            check(&[(PATTERN, &bad)], &stored_regex),
+            Err(ClientError::RegexInvalid)
+        );
+        assert_eq!(
+            check(&[(MATCH, &regex)], &stored_regex),
+            Err(ClientError::RegexInvalid)
+        );
+        // A synced invalid pattern is kept verbatim: an edit that touches neither match nor
+        // pattern is not refused for it (§3.6).
+        assert_eq!(check(&[(VALUE, &site)], &stored_regex), Ok(()));
+        assert_eq!(ClientError::RegexInvalid.code(), "regex_invalid");
     }
 }

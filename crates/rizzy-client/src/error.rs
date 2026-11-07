@@ -184,6 +184,11 @@ pub enum ClientError {
     ///
     /// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
     SettingsUnreadable,
+    /// An item save would leave a URI in *Regex* mode whose `uri/<id>/pattern` is missing or
+    /// does not compile ([ADR 0097] §3.5–§3.6). Nothing was written. Carries no pattern text.
+    ///
+    /// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
+    RegexInvalid,
     /// A domain of a new user-defined equivalence group is not a registrable domain: a bare
     /// public suffix (`co.uk`, `github.io`) or a subdomain (`www.example.com`) (ADR 0042 §4).
     /// Nothing was written.
@@ -293,6 +298,7 @@ impl ClientError {
             Self::SetupRetired => "setup_retired",
             Self::SettingsUpdateRequired => "settings_update_required",
             Self::SettingsUnreadable => "settings_unreadable",
+            Self::RegexInvalid => "regex_invalid",
             Self::EquivalenceDomainRejected => "equivalence_domain_rejected",
             Self::SettingsLimitReached => "settings_limit_reached",
             Self::AttachmentTooLarge => "attachment_too_large",
@@ -390,6 +396,7 @@ impl fmt::Display for ClientError {
             Self::SettingsUpdateRequired => {
                 "the account settings were written by a newer rizzy-vault; update required"
             }
+            Self::RegexInvalid => "a website's Regex pattern is missing or not valid",
             Self::SettingsUnreadable => {
                 "the account's settings could not be read; another device may have written them incorrectly"
             }
@@ -484,6 +491,7 @@ mod tests {
             ClientError::SetupRetired,
             ClientError::SettingsUpdateRequired,
             ClientError::SettingsUnreadable,
+            ClientError::RegexInvalid,
             ClientError::EquivalenceDomainRejected,
             ClientError::SettingsLimitReached,
             ClientError::AttachmentTooLarge,

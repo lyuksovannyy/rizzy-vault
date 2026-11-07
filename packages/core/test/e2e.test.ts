@@ -720,6 +720,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
       userGroups: [],
       globalGroups: [],
       otherDisabled: [],
+      inertGroups: [],
     });
     await expect(
       owner.changeMatchSettings({ kind: "addUserGroup", domains: ["co.uk", "example.com"] }),

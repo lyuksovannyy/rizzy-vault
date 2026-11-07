@@ -38,6 +38,7 @@ use rizzy_client::matching::{
     global_equivalence_groups,
 };
 use rizzy_client::rizzy_match::MatchingSettings;
+use rizzy_client::rizzy_match::settings::{InertGroup, InertReasonKind};
 use rizzy_client::settings::AccountSettingsRecord;
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -61,21 +62,63 @@ pub struct UriInput {
     value: String,
     /// The wire `MatchMode` value (`0x0000`–`0x0006`).
     mode: u16,
+    /// `uri/<id>/pattern` ([ADR 0097] §3.1, §3.5): used only in *Regex* mode; `None` when
+    /// absent or cleared.
+    ///
+    /// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
+    pattern: Option<String>,
 }
 
 #[wasm_bindgen]
 impl UriInput {
-    /// Builds one input row.
+    /// Builds one input row. `pattern` is the URI's *Regex* pattern, if any (ADR 0097 §3.5).
     #[wasm_bindgen(constructor)]
     #[must_use]
-    pub fn new(item_id: String, uri_id: String, value: String, mode: u16) -> Self {
+    pub fn new(
+        item_id: String,
+        uri_id: String,
+        value: String,
+        mode: u16,
+        pattern: Option<String>,
+    ) -> Self {
         Self {
             item_id,
             uri_id,
             value,
             mode,
+            pattern,
         }
     }
+}
+
+/// Why `pattern` cannot be saved as a *Regex* URI's pattern ([ADR 0097] §3.6: the editor calls
+/// it before saving), or `undefined` when it compiles: `"empty"`, `"too_long"` (over 1,024
+/// bytes), `"not_ascii"` or `"invalid"` (a syntax error, an unsupported feature, or a size or
+/// nesting limit). A save with an invalid pattern fails with `regex_invalid`.
+///
+/// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
+#[wasm_bindgen(js_name = uriPatternError)]
+#[must_use]
+pub fn uri_pattern_error(pattern: &str) -> Option<String> {
+    use rizzy_client::rizzy_match::error::PatternError;
+    let kind = match rizzy_client::rizzy_match::pattern::compile(pattern).err()? {
+        PatternError::Empty => "empty",
+        PatternError::TooLong => "too_long",
+        PatternError::NotAscii => "not_ascii",
+        _ => "invalid",
+    };
+    Some(kind.to_owned())
+}
+
+/// Whether `pattern` anchors itself at the start of the address ([ADR 0097] §3.6): after any
+/// leading inline-flag groups, it begins with `^` or `\A`. The editor warns about an unanchored
+/// pattern and still lets it be saved.
+///
+/// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
+#[wasm_bindgen(js_name = uriPatternIsAnchored)]
+#[must_use]
+pub fn uri_pattern_is_anchored(pattern: &str) -> bool {
+    rizzy_client::rizzy_match::pattern::is_anchored(pattern)
 }
 
 /// One candidate offered for autofill.
@@ -305,9 +348,7 @@ pub fn decide_match_candidates(
             item_id: *item_id,
             uri_id: *uri_id,
             value: input.value.as_str(),
-            // The wasm and TypeScript bindings do not carry `pattern` yet (ADR 0097 §3.5, plan
-            // step 4): a *Regex* URI from a host is therefore skipped as `RegexInvalid`.
-            pattern: None,
+            pattern: input.pattern.as_deref(),
             mode: *mode,
         })
         .collect();
@@ -420,9 +461,7 @@ pub(crate) fn decide_with_account(
             item_id: *item_id,
             uri_id: *uri_id,
             value: input.value.as_str(),
-            // The wasm and TypeScript bindings do not carry `pattern` yet (ADR 0097 §3.5, plan
-            // step 4): a *Regex* URI from a host is therefore skipped as `RegexInvalid`.
-            pattern: None,
+            pattern: input.pattern.as_deref(),
             mode: *mode,
         })
         .collect();
@@ -486,6 +525,116 @@ impl EquivalenceGroupView {
     }
 }
 
+/// One reason a stored user group is ignored for matching ([ADR 0097] §4.2).
+///
+/// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct InertReasonView {
+    /// `"not_canonical"`, `"ip_literal"`, `"not_registrable"`, `"dotless"` or
+    /// `"third_party_flag"`.
+    kind: String,
+    /// The failing domain, exactly as stored; `None` for `third_party_flag`.
+    domain: Option<String>,
+}
+
+impl fmt::Debug for InertReasonView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The kind only: the domain is the user's private data.
+        f.debug_struct("InertReasonView")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+#[wasm_bindgen]
+impl InertReasonView {
+    /// The content rule that failed.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn kind(&self) -> String {
+        self.kind.clone()
+    }
+
+    /// The failing domain, if the rule names one.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn domain(&self) -> Option<String> {
+        self.domain.clone()
+    }
+}
+
+/// A stored user group that is "Ignored for matching" ([ADR 0097] §4.2): kept and written back,
+/// never part of a match; the one edit offered is Delete (`removeUserGroup` with its id).
+///
+/// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct InertGroupView {
+    /// The group id, 32 lowercase hex digits.
+    id: String,
+    /// The domains exactly as stored.
+    domains: Vec<String>,
+    /// Every rule it fails.
+    reasons: Vec<InertReasonView>,
+}
+
+impl fmt::Debug for InertGroupView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InertGroupView")
+            .field("domains", &self.domains.len())
+            .field("reasons", &self.reasons.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[wasm_bindgen]
+impl InertGroupView {
+    /// The group id, hex.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    /// The domains exactly as stored.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn domains(&self) -> Vec<String> {
+        self.domains.clone()
+    }
+
+    /// Why it is ignored.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn reasons(&self) -> Vec<InertReasonView> {
+        self.reasons.clone()
+    }
+}
+
+/// The host's view of an inert group.
+fn inert_view(g: &InertGroup) -> InertGroupView {
+    InertGroupView {
+        id: hex(g.id().as_bytes()),
+        domains: g.domains().to_vec(),
+        reasons: g
+            .reasons()
+            .iter()
+            .map(|r| InertReasonView {
+                kind: match r.kind() {
+                    InertReasonKind::NotCanonical => "not_canonical",
+                    InertReasonKind::IpLiteral => "ip_literal",
+                    InertReasonKind::NotRegistrable => "not_registrable",
+                    InertReasonKind::Dotless => "dotless",
+                    _ => "third_party_flag",
+                }
+                .to_owned(),
+                domain: r.domain().map(str::to_owned),
+            })
+            .collect(),
+    }
+}
+
 /// The account's matching settings (ADR 0037 §6–§7; ADR 0042 §3), for the settings screen.
 #[wasm_bindgen]
 #[derive(Clone)]
@@ -500,6 +649,8 @@ pub struct MatchSettingsView {
     /// Disabled ids that name no group of this build's global list (a list that dropped them,
     /// or a newer one), hex: still disabled, and can be enabled again.
     other_disabled: Vec<String>,
+    /// The stored user groups ignored for matching (ADR 0097 §4.2), sorted by id.
+    inert_groups: Vec<InertGroupView>,
 }
 
 impl fmt::Debug for MatchSettingsView {
@@ -508,6 +659,7 @@ impl fmt::Debug for MatchSettingsView {
             .field("match_default", &self.match_default)
             .field("user_groups", &self.user_groups.len())
             .field("global_groups", &self.global_groups.len())
+            .field("inert_groups", &self.inert_groups.len())
             .finish_non_exhaustive()
     }
 }
@@ -541,6 +693,13 @@ impl MatchSettingsView {
     pub fn other_disabled(&self) -> Vec<String> {
         self.other_disabled.clone()
     }
+
+    /// The account's groups ignored for matching (ADR 0097 §4.2).
+    #[wasm_bindgen(getter, js_name = inertGroups)]
+    #[must_use]
+    pub fn inert_groups(&self) -> Vec<InertGroupView> {
+        self.inert_groups.clone()
+    }
 }
 
 /// The settings screen's view of `settings` against the compiled-in global list's groups
@@ -571,6 +730,7 @@ pub(crate) fn settings_view(
             .filter(|id| !global.iter().any(|g| g.id() == **id))
             .map(|id| hex(id.as_bytes()))
             .collect(),
+        inert_groups: settings.inert_groups().iter().map(inert_view).collect(),
     }
 }
 
@@ -635,6 +795,7 @@ mod tests {
             hex(&[2; 16]),
             "https://example.com/login".to_owned(),
             0x0001,
+            None,
         )];
         let decision = decide_match_candidates(
             "https://example.com/",
@@ -671,12 +832,14 @@ mod tests {
                 hex(&[2; 16]),
                 "https://example.com/login".to_owned(),
                 0x0001,
+                None,
             ),
             UriInput::new(
                 second.clone(),
                 hex(&[3; 16]),
                 "https://example.com/".to_owned(),
                 0x0001,
+                None,
             ),
         ];
         let decision = decide_match_candidates(
@@ -700,6 +863,7 @@ mod tests {
             hex(&[2; 16]),
             "https://example.com/".to_owned(),
             0x0001,
+            None,
         )];
         assert!(
             decide_match_candidates(
@@ -721,6 +885,7 @@ mod tests {
             hex(&[2; 16]),
             "https://other.example/".to_owned(),
             0x0001,
+            None,
         )];
         let decision = decide_match_candidates(
             "https://example.com/",
@@ -744,6 +909,7 @@ mod tests {
             hex(&[2; 16]),
             "https://example.com:9000/login".to_owned(),
             0x0001,
+            None,
         )];
         let decision = decide_match_candidates(
             "https://example.com:8443/",
@@ -765,6 +931,7 @@ mod tests {
             hex(&[2; 16]),
             "https://example.com/login".to_owned(),
             0x0001,
+            None,
         )];
         let decision = decide_match_candidates(
             "https://example.com/",
@@ -800,6 +967,7 @@ mod tests {
             hex(&[2; 16]),
             "https://example.com/".to_owned(),
             0x0001,
+            None,
         )];
         let error = decide_match_candidates(
             "https://example.com/",
@@ -834,6 +1002,7 @@ mod tests {
                 hex(&[2; 16]),
                 value.to_owned(),
                 mode,
+                None,
             )]
         };
         let with_group =
@@ -905,5 +1074,67 @@ mod tests {
         assert_eq!(default_mode_of(7).unwrap_err().as_str(), "invalid_input");
         assert_eq!(default_mode_of(2).unwrap(), MatchMode::Host);
         assert_eq!(group_id_of("zz").unwrap_err().as_str(), "invalid_input");
+    }
+
+    #[test]
+    fn the_settings_view_lists_inert_groups_with_their_reasons() {
+        // ADR 0097 §4.2: {example.com, github.io} is valid structurally; github.io is a public
+        // suffix under this build's PSL, so the group is ignored for matching.
+        let section = format!(
+            "0001 0000 0001 {} 0002 0000000b {} 00000009 {} 00",
+            "b0".repeat(16),
+            "6578616d706c652e636f6d",
+            "6769746875622e696f"
+        );
+        let record = format!("0001 0001 0001 00000035 {section}").replace(' ', "");
+        let record = AccountSettingsRecord::decode(&unhex(&record)).unwrap();
+        let view = settings_view(record.matching().unwrap(), &[]);
+        assert!(view.user_groups().is_empty());
+        let inert = view.inert_groups();
+        assert_eq!(inert.len(), 1);
+        assert_eq!(inert[0].id(), "b0".repeat(16));
+        assert_eq!(inert[0].domains(), ["example.com", "github.io"]);
+        let reasons = inert[0].reasons();
+        assert_eq!(reasons.len(), 1);
+        assert_eq!(reasons[0].kind(), "not_registrable");
+        assert_eq!(reasons[0].domain().as_deref(), Some("github.io"));
+    }
+
+    #[test]
+    fn the_pattern_checks_and_a_regex_uri_match_per_adr_0097() {
+        // §3.6: the editor's checks.
+        assert_eq!(uri_pattern_error(r"^https://example\.com/login$"), None);
+        assert_eq!(uri_pattern_error("").as_deref(), Some("empty"));
+        assert_eq!(
+            uri_pattern_error(&"a".repeat(1_025)).as_deref(),
+            Some("too_long")
+        );
+        assert_eq!(uri_pattern_error("é").as_deref(), Some("not_ascii"));
+        assert_eq!(uri_pattern_error("(").as_deref(), Some("invalid"));
+        assert!(uri_pattern_is_anchored(r"(?i)^https://"));
+        assert!(uri_pattern_is_anchored(r"\Ahttps://"));
+        assert!(!uri_pattern_is_anchored("x=1"));
+        // Plan step 1's Regex vectors, through the binding with the pattern carried.
+        let decide = |pattern: &str| {
+            decide_match_candidates(
+                "https://example.com/login?x=1",
+                true,
+                "",
+                0x0001,
+                vec![UriInput::new(
+                    hex(&[1; 16]),
+                    hex(&[2; 16]),
+                    "https://example.com/login".to_owned(),
+                    0x0005,
+                    Some(pattern.to_owned()),
+                )],
+                &GlobalEquivalence::without_cache(),
+            )
+            .unwrap()
+            .candidates()
+            .len()
+        };
+        assert_eq!(decide("x=1"), 0);
+        assert_eq!(decide(r"^https://example\.com/login$"), 1);
     }
 }

@@ -32,6 +32,7 @@ import initWasm, {
   DeviceSession as WasmDeviceSession,
   EnrolFlow,
   type EquivalenceGroupView as WasmEquivalenceGroupView,
+  type InertGroupView as WasmInertGroupView,
   GlobalEquivalence,
   HttpRequest,
   ItemDraft,
@@ -85,6 +86,8 @@ import initWasm, {
   sessionEndedNotice as wasmSessionEndedNotice,
   registrableDomainOf as wasmRegistrableDomainOf,
   removalRefusal as wasmRemovalRefusal,
+  uriPatternError as wasmUriPatternError,
+  uriPatternIsAnchored as wasmUriPatternIsAnchored,
 } from "../generated/rizzy_core.js";
 
 // ---------------------------------------------------------------------------------------------
@@ -4267,7 +4270,7 @@ export class DurableSession {
     frame: MatchFrameInfo,
     itemUris: readonly MatchUriInput[],
   ): MatchDecisionResult {
-    const inputs = itemUris.map((u) => new UriInput(u.itemId, u.uriId, u.value, u.mode));
+    const inputs = itemUris.map((u) => new UriInput(u.itemId, u.uriId, u.value, u.mode, u.pattern));
     return decisionOf(
       call(() => this.#inner.decideMatchCandidates(pageUrl, frame.isTopFrame, frame.frameOrigin, inputs)),
     );
@@ -4328,6 +4331,29 @@ export interface MatchUriInput {
   readonly uriId: string;
   readonly value: string;
   readonly mode: MatchModeValue;
+  /** `uri/<id>/pattern`, used only in {@link MatchMode.Regex} (ADR 0097 §3.1, §3.5). */
+  readonly pattern?: string | undefined;
+}
+
+/** Why a *Regex* pattern cannot be saved (ADR 0097 §3.3, §3.6). */
+export type UriPatternError = "empty" | "too_long" | "not_ascii" | "invalid";
+
+/**
+ * Checks a *Regex* URI's pattern before saving (ADR 0097 §3.6): `undefined` when it compiles,
+ * otherwise why not. A save with an invalid pattern fails with `regex_invalid`.
+ */
+export function uriPatternError(pattern: string): UriPatternError | undefined {
+  ensureReady();
+  return call(() => wasmUriPatternError(pattern)) as UriPatternError | undefined;
+}
+
+/**
+ * Whether a *Regex* pattern anchors itself at the start of the address (ADR 0097 §3.6). The
+ * editor warns about an unanchored one and still lets it be saved.
+ */
+export function uriPatternIsAnchored(pattern: string): boolean {
+  ensureReady();
+  return call(() => wasmUriPatternIsAnchored(pattern));
 }
 
 /** What the content script reports about the frame asking for candidates (ADR 0037 §5). */
@@ -4409,7 +4435,7 @@ export function decideMatchCandidates(
   ensureReady();
   globalWithoutCache ??= call(() => GlobalEquivalence.withoutCache());
   const global = globalWithoutCache;
-  const inputs = itemUris.map((u) => new UriInput(u.itemId, u.uriId, u.value, u.mode));
+  const inputs = itemUris.map((u) => new UriInput(u.itemId, u.uriId, u.value, u.mode, u.pattern));
   return decisionOf(
     call(() =>
       wasmDecideMatchCandidates(pageUrl, frame.isTopFrame, frame.frameOrigin, accountDefaultMode, inputs, global),
@@ -4458,6 +4484,21 @@ export interface MatchSettings {
   readonly globalGroups: readonly EquivalenceGroupInfo[];
   /** Disabled ids that name no group of this build's global list, hex: still disabled. */
   readonly otherDisabled: readonly string[];
+  /** The account's stored groups "Ignored for matching" (ADR 0097 §4.2): kept, never part of a
+   * match; Delete (`removeUserGroup`) is the one edit offered. */
+  readonly inertGroups: readonly InertGroupInfo[];
+}
+
+/** Why a stored user group is ignored for matching (ADR 0097 §4.2). */
+export type InertReasonKind = "not_canonical" | "ip_literal" | "not_registrable" | "dotless" | "third_party_flag";
+
+/** A stored user group ignored for matching (ADR 0097 §4.2). */
+export interface InertGroupInfo {
+  readonly id: string;
+  /** The domains exactly as stored. */
+  readonly domains: readonly string[];
+  /** Every rule it fails; `domain` is `undefined` for `third_party_flag`. */
+  readonly reasons: readonly { readonly kind: InertReasonKind; readonly domain: string | undefined }[];
 }
 
 /** One change to the account's matching settings: one `account/commit` (ADR 0042 §5). */
@@ -4483,6 +4524,11 @@ function matchSettingsOf(view: WasmMatchSettingsView): MatchSettings {
       userGroups: mapFree(v.userGroups, group),
       globalGroups: mapFree(v.globalGroups, group),
       otherDisabled: [...v.otherDisabled],
+      inertGroups: mapFree(v.inertGroups, (g: WasmInertGroupView): InertGroupInfo => ({
+        id: g.id,
+        domains: [...g.domains],
+        reasons: mapFree(g.reasons, (r) => ({ kind: r.kind as InertReasonKind, domain: r.domain })),
+      })),
     };
   });
 }
