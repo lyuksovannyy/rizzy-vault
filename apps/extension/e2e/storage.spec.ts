@@ -275,12 +275,12 @@ test("closing the offscreen document leaves the extension locked, and unlocking 
   server,
 }) => {
   const page = await context.newPage();
-  const secretKey = await signUp(page, server.origin, "teardownuser");
+  const secretKey = await signUp(page, server.origin, LOGIN_NAME);
   await page.close();
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${extensionId}/src/popup/index.html`);
   await popup.getByLabel("Server URL").fill(server.origin);
-  await popup.getByLabel("Account (login name)").fill("teardownuser");
+  await popup.getByLabel("Account (login name)").fill(LOGIN_NAME);
   await popup.getByLabel("Secret Key").fill(secretKey);
   await popup.getByLabel("Master password").fill(TEST_ACCOUNT_PASSWORD);
   await popup.getByRole("button", { name: "Set up" }).click();
