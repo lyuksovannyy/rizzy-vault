@@ -19,6 +19,8 @@ Status: M1, not audited. Read [SECURITY.md](../SECURITY.md) before trusting it w
 | macOS | `~/Library/Application Support/rizzy-vault` |
 | Windows | `%LOCALAPPDATA%\rizzy-vault` |
 
+`rv` exits with status 101 after an internal error (a bug). It prints only the source location and writes no crash dump. On Windows and macOS other kinds of crash can still reach the OS crash reporter ([THREAT_MODEL AR-31](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope)).
+
 Each account has one SQLite file, `<account id>.sqlite3`, and a lock file next to it. On Unix `rv` creates the directory with mode 0700 and the files with mode 0600. A directory that already exists and is open to the group or to others is set to 0700 at every run; if `rv` cannot do that (the directory is not yours), it stops.
 
 **Exclude this directory from backups and file-sync tools** (Time Machine, iCloud Drive, Dropbox, rsync jobs, home-directory snapshots). The file holds this device's Secret Key in the clear and the vault keys wrapped under the master password ([ADR 0026](adr/0026-client-device-state-and-cache.md) §2). A copy of it lets whoever holds the copy guess the master password offline (threat model INV-61). `rv` does not set the exclusion for you.
