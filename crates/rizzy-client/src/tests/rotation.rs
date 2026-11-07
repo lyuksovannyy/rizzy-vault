@@ -82,7 +82,9 @@ impl Server {
                 .unwrap()
                 .to_bytes();
         }
-        // A full rotation: the new bundle, and every certificate re-issued under it.
+        // A full rotation: the new bundle, and every certificate and revocation re-issued under
+        // it; a standard one adds its revocations (CRYPTO.md §11.8 step 3).
+        let revocations = req.device_revocations.iter().map(|r| r.as_slice().to_vec());
         if let Some(wire) = &req.bundle {
             s.bundles.push(wire.as_slice().to_vec());
             s.certs = req
@@ -90,6 +92,9 @@ impl Server {
                 .iter()
                 .map(|c| c.as_slice().to_vec())
                 .collect();
+            s.revocations = revocations.collect();
+        } else {
+            s.revocations.extend(revocations);
         }
         s.state = req.account_state.as_slice().to_vec();
         s.e_srv = req.account_key_server_wrap.clone().unwrap();
@@ -235,7 +240,7 @@ fn a_rotation_commits_and_the_other_device_follows() {
     // Rotation needs a complete Fetch after the upload.
     let options = RotationOptions {
         level: RotationLevel::Standard,
-        revoke: None,
+        revoke: &[],
         recovery_code: Some(&code),
         now_ms: T0 + 10_000,
     };
@@ -406,7 +411,7 @@ fn a_rotation_retries_by_the_cas_rule() {
     settle(&mut server, &mut rng, &mut vault, &a_unlocked);
     let options = RotationOptions {
         level: RotationLevel::Standard,
-        revoke: None,
+        revoke: &[],
         recovery_code: Some(&code),
         now_ms: T0 + 10_000,
     };
@@ -994,7 +999,7 @@ fn a_full_rotation_retry_renews_the_web_revocation_head() {
 
     let options = RotationOptions {
         level: RotationLevel::Full,
-        revoke: None,
+        revoke: &[],
         recovery_code: Some(&code),
         now_ms: T0 + 10_000,
     };

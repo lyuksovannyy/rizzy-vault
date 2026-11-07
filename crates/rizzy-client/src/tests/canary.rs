@@ -118,7 +118,7 @@ fn canary_key_bytes_and_device_envelopes_never_reach_the_server() {
     // A standard rotation by A, keeping the recovery code.
     let options = RotationOptions {
         level: RotationLevel::Standard,
-        revoke: None,
+        revoke: &[],
         recovery_code: Some(&code),
         now_ms: T0 + 10_000,
     };

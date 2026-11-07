@@ -40,8 +40,12 @@
 //! - A grant for this device's epoch chain must be addressed to this device, carry exactly
 //!   each epoch from the held key's + 1 to the state's, and deliver a key whose id is the
 //!   state's `account_key_id`; a grant's sender is a certificate of the account (revoked ones
-//!   included, §11.3 step 4.2) or, when no durable certificate names it, the current identity
-//!   key (a kind-4 rotating client, §10.1).
+//!   included for an earlier epoch, §11.3 step 4.2) or, when no durable certificate names it,
+//!   the current identity key (a kind-4 rotating client, §10.1). The grant of the newest epoch
+//!   never comes from a device the state revokes ([ADR 0091] §5): the device aborts and stays
+//!   read-only with its old key.
+//!
+//! [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
 
 use rizzy_core::envelope::purpose::AccountKeyDeviceGrantCtx;
 use rizzy_core::ids::DeviceId;
@@ -192,6 +196,19 @@ pub fn apply_device_grants<R: CryptoRng + ?Sized>(
             .certificates
             .iter()
             .find(|c| c.certificate.device_id == sender_id && c.certificate.in_device_set());
+        // ADR 0091 §5: the grant of the newest epoch, which delivers the key the state commits
+        // to, must come from a device in the device set that state commits to, or from a kind-4
+        // sender under that state's identity key; never from a device the state revokes. That
+        // rejects a server that pairs a revocation of D with a grant from D, and nothing more.
+        // A grant of an earlier epoch may come from a device revoked since (§11.3 step 4.2).
+        if next == target
+            && public
+                .revocations
+                .iter()
+                .any(|r| r.revocation.device_id == sender_id)
+        {
+            return Err(bad);
+        }
         let sender = match sender_cert {
             Some(c) => GrantSender::Device(&c.certificate),
             None => GrantSender::Identity(&public.bundle.identity_ed25519),

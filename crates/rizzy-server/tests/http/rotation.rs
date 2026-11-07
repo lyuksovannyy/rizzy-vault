@@ -586,7 +586,7 @@ fn a_standard_rotation_commits_retries_and_is_followed() {
         let reauth = login(&server, &mut rng, &sk, Some((&mut a.session, &a.unlocked))).await;
         let options = RotationOptions {
             level: RotationLevel::Standard,
-            revoke: None,
+            revoke: &[],
             recovery_code: Some(&code),
             now_ms: now_ms(),
         };
@@ -691,7 +691,7 @@ fn a_standard_rotation_commits_retries_and_is_followed() {
             &[&c.vault],
             &RotationOptions {
                 level: RotationLevel::Standard,
-                revoke: None,
+                revoke: &[],
                 recovery_code: Some(&code),
                 now_ms: now_ms(),
             },
@@ -759,7 +759,7 @@ fn an_upload_racing_a_commit_is_ordered_over_http() {
                 &[&a.vault],
                 &RotationOptions {
                     level: RotationLevel::Standard,
-                    revoke: None,
+                    revoke: &[],
                     recovery_code: None,
                     now_ms: now_ms(),
                 },
@@ -873,10 +873,10 @@ fn a_revocation_with_a_full_rotation_locks_the_device_out() {
         assert!(a.sync(&server, &mut rng).await.is_empty());
         let options = RotationOptions {
             level: RotationLevel::Full,
-            revoke: Some(RevokeDevice {
+            revoke: &[RevokeDevice {
                 device_id: b.state.device_id(),
                 last_accepted_device_seq: head,
-            }),
+            }],
             recovery_code: None,
             now_ms: now_ms(),
         };

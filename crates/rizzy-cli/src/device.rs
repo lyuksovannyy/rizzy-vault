@@ -2145,7 +2145,7 @@ impl Device {
         };
         let options = RotationOptions {
             level,
-            revoke,
+            revoke: revoke.as_slice(),
             recovery_code: recovery_code.as_deref().map(String::as_str),
             now_ms: now_ms(),
         };

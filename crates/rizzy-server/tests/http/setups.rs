@@ -445,6 +445,7 @@ fn pending_changes_cross_a_rotation_and_a_retirement() {
             rotate: false,
             full_rotation: false,
             recovery_code: None,
+            revoke: &[],
             now_ms: now_ms(),
         };
         let (token, body, _, _) = stored_change(
@@ -479,6 +480,7 @@ fn pending_changes_cross_a_rotation_and_a_retirement() {
             rotate: false,
             full_rotation: false,
             recovery_code: None,
+            revoke: &[],
             now_ms: now_ms(),
         };
         let (token, body, record, new_sk) =

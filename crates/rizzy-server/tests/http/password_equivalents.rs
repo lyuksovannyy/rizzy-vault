@@ -119,6 +119,7 @@ fn register_login_and_password_change_send_only_opaque_messages() {
             rotate: false,
             full_rotation: false,
             recovery_code: None,
+            revoke: &[],
             now_ms: now_ms(),
         };
         let (started, request) =

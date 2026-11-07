@@ -98,8 +98,8 @@ use crate::device::{DeviceState, LocalWrap, UnlockedDevice, wrap_local};
 use crate::error::{ClientError, internal};
 use crate::login::LoggedIn;
 use crate::rotation::{
-    ConflictOutcome, MAX_REBUILDS, PendingRotation, RotationDone, RotationLevel, RotationOptions,
-    check_reauth, start_rotation_with,
+    ConflictOutcome, MAX_REBUILDS, PendingRotation, RevokeDevice, RotationDone, RotationLevel,
+    RotationOptions, check_reauth, start_rotation_with,
 };
 use crate::signup::EmergencyKit;
 use crate::store;
@@ -257,6 +257,12 @@ pub struct CredentialChangeInput<'a> {
     /// while recovery is on (§11.6 step 5). `None` otherwise: a Secret Key change with a
     /// rotation issues a new code, and a change without a rotation leaves `E_rec` as it is.
     pub recovery_code: Option<&'a str>,
+    /// The devices the rotation revokes, each suspended before with its H: the revocation of a
+    /// lost or stolen device changes the Secret Key in the same commit by default ([ADR 0091]
+    /// §3 step 4, §4). Requires `rotate`; empty for a credential change alone.
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+    pub revoke: &'a [RevokeDevice],
     /// The host's wall clock, milliseconds since the Unix epoch.
     pub now_ms: u64,
 }
@@ -268,6 +274,7 @@ impl fmt::Debug for CredentialChangeInput<'_> {
             .field("rotate", &self.rotate)
             .field("full_rotation", &self.full_rotation)
             .field("keeps_recovery_code", &self.recovery_code.is_some())
+            .field("revoke", &self.revoke)
             .finish_non_exhaustive()
     }
 }
@@ -289,6 +296,8 @@ pub struct CredentialChangeStarted {
     registration: ClientRegistrationState,
     /// The rotation to run with the change, if any.
     rotation: Option<RotationLevel>,
+    /// The devices that rotation revokes.
+    revoke: Vec<RevokeDevice>,
     /// The current recovery code to keep, as typed.
     recovery_code: Option<Zeroizing<String>>,
     /// The host clock at the start.
@@ -309,7 +318,7 @@ impl fmt::Debug for CredentialChangeStarted {
 /// # Errors
 /// [`ClientError::InvalidInput`] for a login name that does not normalise, a new password
 /// the new-password rules refuse, a change that changes neither the password nor the Secret
-/// Key, a full rotation asked for without a rotation, or a recovery code given where none is
+/// Key, a full rotation or a revocation asked for without a rotation, or a recovery code given where none is
 /// kept (see [`CredentialChangeInput::recovery_code`]); the errors of the re-authentication check
 /// ([`ClientError::Rollback`], [`ClientError::Fork`], [`ClientError::IdentityChangeUnconfirmed`],
 /// [`ClientError::AccountKeyRotated`], [`ClientError::InvalidServerResponse`]);
@@ -329,6 +338,10 @@ pub fn start_credential_change<R: CryptoRng + ?Sized>(
         // A full rotation is a level of a rotation, not something without one.
         (false, true) => return Err(ClientError::InvalidInput),
     };
+    // A revocation rides only with a rotation (CRYPTO.md §11.8 step 3).
+    if rotation.is_none() && !input.revoke.is_empty() {
+        return Err(ClientError::InvalidInput);
+    }
     let login_name = LoginName::parse(input.login_name).map_err(|_| ClientError::InvalidInput)?;
     let recovery_on = reauth.account.pin.state.recovery_enabled;
     // A kept code only rides with the rotation of a password change while recovery is on.
@@ -357,6 +370,7 @@ pub fn start_credential_change<R: CryptoRng + ?Sized>(
             pw_in,
             registration,
             rotation,
+            revoke: input.revoke.to_vec(),
             recovery_code: input.recovery_code.map(|c| Zeroizing::new(c.to_owned())),
             now_ms: input.now_ms,
         },
@@ -443,7 +457,7 @@ impl CredentialChangeStarted {
         let change = if let Some(level) = self.rotation {
             let options = RotationOptions {
                 level,
-                revoke: None,
+                revoke: &self.revoke,
                 recovery_code: self.recovery_code.as_deref().map(String::as_str),
                 now_ms: self.now_ms,
             };

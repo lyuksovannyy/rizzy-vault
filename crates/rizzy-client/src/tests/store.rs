@@ -1271,7 +1271,7 @@ fn a_rotation_is_persisted_and_followed() {
 
     let options = RotationOptions {
         level: RotationLevel::Standard,
-        revoke: None,
+        revoke: &[],
         recovery_code: Some(&code),
         now_ms: T0 + 10_000,
     };
@@ -1584,7 +1584,7 @@ fn a_stale_answer_reissues_and_an_older_file_raises_the_alarm() {
     b.edit(&mut rng, item, "from b, old epoch");
     let options = RotationOptions {
         level: RotationLevel::Standard,
-        revoke: None,
+        revoke: &[],
         recovery_code: Some(&code),
         now_ms: T0 + 10_000,
     };

@@ -135,7 +135,10 @@ pub enum RotationLevel {
 }
 
 /// A device the rotation revokes (CRYPTO.md §11.8 steps 0–3): the device suspended before, and
-/// H, the head the suspension returned.
+/// H, the head the suspension returned (each chosen device has its own H, [ADR 0091] §3
+/// step 2).
+///
+/// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RevokeDevice {
     /// The device.
@@ -149,8 +152,12 @@ pub struct RevokeDevice {
 pub struct RotationOptions<'a> {
     /// Standard or full.
     pub level: RotationLevel,
-    /// The device to revoke with it, if any.
-    pub revoke: Option<RevokeDevice>,
+    /// The devices to revoke with it, none or several ([ADR 0091] §3 step 2), at most
+    /// [`MAX_DEVICE_STATEMENTS`](rizzy_proto::limits::MAX_DEVICE_STATEMENTS), each a remaining
+    /// durable device of the account other than this one, each named once.
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+    pub revoke: &'a [RevokeDevice],
     /// The current recovery code, to keep it (§11.6 step 5): required exactly when the
     /// account's recovery is on.
     pub recovery_code: Option<&'a str>,
@@ -332,8 +339,8 @@ pub struct PendingRotation {
     device_id: DeviceId,
     /// The options that do not change between attempts.
     level: RotationLevel,
-    /// The device revoked, if any.
-    revoke: Option<RevokeDevice>,
+    /// The devices revoked, none or several.
+    revoke: Vec<RevokeDevice>,
     /// The host clock at the start.
     now_ms: u64,
     /// The verified state this attempt is built on, with its bundle and settings.
@@ -531,7 +538,12 @@ pub(crate) fn start_rotation_with<R: CryptoRng + ?Sized>(
     let state = &base.state;
     let account_vaults: BTreeSet<VaultId> = account.vault_ids().collect();
     let ordered_vaults = ordered(&account_vaults, vaults)?;
-    if let Some(target) = options.revoke {
+    // ADR 0091 §3 step 2: a set of devices, each named once, each a remaining durable device.
+    if options.revoke.len() > rizzy_proto::limits::MAX_DEVICE_STATEMENTS {
+        return Err(ClientError::InvalidInput);
+    }
+    let mut named: BTreeSet<DeviceId> = BTreeSet::new();
+    for target in options.revoke {
         let remaining = target.device_id != device.device_id
             && account.certificates.iter().any(|c| {
                 c.certificate.device_id == target.device_id && c.certificate.in_device_set()
@@ -540,7 +552,7 @@ pub(crate) fn start_rotation_with<R: CryptoRng + ?Sized>(
                 .revocations
                 .iter()
                 .any(|r| r.revocation.device_id == target.device_id);
-        if !remaining {
+        if !remaining || !named.insert(target.device_id) {
             return Err(ClientError::InvalidInput);
         }
     }
@@ -675,7 +687,7 @@ pub(crate) fn start_rotation_with<R: CryptoRng + ?Sized>(
         account_id,
         device_id: device.device_id,
         level: options.level,
-        revoke: options.revoke,
+        revoke: options.revoke.to_vec(),
         now_ms: options.now_ms,
         base,
         certificates: account.certificates,
@@ -823,7 +835,7 @@ impl PendingRotation {
             .map(|r| r.revocation.device_id)
             .collect();
         let mut revoked_now: Vec<(DeviceId, u64)> = Vec::new();
-        if let Some(target) = self.revoke {
+        for target in &self.revoke {
             revoked_now.push((target.device_id, target.last_accepted_device_seq));
         }
         revoked_now.extend(self.web_revocation_heads(&revoked_before, vaults));
@@ -924,8 +936,8 @@ impl PendingRotation {
 
     /// The kind-4 revocations of a full rotation (CRYPTO.md §11.6 step 7), as (device, H): every
     /// web-vault certificate of the base that has not expired, is not this device's, is not
-    /// revoked in `revoked_before` and is not [`RotationOptions::revoke`]'s target (which has
-    /// its own H), with H the highest head this device holds from it over `vaults` after its
+    /// revoked in `revoked_before` and is not one of [`RotationOptions::revoke`]'s targets (which
+    /// have their own H), with H the highest head this device holds from it over `vaults` after its
     /// complete Fetch. Empty for a standard rotation.
     fn web_revocation_heads(
         &self,
@@ -935,7 +947,7 @@ impl PendingRotation {
         if self.level != RotationLevel::Full {
             return Vec::new();
         }
-        let target = self.revoke.map(|t| t.device_id);
+        let targets: BTreeSet<DeviceId> = self.revoke.iter().map(|t| t.device_id).collect();
         self.certificates
             .iter()
             .map(|cert| &cert.certificate)
@@ -943,7 +955,7 @@ impl PendingRotation {
                 c.device_kind == DeviceKind::WebEphemeral
                     && c.expires_at_ms > self.now_ms
                     && c.device_id != self.device_id
-                    && Some(c.device_id) != target
+                    && !targets.contains(&c.device_id)
                     && !revoked_before.contains(&c.device_id)
             })
             .map(|c| {

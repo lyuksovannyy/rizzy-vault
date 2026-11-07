@@ -74,6 +74,7 @@ fn a_secret_key_change_with_a_full_rotation_replaces_the_identity_keys() {
         rotate: true,
         full_rotation: true,
         recovery_code: None,
+        revoke: &[],
         now_ms: T0 + 10_000,
     };
     // A full rotation is a level of a rotation: without one it is refused.
@@ -284,6 +285,7 @@ fn a_change_refused_setup_retired_restarts_only_its_registration() {
         rotate: false,
         full_rotation: false,
         recovery_code: None,
+        revoke: &[],
         now_ms: T0 + 10_000,
     };
     let login = reauth(&mut server, &mut rng, &sk);
@@ -517,6 +519,7 @@ fn a_restore_to_before_a_full_rotation_is_an_older_chain_rollback() {
         rotate: true,
         full_rotation: true,
         recovery_code: None,
+        revoke: &[],
         now_ms: T0 + 10_000,
     };
     let login = reauth(&mut server, &mut rng, &sk);

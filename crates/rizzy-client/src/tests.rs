@@ -81,6 +81,8 @@ struct Stored {
     state: Vec<u8>,
     /// Certificates.
     certs: Vec<Vec<u8>>,
+    /// Revocations.
+    revocations: Vec<Vec<u8>>,
     /// Vault self-grants.
     grants: Vec<VaultSelfGrant>,
     /// `ACCOUNT_SETTINGS`, once written.
@@ -198,6 +200,7 @@ impl Server {
             bundles: vec![req.bundle.as_slice().to_vec()],
             state: req.account_state.as_slice().to_vec(),
             certs: vec![req.device_certificate.as_slice().to_vec()],
+            revocations: Vec::new(),
             grants: vec![req.vault_self_grant.clone()],
             settings: None,
         });
@@ -246,7 +249,8 @@ impl Server {
             account_state: bytes(&s.state),
             bundles: List::new(s.bundles.iter().map(|b| bytes(b)).collect()).unwrap(),
             device_certificates: List::new(s.certs.iter().map(|c| bytes(c)).collect()).unwrap(),
-            device_revocations: List::empty(),
+            device_revocations: List::new(s.revocations.iter().map(|r| bytes(r)).collect())
+                .unwrap(),
             account_settings: s.settings.clone(),
             identity_secret_keys: s.e_id.clone(),
             vault_self_grants: List::new(s.grants.clone()).unwrap(),
@@ -2360,6 +2364,7 @@ mod paged_fetch;
 mod password_history;
 mod recovery_pending;
 mod retention;
+mod revocation;
 mod rotation;
 mod settings;
 mod store;

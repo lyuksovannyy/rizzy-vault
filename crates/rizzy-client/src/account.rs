@@ -172,6 +172,11 @@ pub struct VerifiedAccount {
     ///
     /// [ADR 0045]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0045-recovery-pending-notification.md
     pub(crate) recovery_notice: Option<RecoveryNotice>,
+    /// The server's revocation notice ([ADR 0091] §2): unsigned, for display and retry timing
+    /// only ([`crate::revocation::RevocationNotice`]).
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+    pub(crate) revocation_notice: crate::revocation::RevocationNotice,
 }
 
 /// The server's notice that a recovery of the account is pending ([ADR 0045]): when it opened,
@@ -391,6 +396,13 @@ impl VerifiedAccount {
         self.recovery_notice
     }
 
+    /// The server's revocation notice that came with this answer (ADR 0091 §2); unverified,
+    /// for display and retry timing only ([`crate::revocation::RevocationNotice`]).
+    #[must_use]
+    pub const fn revocation_notice(&self) -> &crate::revocation::RevocationNotice {
+        &self.revocation_notice
+    }
+
     /// Takes the vault key of `vault_id` out of this answer, to build that vault's
     /// [`crate::sync::VaultSync`]. The key stays in Rust memory (ADR 0013 §3 rule 1).
     #[must_use]
@@ -578,6 +590,7 @@ pub(crate) fn verify_account_view(
         usage: StorageUsage::of_view(view),
         // INV-70: copied after every check passed, never read by one.
         recovery_notice: RecoveryNotice::of_view(view),
+        revocation_notice: crate::revocation::RevocationNotice::of_view(view),
         vault_bytes: view
             .vaults
             .as_slice()

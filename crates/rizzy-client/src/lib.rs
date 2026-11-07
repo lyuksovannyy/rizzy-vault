@@ -125,6 +125,7 @@ pub mod matching;
 pub mod passkey;
 pub mod recovery;
 pub mod reregister;
+pub mod revocation;
 pub mod rotation;
 pub mod session;
 pub mod sessions;

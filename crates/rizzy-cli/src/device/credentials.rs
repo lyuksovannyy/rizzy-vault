@@ -261,6 +261,7 @@ impl Device {
             rotate,
             full_rotation,
             recovery_code: recovery_code.as_deref().map(String::as_str),
+            revoke: &[],
             now_ms: now_ms(),
         };
         let (started, request) =
