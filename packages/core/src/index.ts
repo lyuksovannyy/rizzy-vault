@@ -58,6 +58,11 @@ import initWasm, {
   generatePassphraseWithOptions as wasmGeneratePassphraseWithOptions,
   generatePasswordWithOptions as wasmGeneratePasswordWithOptions,
   generatorLimits as wasmGeneratorLimits,
+  LockSettings as WasmLockSettings,
+  LockTimer as WasmLockTimer,
+  lockSettingsFromLegacyMinutes as wasmLockSettingsFromLegacyMinutes,
+  lockSettingsLimits as wasmLockSettingsLimits,
+  parseLockSettings as wasmParseLockSettings,
   agePresets as wasmAgePresets,
   checkAgeRange as wasmCheckAgeRange,
   generateIdentity as wasmGenerateIdentity,
@@ -2919,6 +2924,222 @@ export const GENERATOR_ERROR_MESSAGES: Readonly<Record<string, string>> = Object
   generator_rng_failure: "The random number generator failed. Reload the page.",
   generator_invalid_options: "These generator options are not valid.",
 });
+
+// ---------------------------------------------------------------------------------------------
+// The vault lock settings (ADR 0110 §1–§4, §6 point 1)
+//
+// One per-device record under `rizzy.lock_settings` (`localStorage` in the web vault,
+// `storage.local` in the extension), read by Rust's one parser so every client applies the same
+// rules: a missing or broken record is the defaults (locking on, 5 minutes, restart on, sleep
+// on). The settings are not secret. The lock timer is Rust's too: the host passes both clocks
+// and locks on the reason it gets back.
+
+/** One device's lock settings (ADR 0110 §1). `lockOnRestart` is always true today (§4.1). */
+export interface LockSettings {
+  readonly autoLock: boolean;
+  /** One of {@link LockSettingsLimits.idleMinutes}. */
+  readonly idleMinutes: number;
+  readonly lockOnRestart: boolean;
+  readonly lockOnSleep: boolean;
+}
+
+/** What {@link encodeLockSettings} takes: the three settings the UI can change. */
+export type LockSettingsChoice = Pick<LockSettings, "autoLock" | "idleMinutes" | "lockOnSleep">;
+
+/** The record's keys, the idle list and the timings of ADR 0110. */
+export interface LockSettingsLimits {
+  /** `rizzy.lock_settings`. */
+  readonly storageKey: string;
+  /** `rizzy.auto_lock_minutes`, the extension's key that is migrated (§3 point 5). */
+  readonly legacyStorageKey: string;
+  readonly maxRecordLength: number;
+  /** In minutes, in display order. */
+  readonly idleMinutes: readonly number[];
+  readonly defaultIdleMinutes: number;
+  /** The longest idle time that is still bounding (§6 point 1). */
+  readonly uvPolicyMaxIdleMinutes: number;
+  /** The turn-off dialog's delay (§2 point 3), `LOCK_DISABLE_CONFIRM_DELAY_MS`. */
+  readonly confirmDelayMs: number;
+  /** `SLEEP_TICK_MS` (§4.2 point 2). */
+  readonly sleepTickMs: number;
+  /** `SLEEP_GAP_MS` (§4.2 point 2). */
+  readonly sleepGapMs: number;
+}
+
+/**
+ * The lock settings' constants, so a UI can lay out its controls before the module loads. A test
+ * checks them against {@link lockSettingsLimits}, which reads them from Rust.
+ */
+export const LOCK_SETTINGS_LIMITS: LockSettingsLimits = Object.freeze({
+  storageKey: "rizzy.lock_settings",
+  legacyStorageKey: "rizzy.auto_lock_minutes",
+  maxRecordLength: 256,
+  idleMinutes: Object.freeze([1, 2, 5, 10, 15, 30, 60, 240]),
+  defaultIdleMinutes: 5,
+  uvPolicyMaxIdleMinutes: 5,
+  confirmDelayMs: 5_000,
+  sleepTickMs: 10_000,
+  sleepGapMs: 120_000,
+});
+
+/** The defaults (ADR 0110 §1). */
+export const DEFAULT_LOCK_SETTINGS: LockSettings = Object.freeze({
+  autoLock: true,
+  idleMinutes: 5,
+  lockOnRestart: true,
+  lockOnSleep: true,
+});
+
+/** The lock settings' constants, read from Rust. */
+export function lockSettingsLimits(): LockSettingsLimits {
+  ensureReady();
+  return mapOne(wasmLockSettingsLimits(), (l) => ({
+    storageKey: l.storageKey,
+    legacyStorageKey: l.legacyStorageKey,
+    maxRecordLength: l.maxRecordLength,
+    idleMinutes: Array.from(l.idleMinutes),
+    defaultIdleMinutes: l.defaultIdleMinutes,
+    uvPolicyMaxIdleMinutes: l.uvPolicyMaxIdleMinutes,
+    confirmDelayMs: l.confirmDelayMs,
+    sleepTickMs: l.sleepTickMs,
+    sleepGapMs: l.sleepGapMs,
+  }));
+}
+
+/** A plain copy of a Rust `LockSettings`, which is freed. */
+function lockSettingsOf(s: WasmLockSettings): LockSettings {
+  return mapOne(s, (v) => ({
+    autoLock: v.autoLock,
+    idleMinutes: v.idleMinutes,
+    lockOnRestart: v.lockOnRestart,
+    lockOnSleep: v.lockOnSleep,
+  }));
+}
+
+/** Runs `f` over a Rust `LockSettings` built from `choice`; throws `invalid_input` for an idle
+ * time outside the list. */
+function withLockSettings<T>(choice: LockSettingsChoice, f: (s: WasmLockSettings) => T): T {
+  const minutes = choice.idleMinutes;
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > 0xffff) {
+    throw new CoreError("invalid_input");
+  }
+  return mapOne(
+    call(() => new WasmLockSettings(choice.autoLock === true, minutes, choice.lockOnSleep === true)),
+    f,
+  );
+}
+
+/**
+ * Reads the text stored under `rizzy.lock_settings` (ADR 0110 §3 point 3). `null`/`undefined` (no
+ * record) and a broken record are the defaults. Never throws once the module is loaded.
+ */
+export function parseLockSettings(record: string | null | undefined): LockSettings {
+  ensureReady();
+  return lockSettingsOf(wasmParseLockSettings(typeof record === "string" ? record : undefined));
+}
+
+/** The canonical record text of `choice`, to store under `rizzy.lock_settings`. Throws
+ * `invalid_input` for an idle time outside the list. */
+export function encodeLockSettings(choice: LockSettingsChoice): string {
+  ensureReady();
+  return withLockSettings(choice, (s) => s.encode());
+}
+
+/**
+ * The extension's migration (ADR 0110 §3 point 5): the settings for a stored
+ * `rizzy.auto_lock_minutes` value, or `undefined` when it is not an integer (then the defaults
+ * apply). Locking on, the largest listed value not above it (at least 1), both switches on.
+ */
+export function lockSettingsFromLegacyMinutes(value: unknown): LockSettings | undefined {
+  ensureReady();
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    return undefined;
+  }
+  const minutes = Math.min(Math.max(value, 0), 0xffff_ffff);
+  return lockSettingsOf(wasmLockSettingsFromLegacyMinutes(minutes));
+}
+
+/** Whether the lock policy is bounding (ADR 0110 §6 point 1): locking on, at most 5 idle
+ * minutes, and a session last unlocked by master password. */
+export function isLockPolicyBounding(
+  settings: LockSettingsChoice,
+  unlockedByMasterPassword: boolean,
+): boolean {
+  ensureReady();
+  return withLockSettings(settings, (s) => s.isBounding(unlockedByMasterPassword));
+}
+
+/** One reading of the host's clocks, in milliseconds: `performance.now()` and `Date.now()`. */
+export interface ClockReading {
+  readonly monotonicMs: number;
+  readonly wallMs: number;
+}
+
+/** Why the lock timer locks. */
+export type LockReason = "idle" | "sleep";
+
+/** A clock value for Rust: whole, non-negative milliseconds. */
+function clockMs(ms: number): bigint {
+  if (!Number.isFinite(ms)) {
+    throw new CoreError("invalid_input");
+  }
+  return BigInt(Math.max(0, Math.floor(ms)));
+}
+
+/** The reason Rust answered, checked. */
+function lockReasonOf(r: string | undefined): LockReason | undefined {
+  return r === "idle" || r === "sleep" ? r : undefined;
+}
+
+/**
+ * The lock timer of one unlocked session (ADR 0110 §4.2–§4.3), Rust's: call {@link tick} every
+ * {@link LockSettingsLimits.sleepTickMs}, {@link input} on user input, {@link setSettings} on a
+ * change, and lock on the reason returned. {@link free} when the session ends.
+ */
+export class LockTimer {
+  #t: WasmLockTimer | undefined;
+
+  constructor(settings: LockSettingsChoice, now: ClockReading) {
+    ensureReady();
+    this.#t = withLockSettings(
+      settings,
+      (s) => new WasmLockTimer(s, clockMs(now.monotonicMs), clockMs(now.wallMs)),
+    );
+  }
+
+  #timer(): WasmLockTimer {
+    if (this.#t === undefined) {
+      throw new CoreError("wrong_state");
+    }
+    return this.#t;
+  }
+
+  /** Records user input at `now`. */
+  input(now: ClockReading): void {
+    this.#timer().input(clockMs(now.monotonicMs), clockMs(now.wallMs));
+  }
+
+  /** One tick: `"sleep"`, `"idle"` or `undefined`. */
+  tick(now: ClockReading): LockReason | undefined {
+    return lockReasonOf(this.#timer().tick(clockMs(now.monotonicMs), clockMs(now.wallMs)));
+  }
+
+  /** Applies new settings and re-checks the idle deadline at once. */
+  setSettings(settings: LockSettingsChoice, now: ClockReading): LockReason | undefined {
+    const t = this.#timer();
+    return lockReasonOf(
+      withLockSettings(settings, (s) =>
+        t.setSettings(s, clockMs(now.monotonicMs), clockMs(now.wallMs)),
+      ),
+    );
+  }
+
+  /** Frees the Rust timer; later calls throw `wrong_state`. */
+  free(): void {
+    this.#t?.free();
+    this.#t = undefined;
+  }
+}
 
 /** The sentence for a `generator_*` code; a generic one for any other code. */
 export function generatorErrorMessage(code: string): string {
