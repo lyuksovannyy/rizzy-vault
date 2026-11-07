@@ -143,6 +143,14 @@ pub const MIGRATIONS: &[MigrationFile] = &[
         sqlite: include_str!("../migrations/sqlite/0011_auth_invalidate_pending.sql"),
         postgres: include_str!("../migrations/postgres/0011_auth_invalidate_pending.sql"),
     },
+    // ADR 0091 §2 "State": the account's revocation window, in the next free number. Raises the
+    // backup `schema_version` to 12; the table itself is not backed up (`tables::NOT_BACKED_UP`).
+    MigrationFile {
+        version: 12,
+        description: "auth_revocation_window",
+        sqlite: include_str!("../migrations/sqlite/0012_auth_revocation_window.sql"),
+        postgres: include_str!("../migrations/postgres/0012_auth_revocation_window.sql"),
+    },
 ];
 
 /// This release's schema version: the last migration's version. A logical backup is stamped

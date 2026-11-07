@@ -20,6 +20,9 @@
 //!   invalidate` run against this database and the secrets file next to it. A backup taken
 //!   while one is pending would carry a half-finished run into another instance; the restored
 //!   database is checked against the secrets file anyway (`ServerSecrets::check_dump`).
+//! - `auth_revocation_windows` (ADR 0091 §2 "State"): the ephemeral revocation window, at most
+//!   ten minutes long. A restore never revives a window; the suspensions it protected are in
+//!   `auth_device_certificates` and are restored.
 //! - `storage_meta` and `storage_reconciliation`: `restore` writes both itself, with a new
 //!   restore generation (ADR 0021 §2) and a reconciliation epoch for every account (INV-59).
 //!
@@ -78,6 +81,7 @@ pub const NOT_BACKED_UP: &[&str] = &[
     "auth_webauthn_pending",
     "auth_webauthn_challenges",
     "auth_invalidate_pending",
+    "auth_revocation_windows",
     "storage_meta",
     "storage_reconciliation",
 ];
