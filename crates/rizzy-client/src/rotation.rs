@@ -96,14 +96,15 @@ use rizzy_core::sign::{
 use rizzy_proto::account::{AccountStateQuery, AccountView};
 use rizzy_proto::auth::RecoveryRegistration;
 use rizzy_proto::change::{
-    CommitChangeRequest, RetiredSecretKey, VaultRotation, VaultRotationUpload, WrapLocator,
+    CommitChangeRequest, RetiredSecretKey, StageRequest, VaultRotation, VaultRotationUpload,
+    WrapLocator,
 };
 use rizzy_proto::objects::{
     AccountKeyRecoveryWrap, AccountKeyServerWrap, AccountSettings, DeviceGrant, IdentitySecretKeys,
     ItemKeyWrap, VaultSelfGrant,
 };
 use rizzy_proto::vault::SeqVector;
-use rizzy_proto::wire::{Fixed, List, SessionToken};
+use rizzy_proto::wire::{Fixed, Id, List, SessionToken};
 
 use rizzy_core::envelope::purpose::DeviceSecretKeysCtx;
 use rizzy_core::secret_key::SecretKey;
@@ -115,6 +116,7 @@ use crate::credentials::{CredentialPart, NewCredential};
 use crate::device::{DeviceState, LocalWrap, UnlockedDevice, wrap_local};
 use crate::error::{ClientError, internal};
 use crate::login::LoggedIn;
+use crate::staging::Stager;
 use crate::store;
 use crate::store::record::PendingRecord;
 use crate::store::rows::{Changeset, Write};
@@ -378,6 +380,8 @@ pub struct PendingRotation {
     prepared: Option<(LocalWrap, Vec<u8>)>,
     /// The new credential committed with this rotation ([`start_rotation_with`]), if any.
     credential: Option<CredentialPart>,
+    /// The rotation staging of an attempt too large to commit inline ([`crate::staging`]).
+    stager: Stager,
 }
 
 impl fmt::Debug for PendingRotation {
@@ -732,6 +736,7 @@ pub(crate) fn start_rotation_with<R: CryptoRng + ?Sized>(
         rebuilds: 0,
         prepared: None,
         credential,
+        stager: Stager::default(),
     };
     pending.build_account(rng, unlocked, &ordered_vaults)?;
     pending.build_vaults(rng, &ordered_vaults)?;
@@ -746,6 +751,38 @@ impl PendingRotation {
     #[must_use]
     pub const fn commit_request(&self) -> &CommitChangeRequest {
         &self.request
+    }
+
+    /// [ADR 0092] §0 item 3, §4: given the length of the JSON of [`PendingRotation::commit_request`]
+    /// as the host would send it, the stage requests to `POST` to the rotation stage route,
+    /// in order and over [`PendingRotation::bearer_token`]'s session, before the commit. Empty
+    /// when the commit fits inline (or is staged already); otherwise the commit becomes its
+    /// staged form, so the host encodes it again. Module docs of [`crate::staging`] for the
+    /// retry rules; after a `state_conflict` rebuild, call it again.
+    ///
+    /// # Errors
+    /// [`ClientError::Internal`].
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    pub fn stage_requests<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        encoded_len: usize,
+    ) -> Result<Vec<StageRequest>, ClientError> {
+        let state = &self.account.state;
+        let base = state
+            .state_seq
+            .checked_sub(1)
+            .ok_or(ClientError::Internal)?;
+        let key_id = Id::from_bytes(*state.account_key_id.as_bytes());
+        self.stager
+            .plan(rng, &mut self.request, base, key_id, encoded_len)
+    }
+
+    /// Forgets the staging after a stage request failed for good: the next
+    /// [`PendingRotation::stage_requests`] stages every row under a new `rotation_id`.
+    pub fn discard_staging(&mut self) {
+        self.stager.discard();
     }
 
     /// Standard or full.

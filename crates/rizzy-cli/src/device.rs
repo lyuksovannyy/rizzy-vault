@@ -136,7 +136,8 @@ use rizzy_client::rizzy_proto::auth::{
     RegisterFinishRequest, RegisterStartResponse, RequestSignature,
 };
 use rizzy_client::rizzy_proto::change::{
-    CommitChangeRequest, ReregisterStartRequest, ReregisterStartResponse,
+    CommitChangeRequest, ReregisterStartRequest, ReregisterStartResponse, StageRequest,
+    StageResponse,
 };
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
@@ -279,6 +280,46 @@ const CONFIRM_WORD: &str = "CONFIRM";
 
 /// The most OPAQUE logins one re-authentication tries (a second one carries the TOTP code).
 const LOGIN_ATTEMPTS: usize = 2;
+
+/// Sends the stage requests of a staged rotation ([ADR 0092] §4) over the rotation's session,
+/// in order, showing progress (§6).
+///
+/// # Errors
+/// The first refusal or transport failure, after [`STAGE_RESENDS`] resends of a lost answer.
+///
+/// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+pub(crate) async fn send_stages(
+    http: &Http,
+    ui: &mut dyn Ui,
+    token: &SessionToken,
+    stages: &[StageRequest],
+) -> Result<(), CliError> {
+    let total = stages.len();
+    for (n, stage) in stages.iter().enumerate() {
+        ui.note(&format!(
+            "Uploading the rotation in parts: {} of {total}",
+            n.saturating_add(1)
+        ));
+        let mut sent = http
+            .post::<_, StageResponse>(paths::ACCOUNT_ROTATION_STAGE, stage, Auth::Bearer(token))
+            .await;
+        // ADR 0092 §4 "Crash and retry": a lost answer is answered by the same request again
+        // (an identical row is a no-op on the server).
+        for _ in 0..STAGE_RESENDS {
+            if !matches!(sent, Err(CliError::Network)) {
+                break;
+            }
+            sent = http
+                .post(paths::ACCOUNT_ROTATION_STAGE, stage, Auth::Bearer(token))
+                .await;
+        }
+        sent?;
+    }
+    Ok(())
+}
+
+/// How many times [`send_stages`] resends a stage request whose answer was lost.
+const STAGE_RESENDS: u32 = 2;
 
 /// A copy of a bearer token, for a request sent while its owner is borrowed or consumed.
 pub(crate) fn copy_token(token: &SessionToken) -> SessionToken {
@@ -2222,6 +2263,15 @@ impl Device {
         flight: &mut RotationInFlight,
     ) -> Result<(), CliError> {
         loop {
+            // ADR 0092 §4: an attempt too large for one body goes through staging first.
+            let inline = serde_json::to_vec(flight.pending.commit_request()?)
+                .map_err(|_| ClientError::Internal)?;
+            let stages = flight.pending.stage_requests(&mut self.rng, inline.len())?;
+            drop(inline);
+            if let Err(e) = send_stages(&self.http, ui, &flight.token, &stages).await {
+                flight.pending.discard_staging();
+                return Err(e);
+            }
             let body = self.persist_rotation(flight).await?;
             ui.checkpoint(Checkpoint::Persisted)?;
             let sent = self
@@ -2491,6 +2541,26 @@ impl Flight {
         match self {
             Self::Rotation(r) => Ok(r.commit_request()),
             Self::Credential(c) => c.commit_request(),
+        }
+    }
+
+    /// The stage requests of an attempt too large to commit inline (ADR 0092 §4).
+    fn stage_requests(
+        &mut self,
+        rng: &mut OsRng,
+        encoded_len: usize,
+    ) -> Result<Vec<StageRequest>, ClientError> {
+        match self {
+            Self::Rotation(r) => r.stage_requests(rng, encoded_len),
+            Self::Credential(c) => c.stage_requests(rng, encoded_len),
+        }
+    }
+
+    /// Forgets a staging whose requests did not all arrive.
+    fn discard_staging(&mut self) {
+        match self {
+            Self::Rotation(r) => r.discard_staging(),
+            Self::Credential(c) => c.discard_staging(),
         }
     }
 

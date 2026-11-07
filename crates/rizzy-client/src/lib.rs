@@ -131,6 +131,7 @@ pub mod session;
 pub mod sessions;
 pub mod settings;
 pub mod signup;
+pub mod staging;
 pub mod store;
 pub mod sync;
 pub mod two_factor;

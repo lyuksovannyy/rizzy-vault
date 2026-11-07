@@ -811,6 +811,32 @@ impl PendingCredentialChange {
         })
     }
 
+    /// As [`PendingRotation::stage_requests`] ([ADR 0092] §4); empty for a change that
+    /// rotates nothing.
+    ///
+    /// # Errors
+    /// [`ClientError::EmergencyKitNotConfirmed`]; [`ClientError::Internal`].
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    pub fn stage_requests<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        encoded_len: usize,
+    ) -> Result<Vec<rizzy_proto::change::StageRequest>, ClientError> {
+        self.released()?;
+        match &mut self.change {
+            Change::Rotation(r) => r.stage_requests(rng, encoded_len),
+            Change::Plain(_) => Ok(Vec::new()),
+        }
+    }
+
+    /// As [`PendingRotation::discard_staging`].
+    pub fn discard_staging(&mut self) {
+        if let Change::Rotation(r) = &mut self.change {
+            r.discard_staging();
+        }
+    }
+
     /// The `account-state` this change commits.
     #[must_use]
     pub fn new_state(&self) -> &AccountState {
