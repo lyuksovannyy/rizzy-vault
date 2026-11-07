@@ -46,9 +46,15 @@
 //! Every value read is one the server already holds (THREAT_MODEL §3.4): heads, wrap locators,
 //! epochs, envelope headers and lengths. No error carries a value (INV-48).
 //!
-//! **Limit.** A vault with more than [`MAX_ITEM_KEY_WRAPS`] wrap-set rows cannot rotate in M1
-//! (its rows do not fit one upload, and its Fetch already fails with `WrapSetTooLarge`); the
-//! rotation is refused as `invalid_request` (ADR 0025 "Risks").
+//! **Limit.** A vault with more than [`MAX_ITEM_KEY_WRAPS`] wrap-set rows, which only an account
+//! stored before [ADR 0092] can hold, cannot rotate (its Fetch already fails with
+//! `WrapSetTooLarge`); the rotation is refused as `invalid_request`, a wire-shape refusal of a
+//! list longer than its bound (ADR 0092 §3, and its replacement of ADR 0025 "Risks", third
+//! bullet). An account above `MAX_ACCOUNT_WRAP_ROWS` rotates through staging
+//! ([`crate::staging`], ADR 0092 §4): check 3 then runs over the union of a vault's inline and
+//! staged rows, and a staged row whose stored row is gone is `state_conflict`.
+//!
+//! [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
 //!
 //! [ADR 0025]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0025-rotation-vault-half.md
 

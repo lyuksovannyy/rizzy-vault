@@ -1197,6 +1197,7 @@ IDs INV-70 to INV-100 were allocated across the 2026-10-11 ADR batch in ADR-numb
 | INV-103 | Clients identify items by `(vault_id, item_id)`; an `item_id` from one vault never addresses an item of another (ADR 0081 §A7). | M3 | A test with the same `item_id` in two vaults. |
 | INV-104 | A move purges the source only after the server has acknowledged the target copy with every attachment chunk (ADR 0081 §A6). | M3 | Fault-injection tests at each step. |
 | INV-111 | While an account's revocation window is open, the server applies no write from a session not bound to the revoker device, except the recovery commit ([ADR 0091](adr/0091-revoked-device-rotation-race.md) §2). | M3 | Test: ADR 0091 §7 test 2 and test 4 (I2). |
+| INV-115 | Revoking a device and finishing recovery never fail because of the account's size. Every account the server stores can complete the standard rotation: inline when its commit fits `DEFAULT_UPLOAD_BODY_LEN`, through rotation staging otherwise, and staged rows change nothing until the one commit that applies the whole rotation atomically. The server refuses with `rotation_limit` every write, healing aside, that would take an account past `MAX_ACCOUNT_WRAP_ROWS` wrap-set rows or a vault past `MAX_ITEM_KEY_WRAPS`, and never refuses a write that adds no row, nor any rotation, for size ([ADR 0092](adr/0092-rotation-size-limits.md) §7). | M3 | Tests: ADR 0092 §8 tests 3–10 (`rizzy-domain-vault` `tests/vault/caps.rs` and the staging tests of `tests/vault/rotation.rs`). |
 
 ### 8.5 Sharing
 
