@@ -151,6 +151,14 @@ pub const MIGRATIONS: &[MigrationFile] = &[
         sqlite: include_str!("../migrations/sqlite/0012_auth_revocation_window.sql"),
         postgres: include_str!("../migrations/postgres/0012_auth_revocation_window.sql"),
     },
+    // ADR 0092 §4: rotation staging, in the next free number. Raises the backup
+    // `schema_version` to 13; the three tables are not backed up (`tables::NOT_BACKED_UP`).
+    MigrationFile {
+        version: 13,
+        description: "vault_rotation_staging",
+        sqlite: include_str!("../migrations/sqlite/0013_vault_rotation_staging.sql"),
+        postgres: include_str!("../migrations/postgres/0013_vault_rotation_staging.sql"),
+    },
 ];
 
 /// This release's schema version: the last migration's version. A logical backup is stamped

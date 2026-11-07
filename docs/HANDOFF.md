@@ -350,8 +350,9 @@ Every Proposed ADR as of today, oldest first. "Unblocks" is what accepting it cl
 | 0010 | `auth_last_recovery` | 0045 |
 | 0011 | `auth_invalidate_pending` | 0047 |
 | 0012 | `auth_revocation_window` | 0091 §2 (not backed up) |
+| 0013 | `vault_rotation_staging` | 0092 §4 (not backed up) |
 
-A new migration takes the next free number when it is implemented (0013 now), whatever its ADR's text says.
+A new migration takes the next free number when it is implemented (0014 now), whatever its ADR's text says.
 
 ## 4. Dependency requests waiting for the owner
 

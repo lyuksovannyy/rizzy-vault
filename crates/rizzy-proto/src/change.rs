@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::RecoveryRegistration;
 use crate::limits::{
     MAX_DEVICE_GRANTS, MAX_DEVICE_STATEMENTS, MAX_ITEM_KEY_WRAPS, MAX_RETIRED_KEYS,
-    MAX_VAULT_GRANTS,
+    MAX_VAULT_GRANTS, ROTATION_STAGE_ROWS,
 };
 use crate::objects::{
     AccountKeyRecoveryWrap, AccountKeyServerWrap, AccountSettings, AccountStatement, DeviceGrant,
@@ -241,6 +241,13 @@ pub struct VaultRotationUpload {
     vaults: List<VaultRotation, MAX_VAULT_GRANTS>,
     /// The re-wrapped self-grants of shared vaults, ascending by id (empty in Part A).
     regrants: List<VaultSelfGrant, MAX_VAULT_GRANTS>,
+    /// The account's open rotation staging ([ADR 0092] §0 item 1, §4), whose staged rows count
+    /// as uploaded rows of their vaults; absent when every uploaded row is inline. Left out of
+    /// the JSON when absent.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    staging: Option<RotationId>,
 }
 
 impl VaultRotationUpload {
@@ -278,7 +285,11 @@ impl VaultRotationUpload {
             .windows(2)
             .all(|w| matches!(w, [a, b] if a.vault_id < b.vault_id));
         if ascending && regrants_ascending {
-            Ok(Self { vaults, regrants })
+            Ok(Self {
+                vaults,
+                regrants,
+                staging: None,
+            })
         } else {
             Err(WireError::NotCanonical)
         }
@@ -295,6 +306,22 @@ impl VaultRotationUpload {
     pub fn regrants(&self) -> &[VaultSelfGrant] {
         self.regrants.as_slice()
     }
+
+    /// The same upload naming the account's open rotation staging `rotation_id` ([ADR 0092]
+    /// §4 "Committing").
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    #[must_use]
+    pub const fn with_staging(mut self, rotation_id: RotationId) -> Self {
+        self.staging = Some(rotation_id);
+        self
+    }
+
+    /// The staging the upload names, if any.
+    #[must_use]
+    pub const fn staging(&self) -> Option<RotationId> {
+        self.staging
+    }
 }
 
 /// The wire form: `{"vaults": [...], "regrants": [...]}`, unknown fields rejected; an absent
@@ -307,11 +334,57 @@ struct VaultRotationUploadWire {
     /// The regrants, as sent.
     #[serde(default)]
     regrants: List<VaultSelfGrant, MAX_VAULT_GRANTS>,
+    /// The staging, as sent; absent is none.
+    #[serde(default)]
+    staging: Option<RotationId>,
 }
 
 impl<'de> Deserialize<'de> for VaultRotationUpload {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = VaultRotationUploadWire::deserialize(deserializer)?;
-        Self::checked(wire.vaults, wire.regrants).map_err(de::Error::custom)
+        let upload = Self::checked(wire.vaults, wire.regrants).map_err(de::Error::custom)?;
+        Ok(match wire.staging {
+            Some(id) => upload.with_staging(id),
+            None => upload,
+        })
     }
+}
+
+/// The id of a rotation staging ([ADR 0092] §4): 16 random bytes the client chooses, base64url
+/// on the wire like every [`Id`].
+///
+/// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+pub type RotationId = Id;
+
+/// `POST /api/v1/account/rotation/stage` ([ADR 0092] §4 "Opening"): rows of one vault's
+/// rotation sent ahead of the commit. Authorised as the commit it prepares would be. At most
+/// [`ROTATION_STAGE_ROWS`] rows, wraps and drops together (the server refuses more as
+/// `invalid_request`); a retry of the same rows is a no-op.
+///
+/// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageRequest {
+    /// The staging's id, chosen by the client.
+    pub rotation_id: RotationId,
+    /// The account `state_seq` the commit will advance.
+    pub base_state_seq: u64,
+    /// The new account key id (`state'`) the commit will sign.
+    pub account_key_id: Id,
+    /// The vault the rows belong to.
+    pub vault_id: Id,
+    /// The vault's new epoch (ADR 0025 §3 check 2's value).
+    pub vault_key_epoch: u32,
+    /// Re-wrapped rows at `vault_key_epoch`.
+    pub item_key_wraps: List<ItemKeyWrap, ROTATION_STAGE_ROWS>,
+    /// Rows the rotator could not open.
+    pub dropped: List<WrapLocator, ROTATION_STAGE_ROWS>,
+}
+
+/// The answer to [`StageRequest`]: the rows staged for this vault under the `rotation_id` so
+/// far. A response type: unknown fields are ignored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageResponse {
+    /// Rows (wraps and drops) staged for the vault under the request's `rotation_id`.
+    pub staged_rows: u32,
 }

@@ -23,6 +23,9 @@
 //! - `auth_revocation_windows` (ADR 0091 §2 "State"): the ephemeral revocation window, at most
 //!   ten minutes long. A restore never revives a window; the suspensions it protected are in
 //!   `auth_device_certificates` and are restored.
+//! - `vault_rotation_stagings`, `vault_rotation_staging_vaults` and `vault_rotation_staging`
+//!   (ADR 0092 §4): a rotation's rows staged ahead of its commit, at most 24 h old and useless
+//!   once the account's `state_seq` moves. They are not state; a restore never revives one.
 //! - `storage_meta` and `storage_reconciliation`: `restore` writes both itself, with a new
 //!   restore generation (ADR 0021 §2) and a reconciliation epoch for every account (INV-59).
 //!
@@ -82,6 +85,9 @@ pub const NOT_BACKED_UP: &[&str] = &[
     "auth_webauthn_challenges",
     "auth_invalidate_pending",
     "auth_revocation_windows",
+    "vault_rotation_stagings",
+    "vault_rotation_staging_vaults",
+    "vault_rotation_staging",
     "storage_meta",
     "storage_reconciliation",
 ];
