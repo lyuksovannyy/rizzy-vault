@@ -93,9 +93,9 @@ pub enum EffectiveMode {
     BaseDomain,
     /// Full host, no equivalence widening.
     Host,
-    /// Path-prefix of the full normalised URL.
+    /// Byte prefix of the full normalised URL, query and fragment dropped (ADR 0097 §2).
     StartsWith,
-    /// Byte-equal full normalised URL.
+    /// Byte-equal full normalised URL, query and fragment dropped (ADR 0097 §2).
     Exact,
     /// No regex crate is named by ADR 0037; this build implements
     /// Never/Exact/Host/`StartsWith`/`BaseDomain` only. [`decide`] returns
@@ -676,6 +676,78 @@ mod tests {
         assert_eq!(
             MatchMode::AccountDefault.resolve(MatchMode::Host),
             EffectiveMode::Host
+        );
+    }
+
+    fn decide_plain(page: &str, uri: &str, mode: MatchMode) -> MatchOutcome {
+        decide(
+            &url(page),
+            &url(uri),
+            mode,
+            MatchMode::BaseDomain,
+            &no_equivalence(),
+        )
+    }
+
+    /// ADR 0097 §6 step 1: *Exact* ignores the query on both sides, but not the path.
+    #[test]
+    fn exact_compares_the_normalised_url_without_query_adr0097() {
+        let saved = "https://example.com/login?x=1";
+        assert_eq!(
+            decide_plain("https://example.com/login?y=2", saved, MatchMode::Exact),
+            MatchOutcome::Match(MatchedVia::RegistrableDomain)
+        );
+        assert_eq!(
+            decide_plain("https://example.com/login/", saved, MatchMode::Exact),
+            MatchOutcome::NoMatch
+        );
+        assert_eq!(
+            decide_plain("https://example.com/login#top", saved, MatchMode::Exact),
+            MatchOutcome::Match(MatchedVia::RegistrableDomain)
+        );
+    }
+
+    /// ADR 0097 §6 step 1: *Starts with* is a byte prefix of the normalised URL, query
+    /// dropped, not a path-segment prefix (documented).
+    #[test]
+    fn starts_with_is_a_byte_prefix_without_query_adr0097() {
+        assert_eq!(
+            decide_plain(
+                "https://example.com/login/step?z",
+                "https://example.com/login?x=1",
+                MatchMode::StartsWith
+            ),
+            MatchOutcome::Match(MatchedVia::RegistrableDomain)
+        );
+        assert_eq!(
+            decide_plain(
+                "https://example.com/login",
+                "https://example.com/log",
+                MatchMode::StartsWith
+            ),
+            MatchOutcome::Match(MatchedVia::RegistrableDomain)
+        );
+    }
+
+    /// ADR 0097 §2: dot segments are resolved before comparing, on both sides.
+    #[test]
+    fn exact_compares_after_dot_segments_are_resolved_adr0097() {
+        assert_eq!(
+            decide_plain(
+                "https://example.com/a/../login",
+                "https://example.com/login",
+                MatchMode::Exact
+            ),
+            MatchOutcome::Match(MatchedVia::RegistrableDomain)
+        );
+        // Existing escapes are kept as written: no decoding and no case change.
+        assert_eq!(
+            decide_plain(
+                "https://example.com/%7elogin",
+                "https://example.com/%7Elogin",
+                MatchMode::Exact
+            ),
+            MatchOutcome::NoMatch
         );
     }
 }

@@ -12,6 +12,16 @@
 //! scheme omitted, the path defaulted to `/`, and the registrable domain computed from the
 //! compiled-in Public Suffix List snapshot ([`crate::suffix`]).
 //!
+//! **The compared URL** (ADR 0097 §2, which replaces ADR 0037 §2 point 6): the query (`?…`) and the fragment (`#…`) are dropped
+//! from both the saved URI and the page, for every mode. The path is kept exactly as the `url`
+//! crate serialises it for an `http(s)` URL: dot segments resolved, characters outside the
+//! path percent-encode set percent-encoded, existing escapes kept as written (no decoding, no
+//! case change), and an empty path read as `/`. The **normalised URL**
+//! ([`NormalizedUrl::normalized_string`]) is the ASCII string `scheme "://" host [":" port]
+//! path`. *Exact* compares the page's and the saved URI's byte for byte, *Starts with* by byte
+//! prefix (not by path segment), and *Regex* runs its pattern on the page's; *Base domain* uses
+//! only the registrable domain and *Host* only the host and port.
+//!
 //! [`normalize_domain`] is the separate, narrower path for a *bare* domain string that is not
 //! a full URL: an equivalence-group entry (ADR 0038 §1) or a domain a person types into a
 //! user-defined group. It calls the `idna` crate directly, because there is no URL for the
@@ -54,8 +64,9 @@ impl Scheme {
 }
 
 /// A URL normalised per ADR 0037 §2: scheme, A-label host, a non-default port only, the
-/// registrable domain, and the path (kept for every mode; only *Starts with* and *Regex* use
-/// it, ADR 0037 §2 point 6).
+/// registrable domain, and the path (kept for every mode; *Starts with*, *Exact* and *Regex*
+/// use it, ADR 0097 §2). It holds no query, no fragment and no copy of the raw input (ADR 0097
+/// §1, replacing ADR 0037 §2's `NormalizedUrl` sentence).
 ///
 /// Comparisons between two values use the accessors below, never `Debug`: `Debug` exists for
 /// logs and tests, not as a comparison key, and carries no secret (a URL is never secret data
@@ -83,9 +94,9 @@ pub struct NormalizedUrl {
     /// public suffix that does contain a dot (`co.uk`) stays `None`.
     registrable_domain: Option<String>,
     /// The normalised path: always starts with `/` (the `url` crate already defaults an empty
-    /// path to `/` for a special scheme, ADR 0037 §2 point 6 "default paths"). Query and
-    /// fragment are dropped unconditionally, for every mode, including *Regex* (ADR 0037 §2
-    /// point 6: the full *normalised* URL, which never carries a query).
+    /// path to `/` for a special scheme). Query and fragment are dropped unconditionally, for
+    /// every mode, including *Regex*; escapes are kept as the `url` crate wrote them (ADR 0097
+    /// §2).
     path: String,
 }
 
@@ -225,8 +236,9 @@ impl NormalizedUrl {
         &self.path
     }
 
-    /// The full normalised URL: `scheme://host[:port]path`. *Exact* compares this value
-    /// byte-for-byte; *Starts with* and *Regex* match against it (ADR 0037 §4; §2 point 6).
+    /// The full normalised URL: `scheme://host[:port]path`, ASCII only. *Exact* compares this
+    /// value byte for byte, *Starts with* by byte prefix, and *Regex* searches the page's with
+    /// its pattern (ADR 0097 §2).
     #[must_use]
     pub fn normalized_string(&self) -> String {
         match self.port {
@@ -352,6 +364,45 @@ mod tests {
     fn query_and_fragment_are_dropped() {
         let a = NormalizedUrl::parse("https://example.com/path?x=1#frag").unwrap();
         assert_eq!(a.normalized_string(), "https://example.com/path");
+    }
+
+    /// ADR 0097 §2 and its Context probe against the pinned `url`: dot segments are resolved,
+    /// non-ASCII is percent-encoded, existing escapes keep their case, and query and fragment
+    /// are dropped.
+    #[test]
+    fn path_is_the_url_crate_serialisation_adr0097() {
+        let a = NormalizedUrl::parse("https://EXAMPLE.com/a/../B/%7e/%7E/\u{e9}?q=1#f").unwrap();
+        assert_eq!(a.host(), "example.com");
+        assert_eq!(a.path(), "/B/%7e/%7E/%C3%A9");
+        assert_eq!(
+            a.normalized_string(),
+            "https://example.com/B/%7e/%7E/%C3%A9"
+        );
+        assert!(a.normalized_string().is_ascii());
+    }
+
+    /// ADR 0097 Context probe: tab and newline are stripped by the WHATWG parser.
+    #[test]
+    fn tab_and_newline_are_stripped_adr0097() {
+        let a = NormalizedUrl::parse("https://ex\tample.com/lo\ngin").unwrap();
+        assert_eq!(a.host(), "example.com");
+        assert_eq!(a.path(), "/login");
+    }
+
+    /// ADR 0097 §2: a fragment alone, or a query and fragment together, is dropped.
+    #[test]
+    fn fragment_is_dropped_adr0097() {
+        for raw in [
+            "https://example.com/login#section",
+            "https://example.com/login?a=b#section",
+            "https://example.com/login#?a=b",
+        ] {
+            assert_eq!(
+                NormalizedUrl::parse(raw).unwrap().normalized_string(),
+                "https://example.com/login",
+                "{raw}"
+            );
+        }
     }
 
     #[test]
