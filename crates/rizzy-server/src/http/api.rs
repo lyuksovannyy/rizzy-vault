@@ -167,7 +167,9 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use rizzy_domain_auth::types::RequestSignature;
 use rizzy_domain_auth::types::paths;
-use rizzy_domain_auth::types::{API_V1, ApiVersion, MetaResponse, MinClientVersion, Version};
+use rizzy_domain_auth::types::{
+    API_V1, ApiVersion, MetaResponse, MinClientVersion, SourceUrl, Version,
+};
 use rizzy_domain_auth::types::{ErrorCode, ErrorResponse};
 use rizzy_domain_auth::types::{List, MAX_BODY_LEN, Platform, SessionToken};
 use rizzy_domain_auth::{AuthError, AuthService, RequestParts, Session, SessionKind};
@@ -279,6 +281,9 @@ pub struct Api {
     /// The minimum client version per platform ([`MIN_CLIENT_VERSIONS`]): served by
     /// `GET /api/meta` and applied to the `Rizzy-Client` header of every `/api/v1` request.
     pub min_client_versions: Vec<MinClientVersion>,
+    /// The source URL `GET /api/meta` serves (ADR 0106 §3): `RIZZY_SOURCE_URL` or the build's
+    /// default ([`crate::source::served`]).
+    pub source_url: SourceUrl,
     /// The slots of requests with the upload limit ([`MAX_CONCURRENT_LARGE_BODIES`]).
     large_bodies: Semaphore,
 }
@@ -291,6 +296,7 @@ impl Api {
         vault: VaultDomain<AuthDirectory>,
         trusted_proxies: Vec<IpAddr>,
         max_upload_bytes: usize,
+        source_url: SourceUrl,
     ) -> Self {
         Self {
             auth,
@@ -298,6 +304,7 @@ impl Api {
             trusted_proxies,
             max_upload_bytes,
             min_client_versions: built_in_minimums(),
+            source_url,
             large_bodies: Semaphore::new(MAX_CONCURRENT_LARGE_BODIES),
         }
     }
@@ -801,15 +808,17 @@ fn vault_code(endpoint: Endpoint, e: &VaultError) -> ErrorCode {
 
 /// `GET /api/meta` (ADR 0002 point 3, as ADR 0022 amends it; [ADR 0028] item 14): this
 /// server's version, the API versions it serves, and the minimum client version per platform
-/// (`minimums`; none in this build, [`MIN_CLIENT_VERSIONS`]).
+/// (`minimums`; none in this build, [`MIN_CLIENT_VERSIONS`]), and where users get its source
+/// (`source_url`, [ADR 0106] §3: always present).
 ///
 /// Unauthenticated and public on purpose: it holds no secret and nothing about any account,
 /// and the server version is disclosed so that a client can tell it is too old before it
 /// authenticates. It is served whatever `Rizzy-Client` says.
 ///
 /// [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
+/// [ADR 0106]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0106-agpl-source-url.md
 #[must_use]
-pub fn meta(minimums: &[MinClientVersion]) -> Response {
+pub fn meta(minimums: &[MinClientVersion], source_url: &SourceUrl) -> Response {
     let answer = Version::from_str(env!("CARGO_PKG_VERSION"))
         .ok()
         .zip(ApiVersion::from_str(API_V1).ok())
@@ -818,7 +827,7 @@ pub fn meta(minimums: &[MinClientVersion]) -> Response {
                 server_version,
                 api_versions: List::new(vec![v1]).ok()?,
                 min_client_versions: List::new(minimums.to_vec()).ok()?,
-                source_url: None,
+                source_url: Some(source_url.clone()),
             })
         });
     match answer.map(|m| serde_json::to_vec(&m)) {

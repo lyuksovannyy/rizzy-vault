@@ -14,8 +14,10 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use rizzy_domain_auth::types::{MinClientVersion, Platform, SessionToken, Version};
-use rizzy_server::config::TRUSTED_PROXIES;
+use rizzy_domain_auth::types::{
+    MetaResponse, MinClientVersion, Platform, SessionToken, SourceUrl, Version,
+};
+use rizzy_server::config::{SOURCE_URL, TRUSTED_PROXIES};
 use rizzy_server::http::api::Endpoint;
 use zeroize::Zeroizing;
 
@@ -446,8 +448,9 @@ fn rizzy_client_below_the_minimum_is_refused() {
         let meta = server.get("/api/meta").await;
         assert_eq!(meta.status, StatusCode::OK);
         let expected = format!(
-            r#"{{"server_version":"{}","api_versions":["v1"],"min_client_versions":[{{"platform":"cli","version":"0.3.0"}},{{"platform":"ios","version":"2.0.0"}}]}}"#,
-            env!("CARGO_PKG_VERSION")
+            r#"{{"server_version":"{}","api_versions":["v1"],"min_client_versions":[{{"platform":"cli","version":"0.3.0"}},{{"platform":"ios","version":"2.0.0"}}],"source_url":"{}"}}"#,
+            env!("CARGO_PKG_VERSION"),
+            default_source_url()
         );
         assert_eq!(String::from_utf8_lossy(&meta.body), expected);
 
@@ -509,14 +512,62 @@ fn this_build_refuses_no_client_version() {
         let server = Server::start().await;
         let meta = server.get("/api/meta").await;
         let expected = format!(
-            r#"{{"server_version":"{}","api_versions":["v1"],"min_client_versions":[]}}"#,
-            env!("CARGO_PKG_VERSION")
+            r#"{{"server_version":"{}","api_versions":["v1"],"min_client_versions":[],"source_url":"{}"}}"#,
+            env!("CARGO_PKG_VERSION"),
+            default_source_url()
         );
         assert_eq!(String::from_utf8_lossy(&meta.body), expected);
         let reply = server
             .send(recovery_start("target", &[("rizzy-client", "cli/0.0.1")]))
             .await;
         assert_error(&reply, StatusCode::UNAUTHORIZED, "unauthorized");
+    });
+}
+
+/// This build's compiled default source URL (ADR 0106 §2).
+fn default_source_url() -> String {
+    rizzy_server::source::compiled_default()
+        .unwrap()
+        .url
+        .as_str()
+        .to_owned()
+}
+
+/// ADR 0106 §3 (implementation step 3): `source_url` is on every meta answer, with or without
+/// `Rizzy-Client` (a too-old one included): the compiled default when `RIZZY_SOURCE_URL` is
+/// unset, the setting byte for byte when it is set.
+#[test]
+fn meta_serves_the_source_url() {
+    block_on(async {
+        let configured = "https://src.example:8443/Fork/tree/v1?ref=a%2Fb#Top";
+        for (extra, want) in [
+            (vec![], default_source_url()),
+            (vec![(SOURCE_URL, configured)], configured.to_owned()),
+        ] {
+            let server = Server::start_adjusted(&extra, |api| {
+                api.min_client_versions = vec![minimum("cli", "0.3.0")];
+            })
+            .await;
+            for header in [None, Some("cli/9.0.0"), Some("cli/0.1.0"), Some("nonsense")] {
+                let mut request = Request::get("/api/meta");
+                if let Some(value) = header {
+                    request = request.header("rizzy-client", value);
+                }
+                let reply = server.send(request.body(Body::empty()).unwrap()).await;
+                assert_eq!(reply.status, StatusCode::OK);
+                let meta: MetaResponse = reply.json();
+                assert_eq!(
+                    meta.source_url.as_ref().map(SourceUrl::as_str),
+                    Some(want.as_str()),
+                    "{header:?}"
+                );
+                let body = String::from_utf8_lossy(&reply.body).into_owned();
+                assert!(
+                    body.contains(&format!(r#""source_url":"{want}""#)),
+                    "{body}"
+                );
+            }
+        }
     });
 }
 

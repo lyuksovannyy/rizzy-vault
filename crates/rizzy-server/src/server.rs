@@ -129,6 +129,7 @@ use crate::fsutil;
 use crate::http::{self, api::Api};
 use crate::log::{self, Field};
 use crate::secrets_file::{self, SecretsFileError};
+use crate::source;
 use crate::sys::{now_ms, os_rng};
 use crate::usage::{self, UsageError};
 use crate::worker;
@@ -149,6 +150,9 @@ pub const INSTANCE_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum ServeError {
     /// A database role runs, but the configuration has no origin.
     NoOrigin,
+    /// `RIZZY_SOURCE_URL` is unset and this build's `repository` field gives no valid default
+    /// (ADR 0106 §2; [`crate::source`]).
+    NoSourceUrl,
     /// The secrets file resolves inside the data directory, or its location cannot be resolved.
     SecretsInsideDataDir,
     /// The secrets file could not be loaded.
@@ -191,6 +195,10 @@ impl fmt::Display for ServeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoOrigin => f.write_str("RIZZY_ORIGIN is required for the api and worker roles"),
+            Self::NoSourceUrl => f.write_str(
+                "RIZZY_SOURCE_URL is required: this build's repository field gives no valid \
+                 default source URL (ADR 0106 §2)",
+            ),
             Self::SecretsInsideDataDir => f.write_str(
                 "the secrets file must not be inside the data directory (ADR 0010 §4), \
                  or its location could not be resolved",
@@ -392,6 +400,9 @@ async fn instance_lock_lost(mut lost: watch::Receiver<bool>) {
 /// [`ServeError`]; nothing is served then.
 pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
     let origin = config.origin.clone().ok_or(ServeError::NoOrigin)?;
+    // ADR 0106 §1–§3: what `/api/meta` serves, logged once; before anything is opened.
+    let source_url = source::served(config.source_url.as_ref(), source::compiled_default())
+        .ok_or(ServeError::NoSourceUrl)?;
     if fsutil::is_inside(&config.data_dir, &config.secrets_file).unwrap_or(true) {
         return Err(ServeError::SecretsInsideDataDir);
     }
@@ -468,6 +479,7 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
             vault,
             config.trusted_proxies.clone(),
             config.max_upload_bytes,
+            source_url,
         )),
         db,
         instance_lock: Some(instance_lock),

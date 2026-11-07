@@ -59,7 +59,9 @@ pub fn router(api: Option<Arc<Api>>, web: bool) -> Router {
     if let Some(api) = api {
         let mut api_router: Router<Arc<Api>> = Router::new().route(
             META_PATH,
-            get(|State(api): State<Arc<Api>>| async move { api::meta(&api.min_client_versions) }),
+            get(|State(api): State<Arc<Api>>| async move {
+                api::meta(&api.min_client_versions, &api.source_url)
+            }),
         );
         for &endpoint in Endpoint::ALL {
             let handler = move |State(api): State<Arc<Api>>, request: Request| {
