@@ -26,13 +26,14 @@ import {
   type MatchUriInput,
   type PasskeyAssertionResult,
   type PasskeyCandidateResult,
+  type PasskeyUvInput,
   type VaultInfo,
   CoreError,
   DurableSession,
   MatchMode,
   PASSKEY_ALG_ES256,
+  DEFAULT_LOCK_SETTINGS,
   cacheStoreNames,
-  createPasskey as coreCreatePasskey,
   decideMatchCandidates,
   enrolDevice as coreEnrolDevice,
   fetchItemIcon,
@@ -46,7 +47,7 @@ import {
   unlockDurableDevice,
 } from "@rizzy-vault/core";
 
-export type { CacheStore, Clock, CreatedPasskey, DurableSession, FieldView, ItemChange, ItemSummary, MatchCandidate, MatchFrameInfo, PasskeyAssertionResult, VaultInfo };
+export type { CacheStore, Clock, CreatedPasskey, DurableSession, FieldView, ItemChange, ItemSummary, MatchCandidate, MatchFrameInfo, PasskeyAssertionResult, PasskeyUvInput, VaultInfo };
 export { MatchMode, PASSKEY_ALG_ES256, cacheRemovalRefusal, cacheStoreNames, decideMatchCandidates, newElementId, normalizePageUrl };
 
 /** `passkey/<id>/*` field-key parts (`crates/rizzy-core/src/item/schema.rs`'s `LIST_PASSKEY`/
@@ -56,11 +57,12 @@ export const PASSKEY_LIST = "passkey";
 export const PASSKEY_ATTR_RP_ID = "rp_id";
 export const PASSKEY_ATTR_CREATED_MS = "created_ms";
 
-/** Runs `createPasskey` (ADR 0039 §2) — a pure, stateless core-host wrapper, so
- * `content-handler.ts` never imports `@rizzy-vault/core` directly either (this module's own
- * "host glue only" rule, top doc comment). */
-export function createPasskey(origin: string, rpId: string, challenge: Uint8Array): CreatedPasskey {
-  return coreCreatePasskey(origin, rpId, challenge);
+/** The `UV` input of `DurableSession.createPasskey`/`passkeyAssertion` (ADR 0110 §6 point 5):
+ * the page's relayed `userVerification` (none is relayed yet, so Preferred) and the default lock
+ * settings, under which a master-password session is bounding and signs with `UV=1` as before.
+ * Wired in the extension step (the relayed value, the stored settings, the re-verification). */
+export function passkeyUvInput(userVerification?: string): PasskeyUvInput {
+  return { userVerification, lockSettings: DEFAULT_LOCK_SETTINGS };
 }
 
 /** One stored passkey's non-secret, re-derivable-from-`fields()` metadata — the `rp_id`/

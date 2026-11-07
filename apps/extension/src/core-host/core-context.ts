@@ -31,7 +31,6 @@ import {
   addPasskeyChange,
   cacheRemovalRefusal,
   cacheStoreNames,
-  createPasskey,
   decideCandidates,
   enrolDevice,
   findItemForUpdate,
@@ -42,6 +41,7 @@ import {
   newElementId,
   newLoginChangeset,
   newLoginWithPasskeyChangeset,
+  passkeyUvInput,
   saveTargets,
   saveVault,
   sessionPasskeyCandidatesForRpId,
@@ -507,7 +507,7 @@ export function releaseIframeInstance(instanceToken: string): void {
 
 /** `content-handler.ts`'s `passkey_create_request` handling (ADR 0039 §2): registers a pending
  * "save a passkey" ceremony and returns what the consent UI needs to display, or `undefined`
- * while locked — never calls {@link createPasskey} itself (module docs: that only happens once
+ * while locked — never calls `DurableSession.createPasskey` itself (module docs: that only happens once
  * the user approves, `approvePasskeyCeremony`). `rpId` defaults to the verified origin's own
  * host when the page supplied none (`rpIdHint`), matching how a real browser's own WebAuthn
  * implementation resolves an absent `rp.id` — `createPasskey`'s own INV-64 check (Rust) is still
@@ -685,7 +685,9 @@ async function runCreatePasskey(
   request: Extract<PasskeyCeremonyRequest, { kind: "create" }>,
   vaultId: string | undefined,
 ): Promise<PasskeyResultPayload> {
-  const created = createPasskey(request.origin, request.rpId, base64ToBytes(request.challengeB64));
+  // ADR 0110 §6: the UV flag is decided in Rust at signing; Preferred and the default lock
+  // settings for now (`passkeyUvInput`'s doc), wired in the extension step.
+  const created = s.createPasskey(request.origin, request.rpId, base64ToBytes(request.challengeB64), passkeyUvInput());
   const passkeyInput: AddPasskeyInput = {
     elementId: newElementId(),
     rpId: request.rpId,
@@ -743,7 +745,15 @@ function runGetPasskey(
   if (ref === undefined) {
     return undefined;
   }
-  const assertion = s.passkeyAssertion(ref.itemId, ref.elementId, request.origin, request.rpId, base64ToBytes(request.challengeB64));
+  // ADR 0110 §6, as for `runCreatePasskey`: wired in the extension step.
+  const assertion = s.passkeyAssertion(
+    ref.itemId,
+    ref.elementId,
+    request.origin,
+    request.rpId,
+    base64ToBytes(request.challengeB64),
+    passkeyUvInput(),
+  );
   return {
     credentialIdB64: bytesToBase64(assertion.credentialId),
     clientDataJsonB64: bytesToBase64(assertion.clientDataJson),
