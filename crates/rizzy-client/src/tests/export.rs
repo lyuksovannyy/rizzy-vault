@@ -1728,6 +1728,7 @@ impl TestPasskey {
             &format!("https://{rp_id}"),
             rp_id,
             b"challenge",
+            crate::passkey::UserVerified::Yes,
         )
         .unwrap();
         Self {
@@ -2053,6 +2054,7 @@ fn a_bare_cxf_file_imports_through_the_same_reader() {
         "https://webauthn.io",
         "webauthn.io",
         b"challenge",
+        crate::passkey::UserVerified::Yes,
     )
     .unwrap();
     let mut message = assertion.authenticator_data.clone();

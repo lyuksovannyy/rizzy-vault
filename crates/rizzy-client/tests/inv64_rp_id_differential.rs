@@ -302,7 +302,13 @@ fn run_case(case: &Case) -> (Verdict, Verdict, String, String) {
     );
 
     let mut rng = ChaCha20Rng::seed_from_u64(0x5151);
-    let real_verdict = match create_credential(&mut rng, &origin_raw, &rp_id_raw, b"challenge") {
+    let real_verdict = match create_credential(
+        &mut rng,
+        &origin_raw,
+        &rp_id_raw,
+        b"challenge",
+        rizzy_client::passkey::UserVerified::Yes,
+    ) {
         Ok(_) => Verdict::Accept,
         Err(ClientError::RpIdRejected) => Verdict::RejectRpId,
         Err(ClientError::InvalidInput) => Verdict::InvalidInput,
@@ -435,7 +441,14 @@ mod golden {
 
     fn verdict(origin: &str, rp_id: &str) -> Result<(), ClientError> {
         let mut rng = ChaCha20Rng::seed_from_u64(7);
-        create_credential(&mut rng, origin, rp_id, b"c").map(|_| ())
+        create_credential(
+            &mut rng,
+            origin,
+            rp_id,
+            b"c",
+            rizzy_client::passkey::UserVerified::Yes,
+        )
+        .map(|_| ())
     }
 
     /// Not a security property (INV-64 says nothing about ports), but `clientDataJSON`'s
@@ -447,8 +460,14 @@ mod golden {
     #[test]
     fn client_data_json_origin_keeps_a_non_default_port() {
         let mut rng = ChaCha20Rng::seed_from_u64(9);
-        let created = create_credential(&mut rng, "https://example.com:8443", "example.com", b"c")
-            .expect("origin and rp_id are valid for INV-64");
+        let created = create_credential(
+            &mut rng,
+            "https://example.com:8443",
+            "example.com",
+            b"c",
+            rizzy_client::passkey::UserVerified::Yes,
+        )
+        .expect("origin and rp_id are valid for INV-64");
         let text = core::str::from_utf8(&created.client_data_json).expect("ASCII JSON");
         assert!(
             text.contains(r#""origin":"https://example.com:8443""#),

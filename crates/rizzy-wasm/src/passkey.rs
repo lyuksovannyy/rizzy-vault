@@ -214,7 +214,13 @@ pub fn create_passkey(
     rp_id: &str,
     challenge: &[u8],
 ) -> Result<CreatedPasskey, CoreError> {
-    let created = create_credential(&mut os_rng(), origin, rp_id, challenge)?;
+    let created = create_credential(
+        &mut os_rng(),
+        origin,
+        rp_id,
+        challenge,
+        rizzy_client::passkey::UserVerified::Yes,
+    )?;
     Ok(CreatedPasskey {
         private_key: created.signing_key.to_bytes().expose_secret().to_vec(),
         credential_id: created.credential_id,

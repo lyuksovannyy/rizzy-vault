@@ -244,6 +244,10 @@ pub enum ClientError {
     /// ADR 0093 §1.2: the server refused to delete a purged item's attachments for a reason a
     /// retry cannot fix. Reported once; the files still count toward the account's storage.
     AttachmentCleanupFailed,
+    /// ADR 0110 §6: a passkey ceremony whose relying party requires user verification, while
+    /// the lock policy is not bounding and no master-password verification is fresh. Nothing
+    /// was signed or generated; the extension asks for the master password (§7).
+    UvRequired,
     /// An internal step failed that the inputs cannot cause: a sealing, signing, encoding or
     /// derivation call that is unreachable for valid state. No detail is kept on purpose.
     Internal,
@@ -315,6 +319,7 @@ impl ClientError {
             Self::RotationLimit => "rotation_limit",
             Self::UnsupportedItem => "unsupported_item",
             Self::AttachmentCleanupFailed => "attachment_cleanup_failed",
+            Self::UvRequired => "uv_required",
             Self::Internal => "internal",
         }
     }
@@ -428,6 +433,7 @@ impl fmt::Display for ClientError {
                 "Files of a deleted item could not be removed from the server and still count \
                  toward your storage."
             }
+            Self::UvRequired => "this sign-in needs your master password first",
             Self::Internal => "internal error",
         })
     }
@@ -508,6 +514,7 @@ mod tests {
             ClientError::RotationLimit,
             ClientError::UnsupportedItem,
             ClientError::AttachmentCleanupFailed,
+            ClientError::UvRequired,
             ClientError::Internal,
         ];
         let mut codes: Vec<&str> = all.iter().map(|e| e.code()).collect();

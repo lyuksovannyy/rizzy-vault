@@ -169,3 +169,47 @@ fn extension_device_enrols_persists_cache_reloads_and_syncs() {
         .unwrap();
     assert_eq!(outcome.applied, 0);
 }
+
+/// ADR 0110 §7 point 4.3: the re-verification runs the local unlock against the session's own
+/// device state; a wrong password changes nothing, the right one sets `verified_at` and leaves
+/// how the session was unlocked as it was.
+#[test]
+fn reverify_sets_verified_at_only_for_the_right_master_password() {
+    use crate::lock_settings::{LockSettings, UnlockedBy};
+    use crate::passkey::{UV_FRESH_MS, UvDecision, UvRequirement, UvState, reverify};
+
+    let mut rng = ChaCha20Rng::seed_from_u64(7);
+    let mut server = Server::new(100);
+    let owner = signup(&mut server, &mut rng, DeviceKind::Extension);
+    let device = owner.device.as_ref().unwrap();
+    let loose = LockSettings::new(true, 60, true).unwrap();
+
+    let mut state = UvState::other();
+    assert_eq!(
+        reverify(&mut state, device, "wrong password", T0).unwrap_err(),
+        ClientError::WrongPasswordOrSecretKey
+    );
+    assert_eq!(state, UvState::other());
+
+    reverify(&mut state, device, PASSWORD, T0).unwrap();
+    assert_eq!(state.verified_at(), Some(T0));
+    assert_eq!(state.unlocked_by(), UnlockedBy::Other);
+    assert_eq!(
+        state.decide(
+            UvRequirement::Required,
+            &LockSettings::DEFAULT,
+            T0 + UV_FRESH_MS
+        ),
+        UvDecision::Sign { uv: true }
+    );
+    assert_eq!(
+        state.decide(UvRequirement::Required, &loose, T0 + UV_FRESH_MS + 1),
+        UvDecision::UvRequired,
+        "a keystore-unlocked session stays not bounding after a re-verification"
+    );
+
+    let mut password_session = UvState::master_password(T0);
+    reverify(&mut password_session, device, PASSWORD, T0 + 10_000).unwrap();
+    assert_eq!(password_session.verified_at(), Some(T0 + 10_000));
+    assert_eq!(password_session.unlocked_by(), UnlockedBy::MasterPassword);
+}

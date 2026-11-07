@@ -39,7 +39,12 @@ use rizzy_match::{NormalizedUrl, Scheme, normalize_domain, suffix};
 use crate::error::{ClientError, internal};
 
 mod cbor;
+mod uv;
 mod wire;
+
+pub use uv::{
+    UV_FRESH_MS, UserVerified, UvDecision, UvRequirement, UvState, decide_uv, is_fresh, reverify,
+};
 
 /// The origin and `rpId` `verify_rp_id` accepted, both already normalised.
 ///
@@ -169,6 +174,10 @@ pub struct CreatedCredential {
 /// host if the page omitted it; `challenge` is the relying party's own randomness, opaque to
 /// this function (it is never generated here).
 ///
+/// `uv` is the `UV` flag of the registration's `authenticatorData` (ADR 0110 §6): the caller's
+/// [`UvDecision`] for this ceremony, taken at signing time ([`UvState::decide`]); an
+/// [`UvDecision::UvRequired`] never reaches this function, so nothing is generated for it.
+///
 /// # Errors
 /// Whatever `verify_rp_id` returns; nothing else, for a valid `rng`.
 pub fn create_credential<R: CryptoRng + ?Sized>(
@@ -176,6 +185,7 @@ pub fn create_credential<R: CryptoRng + ?Sized>(
     origin: &str,
     rp_id: &str,
     challenge: &[u8],
+    uv: UserVerified,
 ) -> Result<CreatedCredential, ClientError> {
     let verified = verify_rp_id(origin, rp_id)?;
     let origin_string = wire::origin_string(&verified.origin);
@@ -193,8 +203,12 @@ pub fn create_credential<R: CryptoRng + ?Sized>(
     // `verify_rp_id` compared it (`VerifiedRp`'s own docs) — a page spelling `rpId` in another
     // case or with a trailing dot must still hash to the one `rpIdHash` a relying party and
     // this project's own later assertion both compute.
-    let auth_data =
-        wire::authenticator_data_registration(&verified.rp_id, &credential_id, &public_key_cose);
+    let auth_data = wire::authenticator_data_registration(
+        &verified.rp_id,
+        uv,
+        &credential_id,
+        &public_key_cose,
+    );
     let attestation_object = cbor::attestation_object_none(&auth_data);
 
     Ok(CreatedCredential {
@@ -282,7 +296,8 @@ pub struct Assertion {
 /// [`Assertion::user_handle`] so the caller has one self-contained ceremony result instead of
 /// further values to remember to attach. Matching `credential_id` to `signing_key` — and, when
 /// the page sent `allowCredentials`, checking this credential is one of them — is entirely the
-/// caller's.
+/// caller's. `uv` is the `UV` flag of the signed `authenticatorData`, as for
+/// [`create_credential`]: the caller's [`UvState::decide`] at signing time (ADR 0110 §6).
 ///
 /// # Errors
 /// Whatever `verify_rp_id` returns. [`ClientError::Internal`] only for the unreachable
@@ -297,6 +312,7 @@ pub fn get_assertion(
     origin: &str,
     rp_id: &str,
     challenge: &[u8],
+    uv: UserVerified,
 ) -> Result<Assertion, ClientError> {
     assertion(
         |message| signing_key.sign_der(message).map_err(internal),
@@ -305,6 +321,7 @@ pub fn get_assertion(
         origin,
         rp_id,
         challenge,
+        uv,
     )
 }
 
@@ -320,6 +337,7 @@ pub fn get_assertion_with(
     origin: &str,
     rp_id: &str,
     challenge: &[u8],
+    uv: UserVerified,
 ) -> Result<Assertion, ClientError> {
     assertion(
         |message| signing_key.sign(message),
@@ -328,6 +346,7 @@ pub fn get_assertion_with(
         origin,
         rp_id,
         challenge,
+        uv,
     )
 }
 
@@ -339,12 +358,13 @@ fn assertion(
     origin: &str,
     rp_id: &str,
     challenge: &[u8],
+    uv: UserVerified,
 ) -> Result<Assertion, ClientError> {
     let verified = verify_rp_id(origin, rp_id)?;
     let origin_string = wire::origin_string(&verified.origin);
 
     let client_data_json = wire::client_data_json(wire::Ceremony::Get, challenge, &origin_string);
-    let authenticator_data = wire::authenticator_data_assertion(&verified.rp_id);
+    let authenticator_data = wire::authenticator_data_assertion(&verified.rp_id, uv);
 
     let mut message = Vec::with_capacity(authenticator_data.len() + 32);
     message.extend_from_slice(&authenticator_data);
@@ -539,6 +559,7 @@ mod ceremony_tests {
             "https://example.com",
             "example.com",
             b"challenge",
+            crate::passkey::UserVerified::Yes,
         )
         .unwrap();
         assert_eq!(assertion.signature_der.len(), 64);
@@ -553,8 +574,14 @@ mod ceremony_tests {
             .unwrap();
 
         let mut rng = ChaCha20Rng::seed_from_u64(9);
-        let created =
-            create_credential(&mut rng, "https://example.com", "example.com", b"r").unwrap();
+        let created = create_credential(
+            &mut rng,
+            "https://example.com",
+            "example.com",
+            b"r",
+            crate::passkey::UserVerified::Yes,
+        )
+        .unwrap();
         let stored = created.signing_key.to_bytes();
         let key = PasskeySigningKey::from_stored(1, stored.expose_secret()).unwrap();
         let assertion = get_assertion_with(
@@ -564,6 +591,7 @@ mod ceremony_tests {
             "https://example.com",
             "example.com",
             b"challenge",
+            crate::passkey::UserVerified::Yes,
         )
         .unwrap();
         let mut message = assertion.authenticator_data.clone();
@@ -593,8 +621,14 @@ mod ceremony_tests {
     #[test]
     fn create_credential_rejects_an_origin_that_fails_inv_64() {
         let mut rng = ChaCha20Rng::seed_from_u64(1);
-        let err = create_credential(&mut rng, "https://evil.example", "bank.com", b"chal")
-            .expect_err("bank.com does not belong to evil.example");
+        let err = create_credential(
+            &mut rng,
+            "https://evil.example",
+            "bank.com",
+            b"chal",
+            crate::passkey::UserVerified::Yes,
+        )
+        .expect_err("bank.com does not belong to evil.example");
         assert_eq!(err, ClientError::RpIdRejected);
     }
 
@@ -610,6 +644,7 @@ mod ceremony_tests {
             "https://example.com/some/path?query=1",
             "example.com",
             b"chal",
+            crate::passkey::UserVerified::Yes,
         )
         .expect("origin and rp_id are valid for INV-64");
         let text = core::str::from_utf8(&created.client_data_json).expect("ASCII JSON");
@@ -621,8 +656,14 @@ mod ceremony_tests {
     #[test]
     fn create_credential_then_get_assertion_signature_verifies() {
         let mut rng = ChaCha20Rng::seed_from_u64(3);
-        let created = create_credential(&mut rng, "https://example.com", "example.com", b"reg")
-            .expect("valid origin/rp_id");
+        let created = create_credential(
+            &mut rng,
+            "https://example.com",
+            "example.com",
+            b"reg",
+            crate::passkey::UserVerified::Yes,
+        )
+        .expect("valid origin/rp_id");
 
         let assertion = get_assertion(
             &created.signing_key,
@@ -631,6 +672,7 @@ mod ceremony_tests {
             "https://example.com",
             "example.com",
             b"login-challenge",
+            crate::passkey::UserVerified::Yes,
         )
         .expect("valid origin/rp_id");
 
@@ -651,8 +693,14 @@ mod ceremony_tests {
     #[test]
     fn get_assertion_rejects_an_origin_that_fails_inv_64() {
         let mut rng = ChaCha20Rng::seed_from_u64(4);
-        let created = create_credential(&mut rng, "https://example.com", "example.com", b"reg")
-            .expect("valid origin/rp_id");
+        let created = create_credential(
+            &mut rng,
+            "https://example.com",
+            "example.com",
+            b"reg",
+            crate::passkey::UserVerified::Yes,
+        )
+        .expect("valid origin/rp_id");
 
         let err = get_assertion(
             &created.signing_key,
@@ -661,6 +709,7 @@ mod ceremony_tests {
             "http://example.com",
             "example.com",
             b"c",
+            crate::passkey::UserVerified::Yes,
         )
         .expect_err("http is not an acceptable origin for an assertion either");
         assert_eq!(err, ClientError::RpIdRejected);
@@ -675,8 +724,14 @@ mod ceremony_tests {
     #[test]
     fn rp_id_case_and_trailing_dot_do_not_change_the_rp_id_hash() {
         let mut rng = ChaCha20Rng::seed_from_u64(5);
-        let created = create_credential(&mut rng, "https://example.com", "EXAMPLE.COM", b"reg")
-            .expect("EXAMPLE.COM folds to the origin's own host");
+        let created = create_credential(
+            &mut rng,
+            "https://example.com",
+            "EXAMPLE.COM",
+            b"reg",
+            crate::passkey::UserVerified::Yes,
+        )
+        .expect("EXAMPLE.COM folds to the origin's own host");
 
         // The registration's rpIdHash is the first 32 bytes of the authenticatorData the CBOR
         // attestationObject wraps; recomputing it directly (rather than decoding CBOR back out,
@@ -697,6 +752,7 @@ mod ceremony_tests {
                 "https://example.com",
                 rp_id,
                 b"c",
+                crate::passkey::UserVerified::Yes,
             )
             .unwrap_or_else(|e| panic!("{rp_id:?} must fold the same way as example.com: {e:?}"));
             assert_eq!(

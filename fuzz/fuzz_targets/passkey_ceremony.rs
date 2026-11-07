@@ -30,7 +30,8 @@
 //! - the same `origin`/`rp_id` pair, which already passed INV-64 once for creation, must pass
 //!   it again for [`get_assertion`] (the check is a pure function of those two strings, module
 //!   docs), and the resulting assertion's signature must verify under the credential's own
-//!   freshly generated public key.
+//!   freshly generated public key, and its flags byte must be ADR 0110 §6's `0x1D` or `0x19`
+//!   for the `UV` value the input picked.
 //!
 //! [ADR 0039]: ../../docs/adr/0039-passkeys-vault-and-extension.md
 //!
@@ -43,7 +44,7 @@ use std::convert::Infallible;
 
 use libfuzzer_sys::fuzz_target;
 use rand_core::{TryCryptoRng, TryRng};
-use rizzy_client::passkey::{create_credential, get_assertion};
+use rizzy_client::passkey::{UserVerified, create_credential, get_assertion};
 use rizzy_core::passkey::client_data_hash;
 
 /// `SplitMix64`, seeded from the input. Not a CSPRNG: see the module docs.
@@ -89,8 +90,10 @@ fuzz_target!(|data: &[u8]| {
         seed = seed.wrapping_mul(31).wrapping_add(u64::from(byte));
     }
     let mut rng = SplitMix(seed);
+    // ADR 0110 §6: both values of the `UV` flag, picked by the input.
+    let uv = if seed & 1 == 0 { UserVerified::Yes } else { UserVerified::No };
 
-    let Ok(created) = create_credential(&mut rng, origin, rp_id, challenge) else {
+    let Ok(created) = create_credential(&mut rng, origin, rp_id, challenge, uv) else {
         return;
     };
 
@@ -118,9 +121,16 @@ fuzz_target!(|data: &[u8]| {
         origin,
         rp_id,
         challenge,
+        uv,
     )
     .expect("the origin/rp_id that created the credential must also pass for assertion");
     assert_eq!(assertion.credential_id, created.credential_id);
+    // ADR 0110 §6's flags table: exactly 0x1D or 0x19, never AT or ED on an assertion.
+    let expected_flags: u8 = match uv {
+        UserVerified::Yes => 0x1D,
+        UserVerified::No => 0x19,
+    };
+    assert_eq!(assertion.authenticator_data.get(32), Some(&expected_flags));
     assert_eq!(assertion.user_handle.as_deref(), Some(user_handle));
 
     let mut message = assertion.authenticator_data.clone();

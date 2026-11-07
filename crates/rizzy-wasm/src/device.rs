@@ -1384,6 +1384,7 @@ impl DeviceSession {
             origin,
             rp_id,
             challenge,
+            rizzy_client::passkey::UserVerified::Yes,
         )?;
         Ok(assertion.into())
     }

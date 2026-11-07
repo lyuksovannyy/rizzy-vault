@@ -11,6 +11,8 @@ use rizzy_core::encoding::b64url_encode;
 use rizzy_core::passkey::rp_id_hash;
 use rizzy_match::NormalizedUrl;
 
+use super::UserVerified;
+
 /// The serialized origin `clientDataJSON`'s `"origin"` field carries (`WebAuthn` L3 §5.8.1,
 /// `HTML` "serialization of an origin"): `scheme://host[:port]`, **never** a path or query.
 /// [`NormalizedUrl`] always carries a path (`super::verify_rp_id`'s return value defaults it to
@@ -25,10 +27,12 @@ pub(super) fn origin_string(origin: &NormalizedUrl) -> String {
 }
 
 // `authenticatorData`'s flags byte (`WebAuthn` L3 §6.1). This project's extension always
-// requires user presence and verification before either ceremony completes, so `UP` and `UV`
-// are always set; every credential this project creates is a synced/backed-up passkey (ADR
-// 0039 §1, "discoverable... resident"), so `BE` and `BS` are always set too, the same as a
-// real platform authenticator reports for a synced passkey.
+// requires user presence (the consent click) before either ceremony completes, so `UP` is
+// always set; `UV` is the caller's [`UserVerified`], decided by ADR 0110 §6's rule
+// ([`super::decide_uv`]); every credential this project creates is a synced/backed-up passkey
+// (ADR 0039 §1, "discoverable... resident"), so `BE` and `BS` are always set too, the same as
+// a real platform authenticator reports for a synced passkey. The byte is therefore exactly one
+// of `0x1D`/`0x19` (assertion, `UV` 1/0) and `0x5D`/`0x59` (registration), ADR 0110 §6.
 
 /// User Present.
 const FLAG_UP: u8 = 0x01;
@@ -115,13 +119,14 @@ fn escape_json_string(out: &mut Vec<u8>, s: &str) {
 /// `"none"` attestation format it wraps this in (ADR 0039 §4).
 pub(super) fn authenticator_data_registration(
     rp_id: &str,
+    uv: UserVerified,
     credential_id: &[u8],
     public_key_cose: &[u8],
 ) -> Vec<u8> {
     const AAGUID: [u8; 16] = [0; 16];
     let mut out = Vec::with_capacity(37 + 16 + 2 + credential_id.len() + public_key_cose.len());
     out.extend_from_slice(&rp_id_hash(rp_id));
-    out.push(FLAG_UP | FLAG_UV | FLAG_BE | FLAG_BS | FLAG_AT);
+    out.push(flags(uv) | FLAG_AT);
     out.extend_from_slice(&0u32.to_be_bytes());
     out.extend_from_slice(&AAGUID);
     let credential_id_len = u16::try_from(credential_id.len()).unwrap_or(u16::MAX);
@@ -134,18 +139,29 @@ pub(super) fn authenticator_data_registration(
 /// `authenticatorData` for an assertion ceremony: `rpIdHash ‖ flags ‖ counter`, with no
 /// `attestedCredentialData` (`WebAuthn` L3 §6.1; the `AT` flag is unset, [`super::wire`]
 /// module docs — an assertion presents an existing credential, it does not attest a new one).
-pub(super) fn authenticator_data_assertion(rp_id: &str) -> Vec<u8> {
+pub(super) fn authenticator_data_assertion(rp_id: &str, uv: UserVerified) -> Vec<u8> {
     let mut out = Vec::with_capacity(37);
     out.extend_from_slice(&rp_id_hash(rp_id));
-    out.push(FLAG_UP | FLAG_UV | FLAG_BE | FLAG_BS);
+    out.push(flags(uv));
     out.extend_from_slice(&0u32.to_be_bytes());
     out
+}
+
+/// The flags byte both ceremonies share: `UP`, `BE`, `BS`, and `UV` exactly when `uv` says so
+/// (module comment above `FLAG_UP`). Never `ED`.
+const fn flags(uv: UserVerified) -> u8 {
+    let base = FLAG_UP | FLAG_BE | FLAG_BS;
+    match uv {
+        UserVerified::Yes => base | FLAG_UV,
+        UserVerified::No => base,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Ceremony, authenticator_data_assertion, authenticator_data_registration, client_data_json,
+        Ceremony, UserVerified, authenticator_data_assertion, authenticator_data_registration,
+        client_data_json,
     };
 
     #[test]
@@ -181,7 +197,12 @@ mod tests {
 
     #[test]
     fn registration_authenticator_data_has_the_attested_credential_data_flag_set() {
-        let auth_data = authenticator_data_registration("example.com", &[0xAA; 16], &[0xBB; 10]);
+        let auth_data = authenticator_data_registration(
+            "example.com",
+            UserVerified::Yes,
+            &[0xAA; 16],
+            &[0xBB; 10],
+        );
         assert_eq!(auth_data.len(), 32 + 1 + 4 + 16 + 2 + 16 + 10);
         assert_eq!(flags_byte(&auth_data) & 0x40, 0x40, "AT flag must be set");
         assert_eq!(
@@ -203,7 +224,7 @@ mod tests {
 
     #[test]
     fn assertion_authenticator_data_has_no_attested_credential_data_flag() {
-        let auth_data = authenticator_data_assertion("example.com");
+        let auth_data = authenticator_data_assertion("example.com", UserVerified::Yes);
         assert_eq!(auth_data.len(), 37);
         let flags = flags_byte(&auth_data);
         assert_eq!(flags & 0x40, 0, "AT flag must be unset for an assertion");
@@ -213,8 +234,35 @@ mod tests {
 
     #[test]
     fn registration_and_assertion_rp_id_hash_agree_for_the_same_rp_id() {
-        let reg = authenticator_data_registration("example.com", &[1], &[2]);
-        let assertion = authenticator_data_assertion("example.com");
+        let reg = authenticator_data_registration("example.com", UserVerified::Yes, &[1], &[2]);
+        let assertion = authenticator_data_assertion("example.com", UserVerified::No);
         assert_eq!(reg.get(..32), assertion.get(..32));
+    }
+
+    /// ADR 0110 §6's flags table: exactly `0x1D`/`0x19` for an assertion and `0x5D`/`0x59` for
+    /// a registration, `UV` set or not; never `ED` (`0x80`), never `AT` on an assertion.
+    #[test]
+    fn the_flags_byte_is_exactly_one_of_the_four_values_of_adr_0110() {
+        let cases = [
+            (
+                authenticator_data_assertion("example.com", UserVerified::Yes),
+                0x1D,
+            ),
+            (
+                authenticator_data_assertion("example.com", UserVerified::No),
+                0x19,
+            ),
+            (
+                authenticator_data_registration("example.com", UserVerified::Yes, &[1; 16], &[2]),
+                0x5D,
+            ),
+            (
+                authenticator_data_registration("example.com", UserVerified::No, &[1; 16], &[2]),
+                0x59,
+            ),
+        ];
+        for (auth_data, expected) in cases {
+            assert_eq!(flags_byte(&auth_data), expected);
+        }
     }
 }
