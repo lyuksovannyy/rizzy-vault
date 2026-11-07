@@ -59,7 +59,19 @@ export function GroupDomains(props: { readonly domains: readonly string[]; reado
 
 /** A reason line of an inert group (ADR 0097 §4.2). */
 export function inertReasonText(reason: InertGroupInfo["reasons"][number]): string {
-  return t(`matching.inertReason.${reason.kind}`, { domain: reason.domain ?? "" });
+  const domain = reason.domain ?? "";
+  switch (reason.kind) {
+    case "not_registrable":
+      return t("matching.inertNotRegistrable", { domain });
+    case "not_canonical":
+      return t("matching.inertNotCanonical", { domain });
+    case "ip_literal":
+      return t("matching.inertIpLiteral", { domain });
+    case "dotless":
+      return t("matching.inertDotless", { domain });
+    case "third_party_flag":
+      return t("matching.inertThirdPartyFlag");
+  }
 }
 
 /** A stored group of the user's that is "Ignored for matching" (ADR 0097 §4.2): kept as it was

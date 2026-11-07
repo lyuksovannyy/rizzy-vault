@@ -26,7 +26,16 @@ export function isRegexMode(value: string): boolean {
 
 /** The message of an invalid pattern, naming its kind (ADR 0097 §3.6). */
 export function patternErrorText(error: UriPatternError): string {
-  return t(`matching.patternError.${error}`);
+  switch (error) {
+    case "empty":
+      return t("matching.patternErrorEmpty");
+    case "too_long":
+      return t("matching.patternErrorTooLong");
+    case "not_ascii":
+      return t("matching.patternErrorNotAscii");
+    case "invalid":
+      return t("matching.patternErrorInvalid");
+  }
 }
 
 /** The pattern input of one website row: `label` names the website (`Website 2`). */
