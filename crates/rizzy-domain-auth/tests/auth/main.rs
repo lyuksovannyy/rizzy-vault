@@ -9,6 +9,7 @@
 //! | `enumeration` | unknown and real login names answer alike; rate limits; the re-authentication bucket (INV-7) |
 //! | `state` | enrolment, compare-and-swap races, forks, idempotent repeats (CRYPTO.md §10.2) |
 //! | `revocation` | suspension, revocation with a rotation, H checks (§11.8) |
+//! | `revocation_model` | ADR 0091 §7 test 4: a model-based property test of suspension, the window, revocation with an SK change, the thief's requests, expiry and recovery against invariants I1–I6 (reductions in its module docs) |
 //! | `revocation_window` | ADR 0091 §1–§2: what a suspension refuses, the window's freeze of every left-column auth write (nothing written), the right column, its boundaries, renewal and closing, concurrent revokers, the SK change in the revocation commit, the backup (§7 tests 1, 2, 3, 6, 8) |
 //! | `recovery` | the waiting period, cancellation, release and the recovery commit (§11.9) |
 //! | `second_factor` | TOTP enrolment, login with 2FA, replay of a step (§11.15) |
@@ -41,6 +42,7 @@ mod recovery;
 mod requests;
 mod restore;
 mod revocation;
+mod revocation_model;
 mod revocation_window;
 mod second_factor;
 mod secrets;

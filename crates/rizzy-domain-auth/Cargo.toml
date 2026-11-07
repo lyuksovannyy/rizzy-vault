@@ -39,6 +39,8 @@ zeroize.workspace = true
 [dev-dependencies]
 # The seeded ChaCha20Rng of the tests (ADR 0009 test RNG). Test-only.
 chacha20.workspace = true
+# The model-based property test of the revocation window (ADR 0091 §7 test 4). Test-only.
+proptest.workspace = true
 # A current-thread runtime to drive the async domain functions against real SQLite. Test-only.
 tokio = { workspace = true, features = ["rt", "time"] }
 

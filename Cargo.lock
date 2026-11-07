@@ -1973,6 +1973,7 @@ name = "rizzy-domain-auth"
 version = "0.0.0"
 dependencies = [
  "chacha20",
+ "proptest",
  "rizzy-core",
  "rizzy-proto",
  "rizzy-storage",

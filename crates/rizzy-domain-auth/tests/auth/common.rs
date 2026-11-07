@@ -114,6 +114,24 @@ impl TestVault {
             .unwrap()
             .insert((account.to_bytes(), device.to_bytes()), head);
     }
+
+    /// A copy of this state, for a test that serves a copy of the database.
+    pub(crate) fn fork(&self) -> Self {
+        Self {
+            grants: Mutex::new(self.grants.lock().unwrap().clone()),
+            heads: Mutex::new(self.heads.lock().unwrap().clone()),
+        }
+    }
+
+    /// H of `device`, as set.
+    pub(crate) fn head(&self, account: AccountId, device: DeviceId) -> u64 {
+        self.heads
+            .lock()
+            .unwrap()
+            .get(&(account.to_bytes(), device.to_bytes()))
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 /// The port the service holds: a shared handle to one [`TestVault`].
