@@ -6,7 +6,10 @@
 //! run, server-side 2FA (§5.10, §11.15), and a recovery with the Emergency Kit completed
 //! through the binaries on a server with a zero waiting period (§11.9), also when it is
 //! interrupted after its pre-commit write or loses its answer and the next run settles the
-//! recovery-pending record (ADR 0046 §3, §5; threat model INV-71). Device removal (ADR 0091
+//! recovery-pending record (ADR 0046 §3, §5; threat model INV-71), or `rv recovery abandon`
+//! leaves it, in every case of ADR 0108 §3, including a commit still in transit before and
+//! after a new attempt's `recovery/complete` (INV-122) and crashes before and inside the
+//! removal. Device removal (ADR 0091
 //! §3): one or several devices, the three reasons, a crash at each point of §7 test 5, a write
 //! from another device paused by the window and sent once it closes, a removal finished or
 //! cancelled after a crash, and a removed device that drops its pending commit unsent.
@@ -318,6 +321,8 @@ struct Proxy {
     fault: Arc<Mutex<Option<(&'static str, Fault)>>>,
     /// The path and body of every request, in arrival order.
     seen: Seen,
+    /// The path and the server's answer body of every request it answered, in arrival order.
+    answers: Seen,
     /// Set on drop.
     stop: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -331,15 +336,22 @@ impl Proxy {
         let upstream = server.port;
         let fault = Arc::new(Mutex::new(None));
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let answers = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (thread_fault, thread_seen, thread_stop) = (fault.clone(), seen.clone(), stop.clone());
+        let thread_answers = answers.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 if thread_stop.load(Ordering::Relaxed) {
                     break;
                 }
                 if let Ok(stream) = stream {
-                    let _ = Self::serve(stream, upstream, &thread_fault, &thread_seen);
+                    let _ = Self::serve(
+                        stream,
+                        upstream,
+                        &thread_fault,
+                        (&thread_seen, &thread_answers),
+                    );
                 }
             }
         });
@@ -348,6 +360,7 @@ impl Proxy {
                 port,
                 fault,
                 seen,
+                answers,
                 stop,
             },
             server,
@@ -373,6 +386,19 @@ impl Proxy {
             .filter(|(p, _)| p == path)
             .map(|(_, body)| body.clone())
             .collect()
+    }
+
+    /// The bearer token of the recovery-only session the latest `recovery/complete` answer
+    /// issued.
+    fn recovery_session(&self) -> rizzy_client::rizzy_proto::wire::SessionToken {
+        let answers = self.answers.lock().unwrap();
+        let (_, body) = answers
+            .iter()
+            .rev()
+            .find(|(p, _)| p == paths::RECOVERY_COMPLETE)
+            .unwrap();
+        let answer: serde_json::Value = serde_json::from_slice(body).unwrap();
+        serde_json::from_value(answer["session_token"].clone()).unwrap()
     }
 
     /// Arms `fault` for the next request to `path`.
@@ -421,7 +447,7 @@ impl Proxy {
         mut client: std::net::TcpStream,
         upstream: u16,
         armed: &Mutex<Option<(&'static str, Fault)>>,
-        seen: &Mutex<Vec<(String, Vec<u8>)>>,
+        (seen, answers): (&Seen, &Seen),
     ) -> std::io::Result<()> {
         use std::io::Write as _;
         client.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -458,6 +484,10 @@ impl Proxy {
             server.write_all(&head)?;
             server.write_all(&body)?;
             let (answer_head, answer_body) = Self::read_message(&mut server)?;
+            answers
+                .lock()
+                .unwrap()
+                .push((path.clone(), answer_body.clone()));
             if fault == Some(Fault::AnswerLost) {
                 bad_gateway
             } else {
@@ -1712,6 +1742,401 @@ fn a_landed_recovery_whose_device_was_revoked_is_finalised_not_abandoned() {
     let cache = cache_state(&r).unwrap();
     assert_eq!(cache.stage, Stage::Committed);
     assert!(cache.pending_commit.is_none());
+}
+
+// ADR 0108: leaving an interrupted recovery whose new master password is lost.
+
+/// `rv recovery abandon --server origin --name alice --confirm`.
+fn abandon_args(origin: &str) -> [&str; 7] {
+    [
+        "recovery",
+        "abandon",
+        "--server",
+        origin,
+        "--name",
+        "alice",
+        "--confirm",
+    ]
+}
+
+/// alice signed up on `a`, a recovery started on `r` with her code R, and `r`'s attempt killed
+/// after its pre-commit write (ADR 0046 §5). Returns R, the new kit's code R′ and the stored
+/// commit body.
+fn interrupted(origin: &str, a: &Rv, r: &Rv) -> (String, String, Vec<u8>) {
+    let (_, code) = sign_up(a, origin, "alice");
+    r.ok(
+        &["recovery", "start", "--server", origin, "--name", "alice"],
+        &[&code],
+        &[],
+    );
+    let (outcome, crashed) = recovery_until_the_commit(r, origin, &code);
+    let stored = outcome.unwrap_or_else(|e| panic!("prepare: {e:?} {:?}", crashed.notes));
+    let new_code = crashed.printed("Recovery code:");
+    assert_eq!(cache_state(r).unwrap().stage, Stage::RecoveryPending);
+    (code, new_code, stored)
+}
+
+/// An `Env` over `rv`'s data directory with `script` as the user.
+fn env_of<'a>(rv: &Rv, script: &'a mut Script) -> Env<'a> {
+    Env {
+        data_dir: rv.dir.clone(),
+        account: None,
+        trust: rizzy_cli::tls::Trust::default(),
+        ui: script,
+        sign_outs: SignOuts::default(),
+        pauses: rizzy_cli::http::Pauses::default(),
+    }
+}
+
+/// A script that answers the secret prompts with `secrets`, in order.
+fn answering(secrets: &[&str]) -> Script {
+    Script {
+        secrets: secrets.iter().map(|s| (*s).to_owned()).collect(),
+        ..Script::default()
+    }
+}
+
+/// Neither recovery code appears on standard output, standard error or in the outcome's
+/// `Debug` (CLAUDE.md "Never log secrets").
+fn no_code_shown(outcome: &Result<(), CliError>, script: &Script, codes: &[&str]) {
+    let debug = format!("{outcome:?}");
+    for code in codes {
+        assert!(!debug.contains(code));
+        assert!(
+            script
+                .out
+                .iter()
+                .chain(&script.notes)
+                .all(|l| !l.contains(code))
+        );
+    }
+}
+
+/// The bytes of `rv`'s one cache file.
+fn cache_bytes(rv: &Rv) -> Vec<u8> {
+    let accounts = rizzy_cli::paths::enrolled_accounts(&rv.dir).unwrap();
+    std::fs::read(rizzy_cli::paths::cache_path(&rv.dir, &accounts[0])).unwrap()
+}
+
+/// Sends `body` to `account/commit` over the recovery-only session `token`, as a copy of a
+/// commit still in transit would arrive.
+fn commit_over(
+    rv: &Rv,
+    origin: &str,
+    token: &rizzy_client::rizzy_proto::wire::SessionToken,
+    body: &[u8],
+) -> Result<(), CliError> {
+    let http = rizzy_cli::http::Http::new(origin, &rizzy_cli::tls::Trust::default()).unwrap();
+    rv.runtime.block_on(http.post_bytes_empty(
+        paths::ACCOUNT_COMMIT,
+        body.to_vec(),
+        rizzy_cli::http::Auth::Bearer(token),
+    ))
+}
+
+/// The `<ms>` of a removal's one standard-output line `<word> <ms>`.
+fn removal_line(script: &Script, word: &str) -> u64 {
+    assert_eq!(script.out.len(), 1, "{:?}", script.out);
+    script.out[0]
+        .strip_prefix(word)
+        .and_then(|rest| rest.strip_prefix(' '))
+        .unwrap_or_else(|| panic!("{:?}", script.out))
+        .parse()
+        .unwrap()
+}
+
+/// ADR 0108 §2, the commit never landed and R′ is lost: an empty R′, then R, which the server
+/// accepts. A crash after that probe and before the removal leaves the record, and the rerun
+/// repeats the same probe (the same pending recovery, `available_at_ms` unchanged) and
+/// removes it. A fresh `rv recovery complete` then succeeds, and K1's code is refused.
+#[test]
+fn abandon_when_the_commit_never_landed_and_its_kit_is_lost() {
+    let (proxy, server) = Proxy::start(&[("RIZZY_RECOVERY_WAIT_HOURS", "0")]);
+    let origin = server.origin();
+    let (a, r) = (Rv::new("a"), Rv::new("r"));
+    let (code, new_code, _) = interrupted(&origin, &a, &r);
+
+    // Crash before the removal: the deciding probe answered, nothing was removed.
+    let mark = proxy.paths().len();
+    let mut script = answering(&["", &code]);
+    let decided = r
+        .runtime
+        .block_on(rizzy_cli::recover::abandon_until_the_removal(
+            &mut env_of(&r, &mut script),
+            &origin,
+            "alice",
+        ))
+        .unwrap();
+    assert_eq!(
+        decided.outcome(),
+        rizzy_cli::recover::AbandonOutcome::NotLanded
+    );
+    let available_at = decided.available_at_ms();
+    drop(decided);
+    assert_eq!(cache_state(&r).unwrap().stage, Stage::RecoveryPending);
+
+    // The rerun: the same probe, the same pending recovery, then the removal.
+    let (outcome, removed) = r.try_run(&abandon_args(&origin), &["", &code], &[]);
+    outcome.unwrap_or_else(|e| panic!("abandon: {e:?} {:?}", removed.notes));
+    no_code_shown(&Ok(()), &removed, &[&code, &new_code]);
+    assert_eq!(removal_line(&removed, "not-landed"), available_at);
+    assert!(
+        removed.noted("had not reached the server"),
+        "{:?}",
+        removed.notes
+    );
+    assert!(cache_state(&r).is_none());
+    assert_eq!(
+        proxy.paths()[mark..],
+        [paths::RECOVERY_START, paths::RECOVERY_START]
+    );
+
+    // A fresh recovery succeeds; the abandoned kit's code is refused.
+    let (outcome, fresh) = r.try_run(
+        &complete_args(&origin),
+        &[&code, RECOVERED_PASSWORD, RECOVERED_PASSWORD],
+        &[],
+    );
+    outcome.unwrap_or_else(|e| panic!("complete: {e:?} {:?}", fresh.notes));
+    assert_eq!(kits(&fresh), 1);
+    let (outcome, _) = Rv::new("r2").try_run(
+        &["recovery", "start", "--server", &origin, "--name", "alice"],
+        &[&new_code],
+        &[],
+    );
+    assert!(
+        matches!(outcome, Err(CliError::Server(ErrorCode::Unauthorized))),
+        "{outcome:?}"
+    );
+}
+
+/// ADR 0108 §2, the commit landed but its answer was lost. Without R′, R is refused:
+/// `RecoveryNotSettled`, exit 1, nothing on standard output, the cache file byte-identical.
+/// With R′, probe A answers `200`: the record is removed and no R is asked; `rv recovery
+/// complete` with R′ then succeeds.
+#[test]
+fn abandon_with_the_new_kit_after_the_commit_landed() {
+    let (proxy, server) = Proxy::start(&[("RIZZY_RECOVERY_WAIT_HOURS", "0")]);
+    let origin = server.origin();
+    let (a, r) = (Rv::new("a"), Rv::new("r"));
+    let (_, code) = sign_up(&a, &origin, "alice");
+    r.ok(
+        &["recovery", "start", "--server", &origin, "--name", "alice"],
+        &[&code],
+        &[],
+    );
+    proxy.arm(paths::ACCOUNT_COMMIT, Fault::AnswerLost);
+    let (outcome, lost) = r.try_run(
+        &complete_args(&origin),
+        &[&code, RECOVERED_PASSWORD, RECOVERED_PASSWORD],
+        &[],
+    );
+    assert!(proxy.fired());
+    assert!(outcome.is_err());
+    let new_code = lost.printed("Recovery code:");
+    assert_eq!(cache_state(&r).unwrap().stage, Stage::RecoveryPending);
+
+    // Landed, no R′: R is no longer the server's code.
+    let before = cache_bytes(&r);
+    let (outcome, refused) = r.try_run(&abandon_args(&origin), &["", &code], &[]);
+    assert!(
+        matches!(outcome, Err(CliError::RecoveryNotSettled)),
+        "{outcome:?}"
+    );
+    assert_eq!(outcome.as_ref().unwrap_err().exit_code(), 1);
+    assert!(refused.out.is_empty());
+    no_code_shown(&outcome, &refused, &[&code, &new_code]);
+    assert_eq!(cache_bytes(&r), before);
+
+    // Landed, R′: probe A decides; probe B never runs.
+    let mark = proxy.paths().len();
+    let (outcome, removed) = r.try_run(&abandon_args(&origin), &[&new_code], &[]);
+    outcome.unwrap_or_else(|e| panic!("abandon: {e:?} {:?}", removed.notes));
+    removal_line(&removed, "landed");
+    assert!(
+        removed.noted("had reached the server"),
+        "{:?}",
+        removed.notes
+    );
+    no_code_shown(&Ok(()), &removed, &[&code, &new_code]);
+    assert_eq!(proxy.paths()[mark..], [paths::RECOVERY_START]);
+    assert!(cache_state(&r).is_none());
+
+    // The pending recovery for R′ completes.
+    let (outcome, fresh) = r.try_run(
+        &complete_args(&origin),
+        &[
+            &new_code,
+            "a third master password",
+            "a third master password",
+        ],
+        &[],
+    );
+    outcome.unwrap_or_else(|e| panic!("complete: {e:?} {:?}", fresh.notes));
+}
+
+/// ADR 0108 §2, the refusals: no stage-3 record (a stage-1 record is never touched), a lock
+/// held by another `rv`, and with the server stopped: a wrong R′ is `BadInput`, not
+/// `Network` (no round trip), probe A and probe B are `Network`, and no `--confirm` is the
+/// usage error, exit 2. The cache file stays byte-identical, and nothing is printed on
+/// standard output.
+#[test]
+fn abandon_refusals_keep_the_record() {
+    let server = Server::start(&[("RIZZY_RECOVERY_WAIT_HOURS", "0")], None);
+    let origin = server.origin();
+    let (a, r) = (Rv::new("a"), Rv::new("r"));
+    let (code, new_code, _) = interrupted(&origin, &a, &r);
+    let before = cache_bytes(&r);
+    let codes = [code.as_str(), new_code.as_str()];
+
+    let (outcome, script) = a.try_run(&abandon_args(&origin), &[&new_code], &[]);
+    assert!(
+        matches!(outcome, Err(CliError::NoUnfinishedRecovery)),
+        "{outcome:?}"
+    );
+    assert!(script.out.is_empty());
+    assert_eq!(script.secrets.len(), 1, "nothing was asked");
+    assert_eq!(cache_state(&a).unwrap().stage, Stage::Committed);
+
+    let account = rizzy_cli::paths::enrolled_accounts(&r.dir).unwrap()[0];
+    let held = rizzy_cli::paths::AccountLock::acquire(&r.dir, &account).unwrap();
+    let (outcome, script) = r.try_run(&abandon_args(&origin), &[&new_code], &[]);
+    assert!(matches!(outcome, Err(CliError::InUse)), "{outcome:?}");
+    assert!(script.out.is_empty());
+    drop(held);
+
+    drop(server);
+    let (outcome, script) = r.try_run(&abandon_args(&origin), &[&code], &[]);
+    assert!(matches!(outcome, Err(CliError::BadInput(_))), "{outcome:?}");
+    assert!(script.out.is_empty());
+    no_code_shown(&outcome, &script, &codes);
+    let (outcome, script) = r.try_run(&abandon_args(&origin), &[&new_code], &[]);
+    assert!(matches!(outcome, Err(CliError::Network)), "{outcome:?}");
+    assert!(
+        script.noted("still saved on this computer"),
+        "{:?}",
+        script.notes
+    );
+    assert!(script.out.is_empty());
+    no_code_shown(&outcome, &script, &codes);
+    let (outcome, script) = r.try_run(&abandon_args(&origin), &["", &code], &[]);
+    assert!(matches!(outcome, Err(CliError::Network)), "{outcome:?}");
+    assert!(script.out.is_empty());
+    no_code_shown(&outcome, &script, &codes);
+    let (outcome, script) = r.try_run(&abandon_args(&origin)[..6], &[&new_code], &[]);
+    assert!(matches!(outcome, Err(CliError::Usage(_))), "{outcome:?}");
+    assert_eq!(outcome.as_ref().unwrap_err().exit_code(), 2);
+    assert!(script.out.is_empty());
+    assert_eq!(script.secrets.len(), 1, "nothing was asked");
+
+    assert_eq!(cache_bytes(&r), before);
+    assert_eq!(cache_state(&r).unwrap().stage, Stage::RecoveryPending);
+}
+
+/// ADR 0108 §3, C1 in transit and landing after probe B's `200`: it is applied over its own
+/// session, so the old code is no longer current; a fresh `rv recovery complete` with R is
+/// refused `unauthorized` before any kit is made, and creates no cache file.
+#[test]
+fn a_commit_in_transit_that_lands_after_the_abandon_voids_the_old_code() {
+    let (proxy, server) = Proxy::start(&[("RIZZY_RECOVERY_WAIT_HOURS", "0")]);
+    let origin = server.origin();
+    let (a, r) = (Rv::new("a"), Rv::new("r"));
+    let (code, _, stored) = interrupted(&origin, &a, &r);
+    let first = proxy.recovery_session();
+    let (outcome, removed) = r.try_run(&abandon_args(&origin), &["", &code], &[]);
+    outcome.unwrap_or_else(|e| panic!("abandon: {e:?} {:?}", removed.notes));
+    removal_line(&removed, "not-landed");
+
+    commit_over(&r, &origin, &first, &stored).unwrap();
+    let (outcome, fresh) = r.try_run(
+        &complete_args(&origin),
+        &[&code, RECOVERED_PASSWORD, RECOVERED_PASSWORD],
+        &[],
+    );
+    assert!(
+        matches!(outcome, Err(CliError::Server(ErrorCode::Unauthorized))),
+        "{outcome:?}"
+    );
+    assert_eq!(kits(&fresh), 0);
+    assert!(cache_state(&r).is_none());
+}
+
+/// ADR 0108 §3 and INV-122, C1 in transit and arriving after the new attempt's
+/// `recovery/complete` was answered: it is refused `unauthorized`, since that answer ended the
+/// session C1 rides; the new attempt then commits, and its kit is the live one.
+#[test]
+fn a_commit_in_transit_that_arrives_after_a_new_complete_is_refused() {
+    let (proxy, server) = Proxy::start(&[("RIZZY_RECOVERY_WAIT_HOURS", "0")]);
+    let origin = server.origin();
+    let (a, r) = (Rv::new("a"), Rv::new("r"));
+    let (code, _, stored) = interrupted(&origin, &a, &r);
+    let first = proxy.recovery_session();
+    let (outcome, removed) = r.try_run(&abandon_args(&origin), &["", &code], &[]);
+    outcome.unwrap_or_else(|e| panic!("abandon: {e:?} {:?}", removed.notes));
+
+    // The new attempt, up to its pre-commit write: its `recovery/complete` was answered.
+    let mut script = answering(&[&code, RECOVERED_PASSWORD, RECOVERED_PASSWORD]);
+    let prepared = r
+        .runtime
+        .block_on(rizzy_cli::recover::prepare(
+            &mut env_of(&r, &mut script),
+            &origin,
+            "alice",
+            true,
+        ))
+        .unwrap();
+    let live_code = script.printed("Recovery code:");
+    assert!(matches!(
+        commit_over(&r, &origin, &first, &stored),
+        Err(CliError::Server(ErrorCode::Unauthorized))
+    ));
+    r.runtime
+        .block_on(prepared.commit(&mut env_of(&r, &mut script)))
+        .unwrap_or_else(|e| panic!("commit: {e:?} {:?}", script.notes));
+    assert_eq!(cache_state(&r).unwrap().stage, Stage::Committed);
+    Rv::new("r2").ok(
+        &["recovery", "start", "--server", &origin, "--name", "alice"],
+        &[&live_code],
+        &[],
+    );
+}
+
+/// ADR 0108 §2 "Crash and retry": a removal that crashed after its first unlink left no cache
+/// file, only the rollback journal and the lock file. `rv recovery abandon` then finds no
+/// record, and a fresh `rv recovery complete` is not refused `AlreadyEnrolled`.
+#[test]
+fn an_abandon_that_crashed_after_its_first_unlink_is_complete() {
+    let server = Server::start(&[("RIZZY_RECOVERY_WAIT_HOURS", "0")], None);
+    let origin = server.origin();
+    let (a, r) = (Rv::new("a"), Rv::new("r"));
+    let (code, _, _) = interrupted(&origin, &a, &r);
+    let account = rizzy_cli::paths::enrolled_accounts(&r.dir).unwrap()[0];
+    let cache = rizzy_cli::paths::cache_path(&r.dir, &account);
+    let mut journal = cache.clone().into_os_string();
+    journal.push("-journal");
+    std::fs::remove_file(&cache).unwrap();
+    std::fs::write(&journal, b"").unwrap();
+    assert!(
+        std::fs::read_dir(&r.dir).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".lock"))
+    );
+
+    let (outcome, script) = r.try_run(&abandon_args(&origin), &["", &code], &[]);
+    assert!(
+        matches!(outcome, Err(CliError::NoUnfinishedRecovery)),
+        "{outcome:?}"
+    );
+    assert!(script.out.is_empty());
+    let (outcome, fresh) = r.try_run(
+        &complete_args(&origin),
+        &[&code, RECOVERED_PASSWORD, RECOVERED_PASSWORD],
+        &[],
+    );
+    outcome.unwrap_or_else(|e| panic!("complete: {e:?} {:?}", fresh.notes));
+    assert_eq!(cache_state(&r).unwrap().stage, Stage::Committed);
 }
 
 // ADR 0091: removing devices.

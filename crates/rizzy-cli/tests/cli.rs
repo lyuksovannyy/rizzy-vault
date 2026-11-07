@@ -33,6 +33,43 @@ fn unknown_or_missing_argument_exits_with_usage_error() {
     }
 }
 
+/// `rv recovery abandon` (ADR 0108 §2): `--server` and `--name` are required, an unknown flag
+/// (there is no `--force`) is a usage error, and without `--confirm` it refuses with exit 2
+/// before it opens the data directory or sends anything (the server named does not exist).
+#[test]
+fn recovery_abandon_grammar_and_confirm() {
+    let data = std::env::temp_dir().join(format!("rv-cli-abandon-{}", std::process::id()));
+    let run = |args: &[&str]| {
+        Command::new(BIN)
+            .args(["recovery", "abandon"])
+            .args(args)
+            .env("RIZZY_CLI_DATA_DIR", &data)
+            .output()
+            .unwrap()
+    };
+    for args in [
+        &["--name", "alice", "--confirm"][..],
+        &["--server", "http://127.0.0.1:9", "--confirm"][..],
+        &[
+            "--server",
+            "http://127.0.0.1:9",
+            "--name",
+            "alice",
+            "--force",
+        ][..],
+    ] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(2), "args: {args:?}");
+        assert!(out.stdout.is_empty());
+    }
+    let out = run(&["--server", "http://127.0.0.1:9", "--name", "alice"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("pass --confirm"), "{stderr}");
+    assert!(!data.exists(), "the data directory was opened");
+}
+
 /// `std::env::args` panics on an argument that is not valid Unicode (exit code 101); the
 /// binary treats it as an unknown option.
 #[test]
