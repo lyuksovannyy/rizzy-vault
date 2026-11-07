@@ -94,6 +94,16 @@ COPY --from=web /src/apps/web/dist apps/web/dist
 # The binary is static: musl is the host target of this image and links statically by default.
 # No `RUN --mount` cache: the classic Docker builder has no BuildKit mounts, and one
 # Containerfile must build under Docker (with or without BuildKit), Podman and Buildah.
+#
+# The source reference the server embeds (ADR 0017 §7 "The server embeds its commit hash";
+# ADR 0106 §2): a build ARG is in the environment of this stage's RUN, so `cargo build` sees it
+# and the binary's default `/api/meta` `source_url` becomes `<repository>/tree/<commit>`, or
+# `<repository>/releases/tag/<tag>` for a release build that also passes
+# `--build-arg RIZZY_BUILD_TAG=v<version>`. Empty (the default) counts as absent: the default is
+# then the repository alone, and the server logs a warning at startup. A CI or release build
+# passes `--build-arg RIZZY_BUILD_COMMIT="$(git rev-parse HEAD)"`.
+ARG RIZZY_BUILD_COMMIT=
+ARG RIZZY_BUILD_TAG=
 RUN cargo build --locked --release -p rizzy-server --bin rizzy-vault --features embed-web \
  && readelf -d target/release/rizzy-vault > /tmp/dynamic.txt \
  && if grep -q NEEDED /tmp/dynamic.txt; then \
@@ -109,8 +119,9 @@ FROM ${RUNTIME_IMAGE}
 # and `org.opencontainers.image.revision` labels." A CI or release build passes the commit it
 # builds, `--build-arg RIZZY_BUILD_COMMIT="$(git rev-parse HEAD)"`; the defaults keep a plain
 # local build working: the upstream repository, and an empty revision (no commit claimed). A
-# build of modified source passes its own repository in RIZZY_IMAGE_SOURCE. The commit is only a
-# label here; nothing passes it to `cargo build`.
+# build of modified source passes its own repository in RIZZY_IMAGE_SOURCE (and sets
+# RIZZY_SOURCE_URL when it runs, ADR 0106 §5). The same RIZZY_BUILD_COMMIT reaches `cargo build`
+# in the build stage above, so the label and the server's default source URL name one commit.
 ARG RIZZY_IMAGE_SOURCE=https://github.com/lyuksovannyy/rizzy-vault
 ARG RIZZY_BUILD_COMMIT=
 LABEL org.opencontainers.image.source="${RIZZY_IMAGE_SOURCE}" \
