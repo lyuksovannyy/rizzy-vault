@@ -141,6 +141,7 @@ use rizzy_client::rizzy_proto::change::{
 };
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
+use rizzy_client::rizzy_proto::meta::{META_PATH, MetaResponse};
 use rizzy_client::rizzy_proto::recovery::RecoveryCancelResponse;
 use rizzy_client::rizzy_proto::session::{EndSessionRequest, SessionListResponse};
 use rizzy_client::rizzy_proto::vault::{FetchResponse, UploadResponse};
@@ -851,6 +852,16 @@ impl Device {
     #[must_use]
     pub const fn recovery_notice(&self) -> Option<RecoveryNotice> {
         self.recovery_notice
+    }
+
+    /// Where the server says users get its source ([ADR 0106] §4: `/api/meta`'s
+    /// `source_url`), from one unauthenticated `GET /api/meta`. `None` when the request
+    /// fails or the member is absent or not a valid `https://` source URL: never an error.
+    ///
+    /// [ADR 0106]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0106-agpl-source-url.md
+    pub async fn server_source_url(&self) -> Option<String> {
+        let meta: MetaResponse = self.http.get(META_PATH, Auth::None).await.ok()?;
+        meta.source_url.map(|url| url.as_str().to_owned())
     }
 
     /// Whether a pending commit (a rotation or a credential change) is saved and not settled.

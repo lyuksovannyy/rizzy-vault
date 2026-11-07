@@ -4961,6 +4961,45 @@ fn a_lying_recovery_notice_changes_nothing_rv_trusts() {
     drop(server);
 }
 
+/// A lying or older server's edit: no `source_url` in `/api/meta`.
+fn no_source_url(meta: &mut serde_json::Value) {
+    meta.as_object_mut().unwrap().remove("source_url");
+}
+
+/// A server's edit: a `source_url` that is not `https://`.
+fn http_source_url(meta: &mut serde_json::Value) {
+    meta["source_url"] = serde_json::Value::from("http://example.com/src");
+}
+
+/// ADR 0106 §4 (implementation step 8): `rv account status` prints `server source: <url>`
+/// from `/api/meta`, or `server source: unavailable` when the member is absent or invalid,
+/// and the command's other output and its success are unchanged.
+#[test]
+fn account_status_prints_the_server_source() {
+    let (proxy, server) = MitmProxy::start();
+    let origin = server.origin();
+    let a = Rv::new("source-a");
+    sign_up(&a, &origin, "alice");
+    let shown = a.ok(&["account", "status"], &[]);
+    let url = shown.printed("server source:");
+    assert!(
+        url.starts_with("https://github.com/lyuksovannyy/rizzy-vault"),
+        "{url}"
+    );
+    for edit in [no_source_url, http_source_url] {
+        proxy.rewrite(Some(("/api/meta", edit)));
+        let status = a.ok(&["account", "status"], &[]);
+        assert_eq!(status.printed("server source:"), "unavailable");
+        assert_eq!(
+            status.printed("state:"),
+            "verified (signed by the account's identity key)"
+        );
+        assert_eq!(status.printed("server:"), shown.printed("server:"));
+    }
+    proxy.rewrite(None);
+    drop(server);
+}
+
 /// PR budget: a fixed, small set of mutation rounds on `sync` (cheap: no OPAQUE), plus one
 /// mutated instance each of signup, a second device's login and a rotation (expensive: real
 /// KDF work in a real `rizzy-vault` process). See the module section's doc comment for why

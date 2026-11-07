@@ -853,8 +853,9 @@ pub fn notice_warning(notice: RecoveryNotice, now_ms: u64) -> String {
 
 /// `account status` (ADR 0045, owner answer 2): goes online on this device, so the account
 /// answer is verified as every online command verifies it, then prints the account, the
-/// server, the storage figure and the recovery notice the server reported, all of the last
-/// three as the server's word.
+/// server, the server's source URL (ADR 0106 §4: one `GET /api/meta`; `unavailable` when it
+/// fails or carries none, which changes nothing else), the storage figure and the recovery
+/// notice the server reported, all but the first two as the server's word.
 ///
 /// # Errors
 /// As [`Device::open`] and [`Device::online`].
@@ -866,6 +867,11 @@ pub async fn status(env: &mut Env<'_>) -> Result<(), CliError> {
     env.ui.print(&format!(
         "server:   {}",
         device.state().server_origin().as_str()
+    ))?;
+    let source = device.server_source_url().await;
+    env.ui.print(&format!(
+        "server source: {}",
+        source.as_deref().unwrap_or("unavailable")
     ))?;
     env.ui
         .print("state:    verified (signed by the account's identity key)")?;
