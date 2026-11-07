@@ -311,7 +311,7 @@ impl<V: VaultPort> AuthService<V> {
             crate::webauthn::demote_to_pending(tx, &req.login_id, account_id, now_ms).await?;
             return Err(AuthError::SecondFactorRequired);
         }
-        let used = if factor == SecondFactor::Totp { 1 } else { 0 };
+        let used = u64::from(factor == SecondFactor::Totp);
         self.issue_login(
             tx,
             rng,

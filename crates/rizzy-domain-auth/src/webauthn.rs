@@ -742,23 +742,7 @@ impl<V: VaultPort> AuthService<V> {
         let result = match rp.finish_securitykey_authentication(&credential, &state) {
             Ok(result) => result,
             Err(WebauthnError::CredentialPossibleCompromise) => {
-                // The library's own counter check (INV-83's fourth case): code 21, naming the
-                // stored key the assertion claims; the received counter is not exposed.
-                let claimed: &[u8] = credential.raw_id.as_ref();
-                let stored = list(tx.conn(), account)
-                    .await?
-                    .into_iter()
-                    .find(|k| k.credential_id == claimed);
-                let mut clone = Event::new(
-                    SecurityEventKind::SecurityKeyPossibleClone,
-                    Actor::sign_in(None),
-                );
-                if let Some(stored) = &stored {
-                    clone = clone
-                        .label(&stored.label)
-                        .old(Some(u64::from(stored.sign_count)));
-                }
-                events::record(tx, &self.event_ids, account, now_ms, clone).await?;
+                self.library_clone(tx, account, &credential, now_ms).await?;
                 return Err(AuthError::PossibleClone {
                     account_id: account.to_bytes(),
                 });
@@ -814,6 +798,43 @@ impl<V: VaultPort> AuthService<V> {
         }
         self.issue_login(tx, rng, account, &record, &trust, source, reauth, 2, now_ms)
             .await
+    }
+
+    /// ADR 0090 §3 code 21 for the library's own counter check (INV-83's fourth case), made
+    /// after the signature verified: naming the stored key the assertion claims, with the
+    /// `signCount` of its authenticator data (bytes 33..37, `WebAuthn` §6.1).
+    async fn library_clone(
+        &self,
+        tx: &mut WriteTx,
+        account: AccountId,
+        credential: &PublicKeyCredential,
+        now_ms: u64,
+    ) -> Result<(), AuthError> {
+        let claimed: &[u8] = credential.raw_id.as_ref();
+        let received = credential
+            .response
+            .authenticator_data
+            .as_ref()
+            .get(33..37)
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map(u32::from_be_bytes);
+        let stored = list(tx.conn(), account)
+            .await?
+            .into_iter()
+            .find(|k| k.credential_id == claimed);
+        let mut clone = Event::new(
+            SecurityEventKind::SecurityKeyPossibleClone,
+            Actor::sign_in(None),
+        );
+        if let Some(stored) = &stored {
+            clone = clone
+                .label(&stored.label)
+                .old(Some(u64::from(stored.sign_count)));
+        }
+        if let Some(received) = received {
+            clone = clone.value(u64::from(received));
+        }
+        events::record(tx, &self.event_ids, account, now_ms, clone).await
     }
 
     /// ADR 0090 §3 code 3 for a security key: an assertion refused for a reason other than its

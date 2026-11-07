@@ -96,7 +96,7 @@ enum Alg {
 /// A software security key: an ES256 key pair from `rizzy-core` and a credential id.
 pub(crate) struct SoftKey {
     signing: Es256SigningKey,
-    cred_id: Vec<u8>,
+    pub(crate) cred_id: Vec<u8>,
 }
 
 fn client_data(kind: &str, options: &str, origin: &str) -> Vec<u8> {
@@ -290,7 +290,7 @@ async fn finish(
 }
 
 /// A whole login with `key` asserting `counter` with `flags`.
-async fn login_with(
+pub(crate) async fn login_with(
     env: &mut Env,
     client: &Client,
     key: &SoftKey,

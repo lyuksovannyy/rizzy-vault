@@ -36,6 +36,7 @@
 mod common;
 mod data_key;
 mod enumeration;
+mod events;
 mod flow;
 mod invalidation;
 mod lag;
