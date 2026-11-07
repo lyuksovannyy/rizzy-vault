@@ -297,3 +297,21 @@ amendment, **no version bump**". This entry adds that line and changes nothing e
 `TAG_IDENTITY_DEFAULTS`, V). `0x0005`–`0xFFFE` stay unassigned.
 
 Approved by the owner on 2026-10-24 (ADR 0020 point 4): "ADR 0042 amendment: ok".
+
+### 2026-10-25: tag `0x0005`, website icons ([ADR 0099](0099-website-icons-opt-in.md))
+
+[ADR 0099](0099-website-icons-opt-in.md) was accepted with the owner's answer "make on by
+default", and its "On acceptance" item 2 asks for this entry. §2's "Tag registry." bullet provides
+that "a new setting gets a line here by ADR amendment, **no version bump**". This entry adds that
+line and changes nothing else:
+
+- `0x0005` = website icons ([ADR 0099](0099-website-icons-opt-in.md) §1). Layout: exactly one
+  byte, `0x00` off, `0x01` on; any other length or value is a violation inside a recognised tag,
+  rejected as §2 says. An absent tag reads on (ADR 0099 §1, the default); turning the setting off
+  writes `0x00`, never deletes the tag.
+
+Implemented as `TAG_WEBSITE_ICONS` in `crates/rizzy-client/src/settings.rs`, with its vectors in
+`crates/rizzy-client/src/settings/vectors.rs`. `0x0006`–`0xFFFE` stay unassigned.
+
+**Owner approval required (ADR 0020 point 4):** not yet given for this entry. Until the owner
+approves it, this entry is a proposal and the registry line above does not bind.

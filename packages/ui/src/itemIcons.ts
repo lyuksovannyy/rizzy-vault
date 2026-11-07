@@ -13,6 +13,10 @@
 //   (`URL.createObjectURL`) for an `<img alt="">` (`ItemIcon.tsx`): never markup, never a
 //   `data:` URL. The web vault's CSP allows `img-src 'self' blob:` for exactly this (ADR 0052
 //   owner answer 7); the extension pages' CSP does not restrict images. The icon is decorative: the item's title is the row's text, so the image has an empty `alt`.
+// - **Whether at all** (ADR 0099 §2–§3). The caller makes a loader only while the account's
+//   website-icons setting reads on (on by default) and after this session's probe found the
+//   `icons` role; otherwise there is no loader and no request, not even the probe. Turning the
+//   setting off clears the loader (`clear`). The core enforces the same rule (`icons_off`).
 // - **When.** An icon is fetched once per hostname per unlocked session, when a row that needs
 //   it is shown; at most `MAX_CONCURRENT` fetches run at once. A rate limit (the role allows
 //   30 a minute, 10 at once, per address) pauses the queue for `RATE_LIMIT_WAIT_MS` and retries

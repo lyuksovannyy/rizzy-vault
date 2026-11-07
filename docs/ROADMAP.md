@@ -137,7 +137,7 @@ The problem: `youtube.com`, `youtu.be`, `m.youtube.com`, `accounts.google.com` a
 | C | Heuristic multi-step login form support (username page → password page) | M3 |
 | S | Autocomplete-aware autofill: TOTP-code fill with strict detection; custom fields with an autocomplete id (fill and opt-in save) ([ADR 0076](adr/0076-autocomplete-driven-autofill.md); owner decision of 2026-10-22) | M3 |
 | C | Auto-suggest adding a domain to an equivalence group when user manually fills | post-1.0 |
-| W | Fetching website favicons through our server without privacy controls (leaks which sites you use) — must be optional / proxied / cached anonymously | M3 design |
+| W | Fetching website favicons through our server without privacy controls (leaks which sites you use) — must be optional / proxied / cached anonymously | M3: [ADR 0052](adr/0052-icon-proxy-role.md), per-account setting, on by default [ADR 0099](adr/0099-website-icons-opt-in.md) |
 
 ### 4.5 Design, UI & UX — "1Password feel" (M3)
 
