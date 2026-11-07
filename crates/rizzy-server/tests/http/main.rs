@@ -56,6 +56,7 @@ mod recovery;
 mod revocation_window;
 mod rotation;
 mod secrets_ops;
+mod security_events;
 mod sessions;
 mod setups;
 mod signing;

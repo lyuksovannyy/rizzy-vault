@@ -715,6 +715,11 @@ fn seed_value(endpoint: Endpoint, me: &Account) -> Value {
         }
         // A well-formed id that names no session: the lookup runs and answers `404`.
         Endpoint::SessionsEnd => json!({ "session_id": b64(&[0u8; 16]) }),
+        // The security event log (ADR 0090 §7): a cursor names no account, only a position.
+        Endpoint::SecurityEventsList => json!({
+            "before": { "at_ms": 1, "event_id": b64(&[0u8; 16]) },
+            "limit": 10
+        }),
         Endpoint::TotpEnrolConfirm => json!({ "totp_credential_seq": 1, "code": "123456" }),
         Endpoint::TotpDisable => json!({ "code": "123456" }),
         Endpoint::WebauthnEnrolConfirm => json!({

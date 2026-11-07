@@ -424,7 +424,9 @@ fn ending_sessions_writes_22_and_23_only_when_something_ended() {
 }
 
 #[test]
-fn security_keys_write_19_2_21_and_20_with_their_label() {
+fn a_refused_counter_writes_a_possible_clone_entry() {
+    // ADR 0090 §13 (INV-83's event-log test), with codes 19, 2 and 20 around it: the key stays
+    // enrolled after the refusal (its removal below succeeds).
     block_on(async {
         let mut env = Env::on_either_engine(9006, |_| {}).await;
         let client = env.signup("key", "pw").await;
@@ -565,7 +567,9 @@ fn the_worker_purges_by_age_and_trims_bulk_rows() {
 }
 
 #[test]
-fn the_start_up_check_logs_the_wait_in_force() {
+fn a_recovery_wait_change_writes_one_entry_per_account() {
+    // ADR 0090 §13 (INV-69's event-log test), on the configuration path (§6 point 2); the
+    // panel and CLI paths land with ADR 0086.
     block_on(async {
         let mut env = Env::on_either_engine(9009, |_| {}).await;
         let a = env.signup("one", "pw").await;

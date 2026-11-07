@@ -102,8 +102,6 @@
 //! - A run of the `PostgreSQL` paths against a real server: the instance lock (ADR 0023 §5 step
 //!   1; [`server`]), and `restore`, `migrate`, `secrets rotate` and `secrets retire-setups` under it, are tested on
 //!   `SQLite` here and by `rizzy-storage`'s `#[ignore]`d `PostgreSQL` tests.
-//! - Recording a change of the recovery waiting period in the users' security event log
-//!   (threat model §7.19, INV-69): that log is M3's.
 //! - The admin listener and API (M3),
 //!   `notify` (M3) and `smtp` (M6); of `icons`, the favicon fetch (ADR 0052): the role runs
 //!   only the breach check (ADR 0053).

@@ -172,6 +172,26 @@ fn populated(secrets_path: &Path) -> Dump {
                 vec![a2(), Value::Text("bob".into()), int(2_000), Value::Null],
             ],
         ),
+        // ADR 0090 §11: the log survives a restore. A code 1 row stating the default wait, so
+        // the start-up check (§6 point 2) writes nothing for alice after the restore.
+        (
+            "auth_security_events",
+            vec![vec![
+                idv(60),
+                a1(),
+                int(1_000),
+                int(1),
+                int(1),
+                int(5),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                int(259_200_000),
+                Value::Null,
+            ]],
+        ),
         (
             "auth_opaque_setups",
             vec![vec![

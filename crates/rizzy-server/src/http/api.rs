@@ -53,6 +53,7 @@
 //! | `POST /api/v1/sessions/current/end` | no body → 204 | any (OPAQUE, device or recovery-only) |
 //! | `POST /api/v1/sessions/end` | `EndSessionRequest` → 204 | fresh OPAQUE or device (checked by the domain) |
 //! | `POST /api/v1/sessions/others/end` | no body → 204 | fresh OPAQUE or device (checked by the domain) |
+//! | `POST /api/v1/security-events/list` | `SecurityEventListRequest` → `SecurityEventListResponse` | OPAQUE or device |
 //! | `POST /api/v1/vault/upload` | `UploadRequest` → `UploadResponse` | OPAQUE or device |
 //! | `POST /api/v1/vault/fetch` | `FetchRequest` → `FetchResponse` | OPAQUE or device |
 //! | `POST /api/v1/vault/heal` | `HealingRequest` → `HealingResponse` | OPAQUE or device |
@@ -419,6 +420,8 @@ pub enum Endpoint {
     SessionsEnd,
     /// Ending every other OPAQUE and recovery-only session (ADR 0075 R4).
     SessionsOthersEnd,
+    /// The account's security event log (ADR 0090 §7).
+    SecurityEventsList,
     /// Vault upload.
     Upload,
     /// Vault Fetch.
@@ -478,6 +481,7 @@ impl Endpoint {
         Self::SessionsCurrentEnd,
         Self::SessionsEnd,
         Self::SessionsOthersEnd,
+        Self::SecurityEventsList,
         Self::Upload,
         Self::Fetch,
         Self::Heal,
@@ -529,6 +533,7 @@ impl Endpoint {
             Self::SessionsCurrentEnd => paths::SESSIONS_CURRENT_END,
             Self::SessionsEnd => paths::SESSIONS_END,
             Self::SessionsOthersEnd => paths::SESSIONS_OTHERS_END,
+            Self::SecurityEventsList => paths::SECURITY_EVENTS_LIST,
             Self::Upload => paths::VAULT_UPLOAD,
             Self::Fetch => paths::VAULT_FETCH,
             Self::Heal => paths::VAULT_HEAL,
@@ -589,6 +594,7 @@ impl Endpoint {
             | Self::SessionsList
             | Self::SessionsEnd
             | Self::SessionsOthersEnd
+            | Self::SecurityEventsList
             | Self::Upload
             | Self::Fetch
             | Self::Heal
@@ -757,8 +763,9 @@ fn parse<T: DeserializeOwned>(body: &[u8]) -> Result<T, ErrorCode> {
 
 /// The answer to an auth-domain error: its code and, for a rate limit, its retry time. A
 /// storage or internal failure is logged first. A security key's possible clone (INV-83) is
-/// logged as a security event: the per-account security event log (threat model R-row, INV-48)
-/// is not built yet, so this log line is where ADR 0058 owner answer 4's signal goes for now.
+/// also an operator signal: the domain has written it to the account's security event log
+/// (ADR 0090 §3 code 21, which the user sees), and this log line stays for the operator (ADR
+/// 0090 §9); no entry is copied into a log line (INV-48).
 fn auth_code(endpoint: Endpoint, e: &AuthError) -> Failure {
     if let AuthError::PossibleClone { account_id } = e {
         log::warn(
@@ -1296,6 +1303,12 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
                 .map_err(ae)?,
         ),
         Endpoint::SessionsList => json(&auth.list_sessions(need()?, now).await.map_err(ae)?),
+        Endpoint::SecurityEventsList => json(
+            &auth
+                .list_security_events(need()?, &parse(&body)?)
+                .await
+                .map_err(ae)?,
+        ),
         Endpoint::SessionsCurrentEnd => {
             auth.end_current_session(need()?, now).await.map_err(ae)?;
             Ok(Reply::Empty)
@@ -1455,6 +1468,7 @@ mod tests {
             | Endpoint::SessionsCurrentEnd
             | Endpoint::SessionsEnd
             | Endpoint::SessionsOthersEnd
+            | Endpoint::SecurityEventsList
             | Endpoint::Upload
             | Endpoint::Fetch
             | Endpoint::Heal
@@ -1469,7 +1483,7 @@ mod tests {
 
     #[test]
     fn all_is_complete_and_paths_unique() {
-        assert_eq!(Endpoint::ALL.len(), 45);
+        assert_eq!(Endpoint::ALL.len(), 46);
         assert!(Endpoint::ALL.iter().all(|e| listed(*e)));
         let unique: HashSet<_> = Endpoint::ALL.iter().copied().map(Endpoint::path).collect();
         assert_eq!(unique.len(), Endpoint::ALL.len());
@@ -1670,6 +1684,7 @@ mod tests {
             Endpoint::SessionsList,
             Endpoint::SessionsEnd,
             Endpoint::SessionsOthersEnd,
+            Endpoint::SecurityEventsList,
             Endpoint::Upload,
             Endpoint::Fetch,
             Endpoint::Heal,
