@@ -44,6 +44,12 @@ export {
   type RecoveryNoticeBannerProps,
   type RecoveryNoticeText,
 } from "./RecoveryNoticeBanner.tsx";
+export {
+  RevocationPendingBanner,
+  RevocationRetry,
+  type RevocationPendingBannerProps,
+  type RevocationTimers,
+} from "./RevocationPendingBanner.tsx";
 export { THIRD_PARTY_ATTRIBUTIONS, ThirdPartyNotices } from "./ThirdPartyNotices.tsx";
 export { ItemIcon, useItemIcon } from "./ItemIcon.tsx";
 export {
