@@ -145,12 +145,21 @@ test("the Locking group: defaults, the turn-off dialog's 5 s delay, the dimmed s
     await expect(next).toBeFocused();
   }
 
-  await pause(page);
+  // axe waits for animations to settle, which a paused clock never lets them do: the dialog is
+  // audited first, with the clock running, and the timing checked afterwards with it paused.
   const dialog = dialogOf(page);
   const cancel = dialog.getByRole("button", { name: "Keep locking on" });
   const confirm = dialog.getByRole("button", { name: /^Turn off locking/ });
   const live = dialog.locator('[aria-live="polite"]');
+  await master(group).focus();
+  await page.keyboard.press("Space");
+  await expect(dialog).toBeVisible();
+  await expect(cancel).toBeFocused();
+  await expectAccessible(page, "options: turn-off dialog");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
 
+  await pause(page);
   // Cancel at 0 s; then Escape at 0 s, opened with Space.
   await master(group).click();
   await expect(dialog).toBeVisible();
@@ -160,7 +169,6 @@ test("the Locking group: defaults, the turn-off dialog's 5 s delay, the dimmed s
   await expect(master(group)).toBeFocused();
   await page.keyboard.press("Space");
   await expect(dialog).toBeVisible();
-  await expectAccessible(page, "options: turn-off dialog");
   // Tab stays inside the dialog.
   for (let i = 0; i < 4; i++) {
     await page.keyboard.press("Tab");
@@ -201,7 +209,9 @@ test("the Locking group: defaults, the turn-off dialog's 5 s delay, the dimmed s
   await expect(idle(group)).toBeFocused();
   await sleep(group).click({ force: true });
   await expect(sleep(group)).toHaveAttribute("aria-checked", "true");
+  await page.clock.resume();
   await expectAccessible(page, "options: Locking, off");
+  await pause(page);
 
   // On again: no dialog, values restored; reopening restarts at 5.
   await master(group).click();
@@ -269,7 +279,26 @@ test.describe("the lock in the long-lived context", () => {
     expect(await popupLocked(context, extensionId)).toBe(false);
   });
 
-  test("the OS idle state locks through the poll with the service worker stopped (spike, U)", async ({
+  test("the poll reaches the offscreen document: an idle answer locks within IDLE_POLL_MS", async ({
+    context,
+    extensionId,
+    server,
+  }) => {
+    await store(context, { [KEY]: recordOf({ idle_minutes: 10 }) });
+    await enrol(context, extensionId, server, "lockpolluser");
+    // The OS cannot be made idle from here, so the service worker's own `queryState` answers
+    // "idle"; the push (onStateChanged) is not involved. The next poll must lock.
+    await (await worker(context)).evaluate(() => {
+      (chrome!.idle as unknown as { queryState: () => Promise<string> }).queryState = async () => "idle";
+    });
+    const started = Date.now();
+    await expect
+      .poll(() => popupLocked(context, extensionId), { timeout: 30_000 + 15_000, intervals: [5_000] })
+      .toBe(true);
+    expect(Date.now() - started).toBeLessThan(45_000);
+  });
+
+  test("the OS idle state with the service worker stopped (spike: does headless Chromium report idle?)", async ({
     context,
     extensionId,
     server,
@@ -282,10 +311,15 @@ test.describe("the lock in the long-lived context", () => {
     await keeper.evaluate(() => {
       setInterval(() => void chrome!.runtime.sendMessage({ type: "get_status" }), 20_000);
     });
+    await new Promise((r) => setTimeout(r, 65_000));
+    const osState = await (await worker(context)).evaluate(() => chrome!.idle!.queryState(60));
+    // ADR 0111 §7 step 4: if headless Chromium never reports idle, the manual check of step 7
+    // (apps/extension/README.md) replaces this test; it is skipped, not dropped, and says why.
+    test.skip(osState !== "idle", `headless Chromium reports "${osState}" after 65 s without input (U settled: no OS idle here)`);
     const cdp = await context.newCDPSession(keeper);
     await cdp.send("ServiceWorker.enable");
     await cdp.send("ServiceWorker.stopAllWorkers");
-    const deadline = Date.now() + 60_000 + 30_000 + 15_000;
+    const deadline = Date.now() + 30_000 + 15_000;
     let locked = false;
     while (!locked && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 5_000));
@@ -297,3 +331,4 @@ test.describe("the lock in the long-lived context", () => {
     expect(locked).toBe(true);
   });
 });
+
