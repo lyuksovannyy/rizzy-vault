@@ -58,4 +58,4 @@ pub use error::{
 pub use modes::{EffectiveMode, MatchMode, MatchOutcome, MatchedVia, decide};
 pub use normalize::{NormalizedUrl, Scheme, normalize_domain};
 pub use pattern::{Pattern, RegexSession};
-pub use settings::{MatchingSettings, user_group};
+pub use settings::{InertGroup, InertReason, InertReasonKind, MatchingSettings, user_group};

@@ -247,18 +247,6 @@ fn decode_rejects_each_violation() {
             spec(1, &[], &[(1, &["example.com"], 0)]),
         ),
         (
-            "public-suffix domain",
-            spec(1, &[], &[(1, &["co.uk", "example.com"], 0)]),
-        ),
-        (
-            "subdomain",
-            spec(1, &[], &[(1, &["example.com", "www.example.net"], 0)]),
-        ),
-        (
-            "flag = 1",
-            spec(1, &[], &[(1, &["example.com", "example.net"], 1)]),
-        ),
-        (
             "flag = 2",
             spec(1, &[], &[(1, &["example.com", "example.net"], 2)]),
         ),
@@ -267,9 +255,24 @@ fn decode_rejects_each_violation() {
             spec(1, &[], &[(1, &["example.net", "example.com"], 0)]),
         ),
         (
-            "domain not canonical",
-            spec(1, &[], &[(1, &["Example.com", "example.net"], 0)]),
+            "duplicate domain",
+            spec(1, &[], &[(1, &["example.com", "example.com"], 0)]),
         ),
+        (
+            "empty domain",
+            spec(1, &[], &[(1, &["", "example.com"], 0)]),
+        ),
+        ("domain over 253 bytes", {
+            let long = format!("{}.com", "a".repeat(250));
+            spec(1, &[], &[(1, &["example.com", long.as_str()], 0)])
+        }),
+        ("domain not UTF-8", {
+            let mut v = spec(1, &[], &[(1, &["a.example", "b.example"], 0)]);
+            // The first byte of "b.example" becomes 0xff: not UTF-8.
+            let at = v.len() - 1 - "b.example".len();
+            v[at] = 0xff;
+            v
+        }),
         ("truncated", spec(1, &[1], &[])[..10].to_vec()),
         ("empty", Vec::new()),
         ("trailing byte", {
@@ -305,6 +308,155 @@ fn debug_shows_counts_only() {
     let shown = format!("{s:?}");
     assert!(!shown.contains("secret-site"), "{shown}");
     assert!(!shown.contains("171"), "no id bytes: {shown}");
+}
+
+/// One `spec_group` input: id byte, domains, flag.
+type SpecGroup<'a> = (u8, &'a [&'a str], u8);
+
+/// The kinds of one inert group's reasons, in order.
+fn reason_kinds(s: &MatchingSettings) -> Vec<InertReasonKind> {
+    s.inert_groups()
+        .iter()
+        .flat_map(|g| g.reasons().iter().map(InertReason::kind))
+        .collect()
+}
+
+/// ADR 0097 §6 step 5, "valid at write, suffix at read": a hand-encoded `{example.com,
+/// github.io}` (`github.io` is a PSL suffix) reads, the group is inert and absent from the view,
+/// and re-encoding gives identical bytes.
+#[test]
+fn a_group_that_became_a_suffix_is_inert_not_a_reject_adr0097() {
+    let bytes = spec(1, &[], &[(1, &["example.com", "github.io"], 0)]);
+    let s = MatchingSettings::decode(&bytes).unwrap();
+    assert!(s.user_groups().is_empty());
+    assert_eq!(s.inert_groups().len(), 1);
+    assert_eq!(s.inert_groups()[0].id(), gid(1));
+    assert_eq!(reason_kinds(&s), [InertReasonKind::NotRegistrable]);
+    assert_eq!(s.inert_groups()[0].reasons()[0].domain(), Some("github.io"));
+    assert_eq!(s.view(&[]).same_group("example.com", "github.io"), None);
+    assert_eq!(s.encode().unwrap(), bytes);
+}
+
+/// ADR 0097 §6 step 5: one inert vector per content rule; each decodes, is inert with that
+/// reason, never reaches the view, and re-encodes byte for byte.
+#[test]
+fn one_inert_vector_per_content_rule_adr0097() {
+    let cases: [(&str, SpecGroup<'_>, InertReasonKind); 6] = [
+        (
+            "not canonical",
+            (1, &["Example.com", "example.net"], 0),
+            InertReasonKind::NotCanonical,
+        ),
+        (
+            "IP literal",
+            (1, &["192.0.2.1", "example.com"], 0),
+            InertReasonKind::IpLiteral,
+        ),
+        (
+            "public suffix",
+            (1, &["co.uk", "example.com"], 0),
+            InertReasonKind::NotRegistrable,
+        ),
+        (
+            "subdomain",
+            (1, &["example.com", "www.example.net"], 0),
+            InertReasonKind::NotRegistrable,
+        ),
+        (
+            "dotless (Option B)",
+            (1, &["example.com", "nas"], 0),
+            InertReasonKind::Dotless,
+        ),
+        (
+            "flag = 1",
+            (1, &["example.com", "example.net"], 1),
+            InertReasonKind::ThirdPartyFlag,
+        ),
+    ];
+    for (name, group, kind) in cases {
+        let (_, domains, _) = group;
+        let bytes = spec(1, &[], &[group]);
+        let s = MatchingSettings::decode(&bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert!(s.user_groups().is_empty(), "{name}");
+        assert_eq!(reason_kinds(&s), [kind], "{name}");
+        assert_eq!(
+            s.view(&[]).same_group(domains[0], domains[1]),
+            None,
+            "{name}"
+        );
+        assert_eq!(s.encode().unwrap(), bytes, "{name}");
+    }
+}
+
+/// ADR 0097 §4.2: inert groups count towards `u`, keep their place in id order next to active
+/// groups, block a duplicate id, and are deleted like any user group.
+#[test]
+fn inert_groups_count_keep_order_and_can_be_deleted_adr0097() {
+    let ok_low: (u8, &[&str], u8) = (1, &["a.example", "b.example"], 0);
+    let dotless: (u8, &[&str], u8) = (2, &["example.com", "nas"], 0);
+    let ok_high: (u8, &[&str], u8) = (3, &["c.example", "d.example"], 0);
+    let bytes = spec(1, &[], &[ok_low, dotless, ok_high]);
+    let mut s = MatchingSettings::decode(&bytes).unwrap();
+    assert_eq!(s.user_groups().len(), 2);
+    assert_eq!(s.inert_groups().len(), 1);
+    assert!(s.view(&[]).same_group("a.example", "b.example").is_some());
+    assert_eq!(s.encode().unwrap(), bytes);
+    assert_eq!(
+        s.add_user_group(user_group(gid(2), ["e.example", "f.example"]).unwrap()),
+        Err(MatchingSettingsError::DuplicateGroup)
+    );
+    assert!(s.remove_user_group(gid(2)));
+    assert!(s.inert_groups().is_empty());
+    assert_eq!(s.encode().unwrap(), spec(1, &[], &[ok_low, ok_high]));
+
+    // 63 active groups plus one inert one fill `u = 64`.
+    let mut groups: Vec<(u8, Vec<String>)> = (0..63u8)
+        .map(|i| (i, vec![format!("a{i}.example"), format!("b{i}.example")]))
+        .collect();
+    groups.push((200, vec!["example.com".to_owned(), "nas".to_owned()]));
+    let mut full = Vec::new();
+    full.extend_from_slice(&1u16.to_be_bytes());
+    full.extend_from_slice(&0u16.to_be_bytes());
+    full.extend_from_slice(&64u16.to_be_bytes());
+    for (id, domains) in &groups {
+        let domains: Vec<&str> = domains.iter().map(String::as_str).collect();
+        spec_group(&mut full, *id, &domains, 0);
+    }
+    let mut s = MatchingSettings::decode(&full).unwrap();
+    assert_eq!(
+        s.add_user_group(user_group(gid(250), ["x.example", "y.example"]).unwrap()),
+        Err(MatchingSettingsError::TooManyUserGroups)
+    );
+    assert_eq!(s.encode().unwrap(), full);
+}
+
+/// ADR 0097 §5 (Option B): a dotless name is refused in a user group at write time, even when
+/// the shared codec would build the group, and an inert group's `Debug` names no domain.
+#[test]
+fn a_dotless_name_is_refused_at_write_time_adr0097() {
+    for dotless in ["nas", "localhost", "intranet"] {
+        assert_eq!(
+            user_group(gid(1), [dotless, "example.org"]).unwrap_err(),
+            MatchingSettingsError::NotRegistrableDomain,
+            "{dotless}"
+        );
+        // The codec itself accepts a dotless member (it is valid in the signed global list).
+        let group = EquivalenceGroup::new(gid(1), [dotless, "example.org"], false).unwrap();
+        let mut s = MatchingSettings::default();
+        assert_eq!(
+            s.add_user_group(group),
+            Err(MatchingSettingsError::NotRegistrableDomain),
+            "{dotless}"
+        );
+        assert!(s.user_groups().is_empty());
+    }
+    let bytes = spec(1, &[], &[(1, &["example.com", "nas"], 0)]);
+    let shown = format!(
+        "{:?}",
+        MatchingSettings::decode(&bytes).unwrap().inert_groups()
+    );
+    assert!(!shown.contains("nas"), "{shown}");
+    assert!(!shown.contains("example.com"), "{shown}");
 }
 
 fn domain() -> impl Strategy<Value = String> {
@@ -347,6 +499,44 @@ proptest! {
         let decoded = MatchingSettings::decode(&first).unwrap();
         prop_assert_eq!(&decoded, &s);
         prop_assert_eq!(decoded.encode().unwrap(), first);
+    }
+
+    /// ADR 0097 §6 step 5: encode → decode → encode is the identity with inert groups too.
+    /// Groups are hand-encoded from domains a writer would refuse (suffixes, subdomains,
+    /// dotless names, IPs, upper case) as well as valid ones, and flags 0 and 1.
+    #[test]
+    fn encode_decode_encode_is_the_identity_with_inert_groups(
+        groups in proptest::collection::btree_map(
+            any::<u8>(),
+            (
+                proptest::collection::btree_set(
+                    "(nas|co\\.uk|github\\.io|192\\.0\\.2\\.[0-9]|[a-z]{1,4}\\.(com|net)|www\\.[a-z]{1,3}\\.com|[A-Z][a-z]{1,3}\\.com)",
+                    2..5,
+                ),
+                0u8..=1,
+            ),
+            0..6,
+        ),
+    ) {
+        let groups: Vec<(u8, Vec<String>, u8)> = groups
+            .into_iter()
+            .map(|(id, (domains, flag))| (id, domains.into_iter().collect(), flag))
+            .collect();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&u16::try_from(groups.len()).unwrap().to_be_bytes());
+        for (id, domains, flag) in &groups {
+            let domains: Vec<&str> = domains.iter().map(String::as_str).collect();
+            spec_group(&mut bytes, *id, &domains, *flag);
+        }
+        let s = MatchingSettings::decode(&bytes).unwrap();
+        prop_assert_eq!(s.user_groups().len() + s.inert_groups().len(), groups.len());
+        let first = s.encode().unwrap();
+        prop_assert_eq!(&first, &bytes);
+        let again = MatchingSettings::decode(&first).unwrap();
+        prop_assert_eq!(&again, &s);
+        prop_assert_eq!(again.encode().unwrap(), first);
     }
 
     /// Untrusted bytes never panic, and whatever decodes re-encodes to the same bytes (one

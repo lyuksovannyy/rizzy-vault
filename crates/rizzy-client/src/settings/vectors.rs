@@ -16,8 +16,8 @@
 //!   and re-encode. Each must decode, re-encode to the same hex, and (where built through the
 //!   typed API) the typed value must encode to the hex.
 //! - **Negative** (ADR 0042 §8, one violation each): truncated entry, duplicate tag, oversize
-//!   entry, too many entries, duplicate `group_id`, a one-domain user group, a public-suffix
-//!   domain, `match_default` out of range, `flag = 1`, and `format_version ≠ 1` (parked:
+//!   entry, too many entries, duplicate `group_id`, a one-domain user group, `match_default`
+//!   out of range, and `format_version ≠ 1` (parked:
 //!   `settings_update_required`, not rejected), plus tags out of order, tag `0x0000`/`0xFFFF` and a
 //!   trailing byte.
 //! - **Website icons**, tag `0x0005` ([ADR 0099] §1; written by an independent Python writer from
@@ -125,12 +125,6 @@ const NEGATIVE: &[(&str, &str, ClientError)] = &[
         ClientError::InvalidServerResponse,
     ),
     (
-        "public-suffix",
-        "00010001000100000031000100000001a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0000200000005636f2e75\
-         6b0000000b6578616d706c652e636f6d00",
-        ClientError::InvalidServerResponse,
-    ),
-    (
         "match-default-0000",
         "00010001000100000006000000000000",
         ClientError::InvalidServerResponse,
@@ -138,12 +132,6 @@ const NEGATIVE: &[(&str, &str, ClientError)] = &[
     (
         "match-default-0007",
         "00010001000100000006000700000000",
-        ClientError::InvalidServerResponse,
-    ),
-    (
-        "flag-1",
-        "00010001000100000037000100000001a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a000020000000b6578616d\
-         706c652e636f6d0000000b6578616d706c652e6e657401",
         ClientError::InvalidServerResponse,
     ),
     (
@@ -294,6 +282,38 @@ fn the_website_icons_vectors_read_as_their_layout_says() {
     assert!(!IconsSetting::from_read(parked.as_ref().map_err(|e| *e)).is_on());
     assert!(IconsSetting::from_read(Ok(&on)).is_on());
     assert!(!IconsSetting::from_read(Ok(&off)).is_on());
+}
+
+/// ADR 0097 §4.2 (replacing ADR 0042 §8 in part): a user group that fails only a content rule
+/// is inert, not a reject. These two were negative vectors of ADR 0042 §8; they now decode, the
+/// group is inert and outside the view, and the record re-encodes byte for byte.
+const INERT: &[(&str, &str)] = &[
+    (
+        "public-suffix",
+        "00010001000100000031000100000001a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0000200000005636f2e75\
+         6b0000000b6578616d706c652e636f6d00",
+    ),
+    (
+        "flag-1",
+        "00010001000100000037000100000001a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a000020000000b6578616d\
+         706c652e636f6d0000000b6578616d706c652e6e657401",
+    ),
+];
+
+#[test]
+fn a_content_rule_failure_reads_as_an_inert_group_adr0097() {
+    for (name, h) in INERT {
+        let bytes = hex(h);
+        let record =
+            AccountSettingsRecord::decode(&bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert!(record.matching().user_groups().is_empty(), "{name}");
+        assert_eq!(record.matching().inert_groups().len(), 1, "{name}");
+        assert_eq!(
+            record.encode().unwrap().as_slice(),
+            bytes.as_slice(),
+            "{name}"
+        );
+    }
 }
 
 #[test]
