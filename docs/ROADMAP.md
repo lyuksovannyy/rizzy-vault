@@ -59,6 +59,7 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 | M | Client repositories per [ADR 0019](adr/0019-native-clients.md) (`rizzy-vault-apple`, `-android`, `-windows`, `-linux`): attested core artifacts, no Rust outside `rizzy-vault` | M3 |
 | M | CI: fmt, clippy (deny warnings), tests, `cargo deny` (licenses, bans, sources and RustSec advisories; cargo-deny reads the same advisory database as `cargo audit`, so there is no separate `cargo audit` job) | M0 |
 | M | License policy: AGPL-3.0 server/core; decide client license; dependency license allow-list | M0 |
+| M | AGPL §13 source link ([ADR 0106](adr/0106-agpl-source-url.md)) | M1 |
 | S | `SECURITY.md` with disclosure process | M0 |
 | S | Fuzzing harness for parsers (import formats, email MIME, URL parser) | M1–M3; email MIME with M6 (after v1.0) |
 | C | Reproducible builds for server binary and extension | M8 |

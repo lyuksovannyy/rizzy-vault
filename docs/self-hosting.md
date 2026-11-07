@@ -19,6 +19,7 @@ Contents:
 12. [Checklist](#12-checklist)
 13. [Podman Quadlet (systemd-managed, rootless)](#13-podman-quadlet-systemd-managed-rootless)
 14. [The `icons` role: item icons and the breach check](#14-the-icons-role-item-icons-and-the-breach-check)
+15. [The source link (AGPL §13)](#15-the-source-link-agpl-13)
 
 ## 1. What you run
 
@@ -126,6 +127,7 @@ Settings are `RIZZY_*` names. Each comes from the environment, or from a configu
 | `RIZZY_ICON_CACHE_DIR` | `/cache` | `icons` role only: the cache volume (re-encoded item icons and breach-check ranges, shared by all users), created if missing. |
 | `RIZZY_ICON_CACHE_TTL_SECS` | `1209600` (14 days) | `icons` role only: how long a cached answer is used before it is fetched again, 60 s to 365 days. |
 | `RIZZY_ICON_CACHE_MAX_BYTES` | `268435456` (256 MiB) | `icons` role only: the cache's total size, at least 1048576 (1 MiB); the oldest entries are removed first. |
+| `RIZZY_SOURCE_URL` | this build's upstream source | An `https://` URL, at most 2048 bytes, where users get the source of the server and web vault you run: `/api/meta` serves it as `source_url` and the web vault's footer links to it as "Source". Printable ASCII only, a plain `host` or `host:port` (no `user@`, no `[IP]`), kept byte for byte. Set but empty, or invalid, refuses the start. If you run a modified server, you must set it ([§15](#15-the-source-link-agpl-13)). |
 | `RIZZY_ACCOUNT_QUOTA_BYTES` | `5368709120` (5 GiB) | The storage quota of every account, in bytes: at least 268435456 (256 MiB), no maximum; anything else refuses the start. One number for all accounts. See "The storage quota" below. |
 
 **The recovery waiting period** ([ADR 0008](adr/0008-account-recovery.md) decision 5, [CRYPTO.md §11.9](CRYPTO.md#119-recovery-with-the-emergency-kit)). A user who lost every device recovers the account with the recovery code from the Emergency Kit. A valid code does not release the account at once: it opens a pending recovery, and the server releases the account only `RIZZY_RECOVERY_WAIT_HOURS` later. During the wait, any enrolled device of the account can cancel the recovery. That is what protects a user whose printed kit was stolen: the thief has to wait, and the user's own device can say no.
@@ -580,7 +582,7 @@ docker volume rm rizzy-drill-data rizzy-drill-secrets
 
 ## 11. Logs
 
-The server writes one JSON object per line to stderr: `ts_ms`, `level`, `event`, and fields that are integers or fixed strings; the one exception is `storage_usage_corrected`, which names the account by its random 32-hex-digit id ([ADR 0048](adr/0048-per-account-storage-quota.md) §4). By construction it never logs secrets, tokens, request bodies, headers, login names, file paths or IP addresses ([INV-48](THREAT_MODEL.md#8-security-invariants)). One admin command logs too: `secrets invalidate --confirm` writes a `secrets_invalidated` line at `warn` (its `case`, `setup_count` retired, `totp_rows_deleted` and the new `setup_id`) just before its database step commits ([§5](#if-the-secrets-are-lost-and-no-backup-fits-secrets-invalidate)); a line with no matching secrets file means a run was interrupted, and running the command again finishes it. Retention is the container runtime's: `compose.yaml` keeps at most 5 files of 10 MB (`json-file` driver); change `logging` there. Rootless Podman may ignore some of these options; check `podman inspect` and set `log_size_max` in `containers.conf` if needed.
+The server writes one JSON object per line to stderr: `ts_ms`, `level`, `event`, and fields that are integers or fixed strings; the one exception is `storage_usage_corrected`, which names the account by its random 32-hex-digit id ([ADR 0048](adr/0048-per-account-storage-quota.md) §4), and `source_url`, logged once at startup with the public source URL users are shown ([§15](#15-the-source-link-agpl-13)). By construction it never logs secrets, tokens, request bodies, headers, login names, file paths or IP addresses ([INV-48](THREAT_MODEL.md#8-security-invariants)). One admin command logs too: `secrets invalidate --confirm` writes a `secrets_invalidated` line at `warn` (its `case`, `setup_count` retired, `totp_rows_deleted` and the new `setup_id`) just before its database step commits ([§5](#if-the-secrets-are-lost-and-no-backup-fits-secrets-invalidate)); a line with no matching secrets file means a run was interrupted, and running the command again finishes it. Retention is the container runtime's: `compose.yaml` keeps at most 5 files of 10 MB (`json-file` driver); change `logging` there. Rootless Podman may ignore some of these options; check `podman inspect` and set `log_size_max` in `containers.conf` if needed.
 
 The web vault's Settings → "What the server stores" tells your users what the server holds for their account and how long it is kept, including that this server's logs hold no IP addresses, that your reverse proxy may log them, and that your backups keep deleted data until they expire ([AR-11](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope)). Keep your proxy logging and backup retention ([§8](#8-backup)) in line with what you tell them.
 
@@ -599,6 +601,7 @@ The web vault's Settings → "What the server stores" tells your users what the 
 - [ ] The manual drill of [§10](#10-the-restore-drill) passed this month.
 - [ ] Base images are pinned by digest if you build your own image.
 - [ ] The host's crash collector (if `core_pattern` pipes to one) stores no dumps of the rizzy-vault container ([§1](#1-what-you-run)).
+- [ ] If you run modified code, `RIZZY_SOURCE_URL` points at the exact source of what you run, and the startup log shows no `source_url_inexact` warning ([§15](#15-the-source-link-agpl-13)).
 
 ## 13. Podman Quadlet (systemd-managed, rootless)
 
@@ -780,4 +783,21 @@ With Quadlet (§13), copy [`rizzy-vault-icons.container`](../deploy/quadlet/rizz
 **To turn it off**, stop the `icons` container and point the proxy's icons route back at `rizzy-vault:8080` (unset `RIZZY_ICONS_UPSTREAM`). To keep item icons but not the breach check, set `RIZZY_BREACH_CHECK=off`; there is no switch for item icons other than the role itself. Clearing the cache volume is safe at any time.
 
 **Unverified here:** the compose service, the Caddy route and the Quadlet units were not run under Docker, Podman or Caddy in this change (the end-to-end tests mock the role's endpoints in the browser; the role itself is tested against fake sites on local sockets, never the internet). Caddy's `{$VAR:default}` with a `host:port` default is read from Caddy's documentation, not tested.
+
+## 15. The source link (AGPL §13)
+
+rizzy-vault is AGPL-3.0. Users of your server see where its source is: `GET /api/meta` carries `source_url`, the web vault shows a "Source" link in the footer of every screen (the full URL is its tooltip), and `rv account status` prints `server source: <url>` ([ADR 0017](adr/0017-licensing.md) §7, [ADR 0106](adr/0106-agpl-source-url.md)).
+
+If you run a modified rizzy-vault server or web vault, set `RIZZY_SOURCE_URL` to an https address where everyone who uses your server can download, free of charge and without an account, the complete source code of exactly the version you run.
+
+- "Modified" means any change to the code you build: a patch, a fork, a changed dependency version, a rebuilt web vault with your changes. Changing only settings (the `RIZZY_*` values) or the deployment around the server (reverse proxy, compose file) is not a change to the code. This is the project's reading, not legal advice.
+- Point the URL at the exact version, not at a branch that moves: a tag, a commit, or a release page.
+- Upstream releases attach an archive with the source of every dependency compiled in (ADR 0017 §7). If you modify the code, publish the same kind of archive for your build, or link to a page that has it. Whether a link to a repository tree alone is enough is not settled; the project reads AGPL §1 as including the dependency sources, so the safe course is the archive.
+- A link that needs a login (for example a private repository) does not meet "at no charge" for users who have no account there (again the project's reading, not legal advice).
+- The default for a build from a fork still points at upstream (it comes from the workspace `repository` field and your commit, which upstream may not have). Set the URL; the server cannot tell that your build is modified.
+
+**The default**, when `RIZZY_SOURCE_URL` is unset, is this build's upstream source, fixed when the binary is built: `<repository>/releases/tag/v<version>` for a build with `RIZZY_BUILD_TAG=v<version>`, else `<repository>/tree/<commit>` for a build with `RIZZY_BUILD_COMMIT` (40 or 64 lowercase hex digits), else the repository alone. `deploy/Containerfile` takes both as build arguments (`--build-arg RIZZY_BUILD_COMMIT="$(git rev-parse HEAD)"`); the commit also fills the image's `org.opencontainers.image.revision` label. A build with neither logs a `source_url_inexact` warning at startup ("this build has no exact source reference; set RIZZY_SOURCE_URL"), naming a build variable it ignored as invalid; the warning is not logged when the setting is set. Every start logs the URL it serves, once, as a `source_url` line.
+
+**Limits and failures.** The value is read once at startup; changing it takes a restart. An invalid value (not `https://`, over 2048 bytes, a space or a non-ASCII byte, a `user@` or `[IP]` host, a port outside 1–65535, a bad `%` escape) or an empty one stops the start with `RIZZY_SOURCE_URL has an invalid value`; there is no fallback to the default. It is not a secret. Clients never fail because of it: one that gets no valid `source_url` (an older server) shows no link and works normally.
+
 
