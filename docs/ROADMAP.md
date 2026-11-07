@@ -113,6 +113,7 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 | M | Request signing for native clients: every request over a device-authenticated session is signed with the device key (`device-request` statement, [CRYPTO.md §5.10](CRYPTO.md#510-sessions-after-authentication), [ADR 0002](adr/0002-own-protocol.md)); the web vault keeps short-lived bearer tokens | M1 |
 | S | Unlock with biometrics / OS keychain on desktop & mobile. Windows: deferred until a CRYPTO.md design exists ([ADR 0019](adr/0019-native-clients.md) §2.1); Linux: master password only ([INV-62](THREAT_MODEL.md#8-security-invariants)) | M3 / M7 |
 | S | Session/device management: list devices, revoke, force logout | M3 |
+| M | Per-account security event log: logins, device enrolment/suspension/revocation, credential, recovery and 2FA changes, ended sessions and recovery-wait changes, visible to the user with a 72 h alert banner; no secrets, no source address or user agent ([ADR 0090](adr/0090-per-account-security-event-log.md); threat model §7.6 "R", INV-69, INV-83, INV-110) | M3 |
 | C | Hybrid post-quantum key wrapping (X25519 + ML-KEM-768) for sharing & org keys | post-1.0 (format must allow it from M1) |
 | C | Login with passkey (PRF extension to derive unlock key) | post-1.0 |
 | W | Custom/novel crypto constructions | never |

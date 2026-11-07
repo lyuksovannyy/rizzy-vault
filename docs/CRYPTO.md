@@ -1030,7 +1030,7 @@ The server stores `kdf_id` and `password_epoch` from that state with the OPAQUE 
    - The epochs in `state` equal those used in the `E_srv` context.
    - Each self-grant opens with the `account_key_epoch` from `state` in its context.
 7. **Enrolment.** The client generates the device keys and signs the device certificate with the identity key. It writes `E_dev` and `E_local` locally (one more Argon2id run, once); neither is uploaded. It uploads the certificate together with a new `account-state` (`state_seq + 1`, new `device_set_hash`) over the fresh OPAQUE session from step 5, and the server applies it by compare-and-swap.
-8. The server pushes "new device enrolled" to every other device. Each verifies the certificate against the signed device set and shows a notification with a one-click revoke. The server sends this notice for any growth of the device set, by any path ([ADR 0012](adr/0012-sync-engine.md) §7).
+8. The server pushes "new device enrolled" to every other device. Each verifies the certificate against the signed device set and shows a notification with a one-click revoke. The server sends this notice for any growth of the device set, by any path ([ADR 0012](adr/0012-sync-engine.md) §7). Until a push channel exists, the alert-class `device_enrolled` entry and its banner ([ADR 0090](adr/0090-per-account-security-event-log.md) §8) are the pull form of this notice; the client still verifies the device against the signed device set (step 4).
 
 ### 11.3 Unlock on an enrolled device
 
@@ -1074,7 +1074,7 @@ The server stores `kdf_id` and `password_epoch` from that state with the OPAQUE 
 - **Sessions.** Every session is an OPAQUE login ([§11.2](#112-login-on-a-new-device-server-mode) steps 1–6). There is no `E_local` and no durable device.
 - **Signing ops.** The web vault generates an **ephemeral device** key pair in memory, with a certificate signed by the identity key, `device_kind = 4`, and `expires_at` = now + 12 h, so that its ops are signed.
   - The certificate is uploaded, but it is **not** part of the signed device set and publishes no new `account-state`. Peers verify it by the identity-key chain and its expiry against the op's HLC ([§10.2](#102-ed25519-signatures-and-signed-statements)).
-  - A web login does not trigger the "new device enrolled" alarm of [§11.2](#112-login-on-a-new-device-server-mode) step 8. The server sends enrolled devices an informational "web vault session started" notice instead. It is not signed, so a malicious server can suppress it (threat model AR-9).
+  - A web login does not trigger the "new device enrolled" alarm of [§11.2](#112-login-on-a-new-device-server-mode) step 8. The server records a `password_login` entry in the account's security event log ([ADR 0090](adr/0090-per-account-security-event-log.md)) instead. It is not signed, so a malicious server can suppress it (threat model AR-9).
 - **Storage.** No secret is persisted, except the SK if the user opted in. The other values kept in browser storage are the non-secret theme choice (`system`, `light` or `dark`; owner decision of 2026-10-07), so that it survives a reload, and the non-secret lock settings record of [ADR 0110](adr/0110-passkey-user-verification.md) §3. They reveal nothing about the vault.
 
 ### 11.5 Master password or Secret Key change
