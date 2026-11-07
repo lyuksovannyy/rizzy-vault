@@ -13,6 +13,9 @@
 //!   canonical-form checks hold for everything the type admits.
 //! - The whole input, read as UTF-8, is parsed as a `Rizzy-Client` header value
 //!   ([`ClientHeader::parse`]); an accepted value must print back to exactly the input.
+//! - The same text is parsed as a source URL ([`SourceUrl::parse`], ADR 0106 §1); an accepted
+//!   value must print and serialise back to exactly the input. `MetaResponse` (selector 16)
+//!   covers its lenient `source_url` member.
 //!
 //! Part of CRYPTO.md §15 item 7 for the API body parsers (CLAUDE.md: untrusted API bodies get a
 //! fuzz target).
@@ -39,7 +42,7 @@ use rizzy_proto::change::{
     StageRequest, StageResponse, SuspendDeviceResponse, VaultRotationUpload,
 };
 use rizzy_proto::error::ErrorResponse;
-use rizzy_proto::meta::{ClientHeader, MetaResponse};
+use rizzy_proto::meta::{ClientHeader, MetaResponse, SourceUrl};
 use rizzy_proto::recovery::{
     RecoveryCancelResponse, RecoveryCompleteResponse, RecoveryRequest, RecoveryStartResponse,
     RecoveryVault, RecoveryWrapsRequest, RecoveryWrapsResponse,
@@ -68,6 +71,12 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(text) = core::str::from_utf8(data) {
         if let Ok(header) = ClientHeader::parse(text) {
             assert_eq!(header.to_string(), text);
+        }
+        if let Ok(url) = SourceUrl::parse(text) {
+            assert_eq!(url.as_str(), text);
+            let json = serde_json::to_string(&url).expect("a source URL serialises");
+            let again: SourceUrl = serde_json::from_str(&json).expect("a serialised URL parses");
+            assert_eq!(again, url);
         }
     }
     let Some((&selector, json)) = data.split_first() else {

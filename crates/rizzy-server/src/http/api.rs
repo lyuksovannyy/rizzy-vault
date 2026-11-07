@@ -818,6 +818,7 @@ pub fn meta(minimums: &[MinClientVersion]) -> Response {
                 server_version,
                 api_versions: List::new(vec![v1]).ok()?,
                 min_client_versions: List::new(minimums.to_vec()).ok()?,
+                source_url: None,
             })
         });
     match answer.map(|m| serde_json::to_vec(&m)) {
