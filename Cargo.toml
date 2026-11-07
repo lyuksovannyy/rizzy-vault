@@ -161,6 +161,10 @@ proptest = { version = "1.11", default-features = false, features = ["std"] }
 # the webpki root set for PostgreSQL TLS (`sslmode=verify-full`). No `macros`, `any`, `json`:
 # queries are runtime-checked and dispatched by enum (ADR 0011 point 3).
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "postgres", "tls-rustls-ring-webpki", "migrate"] }
+# The `Stream` trait, so `rizzy-storage` can poll sqlx's row stream (`fetch`) one row at a time
+# in the backup dump (ADR 0094 §2). rust-lang/futures-rs, MIT OR Apache-2.0, no dependencies of
+# its own; already in Cargo.lock through sqlx, pinned to that version. `Stream` needs no feature.
+futures-core = { version = "=0.3.34", default-features = false }
 
 # The `rv` client's transport and cache (ADR 0013 §2: "The Rust HTTP client crate is chosen in
 # M1. It must use rustls"; ADR 0026; ADR 0028). `rizzy-cli` only; never a dependency of a

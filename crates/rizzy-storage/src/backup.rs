@@ -506,10 +506,9 @@ async fn dump_table(conn: Conn<'_>, spec: &TableSpec) -> Result<Vec<Vec<Value>>,
 /// Hands every row of one table, in its `select` order, to `f`, one at a time; stops at the
 /// first error `f` returns and returns it as the inner error.
 ///
-/// The rows are decoded and handed over one by one, but sqlx 0.9's row stream (`fetch`)
-/// cannot be consumed without a `futures` trait this crate does not depend on, so the
-/// driver still fetches one table at a time (`fetch_all`): the one place ADR 0094 §2's
-/// "never `fetch_all`" is not met yet.
+/// The rows come from sqlx's row stream (`fetch`), polled through `futures_core::Stream`
+/// one row at a time, so neither the driver nor this function holds a whole table
+/// (ADR 0094 §2: never `fetch_all`).
 async fn each_row<X>(
     conn: Conn<'_>,
     spec: &TableSpec,
@@ -517,7 +516,11 @@ async fn each_row<X>(
 ) -> Result<Result<(), X>, Error> {
     Ok(crate::on_engine!(conn, |c| {
         let mut outcome = Ok(());
-        for row in sqlx::query(spec.select).fetch_all(&mut *c).await? {
+        let mut stream = sqlx::query(spec.select).fetch(&mut *c);
+        while let Some(row) =
+            core::future::poll_fn(|cx| futures_core::Stream::poll_next(stream.as_mut(), cx)).await
+        {
+            let row = row?;
             let mut values = Vec::with_capacity(spec.columns.len());
             for (i, column) in spec.columns.iter().enumerate() {
                 let value = match column.kind {
