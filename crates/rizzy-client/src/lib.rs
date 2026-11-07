@@ -55,6 +55,7 @@
 //! | [`attachments`] | ADR 0054 §1–§4, §7; INV-78, INV-79 | Encrypted attachments: the item op first, the sealed upload, the download verified against the item's own size and assembled only complete, deletion |
 //! | [`healing`] | ADR 0012 §7 steps 1–3 as ADR 0032 §1–§4 replace them; ADR 0021 §9 "Server behind" | Account-side restore healing: the older-chain rollback, the bundle chain, the newest `account-state` with `E_id` and the settings, the self-grants of step 3b; the recovery repair; the reconciliation objects |
 //! | [`matching`] | ADR 0037, ADR 0038 | URL matching for autofill, over `rizzy-match` |
+//! | [`lock_settings`] | ADR 0110 §1–§4, §6 point 1 | The per-device vault lock settings record (`rizzy.lock_settings`), the idle and sleep lock timer, the bounding rule for `UV` |
 //! | [`settings`] | ADR 0042; ADR 0037 §6–§7 | The `ACCOUNT_SETTINGS` plaintext: its record, reading it, and changing the match default and equivalence groups by whole-record replace |
 //! | [`passkey`] | ADR 0039 §2; `THREAT_MODEL.md` INV-64 | Checking a `WebAuthn` `rpId` against the browser-verified origin, over `rizzy-match`'s PSL |
 //! | [`sync`] | ADR 0012 §4, §7; ADR 0018 §3, §10; ADR 0021 §2, §4, §9 | The sync driver of one vault |
@@ -120,6 +121,7 @@ pub mod icons;
 pub mod identity_gen;
 pub mod items;
 pub mod lists;
+pub mod lock_settings;
 pub mod login;
 pub mod matching;
 pub mod passkey;
