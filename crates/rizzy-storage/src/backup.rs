@@ -17,6 +17,11 @@
 //!   the schema again, and never panics on a bad one. The commands around it (`rizzy-vault
 //!   backup` and `restore`, file creation, the secrets check) are `rizzy-server`'s (ADR 0023
 //!   §4).
+//! - **The streaming restore** ([ADR 0094] §3): [`Database::restore_from`] reads a file pass 1
+//!   ([`file::Verifier`]) verified, again from the start, through the incremental
+//!   [`file::Decoder`], inserting each row as it is decoded, with the caller's pre-commit check
+//!   on every row; a file whose bytes changed between the passes is refused
+//!   ([`file::FileError::Changed`]) and nothing is written.
 //!
 //! **Before a restore**, [`Database::check_restore_target`] checks the target without changing
 //! it (ADR 0023 §5 step 1): no migration applied, or exactly this release's, and no row.
@@ -36,6 +41,7 @@
 //! with the server stopped (ADR 0010 §2); `dump` runs on the read-only reader next to it.
 //!
 //! [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
+//! [ADR 0094]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0094-backup-container-limits.md
 
 pub mod file;
 
@@ -46,7 +52,7 @@ use std::path::Path;
 
 use sqlx::Row;
 
-use crate::db::{Conn, Database};
+use crate::db::{Conn, Database, WriteTx};
 use crate::error::{Engine, Error, RestoreError};
 use crate::meta::RestoreGeneration;
 use crate::migrate::{applied_on, check_applied, schema_version};
@@ -376,15 +382,116 @@ impl Database {
         generation: RestoreGeneration,
         now_ms: i64,
     ) -> Result<RestoreReport, Error> {
-        let current = schema_version();
-        if dump.schema_version != current {
-            return Err(RestoreError::SchemaVersion {
-                dump: dump.schema_version,
-                current,
-            }
-            .into());
-        }
+        check_schema(dump.schema_version)?;
         let plan = plan(dump)?;
+        let mut tx = self.begin_restore().await?;
+        let mut rows = 0u64;
+        for (spec, table) in plan {
+            for row in &table.rows {
+                insert_row(tx.conn(), spec, row).await?;
+                rows += 1;
+            }
+        }
+        finish_restore(tx, generation, now_ms, rows).await
+    }
+
+    /// Loads a backup file into this database, which must be empty, streaming: pass 2 of the
+    /// reader (ADR 0094 §3 point 3; ADR 0023 §5 step 5 as ADR 0094 §5(b) replaces it).
+    /// `verified` is pass 1's result over the same file; `read` hands over the format version
+    /// 1 file's bytes again from the start, like [`std::io::Read::read`] (0 at the end).
+    /// Inside one write transaction, each row is checked by [`file::Decoder`], handed to
+    /// `check` (the caller's pre-commit check, ADR 0023 §5 step 4: an error rolls back) and
+    /// inserted as it is decoded; then the header bytes and the digest must equal pass 1's,
+    /// `read` must have nothing more, and only then are the generation, the reconciliation
+    /// epochs and the counters set and the transaction committed. At most one read buffer and
+    /// one row are held.
+    ///
+    /// The bytes read are also hashed as they arrive, so a refusal partway (a malformed row,
+    /// a failed insert, a refused check) on bytes other than pass 1's reads the rest and is
+    /// reported as [`file::FileError::Changed`], what it is, rather than as its symptom.
+    ///
+    /// # Errors
+    ///
+    /// Any error rolls the whole transaction back: nothing was written.
+    /// - [`RestoreFromError::Storage`]: those of [`Database::restore`] (the schema version,
+    ///   a target that is not empty, a failed insert).
+    /// - [`RestoreFromError::File`]: the strict parser's refusals, and
+    ///   [`file::FileError::Changed`] when the bytes differ from pass 1's, or there are more or
+    ///   fewer of them.
+    /// - [`RestoreFromError::Caller`]: what `read` or `check` returned.
+    pub async fn restore_from<E>(
+        &self,
+        verified: &file::Verified,
+        read: impl FnMut(&mut [u8]) -> Result<usize, E>,
+        mut check: impl FnMut(&'static TableSpec, &[Value]) -> Result<(), E>,
+        generation: RestoreGeneration,
+        now_ms: i64,
+    ) -> Result<RestoreReport, RestoreFromError<E>> {
+        use RestoreFromError::{Caller, File, Storage};
+        check_schema(verified.schema_version()).map_err(Storage)?;
+        let mut tx = self.begin_restore().await.map_err(Storage)?;
+        let mut source = Source {
+            read,
+            hash: file::Verifier::new(verified.file_len()).map_err(File)?,
+            len: verified.file_len(),
+            received: 0,
+            read_failed: false,
+        };
+        let mut decoder = file::Decoder::new(verified);
+        // `buf[start..end]` holds the bytes read and not used yet; it grows only for an item
+        // longer than it.
+        let mut buf = vec![0u8; READ_LEN];
+        let (mut start, mut end) = (0usize, 0usize);
+        let mut table = None;
+        let mut rows = 0u64;
+        let outcome: Result<(), RestoreFromError<E>> = async {
+            loop {
+                let input = buf.get(start..end).unwrap_or_default();
+                let (used, event) = decoder.decode(input).map_err(File)?;
+                start += used;
+                match event {
+                    Some(file::Event::Table { spec, .. }) => table = Some(spec),
+                    Some(file::Event::Row(row)) => {
+                        let spec = table.ok_or(File(file::FileError::Changed))?;
+                        check(spec, &row).map_err(Caller)?;
+                        insert_row(tx.conn(), spec, &row).await.map_err(Storage)?;
+                        rows += 1;
+                    }
+                    Some(file::Event::End) => break,
+                    None => {
+                        // Keep what was not used and read more after it.
+                        buf.copy_within(start..end, 0);
+                        end -= start;
+                        start = 0;
+                        if end == buf.len() {
+                            buf.resize(end.saturating_mul(2), 0);
+                        }
+                        let got = source.fill(buf.get_mut(end..).unwrap_or_default())?;
+                        if got == 0 {
+                            return Err(File(file::FileError::Changed));
+                        }
+                        end += got;
+                    }
+                }
+            }
+            // Nothing may follow the bytes pass 1 verified.
+            if start < end || source.fill(&mut [0u8; 1])? != 0 {
+                return Err(File(file::FileError::Changed));
+            }
+            Ok(())
+        }
+        .await;
+        match outcome {
+            Ok(()) => finish_restore(tx, generation, now_ms, rows)
+                .await
+                .map_err(Storage),
+            Err(e) => Err(source.classify(e, verified)),
+        }
+    }
+
+    /// The start of a restore: refuses a target some release migrated to another schema,
+    /// migrates it, opens the one write transaction and requires the target to hold no row.
+    async fn begin_restore(&self) -> Result<WriteTx, Error> {
         // A database some release already migrated, but not to this one's schema, is not a
         // new database: refuse before migrating it rather than change it.
         let pending = self.pending_migrations().await?;
@@ -400,34 +507,126 @@ impl Database {
         if count != 0 {
             return Err(RestoreError::TargetNotEmpty.into());
         }
-        let mut rows = 0u64;
-        for (spec, table) in plan {
-            for row in &table.rows {
-                insert_row(tx.conn(), spec, row).await?;
-                rows += 1;
+        Ok(tx)
+    }
+}
+
+/// The read buffer of [`Database::restore_from`].
+const READ_LEN: usize = 64 * 1024;
+
+/// [`Database::restore_from`]'s source: the caller's `read`, capped at the verified length,
+/// with every byte also hashed ([`file::Verifier`]) to tell a changed file from a bad one.
+struct Source<R> {
+    /// The caller's `read`.
+    read: R,
+    /// Pass 1's checks again, over the bytes read.
+    hash: file::Verifier,
+    /// The verified length.
+    len: u64,
+    /// The bytes read so far.
+    received: u64,
+    /// Whether `read` failed: that error is the caller's own, reported as it is.
+    read_failed: bool,
+}
+
+impl<R, E> Source<R>
+where
+    R: FnMut(&mut [u8]) -> Result<usize, E>,
+{
+    /// Reads into `out`, at most up to the verified length and one byte past it (so that a
+    /// longer file shows); returns how many bytes it read.
+    fn fill(&mut self, out: &mut [u8]) -> Result<usize, RestoreFromError<E>> {
+        let left = self.len.saturating_sub(self.received);
+        let want = usize::try_from(left).map_or(out.len(), |n| n.max(1).min(out.len()));
+        let out = out.get_mut(..want).unwrap_or_default();
+        let got = match (self.read)(out) {
+            Ok(n) => n.min(want),
+            Err(e) => {
+                self.read_failed = true;
+                return Err(RestoreFromError::Caller(e));
+            }
+        };
+        self.received += u64::try_from(got).unwrap_or(u64::MAX);
+        self.hash
+            .update(out.get(..got).unwrap_or_default())
+            .map_err(RestoreFromError::File)?;
+        Ok(got)
+    }
+
+    /// The error to report for `e`: [`file::FileError::Changed`] when the bytes are not pass
+    /// 1's (read to the end to know), otherwise `e` itself.
+    fn classify(
+        mut self,
+        e: RestoreFromError<E>,
+        verified: &file::Verified,
+    ) -> RestoreFromError<E> {
+        if self.read_failed || matches!(e, RestoreFromError::File(file::FileError::Changed)) {
+            return e;
+        }
+        let mut scratch = vec![0u8; READ_LEN];
+        while self.received < self.len {
+            match self.fill(&mut scratch) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(RestoreFromError::File(changed)) => return RestoreFromError::File(changed),
+                Err(_) => return e,
             }
         }
-        let accounts_in_reconciliation = crate::on_engine!(tx.conn(), |c| {
-            sqlx::query(RESTORE_GENERATION_SET)
-                .bind(&generation.as_bytes()[..])
-                .bind(now_ms)
-                .execute(&mut *c)
-                .await?;
-            let opened = sqlx::query(RECONCILIATION_OPEN_ALL)
-                .bind(&generation.as_bytes()[..])
-                .bind(now_ms)
-                .execute(&mut *c)
-                .await?
-                .rows_affected();
-            sqlx::query(RESTORE_STORE_SEQ).execute(&mut *c).await?;
-            opened
-        });
-        tx.commit().await?;
-        Ok(RestoreReport {
-            rows,
-            accounts_in_reconciliation,
-        })
+        match self.hash.finish() {
+            Ok(again) if again == *verified => e,
+            _ => RestoreFromError::File(file::FileError::Changed),
+        }
     }
+}
+
+/// Why [`Database::restore_from`] failed. The target then holds no application row.
+#[derive(Debug)]
+pub enum RestoreFromError<E> {
+    /// The database refused (see [`Database::restore`]).
+    Storage(Error),
+    /// The file is refused, or changed between the passes ([`file::FileError::Changed`]).
+    File(file::FileError),
+    /// The caller's `read` or `check` failed.
+    Caller(E),
+}
+
+/// Requires a dump or file of this release's schema version (ADR 0023 §5 step 3).
+fn check_schema(dump: i64) -> Result<(), Error> {
+    let current = schema_version();
+    if dump != current {
+        return Err(RestoreError::SchemaVersion { dump, current }.into());
+    }
+    Ok(())
+}
+
+/// The end of a restore, in its transaction: the new generation, a reconciliation epoch for
+/// every restored account (INV-59), the store-sequence counters; then the commit.
+async fn finish_restore(
+    mut tx: WriteTx,
+    generation: RestoreGeneration,
+    now_ms: i64,
+    rows: u64,
+) -> Result<RestoreReport, Error> {
+    let accounts_in_reconciliation = crate::on_engine!(tx.conn(), |c| {
+        sqlx::query(RESTORE_GENERATION_SET)
+            .bind(&generation.as_bytes()[..])
+            .bind(now_ms)
+            .execute(&mut *c)
+            .await?;
+        let opened = sqlx::query(RECONCILIATION_OPEN_ALL)
+            .bind(&generation.as_bytes()[..])
+            .bind(now_ms)
+            .execute(&mut *c)
+            .await?
+            .rows_affected();
+        sqlx::query(RESTORE_STORE_SEQ).execute(&mut *c).await?;
+        opened
+    });
+    tx.commit().await?;
+    Ok(RestoreReport {
+        rows,
+        accounts_in_reconciliation,
+    })
 }
 
 /// Matches each table of `dump` to its spec, requiring every table of [`TABLES`], in that

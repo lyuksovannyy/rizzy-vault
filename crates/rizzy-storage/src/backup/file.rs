@@ -57,6 +57,15 @@
 //! The parser is pure (no I/O), never panics, and its errors name the table index, the row and
 //! the column, never a value (INV-48).
 //!
+//! # Reading in two passes ([ADR 0094] §3)
+//!
+//! A file need not be held in memory: [`Verifier`] (pass 1) takes its bytes in pieces of any
+//! size, checks the magic and format version, streams the digest and keeps only the fixed
+//! header and the digest ([`Verified`]); [`Decoder`] (pass 2) is a sans-I/O incremental decoder
+//! over the same bytes, read again: it yields each table's descriptor and each row, holds no
+//! input itself, and refuses with [`FileError::Changed`] bytes that are not the ones pass 1
+//! verified. [`parse`] is the two of them over a buffer, so the fuzz target exercises them.
+//!
 //! # Tests and fuzzing
 //!
 //! The unit tests round-trip a populated dump byte for byte, pin the committed known-answer file
@@ -270,6 +279,9 @@ pub enum FileError {
     },
     /// Writing: the byte sink failed.
     Write(std::io::ErrorKind),
+    /// Reading in two passes: the bytes of the second pass differ from those the first
+    /// verified, or there are more or fewer of them (ADR 0094 §3 point 4).
+    Changed,
 }
 
 impl fmt::Display for FileError {
@@ -308,6 +320,7 @@ impl fmt::Display for FileError {
                  declared"
             ),
             Self::Write(kind) => write!(f, "writing the backup failed: {kind}"),
+            Self::Changed => f.write_str("the backup file changed while it was being read"),
         }
     }
 }
@@ -670,71 +683,104 @@ impl<W: Write> Encoder<W> {
     }
 }
 
-/// A cursor over the tables region of the file (between the header and the digest).
-struct Reader<'a> {
-    /// The bytes still to read.
-    rest: &'a [u8],
+/// A `u64` from a buffer length; a `usize` always fits on the targets this crate builds for.
+fn len64(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
 }
 
-impl<'a> Reader<'a> {
-    /// Takes the next `n` bytes, or `None` if fewer remain.
-    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-        let (head, tail) = self.rest.split_at_checked(n)?;
+/// Why a [`Cursor`] read stopped.
+enum Short {
+    /// The field runs past the end of the tables: the file is malformed.
+    End,
+    /// The field is not in the input yet: the caller must hand over more bytes.
+    More,
+}
+
+/// Why decoding an item stopped.
+enum Pull {
+    /// The caller must hand over more bytes.
+    More,
+    /// The file is refused.
+    Fail(FileError),
+}
+
+/// Maps a [`Short`] to a [`Pull`], an end of the tables being [`Problem::UnexpectedEnd`] at
+/// `at`.
+fn need<T>(read: Result<T, Short>, at: Location) -> Result<T, Pull> {
+    read.map_err(|short| match short {
+        Short::End => Pull::Fail(FileError::Malformed {
+            at,
+            problem: Problem::UnexpectedEnd,
+        }),
+        Short::More => Pull::More,
+    })
+}
+
+/// A cursor over the input of one [`Decoder::decode`] call: `rest` is what the caller handed
+/// over, `body_left` how many bytes of the tables region (between the header and the digest)
+/// the file still holds from here, known from pass 1. A field past `body_left` is malformed;
+/// a field within it but past `rest` needs more input.
+struct Cursor<'a> {
+    /// The input not read yet.
+    rest: &'a [u8],
+    /// The bytes of the file before its digest not read yet.
+    body_left: u64,
+}
+
+impl<'a> Cursor<'a> {
+    /// Takes the next `n` bytes of the file before its digest.
+    fn take(&mut self, n: usize) -> Result<&'a [u8], Short> {
+        let n64 = len64(n);
+        if n64 > self.body_left {
+            return Err(Short::End);
+        }
+        let (head, tail) = self.rest.split_at_checked(n).ok_or(Short::More)?;
         self.rest = tail;
-        Some(head)
+        self.body_left -= n64;
+        Ok(head)
     }
 
     /// Takes the next `N` bytes as an array.
-    fn array<const N: usize>(&mut self) -> Option<[u8; N]> {
-        self.take(N).and_then(|b| <[u8; N]>::try_from(b).ok())
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], Short> {
+        self.take(N)
+            .and_then(|b| <[u8; N]>::try_from(b).map_err(|_| Short::End))
     }
 
     /// A `u8`.
-    fn u8(&mut self) -> Option<u8> {
+    fn u8(&mut self) -> Result<u8, Short> {
         self.array::<1>().map(|[b]| b)
     }
 
     /// A big-endian `u16`.
-    fn u16(&mut self) -> Option<u16> {
+    fn u16(&mut self) -> Result<u16, Short> {
         self.array().map(u16::from_be_bytes)
     }
 
     /// A big-endian `u32`.
-    fn u32(&mut self) -> Option<u32> {
+    fn u32(&mut self) -> Result<u32, Short> {
         self.array().map(u32::from_be_bytes)
     }
 
     /// A big-endian `u64`.
-    fn u64(&mut self) -> Option<u64> {
+    fn u64(&mut self) -> Result<u64, Short> {
         self.array().map(u64::from_be_bytes)
     }
 
     /// `bytes(x)` with `x` at most `max` long: the length is checked against `max` (`too_long`)
-    /// and then against the remaining input (`UnexpectedEnd`) before anything is taken.
-    fn bytes(
-        &mut self,
-        max: usize,
-        too_long: Problem,
-        at: Location,
-    ) -> Result<&'a [u8], FileError> {
-        let len = self.u32().ok_or(FileError::Malformed {
-            at,
-            problem: Problem::UnexpectedEnd,
-        })?;
+    /// and then against the rest of the tables region (`UnexpectedEnd`) before anything is
+    /// taken.
+    fn bytes(&mut self, max: usize, too_long: Problem, at: Location) -> Result<&'a [u8], Pull> {
+        let len = need(self.u32(), at)?;
         let len = usize::try_from(len).unwrap_or(usize::MAX);
         if len > max {
-            return Err(FileError::Malformed {
+            return Err(Pull::Fail(FileError::Malformed {
                 at,
                 problem: too_long,
-            });
+            }));
         }
-        self.take(len).ok_or(FileError::Malformed {
-            at,
-            problem: Problem::UnexpectedEnd,
-        })
+        need(self.take(len), at)
     }
 }
-
 /// Whether `name` is a valid table or column name: 1–[`MAX_NAME_LEN`] bytes of `[a-z0-9_]`.
 fn valid_name(name: &[u8]) -> bool {
     !name.is_empty()
@@ -757,8 +803,416 @@ fn min_row_len(columns: &[Column]) -> usize {
         .sum()
 }
 
-/// Parses a backup file (module docs): magic, format version and digest first, then the
-/// header and every table, strictly.
+/// What pass 1 ([`Verifier`]) keeps of a verified file (ADR 0094 §3 point 1): its length, the
+/// fixed header (magic, `format_version`, `schema_version`, `created_at_ms`, `table_count`)
+/// and the digest. Pass 2 ([`Decoder`]) requires the bytes it reads to match it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Verified {
+    /// The file's length, digest included.
+    len: u64,
+    /// The fixed header's bytes.
+    header: [u8; HEADER_LEN],
+    /// The trailing SHA-256, equal to the one recomputed over the file.
+    digest: [u8; DIGEST_LEN],
+    /// The header's schema version, at least 1.
+    schema_version: i64,
+    /// The header's creation time (informational only).
+    created_at_ms: u64,
+}
+
+impl fmt::Debug for Verified {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Verified")
+            .field("len", &self.len)
+            .field("schema_version", &self.schema_version)
+            .field("created_at_ms", &self.created_at_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Verified {
+    /// The file's length in bytes, digest included.
+    #[must_use]
+    pub const fn file_len(&self) -> u64 {
+        self.len
+    }
+
+    /// The schema version the file is stamped with (ADR 0023 §5 step 3 compares it).
+    #[must_use]
+    pub const fn schema_version(&self) -> i64 {
+        self.schema_version
+    }
+
+    /// When the file was written, by the writer's clock; informational only.
+    #[must_use]
+    pub const fn created_at_ms(&self) -> u64 {
+        self.created_at_ms
+    }
+
+    /// The file's trailing SHA-256.
+    #[must_use]
+    pub const fn digest(&self) -> &[u8; DIGEST_LEN] {
+        &self.digest
+    }
+}
+
+/// Pass 1 of the reader (ADR 0094 §3 point 1), sans I/O: the caller hands it the file's bytes
+/// in order, in pieces of any size; it checks the magic and the format version as soon as they
+/// are in, streams every byte before the last [`DIGEST_LEN`] through SHA-256 and keeps only the
+/// fixed header and the stored digest. [`Verifier::finish`] compares the digest and only then
+/// reads the header's fields. Nothing else is parsed.
+#[derive(Clone)]
+pub struct Verifier {
+    /// The file's length, known before its bytes (a regular file's metadata, or the buffer).
+    len: u64,
+    /// The bytes handed over so far.
+    seen: u64,
+    /// SHA-256 over the bytes before the digest seen so far.
+    hasher: Sha256,
+    /// The first [`HEADER_LEN`] bytes.
+    head: [u8; HEADER_LEN],
+    /// The last [`DIGEST_LEN`] bytes.
+    tail: [u8; DIGEST_LEN],
+}
+
+impl fmt::Debug for Verifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Verifier")
+            .field("len", &self.len)
+            .field("seen", &self.seen)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Verifier {
+    /// A verifier for a file of `len` bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`FileError::TooLarge`] when `len` exceeds [`MAX_BACKUP_FILE_LEN`].
+    pub fn new(len: u64) -> Result<Self, FileError> {
+        if len > MAX_BACKUP_FILE_LEN {
+            return Err(FileError::TooLarge);
+        }
+        Ok(Self {
+            len,
+            seen: 0,
+            hasher: Sha256::new(),
+            head: [0; HEADER_LEN],
+            tail: [0; DIGEST_LEN],
+        })
+    }
+
+    /// Takes the next bytes of the file.
+    ///
+    /// # Errors
+    ///
+    /// [`FileError::BadMagic`] or [`FileError::UnsupportedFormat`] as soon as the first bytes
+    /// show it; [`FileError::Changed`] when more bytes arrive than the length given to
+    /// [`Verifier::new`].
+    pub fn update(&mut self, bytes: &[u8]) -> Result<(), FileError> {
+        let start = self.seen;
+        let end = start
+            .checked_add(len64(bytes.len()))
+            .filter(|end| *end <= self.len)
+            .ok_or(FileError::Changed)?;
+        let body_end = self.len.saturating_sub(len64(DIGEST_LEN));
+        let skip = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
+        for (slot, b) in self.head.iter_mut().skip(skip(start)).zip(bytes) {
+            *slot = *b;
+        }
+        let hashed = skip(body_end.saturating_sub(start)).min(bytes.len());
+        let (body, digest) = bytes.split_at_checked(hashed).unwrap_or((bytes, &[]));
+        self.hasher.update(body);
+        let into_tail = skip(start.saturating_sub(body_end));
+        for (slot, b) in self.tail.iter_mut().skip(into_tail).zip(digest) {
+            *slot = *b;
+        }
+        self.seen = end;
+        self.check_start()
+    }
+
+    /// The magic and format version checks, once their bytes are in.
+    fn check_start(&self) -> Result<(), FileError> {
+        let seen = usize::try_from(self.seen).unwrap_or(usize::MAX);
+        let magic = self.head.get(..MAGIC.len()).unwrap_or_default();
+        if seen >= MAGIC.len() && magic != MAGIC {
+            return Err(FileError::BadMagic);
+        }
+        if seen >= MAGIC.len() + 2 {
+            let version = self.field::<2>(MAGIC.len()).map(u16::from_be_bytes);
+            if version != Some(FORMAT_VERSION) {
+                return Err(FileError::UnsupportedFormat {
+                    version: version.unwrap_or_default(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The `N` header bytes at `at`.
+    fn field<const N: usize>(&self, at: usize) -> Option<[u8; N]> {
+        self.head
+            .get(at..at.checked_add(N)?)
+            .and_then(|b| <[u8; N]>::try_from(b).ok())
+    }
+
+    /// Ends pass 1: the magic, the format version, the length, the digest, then the header's
+    /// fields, in that order (ADR 0023 §2: the digest before anything else is parsed).
+    ///
+    /// # Errors
+    ///
+    /// [`FileError::Changed`] when fewer bytes arrived than the length; otherwise
+    /// [`FileError::Truncated`], [`FileError::BadMagic`], [`FileError::UnsupportedFormat`],
+    /// [`FileError::DigestMismatch`], [`FileError::SchemaVersion`] or
+    /// [`FileError::TableCount`].
+    pub fn finish(self) -> Result<Verified, FileError> {
+        if self.seen != self.len {
+            return Err(FileError::Changed);
+        }
+        let len = usize::try_from(self.len).unwrap_or(usize::MAX);
+        if len < MAGIC.len() {
+            let have = self.head.get(..len).unwrap_or_default();
+            return Err(if MAGIC.starts_with(have) {
+                FileError::Truncated
+            } else {
+                FileError::BadMagic
+            });
+        }
+        if len < MAGIC.len() + 2 {
+            return Err(FileError::Truncated);
+        }
+        self.check_start()?;
+        if len < HEADER_LEN + DIGEST_LEN {
+            return Err(FileError::Truncated);
+        }
+        let digest: [u8; DIGEST_LEN] = self.hasher.clone().finalize().into();
+        if digest != self.tail {
+            return Err(FileError::DigestMismatch);
+        }
+        let end = FileError::Malformed {
+            at: Location::default(),
+            problem: Problem::UnexpectedEnd,
+        };
+        let at = MAGIC.len() + 2;
+        let schema_version = self
+            .field::<8>(at)
+            .map(u64::from_be_bytes)
+            .ok_or_else(|| end.clone())?;
+        let schema_version = i64::try_from(schema_version)
+            .ok()
+            .filter(|v| *v >= 1)
+            .ok_or(FileError::SchemaVersion)?;
+        let created_at_ms = self
+            .field::<8>(at + 8)
+            .map(u64::from_be_bytes)
+            .ok_or_else(|| end.clone())?;
+        let table_count = self
+            .field::<2>(at + 16)
+            .map(u16::from_be_bytes)
+            .ok_or(end)?;
+        if usize::from(table_count) != TABLES.len() {
+            return Err(FileError::TableCount { found: table_count });
+        }
+        Ok(Verified {
+            len: self.len,
+            header: self.head,
+            digest,
+            schema_version,
+            created_at_ms,
+        })
+    }
+}
+
+/// What the [`Decoder`] read.
+#[derive(Debug)]
+pub enum Event {
+    /// A table's descriptor, which matches `spec`; its `row_count` rows follow.
+    Table {
+        /// The table.
+        spec: &'static TableSpec,
+        /// The declared row count, already checked to fit the rest of the file.
+        row_count: u64,
+    },
+    /// The next row of the last table, one value per column, already checked against it.
+    Row(Vec<Value>),
+    /// The digest: every table was read, the file matches pass 1's, and nothing follows.
+    End,
+}
+
+/// Where the [`Decoder`] is.
+#[derive(Clone, Copy, Debug)]
+enum State {
+    /// Before the fixed header.
+    Header,
+    /// Before the descriptor of table `TABLES[n]` (or the digest once `n` is past the end).
+    Table(usize),
+    /// Inside a table: `row` of `count` rows read.
+    Rows {
+        /// The table's index.
+        table: usize,
+        /// The rows read.
+        row: u64,
+        /// The declared row count.
+        count: u64,
+    },
+    /// Before the digest.
+    Digest,
+    /// After the digest.
+    Done,
+}
+
+/// Pass 2 of the reader (ADR 0094 §3 point 3): a sans-I/O incremental decoder. The caller
+/// hands [`Decoder::decode`] the file's unread bytes, in buffers of any size; it yields each
+/// table's descriptor, each row and the end, and says how many bytes it used. It holds no
+/// input of its own, only the hash state: the caller keeps what was not used and hands it over
+/// again with more. Every rule of the module docs applies; "the remaining input" is the
+/// length pass 1 verified minus the bytes used. Before [`Event::End`] it requires the header
+/// bytes, the stored digest and the recomputed one to equal pass 1's ([`FileError::Changed`]
+/// otherwise, ADR 0094 §3 point 4).
+#[derive(Clone)]
+pub struct Decoder {
+    /// Pass 1's result.
+    verified: Verified,
+    /// SHA-256 over the bytes used so far.
+    hasher: Sha256,
+    /// The bytes of the file used so far.
+    used: u64,
+    /// Where the decoder is.
+    state: State,
+}
+
+impl fmt::Debug for Decoder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Decoder")
+            .field("used", &self.used)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Decoder {
+    /// A decoder for the file pass 1 verified.
+    #[must_use]
+    pub fn new(verified: &Verified) -> Self {
+        Self {
+            verified: verified.clone(),
+            hasher: Sha256::new(),
+            used: 0,
+            state: State::Header,
+        }
+    }
+
+    /// The bytes of the file used so far.
+    #[must_use]
+    pub const fn used(&self) -> u64 {
+        self.used
+    }
+
+    /// Reads the next item from `input`, which must start at the first byte not used yet.
+    /// Returns how many bytes of `input` it used and what it read; `None` means `input` does
+    /// not hold the whole next item yet: hand it over again with more bytes. Once
+    /// [`Event::End`] was returned, every call returns it again and uses nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`FileError::Malformed`] or [`FileError::TrailingBytes`] for a file the strict parser
+    /// refuses; [`FileError::Changed`] when the bytes differ from those pass 1 verified.
+    pub fn decode(&mut self, input: &[u8]) -> Result<(usize, Option<Event>), FileError> {
+        let mut off = 0usize;
+        loop {
+            let rest = input.get(off..).unwrap_or_default();
+            let body_left = self
+                .verified
+                .len
+                .saturating_sub(len64(DIGEST_LEN))
+                .saturating_sub(self.used);
+            if let State::Digest | State::Done = self.state {
+                return Ok(match self.finish(rest, body_left)? {
+                    Some(n) => (off + n, Some(Event::End)),
+                    None => (off, None),
+                });
+            }
+            let mut cur = Cursor { rest, body_left };
+            let (next, event) = match self.item(&mut cur) {
+                Ok(item) => item,
+                Err(Pull::More) => return Ok((off, None)),
+                Err(Pull::Fail(e)) => return Err(e),
+            };
+            let n = rest.len() - cur.rest.len();
+            self.hasher.update(rest.get(..n).unwrap_or_default());
+            self.used += len64(n);
+            self.state = next;
+            off += n;
+            if event.is_some() {
+                return Ok((off, event));
+            }
+        }
+    }
+
+    /// The digest: nothing may remain before it, and it, the recomputed one and pass 1's must
+    /// be equal. Returns how many bytes it used (`Some`), or `None` when the digest is not all
+    /// in `rest` yet.
+    fn finish(&mut self, rest: &[u8], body_left: u64) -> Result<Option<usize>, FileError> {
+        if let State::Done = self.state {
+            return Ok(Some(0));
+        }
+        if body_left != 0 {
+            return Err(FileError::TrailingBytes);
+        }
+        let Some(stored) = rest.get(..DIGEST_LEN) else {
+            return Ok(None);
+        };
+        let computed: [u8; DIGEST_LEN] = core::mem::take(&mut self.hasher).finalize().into();
+        if computed != self.verified.digest || stored != self.verified.digest {
+            return Err(FileError::Changed);
+        }
+        self.used += len64(DIGEST_LEN);
+        self.state = State::Done;
+        Ok(Some(DIGEST_LEN))
+    }
+
+    /// Reads the item at the decoder's state: the next state and what to yield.
+    fn item(&self, cur: &mut Cursor<'_>) -> Result<(State, Option<Event>), Pull> {
+        match self.state {
+            State::Header => {
+                let header = need(cur.take(HEADER_LEN), Location::default())?;
+                if header != self.verified.header {
+                    return Err(Pull::Fail(FileError::Changed));
+                }
+                Ok((State::Table(0), None))
+            }
+            State::Table(index) => {
+                let Some(spec) = TABLES.get(index) else {
+                    return Ok((State::Digest, None));
+                };
+                let row_count = decode_descriptor(cur, index, spec)?;
+                let next = State::Rows {
+                    table: index,
+                    row: 0,
+                    count: row_count,
+                };
+                Ok((next, Some(Event::Table { spec, row_count })))
+            }
+            State::Rows { table, row, count } => {
+                let Some(spec) = TABLES.get(table).filter(|_| row < count) else {
+                    return Ok((State::Table(table + 1), None));
+                };
+                let values = decode_row(cur, table, row, spec)?;
+                let next = State::Rows {
+                    table,
+                    row: row + 1,
+                    count,
+                };
+                Ok((next, Some(Event::Row(values))))
+            }
+            State::Digest | State::Done => Ok((self.state, Some(Event::End))),
+        }
+    }
+}
+
+/// Parses a backup file held in memory (module docs): [`Verifier`] (magic, format version and
+/// digest first, then the header), then [`Decoder`] over the same bytes, strictly.
 ///
 /// # Errors
 ///
@@ -767,89 +1221,60 @@ pub fn parse(file: &[u8]) -> Result<BackupFile, FileError> {
     if file.len() > MAX_IN_MEMORY_BACKUP_LEN {
         return Err(FileError::TooLarge);
     }
-    if !file.starts_with(&MAGIC) {
-        return Err(if MAGIC.starts_with(file) {
-            FileError::Truncated
-        } else {
-            FileError::BadMagic
-        });
-    }
-    let version = file
-        .get(MAGIC.len()..MAGIC.len() + 2)
-        .and_then(|b| <[u8; 2]>::try_from(b).ok())
-        .map(u16::from_be_bytes)
-        .ok_or(FileError::Truncated)?;
-    if version != FORMAT_VERSION {
-        return Err(FileError::UnsupportedFormat { version });
-    }
-    let body_len = file
-        .len()
-        .checked_sub(DIGEST_LEN)
-        .filter(|n| *n >= HEADER_LEN)
-        .ok_or(FileError::Truncated)?;
-    let (body, stored) = file
-        .split_at_checked(body_len)
-        .ok_or(FileError::Truncated)?;
-    if digest(body).as_slice() != stored {
-        return Err(FileError::DigestMismatch);
-    }
-
-    let header_at = Location::default();
-    let end = FileError::Malformed {
-        at: header_at,
-        problem: Problem::UnexpectedEnd,
-    };
-    let mut r = Reader {
-        rest: body.get(MAGIC.len() + 2..).ok_or(FileError::Truncated)?,
-    };
-    let schema_version = r.u64().ok_or_else(|| end.clone())?;
-    let schema_version = i64::try_from(schema_version)
-        .ok()
-        .filter(|v| *v >= 1)
-        .ok_or(FileError::SchemaVersion)?;
-    let created_at_ms = r.u64().ok_or_else(|| end.clone())?;
-    let table_count = r.u16().ok_or(end)?;
-    if usize::from(table_count) != TABLES.len() {
-        return Err(FileError::TableCount { found: table_count });
-    }
-    let mut tables = Vec::with_capacity(TABLES.len());
-    for (table_index, spec) in TABLES.iter().enumerate() {
-        tables.push(parse_table(&mut r, table_index, spec)?);
-    }
-    if !r.rest.is_empty() {
-        return Err(FileError::TrailingBytes);
+    let mut pass1 = Verifier::new(len64(file.len()))?;
+    pass1.update(file)?;
+    let verified = pass1.finish()?;
+    let mut decoder = Decoder::new(&verified);
+    let mut tables: Vec<TableDump> = Vec::with_capacity(TABLES.len());
+    let mut at = 0usize;
+    loop {
+        let (used, event) = decoder.decode(file.get(at..).unwrap_or_default())?;
+        at += used;
+        match event {
+            Some(Event::Table { spec, row_count }) => tables.push(TableDump {
+                table: spec.name.to_owned(),
+                rows: Vec::with_capacity(usize::try_from(row_count).unwrap_or(0)),
+            }),
+            Some(Event::Row(row)) => {
+                if let Some(table) = tables.last_mut() {
+                    table.rows.push(row);
+                }
+            }
+            Some(Event::End) => break,
+            // The whole file is in `file`, so the decoder never asks for more.
+            None => return Err(FileError::Changed),
+        }
     }
     Ok(BackupFile {
-        created_at_ms,
+        created_at_ms: verified.created_at_ms,
         dump: Dump {
-            schema_version,
+            schema_version: verified.schema_version,
             tables,
         },
     })
 }
 
-/// Parses one table, which must be `spec`.
-fn parse_table(
-    r: &mut Reader<'_>,
+/// Reads one table's descriptor, which must be `spec`'s, and returns its row count, checked
+/// to fit the rest of the file.
+fn decode_descriptor(
+    cur: &mut Cursor<'_>,
     table_index: usize,
     spec: &TableSpec,
-) -> Result<TableDump, FileError> {
+) -> Result<u64, Pull> {
     let at = Location {
         table: Some(table_index),
         ..Location::default()
     };
-    let malformed = |at: Location, problem: Problem| FileError::Malformed { at, problem };
-    let name = r.bytes(MAX_NAME_LEN, Problem::Name, at)?;
+    let malformed =
+        |at: Location, problem: Problem| Pull::Fail(FileError::Malformed { at, problem });
+    let name = cur.bytes(MAX_NAME_LEN, Problem::Name, at)?;
     if !valid_name(name) {
         return Err(malformed(at, Problem::Name));
     }
     if name != spec.name.as_bytes() {
         return Err(malformed(at, Problem::Table));
     }
-    let column_count = usize::from(
-        r.u16()
-            .ok_or_else(|| malformed(at, Problem::UnexpectedEnd))?,
-    );
+    let column_count = usize::from(need(cur.u16(), at)?);
     if column_count > MAX_COLUMNS || column_count != spec.columns.len() {
         return Err(malformed(at, Problem::ColumnCount));
     }
@@ -858,16 +1283,12 @@ fn parse_table(
             column: Some(column_index),
             ..at
         };
-        let name = r.bytes(MAX_NAME_LEN, Problem::Name, at)?;
+        let name = cur.bytes(MAX_NAME_LEN, Problem::Name, at)?;
         if !valid_name(name) {
             return Err(malformed(at, Problem::Name));
         }
-        let kind = r
-            .u8()
-            .ok_or_else(|| malformed(at, Problem::UnexpectedEnd))?;
-        let nullable = r
-            .u8()
-            .ok_or_else(|| malformed(at, Problem::UnexpectedEnd))?;
+        let kind = need(cur.u8(), at)?;
+        let nullable = need(cur.u8(), at)?;
         if name != column.name.as_bytes()
             || kind != kind_byte(column.kind)
             || nullable != u8::from(column.nullable)
@@ -875,55 +1296,54 @@ fn parse_table(
             return Err(malformed(at, Problem::Column));
         }
     }
-    let row_count = r
-        .u64()
-        .ok_or_else(|| malformed(at, Problem::UnexpectedEnd))?;
-    // No row vector is reserved before its rows can be there: each row takes at least
-    // `min_row_len` bytes (≥ `column_count`, ADR 0023 §3).
-    let min_row = u64::try_from(min_row_len(spec.columns)).unwrap_or(u64::MAX);
-    let remaining = u64::try_from(r.rest.len()).unwrap_or(u64::MAX);
+    let row_count = need(cur.u64(), at)?;
+    // Each row takes at least `min_row_len` bytes (≥ `column_count`, ADR 0023 §3), so a count
+    // the rest of the file cannot hold is refused before any row is read.
+    let min_row = len64(min_row_len(spec.columns));
     if row_count
         .checked_mul(min_row)
-        .is_none_or(|needed| needed > remaining)
+        .is_none_or(|needed| needed > cur.body_left)
     {
         return Err(malformed(at, Problem::RowCount));
     }
-    let mut rows = Vec::with_capacity(usize::try_from(row_count).unwrap_or(0));
-    for row_index in 0..row_count {
-        let mut row = Vec::with_capacity(spec.columns.len());
-        for (column_index, column) in spec.columns.iter().enumerate() {
-            let at = Location {
-                table: Some(table_index),
-                row: Some(row_index),
-                column: Some(column_index),
-            };
-            row.push(parse_value(r, column, at)?);
-        }
-        rows.push(row);
-    }
-    Ok(TableDump {
-        table: spec.name.to_owned(),
-        rows,
-    })
+    Ok(row_count)
 }
 
-/// Parses one value of `column`.
-fn parse_value(r: &mut Reader<'_>, column: &Column, at: Location) -> Result<Value, FileError> {
-    let malformed = |problem: Problem| FileError::Malformed { at, problem };
-    let tag = r.u8().ok_or_else(|| malformed(Problem::UnexpectedEnd))?;
-    match (tag, column.kind) {
+/// Reads one row of `spec`.
+fn decode_row(
+    cur: &mut Cursor<'_>,
+    table_index: usize,
+    row_index: u64,
+    spec: &TableSpec,
+) -> Result<Vec<Value>, Pull> {
+    let mut row = Vec::with_capacity(spec.columns.len());
+    for (column_index, column) in spec.columns.iter().enumerate() {
+        let at = Location {
+            table: Some(table_index),
+            row: Some(row_index),
+            column: Some(column_index),
+        };
+        row.push(decode_value(cur, column, at)?);
+    }
+    Ok(row)
+}
+
+/// Reads one value of `column`.
+fn decode_value(cur: &mut Cursor<'_>, column: &Column, at: Location) -> Result<Value, Pull> {
+    let malformed = |problem: Problem| Pull::Fail(FileError::Malformed { at, problem });
+    match (need(cur.u8(), at)?, column.kind) {
         (tag::NULL, _) if column.nullable => Ok(Value::Null),
-        (tag::INTEGER, Kind::Integer) => r
-            .array::<8>()
-            .map(|b| Value::Integer(i64::from_be_bytes(b)))
-            .ok_or_else(|| malformed(Problem::UnexpectedEnd)),
+        (tag::INTEGER, Kind::Integer) => Ok(Value::Integer(i64::from_be_bytes(need(
+            cur.array::<8>(),
+            at,
+        )?))),
         (tag::TEXT, Kind::Text) => {
-            let bytes = r.bytes(MAX_TEXT_LEN, Problem::TextTooLong, at)?;
+            let bytes = cur.bytes(MAX_TEXT_LEN, Problem::TextTooLong, at)?;
             let text = core::str::from_utf8(bytes).map_err(|_| malformed(Problem::Utf8))?;
             Ok(Value::Text(text.to_owned()))
         }
         (tag::BLOB, Kind::Blob) => {
-            let bytes = r.bytes(MAX_BLOB_LEN, Problem::BlobTooLong, at)?;
+            let bytes = cur.bytes(MAX_BLOB_LEN, Problem::BlobTooLong, at)?;
             Ok(Value::Blob(bytes.to_vec()))
         }
         _ => Err(malformed(Problem::Tag)),
@@ -1077,6 +1497,199 @@ mod tests {
         let mut streamed = Vec::new();
         write_to(&mut streamed, &kat_dump(), KAT_CREATED_AT_MS).unwrap();
         assert_eq!(streamed, KAT);
+    }
+
+    /// Pass 2 as a byte sink: decodes what it is written as it arrives, like
+    /// `Database::restore_from`, keeping the tables when `keep`.
+    struct DecodeSink {
+        decoder: Decoder,
+        buf: Vec<u8>,
+        rows: u64,
+        ended: bool,
+        keep: bool,
+        tables: Vec<TableDump>,
+    }
+
+    impl DecodeSink {
+        fn new(verified: &Verified, keep: bool) -> Self {
+            Self {
+                decoder: Decoder::new(verified),
+                buf: Vec::new(),
+                rows: 0,
+                ended: false,
+                keep,
+                tables: Vec::new(),
+            }
+        }
+    }
+
+    impl Write for DecodeSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.buf.extend_from_slice(bytes);
+            let mut at = 0;
+            loop {
+                let (n, event) = self
+                    .decoder
+                    .decode(&self.buf[at..])
+                    .map_err(std::io::Error::other)?;
+                at += n;
+                match event {
+                    Some(Event::Table { spec, .. }) if self.keep => self.tables.push(TableDump {
+                        table: spec.name.to_owned(),
+                        rows: Vec::new(),
+                    }),
+                    Some(Event::Table { .. }) => {}
+                    Some(Event::Row(row)) => {
+                        self.rows += 1;
+                        if self.keep {
+                            self.tables.last_mut().unwrap().rows.push(row);
+                        }
+                    }
+                    Some(Event::End) => {
+                        assert!(!self.ended);
+                        self.ended = true;
+                        assert_eq!(self.decoder.decode(&[]).unwrap().0, 0);
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            self.buf.drain(..at);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Pass 1 over `bytes` handed over `piece` bytes at a time.
+    fn verify_in_pieces(bytes: &[u8], piece: usize) -> Result<Verified, FileError> {
+        let mut v = Verifier::new(bytes.len() as u64)?;
+        for p in bytes.chunks(piece) {
+            v.update(p)?;
+        }
+        v.finish()
+    }
+
+    /// ADR 0094 §3 and §6: the two-pass reader, fed in pieces of any size, reads the
+    /// known-answer file back to its dump, as [`parse`] does.
+    #[test]
+    fn two_pass_reader_reads_the_kat_in_pieces() {
+        let whole = verify_in_pieces(KAT, KAT.len()).unwrap();
+        assert_eq!(whole.file_len(), KAT.len() as u64);
+        assert_eq!(whole.schema_version(), schema_version());
+        assert_eq!(whole.created_at_ms(), KAT_CREATED_AT_MS);
+        assert_eq!(whole.digest().as_slice(), &KAT[KAT.len() - DIGEST_LEN..]);
+        for piece in [1, 2, 7, 64, 4096, KAT.len()] {
+            let verified = verify_in_pieces(KAT, piece).unwrap();
+            assert_eq!(verified, whole);
+            let mut sink = DecodeSink::new(&verified, true);
+            for p in KAT.chunks(piece) {
+                sink.write_all(p).unwrap();
+            }
+            assert!(sink.ended, "piece {piece}");
+            assert!(sink.buf.is_empty());
+            assert_eq!(sink.decoder.used(), KAT.len() as u64);
+            let dump = Dump {
+                schema_version: verified.schema_version(),
+                tables: sink.tables,
+            };
+            assert_eq!(dump, kat_dump());
+        }
+    }
+
+    /// ADR 0094 §3 point 4: pass 2 refuses bytes other than pass 1's with `Changed`: another
+    /// header, the same header with another body, more bytes or fewer.
+    #[test]
+    fn two_pass_reader_refuses_a_changed_file() {
+        let verified = verify_in_pieces(KAT, KAT.len()).unwrap();
+        let decode_all = |file: &[u8]| -> Result<(), FileError> {
+            let mut d = Decoder::new(&verified);
+            let mut at = 0;
+            loop {
+                match d.decode(&file[at..])? {
+                    (_, Some(Event::End)) => return Ok(()),
+                    (n, Some(_)) => at += n,
+                    (_, None) => return Err(FileError::Truncated),
+                }
+            }
+        };
+        assert_eq!(decode_all(KAT), Ok(()));
+        let other_header = write(&kat_dump(), KAT_CREATED_AT_MS + 1).unwrap();
+        assert_eq!(decode_all(&other_header), Err(FileError::Changed));
+        let mut other_body = kat_dump();
+        other_body.tables[0].rows[0][1] = Value::Text("alicf".into());
+        let other_body = write(&other_body, KAT_CREATED_AT_MS).unwrap();
+        assert_eq!(other_body.len(), KAT.len());
+        assert_eq!(decode_all(&other_body), Err(FileError::Changed));
+        let mut same_body_other_digest = KAT.to_vec();
+        *same_body_other_digest.last_mut().unwrap() ^= 1;
+        assert_eq!(decode_all(&same_body_other_digest), Err(FileError::Changed));
+
+        let mut v = Verifier::new(KAT.len() as u64 - 1).unwrap();
+        assert_eq!(v.update(KAT), Err(FileError::Changed));
+        let mut v = Verifier::new(KAT.len() as u64 + 1).unwrap();
+        v.update(KAT).unwrap();
+        assert_eq!(v.finish(), Err(FileError::Changed));
+        assert_eq!(
+            Verifier::new(MAX_BACKUP_FILE_LEN + 1).unwrap_err(),
+            FileError::TooLarge
+        );
+        // The magic is refused as soon as it is in, before the rest is read.
+        let mut v = Verifier::new(1 << 30).unwrap();
+        assert_eq!(v.update(&[0; MAGIC.len()]), Err(FileError::BadMagic));
+    }
+
+    /// ADR 0094 §6: a file over 2 GiB ([`MAX_IN_MEMORY_BACKUP_LEN`]) reads through both
+    /// passes, streamed, never held. 66 blobs of 32 MiB; written twice and never stored.
+    /// Ignored in the gate (about 4.3 GiB hashed and copied); run with `--ignored`.
+    #[test]
+    #[ignore = "slow: streams a 2.06 GiB file twice"]
+    fn two_pass_reader_reads_a_file_over_2_gib() {
+        const ROWS: u64 = 66;
+        struct VerifySink(Verifier);
+        impl Write for VerifySink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.update(bytes).map_err(std::io::Error::other)?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let chunks = TABLES
+            .iter()
+            .position(|s| s.name == "vault_attachment_chunks")
+            .unwrap();
+        let mut row = vec![
+            Value::Blob(vec![0xa7; 16]),
+            Value::Integer(0),
+            Value::Blob(vec![0x5c; MAX_BLOB_LEN]),
+        ];
+        let mut encode = |out: &mut dyn Write| {
+            let mut e = Encoder::new(out, schema_version(), 1).unwrap();
+            for i in 0..TABLES.len() {
+                e.table(if i == chunks { ROWS } else { 0 }).unwrap();
+                if i == chunks {
+                    for r in 0..ROWS {
+                        row[1] = Value::Integer(i64::try_from(r).unwrap());
+                        e.row(&row).unwrap();
+                    }
+                }
+            }
+            e.finish().unwrap().2
+        };
+        let len = encode(&mut std::io::sink());
+        assert!(len > MAX_IN_MEMORY_BACKUP_LEN as u64);
+        let mut pass1 = VerifySink(Verifier::new(len).unwrap());
+        assert_eq!(encode(&mut pass1), len);
+        let verified = pass1.0.finish().unwrap();
+        let mut pass2 = DecodeSink::new(&verified, false);
+        encode(&mut pass2);
+        assert!(pass2.ended);
+        assert_eq!(pass2.rows, ROWS);
+        assert_eq!(pass2.decoder.used(), len);
     }
 
     /// The encoder refuses a table with another number of rows than it declared, a missing

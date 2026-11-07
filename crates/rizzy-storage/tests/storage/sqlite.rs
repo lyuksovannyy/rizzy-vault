@@ -621,6 +621,127 @@ fn backup_restore_round_trip() {
     });
 }
 
+/// A `read` for `Database::restore_from` over `file`, at most `piece` bytes per call.
+fn reader(file: &[u8], piece: usize) -> impl FnMut(&mut [u8]) -> Result<usize, &'static str> {
+    let mut rest = file;
+    move |buf: &mut [u8]| {
+        let n = buf.len().min(piece).min(rest.len());
+        buf[..n].copy_from_slice(&rest[..n]);
+        rest = &rest[n..];
+        Ok(n)
+    }
+}
+
+/// ADR 0094 §3, §6 test 5: the streaming restore loads a backup file through pass 2 in one
+/// transaction, with the pre-commit check seeing every row in file order; the database then
+/// dumps as after `Database::restore`. A file that changed between the passes, a check that
+/// refuses and a source that fails each roll everything back, and the target stays a
+/// restore target.
+#[test]
+fn streaming_restore_round_trip_and_refusals() {
+    use rizzy_storage::RestoreFromError;
+    use rizzy_storage::backup::file::{self, FileError};
+    block_on(async {
+        let bytes = file::write(&fixture(), 42).unwrap();
+        let mut pass1 = file::Verifier::new(bytes.len() as u64).unwrap();
+        pass1.update(&bytes).unwrap();
+        let verified = pass1.finish().unwrap();
+        let total: u64 = fixture().tables.iter().map(|t| t.rows.len() as u64).sum();
+        let no_check = |_: &'static rizzy_storage::tables::TableSpec, _: &[Value]| Ok(());
+
+        // Changed between the passes: another value of the same length.
+        let dir = TempDir::new();
+        let db = open(&dir, "db.sqlite").await;
+        let mut changed = fixture();
+        changed.tables[0].rows[0][0] = Value::Blob(vec![0xee; 16]);
+        let changed = file::write(&changed, 42).unwrap();
+        assert_eq!(changed.len(), bytes.len());
+        for (file, piece) in [(&changed[..], 5), (&bytes[..bytes.len() - 1], 4096)] {
+            assert!(matches!(
+                db.restore_from(
+                    &verified,
+                    reader(file, piece),
+                    no_check,
+                    RestoreGeneration([1; 16]),
+                    0
+                )
+                .await,
+                Err(RestoreFromError::File(FileError::Changed))
+            ));
+            db.check_restore_target().await.unwrap();
+        }
+        // More bytes than pass 1 verified.
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(matches!(
+            db.restore_from(
+                &verified,
+                reader(&longer, 4096),
+                no_check,
+                RestoreGeneration([1; 16]),
+                0
+            )
+            .await,
+            Err(RestoreFromError::File(FileError::Changed))
+        ));
+        // The check refuses on the first auth_credentials row; the source fails.
+        let refuse = |spec: &'static rizzy_storage::tables::TableSpec, _: &[Value]| {
+            if spec.name == "auth_credentials" {
+                Err("refused")
+            } else {
+                Ok(())
+            }
+        };
+        assert!(matches!(
+            db.restore_from(
+                &verified,
+                reader(&bytes, 3),
+                refuse,
+                RestoreGeneration([1; 16]),
+                0
+            )
+            .await,
+            Err(RestoreFromError::Caller("refused"))
+        ));
+        assert!(matches!(
+            db.restore_from(
+                &verified,
+                |_: &mut [u8]| Err("read"),
+                no_check,
+                RestoreGeneration([1; 16]),
+                0
+            )
+            .await,
+            Err(RestoreFromError::Caller("read"))
+        ));
+        db.check_restore_target().await.unwrap();
+
+        // The round trip, in 1-byte, 7-byte and large reads.
+        for (n, piece) in [1usize, 7, 1 << 20].into_iter().enumerate() {
+            let dir = TempDir::new();
+            let db = open(&dir, "db.sqlite").await;
+            let mut seen = Vec::new();
+            let check = |spec: &'static rizzy_storage::tables::TableSpec, _: &[Value]| {
+                seen.push(spec.name);
+                Ok::<_, &str>(())
+            };
+            let g = RestoreGeneration([u8::try_from(n).unwrap() + 2; 16]);
+            let report = db
+                .restore_from(&verified, reader(&bytes, piece), check, g, 9_000)
+                .await
+                .unwrap();
+            assert_eq!(report.rows, total);
+            assert_eq!(report.accounts_in_reconciliation, 2);
+            assert_eq!(seen.len() as u64, total);
+            let order: Vec<_> = TABLES.iter().map(|s| s.name).collect();
+            assert!(seen.windows(2).all(|w| {
+                order.iter().position(|n| *n == w[0]) <= order.iter().position(|n| *n == w[1])
+            }));
+            assert_eq!(db.dump().await.unwrap(), fixture_after_restore());
+        }
+    });
+}
+
 #[test]
 fn restore_refuses_bad_input_and_writes_nothing() {
     block_on(async {

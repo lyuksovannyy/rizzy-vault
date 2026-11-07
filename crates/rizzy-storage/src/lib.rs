@@ -98,7 +98,7 @@ pub mod quota;
 pub mod tables;
 pub mod writer_lock;
 
-pub use backup::{Dump, DumpError, Dumped, RestoreReport, TableDump, Value};
+pub use backup::{Dump, DumpError, Dumped, RestoreFromError, RestoreReport, TableDump, Value};
 pub use db::{Conn, Database, PostgresOptions, ReadTx, SqliteOptions, WriteTx};
 pub use error::{Engine, Error, RestoreError};
 pub use instance_lock::{InstanceLock, InstanceLockMode};
