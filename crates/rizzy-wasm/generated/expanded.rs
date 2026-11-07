@@ -16267,6 +16267,11 @@ pub mod error {
     /// vault keeps no account-state follow-up in this build: it logs in again, which reads the new
     /// key. Edits not yet uploaded are lost with the old session.
     pub const VAULT_KEY_ROTATED: &str = "vault_key_rotated";
+    /// No icon request without the session's permit ([ADR 0099] §4): the account's website-icons
+    /// setting reads off, or this session's probe has not found the `icons` role.
+    ///
+    /// [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
+    pub const ICONS_OFF: &str = "icons_off";
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
     #[doc = " A failed call: a stable code, nothing else (module docs)."]
@@ -20639,6 +20644,18 @@ pub mod http {
                     request_signature: None,
                 })
         }
+        /// A `POST` of a fixed JSON body, byte for byte, without a bearer token (the icon probe's
+        /// `{"host":""}`, ADR 0099 §3).
+        pub(crate) fn post_bytes(path: &'static str, body: &[u8]) -> Self {
+            Self {
+                method: "POST",
+                path,
+                body: Some(Zeroizing::new(body.to_vec())),
+                authorization: None,
+                request_counter: None,
+                request_signature: None,
+            }
+        }
         /// A `POST` with an empty body (ADR 0028 item 2).
         pub(crate) fn post_empty(path: &'static str,
             session: Option<&SessionToken>) -> Self {
@@ -21126,37 +21143,50 @@ pub mod http {
         };
 }
 pub mod icons {
-    //! Item icons across the boundary ([ADR 0052] point 6; `rizzy_client::icons`).
+    //! Item icons across the boundary ([ADR 0052] point 6; `rizzy_client::icons`), only under this
+    //! session's permit ([ADR 0099] §2–§4).
     //!
     //! ```text
-    //! IconFetch.forHost(summary.websiteHost)
-    //!   -> fetch.request()        POST /api/v1/icons/fetch {"host":"<A-label hostname>"}
-    //!                             no Authorization header, no other field
-    //!   -> fetch.finish(status, body) -> PNG bytes (Uint8Array)
+    //! session.websiteIcons()          the account's setting (ACCOUNT_SETTINGS tag 0x0005)
+    //! session.iconProbeRequest()      POST /api/v1/icons/fetch {"host":""}   (setting on, once)
+    //! session.iconProbeFinish(s, b)   "available" | "rate_limited" | "unavailable"
+    //! session.iconFetch(websiteHost)  -> fetch.request()  POST /api/v1/icons/fetch {"host":"<A-label>"}
+    //!                                 -> fetch.finish(status, body) -> PNG bytes (Uint8Array)
     //! ```
     //!
+    //! - **No permit, no request.** The `Session` holds the `IconPermit` the probe earned; it drops
+    //!   it on lock (with the session), when a settings read says off, and when this client turns
+    //!   the setting off. `iconFetch` and `iconProbeRequest` refuse with `icons_off` while the
+    //!   setting reads off; `iconFetch` refuses with `icons_off` too until the probe found the role.
+    //!   There is no other way to build an icon request: [`IconFetch::host_name`] only normalises.
     //! - **The request is not a session request.** It carries the normalised hostname only and no
     //!   bearer token; the `icons` role would not read one and must not learn who asks.
     //! - **The answer** follows [ADR 0028] items 2–3: `200` with an `image/png` whose bytes start
     //!   with the PNG signature, at most `MAX_ICON_PNG_LEN` bytes; anything else is the server's
-    //!   code (`server_not_found` when there is no icon or no `icons` role, `server_rate_limited`
-    //!   past the limit). The host hands the bytes to its image decoder as an image only (the web
-    //!   vault: a `blob:` URL in an `<img>`), never as markup.
+    //!   code (`server_not_found` when there is no icon, `server_rate_limited` past the limit). The
+    //!   host hands the bytes to its image decoder as an image only (the web vault: a `blob:` URL
+    //!   in an `<img>`), never as markup.
     //!
     //! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
     //! [ADR 0052]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0052-icon-proxy-role.md
+    //! [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
     use core::fmt;
-    use rizzy_client::icons::{icon_finish, icon_request};
+    use rizzy_client::icons::{
+        ICON_PROBE_MAX_ATTEMPTS, IconPermit, IconProbeOutcome, IconsSetting,
+        icon_finish, icon_host, icon_probe_finish, icon_probe_request,
+        icon_request,
+    };
     use rizzy_client::rizzy_proto::http::paths::ICONS_FETCH;
     use rizzy_client::rizzy_proto::icons::{
         IconFetchRequest, IconFetchResponse,
     };
     use wasm_bindgen::prelude::wasm_bindgen;
-    use crate::error::{CoreError, CoreResult};
-    use crate::http::{HttpRequest, json};
+    use crate::error::{CoreError, CoreResult, ICONS_OFF, WRONG_STATE};
+    use crate::http::{HttpRequest, json, server_code};
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
-    #[doc = " One icon fetch for one hostname. `Debug` prints no host."]
+    #[doc =
+    " One icon fetch for one hostname, built under the session\'s permit. `Debug` prints no host."]
     pub struct IconFetch {
         #[doc = " The checked request."]
         request: IconFetchRequest,
@@ -21395,7 +21425,7 @@ pub mod icons {
             const _ENCODED_BYTES: &[u8] =
                 {
                     const _CHUNK_SLICES: [&[u8]; 1usize] =
-                        [b"\0\0\0\x01\tIconFetch\0\x019 One icon fetch for one hostname. `Debug` prints no host.\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        [b"\0\0\0\x01\tIconFetch\0\x01[ One icon fetch for one hostname, built under the session's permit. `Debug` prints no host.\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                     #[allow(long_running_const_eval)]
                     const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                     #[allow(long_running_const_eval)]
@@ -21425,34 +21455,22 @@ pub mod icons {
         }
     }
     impl IconFetch {
-        /// A fetch for `website_host`.
-        pub(crate) fn of(website_host: &str) -> CoreResult<Self> {
-            Ok(Self { request: icon_request(website_host)? })
-        }
-    }
-    impl IconFetch {
         #[doc =
-        " A fetch for the host of an item\'s website (`ItemSummary.websiteHost`), normalised to"]
-        #[doc = " its lowercase A-label form."]
-        #[doc = ""]
-        #[doc = " # Errors"]
+        " The hostname an icon request for `website_host` would carry (lowercase A-labels), or"]
         #[doc =
-        " `invalid_input` for a host that is not a usable hostname (an IP literal in brackets,"]
-        #[doc = " empty, too long): nothing is to be sent for it."]
-        pub fn for_host(website_host: &str) -> Result<IconFetch, CoreError> {
+        " `undefined` when nothing would be sent for it. Builds no request."]
+        #[must_use]
+        pub fn host_name(website_host: &str) -> Option<String> {
             #[automatically_derived]
             const _: () =
                 {
                     #[doc =
-                    " A fetch for the host of an item\'s website (`ItemSummary.websiteHost`), normalised to"]
-                    #[doc = " its lowercase A-label form."]
-                    #[doc = ""]
-                    #[doc = " # Errors"]
+                    " The hostname an icon request for `website_host` would carry (lowercase A-labels), or"]
                     #[doc =
-                    " `invalid_input` for a host that is not a usable hostname (an IP literal in brackets,"]
-                    #[doc = " empty, too long): nothing is to be sent for it."]
-                    #[export_name = "iconfetch_forHost_e09cc0eb35f8b583"]
-                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_IconFetch_forHost(arg0_1:
+                    " `undefined` when nothing would be sent for it. Builds no request."]
+                    #[must_use]
+                    #[export_name = "iconfetch_hostName_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_IconFetch_hostName(arg0_1:
                             <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg0_2:
@@ -21465,8 +21483,8 @@ pub mod icons {
                             <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
-                            wasm_bindgen::convert::WasmRet<<Result<IconFetch, CoreError>
-                            as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
                         const _: () = {};
                         let _ret =
                             wasm_bindgen::__rt::maybe_catch_unwind(||
@@ -21482,11 +21500,11 @@ pub mod icons {
                                                             arg0_3, arg0_4))
                                                 };
                                             let arg0 = &*arg0;
-                                            let _ret = IconFetch::for_host(arg0);
+                                            let _ret = IconFetch::host_name(arg0);
                                             _ret
                                         }
                                     });
-                        <Result<IconFetch, CoreError> as
+                        <Option<String> as
                                     wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
                     }
                 };
@@ -21494,24 +21512,21 @@ pub mod icons {
             const _: () =
                 {
                     #[doc =
-                    " A fetch for the host of an item\'s website (`ItemSummary.websiteHost`), normalised to"]
-                    #[doc = " its lowercase A-label form."]
-                    #[doc = ""]
-                    #[doc = " # Errors"]
+                    " The hostname an icon request for `website_host` would carry (lowercase A-labels), or"]
                     #[doc =
-                    " `invalid_input` for a host that is not a usable hostname (an IP literal in brackets,"]
-                    #[doc = " empty, too long): nothing is to be sent for it."]
+                    " `undefined` when nothing would be sent for it. Builds no request."]
+                    #[must_use]
                     #[no_mangle]
                     #[doc(hidden)]
-                    pub extern "C-unwind" fn __wbindgen_describe_iconfetch_forHost_e09cc0eb35f8b583() {
+                    pub extern "C-unwind" fn __wbindgen_describe_iconfetch_hostName_e09cc0eb35f8b583() {
                         use wasm_bindgen::describe::*;
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
                         inform(1u32);
                         <&str as WasmDescribe>::describe();
-                        <Result<IconFetch, CoreError> as WasmDescribe>::describe();
-                        <Result<IconFetch, CoreError> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
                     }
                 };
             #[automatically_derived]
@@ -21522,7 +21537,7 @@ pub mod icons {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\tIconFetch\x06U A fetch for the host of an item's website (`ItemSummary.websiteHost`), normalised to\x1c its lowercase A-label form.\0\t # ErrorsU `invalid_input` for a host that is not a usable hostname (an IP literal in brackets,0 empty, too long): nothing is to be sent for it.\0\x01\x0cwebsite_host\0\0\0\0\0\x07forHost\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\tIconFetch\x02U The hostname an icon request for `website_host` would carry (lowercase A-labels), orB `undefined` when nothing would be sent for it. Builds no request.\0\x01\x0cwebsite_host\0\0\0\0\0\x08hostName\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -21548,7 +21563,7 @@ pub mod icons {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            Self::of(website_host)
+            icon_host(website_host).ok().map(|h| h.as_str().to_owned())
         }
         #[doc =
         " The normalised hostname the request carries, for the host\'s in-memory cache key."]
@@ -21926,6 +21941,113 @@ pub mod icons {
             static _GENERATED: [u8; _LEN] =
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
+    /// Where this session stands on icons (module docs): dropped with the session at lock.
+    pub(crate) enum IconsState {
+
+        /// No probe sent since unlock or since the setting last read off.
+        #[default]
+        NotProbed,
+
+        /// This many probes sent, the last one not yet answered or answered `rate_limited`.
+        Probing(u8),
+
+        /// The probe found the role: hosts may be sent.
+        Available(IconPermit),
+
+        /// The probe did not find the role: nothing more is sent this session.
+        Unavailable,
+    }
+    #[automatically_derived]
+    impl ::core::fmt::Debug for IconsState {
+        #[inline]
+        fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            match self {
+                IconsState::NotProbed =>
+                    ::core::fmt::Formatter::write_str(f, "NotProbed"),
+                IconsState::Probing(__self_0) =>
+                    ::core::fmt::Formatter::debug_tuple_field1_finish(f,
+                        "Probing", &__self_0),
+                IconsState::Available(__self_0) =>
+                    ::core::fmt::Formatter::debug_tuple_field1_finish(f,
+                        "Available", &__self_0),
+                IconsState::Unavailable =>
+                    ::core::fmt::Formatter::write_str(f, "Unavailable"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl ::core::default::Default for IconsState {
+        #[inline]
+        fn default() -> IconsState { Self::NotProbed }
+    }
+    impl IconsState {
+        /// What the host shows: `off`, `unknown` (not probed yet), `available` or `unavailable`.
+        pub(crate) fn status(&mut self, setting: IconsSetting)
+            -> &'static str {
+            if !setting.is_on() { *self = Self::NotProbed; return "off"; }
+            match self {
+                Self::NotProbed | Self::Probing(_) => "unknown",
+                Self::Available(_) => "available",
+                Self::Unavailable => "unavailable",
+            }
+        }
+        /// The probe request, or `icons_off` while the setting reads off (then nothing is sent);
+        /// `wrong_state` once the outcome is known or every attempt was sent.
+        pub(crate) fn probe_request(&mut self, setting: IconsSetting)
+            -> CoreResult<HttpRequest> {
+            let Some(body) =
+                icon_probe_request(setting) else {
+                    *self = Self::NotProbed;
+                    return Err(CoreError::new(ICONS_OFF));
+                };
+            let sent =
+                match self {
+                    Self::NotProbed => 0,
+                    Self::Probing(n) if *n < ICON_PROBE_MAX_ATTEMPTS => *n,
+                    _ => return Err(CoreError::new(WRONG_STATE)),
+                };
+            *self = Self::Probing(sent.saturating_add(1));
+            Ok(HttpRequest::post_bytes(ICONS_FETCH, body))
+        }
+        /// Reads a probe answer; a `rate_limited` answer after the last attempt reads unavailable.
+        pub(crate) fn probe_finish(&mut self, setting: IconsSetting,
+            status: u16, body: &[u8]) -> CoreResult<&'static str> {
+            let Self::Probing(sent) =
+                *self else { return Err(CoreError::new(WRONG_STATE)); };
+            if !setting.is_on() {
+                *self = Self::NotProbed;
+                return Err(CoreError::new(ICONS_OFF));
+            }
+            Ok(match icon_probe_finish(status, server_code(status, body),
+                        setting) {
+                    IconProbeOutcome::Available(permit) => {
+                        *self = Self::Available(permit);
+                        "available"
+                    }
+                    IconProbeOutcome::RateLimited if
+                        sent < ICON_PROBE_MAX_ATTEMPTS => "rate_limited",
+                    IconProbeOutcome::RateLimited |
+                        IconProbeOutcome::Unavailable => {
+                        *self = Self::Unavailable;
+                        "unavailable"
+                    }
+                })
+        }
+        /// An icon fetch under the permit, or `icons_off` without one (setting off, or the role not
+        /// found yet); `invalid_input` for a host that is not a usable hostname.
+        pub(crate) fn fetch(&mut self, setting: IconsSetting,
+            website_host: &str) -> CoreResult<IconFetch> {
+            if !setting.is_on() {
+                *self = Self::NotProbed;
+                return Err(CoreError::new(ICONS_OFF));
+            }
+            let Self::Available(permit) =
+                self else { return Err(CoreError::new(ICONS_OFF)); };
+            Ok(IconFetch { request: icon_request(permit, website_host)? })
+        }
+        /// The setting was turned off here: the permit and any probe go.
+        pub(crate) fn turn_off(&mut self) { *self = Self::NotProbed; }
+    }
 }
 pub mod identity {
     //! The identity generator for JavaScript ([ADR 0079] §3, §10): the web vault's "New identity"
@@ -43999,6 +44121,7 @@ pub mod session {
         PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck,
         csv_export_warning,
     };
+    use rizzy_client::icons::IconsSetting;
     use rizzy_client::items::{Dot, FieldEdit, ItemId, TRASH_RETENTION_MS};
     use rizzy_client::login::WebSession;
     use rizzy_client::matching::{
@@ -44039,6 +44162,7 @@ pub mod session {
         WRONG_STATE,
     };
     use crate::http::{self, HttpRequest};
+    use crate::icons::{IconFetch, IconsState};
     use crate::identity::{self, IdentityDefaultsView};
     use crate::items::{
         self, ConflictValueView, FieldHistoryView, FieldView,
@@ -52204,6 +52328,9 @@ pub mod session {
         uploads: BTreeMap<AttachmentId, AttachmentUpload>,
         /// Attachments being downloaded and verified, by id.
         downloads: BTreeMap<AttachmentId, (VaultId, AttachmentDownload)>,
+        /// The icon probe's outcome and this session's `IconPermit` (ADR 0099 §3–§4;
+        /// [`crate::icons`]): gone with the session at lock.
+        icons: IconsState,
     }
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
@@ -52505,6 +52632,7 @@ pub mod session {
                                 shown_trash_notices: BTreeSet::new(),
                                 settings: SettingsCache::default(),
                                 settings_pending: None,
+                                icons: IconsState::default(),
                                 global_groups: global_equivalence_groups(0).0,
                                 sessions: None,
                                 uploads: BTreeMap::new(),
@@ -64435,6 +64563,769 @@ pub mod session {
             self.settings_change(SettingsEdit::SetIdentityDefaults(defaults))
         }
         #[doc =
+        " Whether the account\'s website-icons setting reads on (`ACCOUNT_SETTINGS` tag `0x0005`,"]
+        #[doc =
+        " ADR 0099 §1): on by default; off for an explicit `0x00`, and off when the settings record"]
+        #[doc =
+        " cannot be read (rejected or parked), never the wider default."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn website_icons(&mut self) -> Result<bool, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Whether the account\'s website-icons setting reads on (`ACCOUNT_SETTINGS` tag `0x0005`,"]
+                    #[doc =
+                    " ADR 0099 §1): on by default; off for an explicit `0x00`, and off when the settings record"]
+                    #[doc =
+                    " cannot be read (rejected or parked), never the wider default."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name = "session_websiteIcons_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_websiteIcons(me:
+                            <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<bool, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let mut me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            let _ret = me.website_icons();
+                                            _ret
+                                        }
+                                    });
+                        <Result<bool, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Whether the account\'s website-icons setting reads on (`ACCOUNT_SETTINGS` tag `0x0005`,"]
+                    #[doc =
+                    " ADR 0099 §1): on by default; off for an explicit `0x00`, and off when the settings record"]
+                    #[doc =
+                    " cannot be read (rejected or parked), never the wider default."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_websiteIcons_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<bool, CoreError> as WasmDescribe>::describe();
+                        <Result<bool, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x06W Whether the account's website-icons setting reads on (`ACCOUNT_SETTINGS` tag `0x0005`,[ ADR 0099 \xc2\xa71): on by default; off for an explicit `0x00`, and off when the settings record> cannot be read (rejected or parked), never the wider default.\0\t # Errors\n `locked`.\0\0\0\0\x0cwebsiteIcons\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let inner = self.inner_mut()?;
+            Ok(website_icons_setting(inner).is_on())
+        }
+        #[doc =
+        " Where icons stand in this session (ADR 0099 §3, §6): `off` (the setting reads off),"]
+        #[doc =
+        " `unknown` (on, not probed yet), `available` or `unavailable` (the probe\'s outcome)."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn icons_status(&mut self) -> Result<String, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Where icons stand in this session (ADR 0099 §3, §6): `off` (the setting reads off),"]
+                    #[doc =
+                    " `unknown` (on, not probed yet), `available` or `unavailable` (the probe\'s outcome)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name = "session_iconsStatus_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_iconsStatus(me:
+                            <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<String, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let mut me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            let _ret = me.icons_status();
+                                            _ret
+                                        }
+                                    });
+                        <Result<String, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Where icons stand in this session (ADR 0099 §3, §6): `off` (the setting reads off),"]
+                    #[doc =
+                    " `unknown` (on, not probed yet), `available` or `unavailable` (the probe\'s outcome)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_iconsStatus_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<String, CoreError> as WasmDescribe>::describe();
+                        <Result<String, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x05V Where icons stand in this session (ADR 0099 \xc2\xa73, \xc2\xa76): `off` (the setting reads off),T `unknown` (on, not probed yet), `available` or `unavailable` (the probe's outcome).\0\t # Errors\n `locked`.\0\0\0\0\x0biconsStatus\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let inner = self.inner_mut()?;
+            let setting = website_icons_setting(inner);
+            Ok(inner.icons.status(setting).to_owned())
+        }
+        #[doc =
+        " The icon probe (ADR 0099 §3): `POST /api/v1/icons/fetch` with `{\"host\":\"\"}` and no"]
+        #[doc =
+        " `Authorization`. Send it once per session before any host; pass the answer to"]
+        #[doc = " [`Session::icon_probe_finish`]."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `locked`; `icons_off` while the setting reads off (nothing is to be sent);"]
+        #[doc =
+        " `wrong_state` once the outcome is known or every attempt was sent."]
+        pub fn icon_probe_request(&mut self)
+            -> Result<HttpRequest, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The icon probe (ADR 0099 §3): `POST /api/v1/icons/fetch` with `{\"host\":\"\"}` and no"]
+                    #[doc =
+                    " `Authorization`. Send it once per session before any host; pass the answer to"]
+                    #[doc = " [`Session::icon_probe_finish`]."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `icons_off` while the setting reads off (nothing is to be sent);"]
+                    #[doc =
+                    " `wrong_state` once the outcome is known or every attempt was sent."]
+                    #[export_name = "session_iconProbeRequest_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_iconProbeRequest(me:
+                            <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let mut me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            let _ret = me.icon_probe_request();
+                                            _ret
+                                        }
+                                    });
+                        <Result<HttpRequest, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The icon probe (ADR 0099 §3): `POST /api/v1/icons/fetch` with `{\"host\":\"\"}` and no"]
+                    #[doc =
+                    " `Authorization`. Send it once per session before any host; pass the answer to"]
+                    #[doc = " [`Session::icon_probe_finish`]."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `icons_off` while the setting reads off (nothing is to be sent);"]
+                    #[doc =
+                    " `wrong_state` once the outcome is known or every attempt was sent."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_iconProbeRequest_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x07T The icon probe (ADR 0099 \xc2\xa73): `POST /api/v1/icons/fetch` with `{\"host\":\"\"}` and noN `Authorization`. Send it once per session before any host; pass the answer to  [`Session::icon_probe_finish`].\0\t # ErrorsK `locked`; `icons_off` while the setting reads off (nothing is to be sent);C `wrong_state` once the outcome is known or every attempt was sent.\0\0\0\0\x10iconProbeRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let inner = self.inner_mut()?;
+            let setting = website_icons_setting(inner);
+            inner.icons.probe_request(setting)
+        }
+        #[doc =
+        " Reads the probe\'s answer: `available` (hosts may be sent; the session now holds the"]
+        #[doc =
+        " permit), `rate_limited` (wait `Retry-After` or 4 s, then probe again) or `unavailable`"]
+        #[doc =
+        " (nothing is sent this session). A transport failure is `unavailable` too: pass status 0."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `locked`; `wrong_state` without a probe in flight; `icons_off` if the setting went off"]
+        #[doc = " meanwhile."]
+        pub fn icon_probe_finish(&mut self, status: u16, body: &[u8])
+            -> Result<String, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Reads the probe\'s answer: `available` (hosts may be sent; the session now holds the"]
+                    #[doc =
+                    " permit), `rate_limited` (wait `Retry-After` or 4 s, then probe again) or `unavailable`"]
+                    #[doc =
+                    " (nothing is sent this session). A transport failure is `unavailable` too: pass status 0."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `wrong_state` without a probe in flight; `icons_off` if the setting went off"]
+                    #[doc = " meanwhile."]
+                    #[export_name = "session_iconProbeFinish_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_iconProbeFinish(me:
+                            <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<String, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let mut me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u16>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <u16 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u16 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            let _ret = me.icon_probe_finish(arg1, arg2);
+                                            _ret
+                                        }
+                                    });
+                        <Result<String, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Reads the probe\'s answer: `available` (hosts may be sent; the session now holds the"]
+                    #[doc =
+                    " permit), `rate_limited` (wait `Retry-After` or 4 s, then probe again) or `unavailable`"]
+                    #[doc =
+                    " (nothing is sent this session). A transport failure is `unavailable` too: pass status 0."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `wrong_state` without a probe in flight; `icons_off` if the setting went off"]
+                    #[doc = " meanwhile."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_iconProbeFinish_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(2u32);
+                        <u16 as WasmDescribe>::describe();
+                        <&[u8] as WasmDescribe>::describe();
+                        <Result<String, CoreError> as WasmDescribe>::describe();
+                        <Result<String, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x07T Reads the probe's answer: `available` (hosts may be sent; the session now holds theW permit), `rate_limited` (wait `Retry-After` or 4 s, then probe again) or `unavailable`Y (nothing is sent this session). A transport failure is `unavailable` too: pass status 0.\0\t # ErrorsW `locked`; `wrong_state` without a probe in flight; `icons_off` if the setting went off\x0b meanwhile.\0\x02\x06status\0\0\0\x04body\0\0\0\0\0\x0ficonProbeFinish\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let inner = self.inner_mut()?;
+            let setting = website_icons_setting(inner);
+            inner.icons.probe_finish(setting, status, body).map(str::to_owned)
+        }
+        #[doc =
+        " The icon fetch for the host of an item\'s website (`ItemSummary.websiteHost`), under this"]
+        #[doc = " session\'s permit (ADR 0099 §4)."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `locked`; `icons_off` while the setting reads off or before the probe found the role;"]
+        #[doc =
+        " `invalid_input` for a host that is not a usable hostname (nothing is sent for it)."]
+        pub fn icon_fetch(&mut self, website_host: &str)
+            -> Result<IconFetch, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The icon fetch for the host of an item\'s website (`ItemSummary.websiteHost`), under this"]
+                    #[doc = " session\'s permit (ADR 0099 §4)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `icons_off` while the setting reads off or before the probe found the role;"]
+                    #[doc =
+                    " `invalid_input` for a host that is not a usable hostname (nothing is sent for it)."]
+                    #[export_name = "session_iconFetch_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_iconFetch(me:
+                            <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<IconFetch, CoreError>
+                            as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let mut me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            let _ret = me.icon_fetch(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<IconFetch, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The icon fetch for the host of an item\'s website (`ItemSummary.websiteHost`), under this"]
+                    #[doc = " session\'s permit (ADR 0099 §4)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `icons_off` while the setting reads off or before the probe found the role;"]
+                    #[doc =
+                    " `invalid_input` for a host that is not a usable hostname (nothing is sent for it)."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_iconFetch_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <&str as WasmDescribe>::describe();
+                        <Result<IconFetch, CoreError> as WasmDescribe>::describe();
+                        <Result<IconFetch, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x06Y The icon fetch for the host of an item's website (`ItemSummary.websiteHost`), under this! session's permit (ADR 0099 \xc2\xa74).\0\t # ErrorsV `locked`; `icons_off` while the setting reads off or before the probe found the role;S `invalid_input` for a host that is not a usable hostname (nothing is sent for it).\0\x01\x0cwebsite_host\0\0\0\0\0\ticonFetch\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let inner = self.inner_mut()?;
+            let setting = website_icons_setting(inner);
+            inner.icons.fetch(setting, website_host)
+        }
+        #[doc =
+        " Turns website icons on or off for the whole account (ADR 0099 §1 \"Writing\"): the commit"]
+        #[doc =
+        " request; tag `0x0005` is written `0x01` or `0x00`, never deleted. Turning it off drops"]
+        #[doc =
+        " this session\'s permit at once, before the commit is even sent."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " As [`Session::set_match_default_request`]."]
+        pub fn set_website_icons_request(&mut self, on: bool)
+            -> Result<HttpRequest, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Turns website icons on or off for the whole account (ADR 0099 §1 \"Writing\"): the commit"]
+                    #[doc =
+                    " request; tag `0x0005` is written `0x01` or `0x00`, never deleted. Turning it off drops"]
+                    #[doc =
+                    " this session\'s permit at once, before the commit is even sent."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " As [`Session::set_match_default_request`]."]
+                    #[export_name =
+                    "session_setWebsiteIconsRequest_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_setWebsiteIconsRequest(me:
+                            <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let mut me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<bool>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <bool as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<bool as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let _ret = me.set_website_icons_request(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<HttpRequest, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Turns website icons on or off for the whole account (ADR 0099 §1 \"Writing\"): the commit"]
+                    #[doc =
+                    " request; tag `0x0005` is written `0x01` or `0x00`, never deleted. Turning it off drops"]
+                    #[doc =
+                    " this session\'s permit at once, before the commit is even sent."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " As [`Session::set_match_default_request`]."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_setWebsiteIconsRequest_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <bool as WasmDescribe>::describe();
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x06Y Turns website icons on or off for the whole account (ADR 0099 \xc2\xa71 \"Writing\"): the commitW request; tag `0x0005` is written `0x01` or `0x00`, never deleted. Turning it off drops? this session's permit at once, before the commit is even sent.\0\t # Errors+ As [`Session::set_match_default_request`].\0\x01\x02on\0\0\0\0\0\x16setWebsiteIconsRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            if !on { self.inner_mut()?.icons.turn_off(); }
+            self.settings_change(SettingsEdit::SetWebsiteIcons(on))
+        }
+        #[doc =
         " Sets the account-level match default (`0x0001`–`0x0006`): the commit request."]
         #[doc = ""]
         #[doc = " # Errors"]
@@ -65435,6 +66326,12 @@ pub mod session {
             inner.settings_pending = Some(pending);
             Ok(request)
         }
+    }
+    /// The account's website-icons setting from the verified account's settings record (ADR 0099
+    /// §1): off when the record cannot be read.
+    fn website_icons_setting(inner: &mut Inner) -> IconsSetting {
+        IconsSetting::from_read(inner.settings.get(&inner.account,
+                &inner.unlocked))
     }
     /// The name of a device kind.
     const fn kind_name(kind: DeviceKind) -> &'static str {

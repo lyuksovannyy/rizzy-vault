@@ -67,6 +67,7 @@ use rizzy_client::export::gate::{self, ExportGate, check_export_password};
 use rizzy_client::export::plaintext::{
     PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck, csv_export_warning,
 };
+use rizzy_client::icons::IconsSetting;
 use rizzy_client::items::{Dot, FieldEdit, ItemId, TRASH_RETENTION_MS};
 use rizzy_client::login::WebSession;
 use rizzy_client::matching::{
@@ -103,6 +104,7 @@ use zeroize::Zeroizing;
 use crate::breach::BreachCheck;
 use crate::error::{CoreError, CoreResult, IMPORT_FAILED, LOCKED, UNKNOWN_FORMAT, WRONG_STATE};
 use crate::http::{self, HttpRequest};
+use crate::icons::{IconFetch, IconsState};
 use crate::identity::{self, IdentityDefaultsView};
 use crate::items::{
     self, ConflictValueView, FieldHistoryView, FieldView, HistoryEntryView, ItemDraft, ItemSummary,
@@ -198,6 +200,9 @@ struct Inner {
     uploads: BTreeMap<AttachmentId, AttachmentUpload>,
     /// Attachments being downloaded and verified, by id.
     downloads: BTreeMap<AttachmentId, (VaultId, AttachmentDownload)>,
+    /// The icon probe's outcome and this session's `IconPermit` (ADR 0099 §3–§4;
+    /// [`crate::icons`]): gone with the session at lock.
+    icons: IconsState,
 }
 
 /// An unlocked web-vault session (module docs). `Debug` shows nothing secret.
@@ -254,6 +259,7 @@ impl Session {
                 shown_trash_notices: BTreeSet::new(),
                 settings: SettingsCache::default(),
                 settings_pending: None,
+                icons: IconsState::default(),
                 global_groups: global_equivalence_groups(0).0,
                 sessions: None,
                 uploads: BTreeMap::new(),
@@ -1906,6 +1912,88 @@ impl Session {
         self.settings_change(SettingsEdit::SetIdentityDefaults(defaults))
     }
 
+    /// Whether the account's website-icons setting reads on (`ACCOUNT_SETTINGS` tag `0x0005`,
+    /// ADR 0099 §1): on by default; off for an explicit `0x00`, and off when the settings record
+    /// cannot be read (rejected or parked), never the wider default.
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(js_name = websiteIcons)]
+    pub fn website_icons(&mut self) -> Result<bool, CoreError> {
+        let inner = self.inner_mut()?;
+        Ok(website_icons_setting(inner).is_on())
+    }
+
+    /// Where icons stand in this session (ADR 0099 §3, §6): `off` (the setting reads off),
+    /// `unknown` (on, not probed yet), `available` or `unavailable` (the probe's outcome).
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(js_name = iconsStatus)]
+    pub fn icons_status(&mut self) -> Result<String, CoreError> {
+        let inner = self.inner_mut()?;
+        let setting = website_icons_setting(inner);
+        Ok(inner.icons.status(setting).to_owned())
+    }
+
+    /// The icon probe (ADR 0099 §3): `POST /api/v1/icons/fetch` with `{"host":""}` and no
+    /// `Authorization`. Send it once per session before any host; pass the answer to
+    /// [`Session::icon_probe_finish`].
+    ///
+    /// # Errors
+    /// `locked`; `icons_off` while the setting reads off (nothing is to be sent);
+    /// `wrong_state` once the outcome is known or every attempt was sent.
+    #[wasm_bindgen(js_name = iconProbeRequest)]
+    pub fn icon_probe_request(&mut self) -> Result<HttpRequest, CoreError> {
+        let inner = self.inner_mut()?;
+        let setting = website_icons_setting(inner);
+        inner.icons.probe_request(setting)
+    }
+
+    /// Reads the probe's answer: `available` (hosts may be sent; the session now holds the
+    /// permit), `rate_limited` (wait `Retry-After` or 4 s, then probe again) or `unavailable`
+    /// (nothing is sent this session). A transport failure is `unavailable` too: pass status 0.
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` without a probe in flight; `icons_off` if the setting went off
+    /// meanwhile.
+    #[wasm_bindgen(js_name = iconProbeFinish)]
+    pub fn icon_probe_finish(&mut self, status: u16, body: &[u8]) -> Result<String, CoreError> {
+        let inner = self.inner_mut()?;
+        let setting = website_icons_setting(inner);
+        inner
+            .icons
+            .probe_finish(setting, status, body)
+            .map(str::to_owned)
+    }
+
+    /// The icon fetch for the host of an item's website (`ItemSummary.websiteHost`), under this
+    /// session's permit (ADR 0099 §4).
+    ///
+    /// # Errors
+    /// `locked`; `icons_off` while the setting reads off or before the probe found the role;
+    /// `invalid_input` for a host that is not a usable hostname (nothing is sent for it).
+    #[wasm_bindgen(js_name = iconFetch)]
+    pub fn icon_fetch(&mut self, website_host: &str) -> Result<IconFetch, CoreError> {
+        let inner = self.inner_mut()?;
+        let setting = website_icons_setting(inner);
+        inner.icons.fetch(setting, website_host)
+    }
+
+    /// Turns website icons on or off for the whole account (ADR 0099 §1 "Writing"): the commit
+    /// request; tag `0x0005` is written `0x01` or `0x00`, never deleted. Turning it off drops
+    /// this session's permit at once, before the commit is even sent.
+    ///
+    /// # Errors
+    /// As [`Session::set_match_default_request`].
+    #[wasm_bindgen(js_name = setWebsiteIconsRequest)]
+    pub fn set_website_icons_request(&mut self, on: bool) -> Result<HttpRequest, CoreError> {
+        if !on {
+            self.inner_mut()?.icons.turn_off();
+        }
+        self.settings_change(SettingsEdit::SetWebsiteIcons(on))
+    }
+
     /// Sets the account-level match default (`0x0001`–`0x0006`): the commit request.
     ///
     /// # Errors
@@ -2040,6 +2128,12 @@ impl Session {
         inner.settings_pending = Some(pending);
         Ok(request)
     }
+}
+
+/// The account's website-icons setting from the verified account's settings record (ADR 0099
+/// §1): off when the record cannot be read.
+fn website_icons_setting(inner: &mut Inner) -> IconsSetting {
+    IconsSetting::from_read(inner.settings.get(&inner.account, &inner.unlocked))
 }
 
 /// The name of a device kind.

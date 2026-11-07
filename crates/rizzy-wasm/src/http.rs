@@ -184,6 +184,19 @@ impl HttpRequest {
         })
     }
 
+    /// A `POST` of a fixed JSON body, byte for byte, without a bearer token (the icon probe's
+    /// `{"host":""}`, ADR 0099 §3).
+    pub(crate) fn post_bytes(path: &'static str, body: &[u8]) -> Self {
+        Self {
+            method: "POST",
+            path,
+            body: Some(Zeroizing::new(body.to_vec())),
+            authorization: None,
+            request_counter: None,
+            request_signature: None,
+        }
+    }
+
     /// A `POST` with an empty body (ADR 0028 item 2).
     pub(crate) fn post_empty(path: &'static str, session: Option<&SessionToken>) -> Self {
         Self {

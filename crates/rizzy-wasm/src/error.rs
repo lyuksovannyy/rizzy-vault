@@ -50,6 +50,11 @@ pub const IMPORT_FAILED: &str = "import_failed";
 /// vault keeps no account-state follow-up in this build: it logs in again, which reads the new
 /// key. Edits not yet uploaded are lost with the old session.
 pub const VAULT_KEY_ROTATED: &str = "vault_key_rotated";
+/// No icon request without the session's permit ([ADR 0099] §4): the account's website-icons
+/// setting reads off, or this session's probe has not found the `icons` role.
+///
+/// [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
+pub const ICONS_OFF: &str = "icons_off";
 
 /// A failed call: a stable code, nothing else (module docs).
 #[wasm_bindgen]
