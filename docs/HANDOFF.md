@@ -308,7 +308,15 @@ The dated bullets below are a log: an ADR status in a bullet is the status on th
       - `rv account events`.
       - The extra tests the ADR lists, including `a_possible_clone_raises_the_alert_summary`, which INV-83's Verified-by already names.
     - **Before integrating:** finish part 2, rerun the full gate with PostgreSQL.
-  - **ADR 0096:** not started (the worktree was empty and has been removed).
+  - **ADR 0096: not started.** A read-only pass found that it splits in two:
+    - **Part 1 (M1, doable now):**
+      - the rizzy-wasm doc list of the 21 binding entries;
+      - the import calls take `&mut [u8]` and wipe it, and packages/core wipes the caller's array in `finally`;
+      - the passkey private-key array is wiped after the item write (or replaced by the create-and-store call);
+      - the TwoFactorPane enrolment state is cleared on lock, leave, confirm and cancel;
+      - eslint `no-console` is an error;
+      - Debug-redaction tests.
+    - **Part 2 (KDBX in the Worker, the AES-KDF 60 s cap, cancel):** it needs ADR 0029's KDBX reader first. That reader doesn't exist: rizzy-import refuses KDBX, and the AES/CBC/Salsa20 crates aren't in the workspace. So it needs its own track with dependency checks.
   - **ADR 0097 leftovers:**
     - No UI or binding for `SettingsEdit::ResetSection` (the §4.5 confirmation dialog).
     - The fill UI doesn't link the fail-closed warning to Settings.
