@@ -21,6 +21,7 @@ import {
   newElementId,
   plaintextExportPhrase,
   plaintextExportWarning,
+  revocationPendingNotice,
   version,
 } from "../src/index.js";
 import { loadCore } from "./load.js";
@@ -144,6 +145,15 @@ describe("errors", () => {
     const garbage = fixed(502, "<html>bad gateway</html>");
     const bad = await checkServer(garbage.transport).catch((e: unknown) => e);
     expect((bad as CoreError).code).toBe("invalid_server_response");
+  });
+
+  it("name a write refused during another device's removal, with the banner's text (ADR 0091 §2)", async () => {
+    const { transport } = fixed(409, '{"error":"revocation_pending"}');
+    const error = await checkServer(transport).catch((e: unknown) => e);
+    expect((error as CoreError).code).toBe("server_revocation_pending");
+    expect(revocationPendingNotice()).toBe(
+      "Another of your devices is removing a device. Changes are paused for up to 10 minutes.",
+    );
   });
 });
 

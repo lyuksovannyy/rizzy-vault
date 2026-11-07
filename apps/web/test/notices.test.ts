@@ -14,8 +14,8 @@ const PHONE = "cd".repeat(16);
 const UNLISTED = "ef".repeat(16);
 
 const DEVICES: readonly DeviceView[] = [
-  { id: LAPTOP, kind: "desktop-cli", createdAtMs: 0, revoked: false },
-  { id: PHONE, kind: "mobile", createdAtMs: 0, revoked: false },
+  { id: LAPTOP, kind: "desktop-cli", createdAtMs: 0, revoked: false, suspended: false },
+  { id: PHONE, kind: "mobile", createdAtMs: 0, revoked: false, suspended: false },
 ];
 
 const label = (id: string) => deviceLabel(id, DEVICES, OWN);

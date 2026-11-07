@@ -16,7 +16,7 @@ import {
 
 const OWN = "a".repeat(32);
 const OTHER = "b".repeat(32);
-const DEVICES: DeviceView[] = [{ id: OTHER, kind: "desktop-cli", createdAtMs: 0, revoked: false }];
+const DEVICES: DeviceView[] = [{ id: OTHER, kind: "desktop-cli", createdAtMs: 0, revoked: false, suspended: false }];
 const name = deviceNamer(DEVICES, OWN);
 
 function value(over: Partial<ConflictValue>): ConflictValue {

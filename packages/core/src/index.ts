@@ -75,6 +75,7 @@ import initWasm, {
   plaintextExportPhrase as wasmPlaintextExportPhrase,
   plaintextExportWarning as wasmPlaintextExportWarning,
   othersEndedNotice as wasmOthersEndedNotice,
+  revocationPendingNotice as wasmRevocationPendingNotice,
   sessionEndedByYouNotice as wasmSessionEndedByYouNotice,
   sessionEndedNotice as wasmSessionEndedNotice,
   registrableDomainOf as wasmRegistrableDomainOf,
@@ -984,6 +985,11 @@ export interface DeviceView {
   readonly kind: string;
   readonly createdAtMs: number;
   readonly revoked: boolean;
+  /**
+   * Not revoked, and listed as suspended by the server's last account answer: another device
+   * is removing it (ADR 0091 §2). The server's word, unsigned: for display only.
+   */
+  readonly suspended: boolean;
 }
 
 /**
@@ -1041,6 +1047,15 @@ export function othersEndedNotice(): string {
 /** The confirmation after ending one session (ADR 0075 §8). */
 export function sessionEndedByYouNotice(): string {
   return wasmSessionEndedByYouNotice();
+}
+
+/**
+ * What a host shows while a write is refused `server_revocation_pending` (ADR 0091 §2):
+ * "Another of your devices is removing a device. Changes are paused for up to 10 minutes."
+ * The web vault's catalogue holds the same text (`revocation.pending`).
+ */
+export function revocationPendingNotice(): string {
+  return wasmRevocationPendingNotice();
 }
 
 /** A started 2FA enrolment, to show once. */
@@ -1442,6 +1457,43 @@ export interface RecoveryNotice {
   readonly lastRecoveryAtMs?: number | undefined;
 }
 
+/**
+ * The account's open revocation window, as the server's last account answer served it (ADR
+ * 0091 §2): while it is open, every write of a device other than the revoker is refused
+ * `server_revocation_pending`. **Advisory and unsigned:** for display and retry timing only.
+ */
+export interface RevocationWindow {
+  /** The revoking device, 32 hex digits. */
+  readonly revokerDeviceId: string;
+  /** When the window expires, Unix milliseconds on the server's clock. */
+  readonly expiresAtMs: number;
+}
+
+/** The window of the two core getters, or `undefined` (`RevocationWindow`). */
+function revocationWindowOf(s: {
+  readonly revocationWindowRevokerId: string | undefined;
+  readonly revocationWindowExpiresAtMs: bigint | undefined;
+}): RevocationWindow | undefined {
+  const revoker = s.revocationWindowRevokerId;
+  const expires = s.revocationWindowExpiresAtMs;
+  return revoker === undefined || expires === undefined
+    ? undefined
+    : { revokerDeviceId: revoker, expiresAtMs: Number(expires) };
+}
+
+/** `revocationRetryAt` of a core session, as a number (`VaultSession.revocationRetryAt`). */
+function revocationRetryAtOf(
+  s: { revocationRetryAt(retriesDone: number, nowMs: bigint): bigint | undefined },
+  retriesDone: number,
+  nowMs: bigint,
+): number | undefined {
+  if (!Number.isSafeInteger(retriesDone) || retriesDone < 0) {
+    throw new CoreError("invalid_input");
+  }
+  const at = s.revocationRetryAt(Math.min(retriesDone, 0xffff_ffff), nowMs);
+  return at === undefined ? undefined : Number(at);
+}
+
 /** The notice of the three core getters, or `undefined` (`RecoveryNotice`). */
 function recoveryNoticeOf(s: {
   readonly pendingRecoveryOpenedAtMs: bigint | undefined;
@@ -1576,6 +1628,26 @@ export class VaultSession {
    */
   get recoveryNotice(): RecoveryNotice | undefined {
     return call(() => recoveryNoticeOf(this.#s()));
+  }
+
+  /**
+   * The account's open revocation window, as the server's last account answer served it (ADR
+   * 0091 §2), `undefined` while none is open. Advisory only ({@link RevocationWindow}).
+   */
+  get revocationWindow(): RevocationWindow | undefined {
+    return call(() => revocationWindowOf(this.#s()));
+  }
+
+  /**
+   * When to sync again after a sync the server refused `server_revocation_pending` (ADR 0091
+   * §2), with `retriesDone` retries already made: 15 s from now, then every 15 s until the
+   * last account answer's window expires plus 5 s, at most 41 retries (`rizzy-client`'s
+   * `next_revocation_retry`). Unix milliseconds on this host's clock; `undefined`: stop
+   * retrying and report the refusal. A sync starts with `account/state`, so after a refused
+   * sync the window is that of a fresh answer. Throws `invalid_input` for a negative count.
+   */
+  revocationRetryAt(retriesDone: number): number | undefined {
+    return call(() => revocationRetryAtOf(this.#s(), retriesDone, this.#now()));
   }
 
   /**
@@ -2054,7 +2126,13 @@ export class VaultSession {
   devices(): DeviceView[] {
     return mapFree(
       call(() => this.#s().devices()),
-      (d) => ({ id: d.id, kind: d.kind, createdAtMs: Number(d.createdAtMs), revoked: d.revoked }),
+      (d) => ({
+        id: d.id,
+        kind: d.kind,
+        createdAtMs: Number(d.createdAtMs),
+        revoked: d.revoked,
+        suspended: d.suspended,
+      }),
     );
   }
 
@@ -3492,6 +3570,23 @@ export class DurableSession {
    */
   get recoveryNotice(): RecoveryNotice | undefined {
     return call(() => recoveryNoticeOf(this.#inner));
+  }
+
+  /**
+   * The account's open revocation window of this session's last account answer (ADR 0091 §2),
+   * `undefined` while none is open (and right after an unlock). Advisory only
+   * ({@link RevocationWindow}).
+   */
+  get revocationWindow(): RevocationWindow | undefined {
+    return call(() => revocationWindowOf(this.#inner));
+  }
+
+  /**
+   * When to sync again after a sync the server refused `server_revocation_pending` (ADR 0091
+   * §2), as {@link VaultSession.revocationRetryAt}, timed by this session's last account answer.
+   */
+  revocationRetryAt(retriesDone: number): number | undefined {
+    return call(() => revocationRetryAtOf(this.#inner, retriesDone, this.#now()));
   }
 
   /** Every vault of the account (ADR 0081 §A2): the save prompts' picker, the rows' vault. */
