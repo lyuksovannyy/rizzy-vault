@@ -22,6 +22,18 @@ import { SenderRejected, isContentScriptSender, trustedOriginOf } from "../messa
 import { isRelayApplyFillMessage, isRelayPasskeyResultMessage } from "../messaging/contract.ts";
 import type { ApplyFillMessage, ApplyPasskeyResultMessage, ContentScriptForward, ToContentScript } from "../messaging/contract.ts";
 import { isEnsureCoreMessage } from "./ensure-core.ts";
+import {
+  LEGACY_AUTO_LOCK_KEY,
+  LOCK_SETTINGS_KEY,
+  type IdleStateMessage,
+  type IdleStatusAnswer,
+  type LockSettingsPush,
+  idleDetectionSeconds,
+  isIdleStatusQuery,
+  isLockSettingsMigrate,
+  legacyMinutesOf,
+  recordTextOf,
+} from "../messaging/lock-messages.ts";
 
 // Relative to the extension root (`dist/<target>/`), matching `vite.config.ts`'s output
 // layout (Vite's default: an HTML entry is emitted at its path relative to the project root)
@@ -78,6 +90,59 @@ const ext = webext();
 ext.runtime.onInstalled.addListener(() => void ensureOffscreenDocument(ext));
 ext.runtime.onStartup.addListener(() => void ensureOffscreenDocument(ext));
 
+/** Sends `message` to the offscreen document only if it exists (ADR 0111 §3.1 item 1): never
+ * creates it, since a missing document is already locked. A failed send is dropped; the
+ * document's poll covers it. */
+export async function relayToOffscreen(e: WebExtNamespace, message: IdleStateMessage | LockSettingsPush): Promise<void> {
+  const offscreen = e.offscreen;
+  if (offscreen === undefined || !(await offscreen.hasDocument())) {
+    return;
+  }
+  await e.runtime.sendMessage(message);
+}
+
+/** The record's text and, while it is absent, the legacy value (ADR 0110 §3 point 5). */
+async function readLockRecord(e: WebExtNamespace): Promise<{ record: string | null; legacy?: number }> {
+  const storage = e.storage;
+  if (storage === undefined) {
+    return { record: null };
+  }
+  const stored = await storage.local.get([LOCK_SETTINGS_KEY, LEGACY_AUTO_LOCK_KEY]);
+  const record = recordTextOf(stored[LOCK_SETTINGS_KEY]);
+  const legacy = record === null ? legacyMinutesOf(stored[LEGACY_AUTO_LOCK_KEY]) : undefined;
+  return { record, ...(legacy !== undefined ? { legacy } : {}) };
+}
+
+/** `setDetectionInterval` from the record, on every start of this worker and on every change
+ * (ADR 0111 §3.1 item 2): whether the interval survives a worker restart is unknown. */
+async function setIdleInterval(e: WebExtNamespace): Promise<number> {
+  const { record } = await readLockRecord(e);
+  const seconds = idleDetectionSeconds(record);
+  e.idle?.setDetectionInterval(seconds);
+  return seconds;
+}
+
+// ADR 0111 §3.1 item 1: registered synchronously at the top level, next to `onMessage`, so an
+// event that wakes this worker finds its listener. `"idle"` and `"locked"` are relayed; the
+// offscreen document applies the lock settings' table. `"active"` sends nothing.
+ext.idle?.onStateChanged.addListener((state) => {
+  if (state === "idle" || state === "locked") {
+    void relayToOffscreen(ext, { type: "idle_state", state }).catch(() => undefined);
+  }
+});
+
+// ADR 0111 §3.1 items 2 and 4: a changed record resets the interval and is pushed at once.
+ext.storage?.onChanged?.addListener((changes, areaName) => {
+  if (areaName !== "local" || !(LOCK_SETTINGS_KEY in changes)) {
+    return;
+  }
+  void setIdleInterval(ext).catch(() => undefined);
+  const settings = recordTextOf(changes[LOCK_SETTINGS_KEY]?.newValue);
+  void relayToOffscreen(ext, { type: "lock_settings", settings }).catch(() => undefined);
+});
+
+void setIdleInterval(ext).catch(() => undefined);
+
 ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!isContentScriptSender(sender, ext.runtime.id)) {
     // Not a genuine content script — `sender.tab` being set is not enough on its own; see
@@ -133,7 +198,42 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .catch(() => sendResponse({ ok: false }));
       return true;
     }
-    // Not `ensure_core` or either relay: nothing for the router to do.
+    // ADR 0111 §3.1 items 3 and 5: the offscreen document's poll, answered only for this
+    // extension's own pages without a tab (the offscreen document), with the OS idle state and
+    // the settings record's text.
+    if (isIdleStatusQuery(message) && sender.id === ext.runtime.id && sender.tab === undefined) {
+      void (async () => {
+        const seconds = await setIdleInterval(ext);
+        const { record, legacy } = await readLockRecord(ext);
+        const state = ext.idle !== undefined ? await ext.idle.queryState(seconds) : "active";
+        sendResponse({
+          type: "idle_status",
+          state,
+          settings: record,
+          ...(legacy !== undefined ? { legacy } : {}),
+        } satisfies IdleStatusAnswer);
+      })().catch(() => sendResponse(undefined));
+      return true;
+    }
+    // ADR 0110 §3 point 5: the offscreen document's one-time migration, written only while the
+    // record is still absent (a settings-page write always wins), then the old key removed.
+    if (isLockSettingsMigrate(message) && sender.id === ext.runtime.id && sender.tab === undefined) {
+      void (async () => {
+        const storage = ext.storage;
+        if (storage === undefined || message.settings.length > 256) {
+          return;
+        }
+        const { record } = await readLockRecord(ext);
+        if (record === null) {
+          await storage.local.set({ [LOCK_SETTINGS_KEY]: message.settings });
+        }
+        await storage.local.remove(LEGACY_AUTO_LOCK_KEY);
+      })()
+        .catch(() => undefined)
+        .finally(() => sendResponse({ ok: true }));
+      return true;
+    }
+    // Not `ensure_core` or a relay: nothing for the router to do.
     return undefined;
   }
   void (async () => {

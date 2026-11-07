@@ -50,8 +50,16 @@ import {
   handleSaveDialogRequest,
   handleSaveDialogResolve,
 } from "./content-handler.ts";
-import { acquireIframeInstance, handlePopupRequest, lockFromIdleState, releaseIframeInstance, startCoreContext } from "./core-context.ts";
-import { DEFAULT_AUTO_LOCK_MS } from "./lifecycle.ts";
+import {
+  type LockSettingsSource,
+  acquireIframeInstance,
+  applyIdleState,
+  applyLockSettingsRecord,
+  handlePopupRequest,
+  releaseIframeInstance,
+  startCoreContext,
+} from "./core-context.ts";
+import { isIdleStateMessage, isLockSettingsPush } from "../messaging/lock-messages.ts";
 
 function isPopupRequest(value: unknown): value is PopupRequest {
   if (typeof value !== "object" || value === null || !("type" in value)) {
@@ -72,7 +80,9 @@ function isPopupRequest(value: unknown): value is PopupRequest {
     type === "icons_probe" ||
     type === "removal_check" ||
     type === "remove_device" ||
-    type === "revocation_retry"
+    type === "revocation_retry" ||
+    type === "lock_settings_get" ||
+    type === "lock_settings_encode"
   );
 }
 
@@ -95,6 +105,11 @@ export interface InstallCoreContextListenerOptions {
    * job and forwards the result as a {@link ContentScriptForward} — accepting raw content-script
    * senders here too would process every one of them twice. */
   readonly acceptContentScripts: boolean;
+  /** Where the lock settings and the OS idle state come from (`core-context.ts`'s
+   * {@link LockSettingsSource}): the service worker's relay on Chromium, this context's own
+   * `storage` and `idle` on Firefox. Defaults to the one that matches
+   * `acceptContentScripts` (`true` only on Firefox's background page). */
+  readonly lockSource?: LockSettingsSource;
 }
 
 /** Registers the listener and starts the core context. Called once by `offscreen.ts` and
@@ -119,6 +134,7 @@ export interface InstallCoreContextListenerOptions {
  * than assume either exists, while the core messaging contract above never depends on either. */
 export function installCoreContextListener(ext: WebExtNamespace, options: InstallCoreContextListenerOptions): void {
   const extensionOrigin = extensionOriginOf(ext);
+  const lockSource: LockSettingsSource = options.lockSource ?? (options.acceptContentScripts ? "own_storage" : "service_worker");
   ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (isContentScriptSender(sender, ext.runtime.id)) {
       // A real content script (ADR 0036 §4, INV-40: never trusted by shape alone) — not merely
@@ -226,23 +242,27 @@ export function installCoreContextListener(ext: WebExtNamespace, options: Instal
       void handlePopupRequest(ext, message).then((response: PopupResponse) => sendResponse(response));
       return true; // keeps the message channel open for the async `sendResponse` above.
     }
+    // The service worker's relays (ADR 0111 §3.1 items 1, 4, 5): accepted only from this
+    // extension's own pages (checked above), never from a content script. An own page that sends
+    // `idle_state` can only cause a lock, which it can already do with `lock`.
+    if (lockSource === "service_worker" && isIdleStateMessage(message)) {
+      applyIdleState(message.state);
+      return undefined;
+    }
+    if (lockSource === "service_worker" && isLockSettingsPush(message)) {
+      void applyLockSettingsRecord(ext, message.settings).catch(() => undefined);
+      return undefined;
+    }
     return undefined;
   });
 
-  // ADR 0036 §3: "lock on `chrome.idle`/`browser.idle` reaching `locked` or `idle`" — the
-  // system-idle/screen-lock half of auto-lock, alongside `AutoLockTimer`'s own
-  // message-activity-based timeout (`core-context.ts`). The detection interval is the same
-  // threshold as the timeout, in seconds (the API's minimum unit; most platforms floor this at
-  // 15s regardless of what is requested). Feature-detected, not assumed (see this function's own
-  // doc comment): skipped entirely where `ext.idle` does not exist, a real, reported residual —
-  // the timeout-based `AutoLockTimer` alone still locks on inactivity either way.
-  if (ext.idle !== undefined) {
-    ext.idle.setDetectionInterval(Math.max(15, Math.round(DEFAULT_AUTO_LOCK_MS / 1000)));
-    ext.idle.onStateChanged.addListener((state) => {
-      if (state === "idle" || state === "locked") {
-        void lockFromIdleState(ext);
-      }
-    });
+  // Firefox (ADR 0111 §3.2): the persistent background page has `browser.idle` and receives
+  // its event itself; the detection interval is set from the lock settings
+  // (`core-context.ts`'s `applyLockSettings`, at start and on every change), not from a default.
+  // Chromium's offscreen document has no `idle` (§3.1 item 8): the service worker relays it.
+  // `"active"` and any other value never lock; the table of §3 is the controller's.
+  if (lockSource === "own_storage" && ext.idle !== undefined) {
+    ext.idle.onStateChanged.addListener((state) => applyIdleState(state));
   }
-  void startCoreContext(ext);
+  void startCoreContext(ext, lockSource);
 }

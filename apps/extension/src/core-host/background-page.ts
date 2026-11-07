@@ -14,4 +14,4 @@ import { webext } from "../types/runtime-api.ts";
 // context a real content-script message ever reaches — it must validate and handle it directly
 // (fixes the content script's `fields_detected`/`credentials_submitted` messages previously
 // resolving to `undefined` forever on this browser build).
-installCoreContextListener(webext(), { acceptContentScripts: true });
+installCoreContextListener(webext(), { acceptContentScripts: true, lockSource: "own_storage" });

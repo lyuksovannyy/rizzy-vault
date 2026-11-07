@@ -63,6 +63,10 @@ interface WebExtStorageArea {
 interface WebExtStorage {
   readonly session: WebExtStorageArea;
   readonly local: WebExtStorageArea;
+  /** Optional in the type so test fakes need not carry it; present wherever `storage` is. */
+  readonly onChanged?: WebExtEvent<
+    (changes: Record<string, { oldValue?: unknown; newValue?: unknown }>, areaName: string) => void
+  >;
 }
 
 /** `chrome.idle` / `browser.idle` (ADR 0036 §3 auto-lock). */

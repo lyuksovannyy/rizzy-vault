@@ -1,83 +1,105 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// The options page (ADR 0036 §3: auto-lock default 15 minutes, "user-configurable"). The stored
-// value is read by the long-lived context at startup, validated and bounded
-// (`core-host/core-context.ts`'s `startCoreContext` → `lifecycle.ts`'s `readAutoLockMs`), not
-// the hard-coded default. Not security-relevant on its own (the timeout is not secret), so it is
-// read from `storage.local`, not `storage.session`.
+// The options page: this device's lock settings (ADR 0110 §1–§3, the Locking group shared with
+// the web vault through packages/ui's `LockSettingsGroup` and its turn-off dialog), and the
+// third-party notices (THIRD_PARTY_NOTICES.md; ADR 0080 owner answer 5).
 //
-// It also carries the third-party notices (THIRD_PARTY_NOTICES.md; ADR 0080 owner answer 5),
-// shared with the web vault's Settings through `@rizzy-vault/ui`.
+// The record `rizzy.lock_settings` lives in `storage.local` (ADR 0110 §3 table: not secret, not
+// synced, never sent to the server). This page reads it and asks the long-lived context to parse
+// it, and to encode a change, with Rust's `lock_settings` (the core is loaded there only, ADR 0036
+// §2); it then writes the record itself, as the one writer the settings UI is (§3 point 6). The
+// long-lived context applies a write at once: on Chromium the service worker pushes it on
+// `storage.onChanged`, on Firefox the background page re-reads it. Writing removes the legacy
+// key `rizzy.auto_lock_minutes` too, which the long-lived context otherwise migrates once.
 import "@rizzy-vault/ui/tokens.css";
 import "../surface.css";
 
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 
-import { ThirdPartyNotices } from "@rizzy-vault/ui";
+import { t } from "@rizzy-vault/i18n";
+import { LockSettingsGroup, type LockSettingsText, type LockSettingsValue, ThirdPartyNotices } from "@rizzy-vault/ui";
 
+import { ExtensionClient, createRuntimeTransport } from "../core/client.ts";
 import {
-  AUTO_LOCK_MINUTES_STORAGE_KEY,
-  DEFAULT_AUTO_LOCK_MS,
-  MAX_AUTO_LOCK_MINUTES,
-  MIN_AUTO_LOCK_MINUTES,
-  clampAutoLockMinutes,
-} from "../core-host/lifecycle.ts";
+  LEGACY_AUTO_LOCK_KEY,
+  LOCK_SETTINGS_KEY,
+  legacyMinutesOf,
+  recordTextOf,
+} from "../messaging/lock-messages.ts";
 import { webext } from "../types/runtime-api.ts";
 
+/** ADR 0110 §1's idle list and §2's delay (packages/core's `LOCK_SETTINGS_LIMITS`, not imported
+ * here: this page does not load the core). */
+const IDLE_MINUTES: readonly number[] = Object.freeze([1, 2, 5, 10, 15, 30, 60, 240]);
+const LOCK_DISABLE_CONFIRM_DELAY_MS = 5_000;
+
+/** The exact texts of ADR 0110 §1, §2 and §4.1 (extension line), shared with the web vault. */
+const LOCK_TEXT: LockSettingsText = {
+  title: t("lock.settings.title"),
+  autoLock: t("lock.settings.autoLock"),
+  idle: t("lock.settings.idle"),
+  restart: t("lock.settings.restartBrowser"),
+  restartHint: t("lock.settings.restartBrowserHint"),
+  sleep: t("lock.settings.sleep"),
+  sleepHint: t("lock.settings.sleepHint"),
+  offHint: t("lock.settings.offHint"),
+  disableTitle: t("lock.disable.title"),
+  disableBody: t("lock.disable.body"),
+  disableConfirm: t("lock.disable.confirm"),
+  disableConfirmCountdown: (seconds) => t("lock.disable.confirmCountdown", { seconds: String(seconds) }),
+  disableCancel: t("lock.disable.cancel"),
+  disableWait: t("lock.disable.wait"),
+  disableReady: t("lock.disable.ready"),
+};
+
 function OptionsPage() {
-  const [minutes, setMinutes] = useState(DEFAULT_AUTO_LOCK_MS / 60_000);
-  const [saved, setSaved] = useState(false);
+  const [client] = useState(() => new ExtensionClient(createRuntimeTransport(webext())));
+  const [value, setValue] = useState<LockSettingsValue | undefined>();
+  const [error, setError] = useState<string | undefined>();
 
   useEffect(() => {
-    // `storage` is typed optional (absent inside a `chrome.offscreen` document specifically,
-    // per `types/webext.d.ts`'s comment) but present here: the options page is a regular
-    // extension page, not an offscreen document.
-    void webext()
-      .storage!.local.get(AUTO_LOCK_MINUTES_STORAGE_KEY)
+    // `storage` is typed optional (absent inside a `chrome.offscreen` document only) but present
+    // here: the options page is a regular extension page.
+    const storage = webext().storage;
+    if (storage === undefined) {
+      return;
+    }
+    void storage.local
+      .get([LOCK_SETTINGS_KEY, LEGACY_AUTO_LOCK_KEY])
       .then((stored) => {
-        const value = stored[AUTO_LOCK_MINUTES_STORAGE_KEY];
-        if (typeof value === "number") {
-          setMinutes(clampAutoLockMinutes(value));
-        }
-      });
-  }, []);
+        const record = recordTextOf(stored[LOCK_SETTINGS_KEY]);
+        const legacy = record === null ? legacyMinutesOf(stored[LEGACY_AUTO_LOCK_KEY]) : undefined;
+        return client.lockSettings(record, legacy);
+      })
+      .then(setValue, () => setError(t("common.unknownError", { code: "lock_settings_failed" })));
+  }, [client]);
 
   return (
     <main>
       <h1>rizzy-vault settings</h1>
-      <label>
-        Lock after inactivity (minutes)
-        <input
-          type="number"
-          min={MIN_AUTO_LOCK_MINUTES}
-          max={MAX_AUTO_LOCK_MINUTES}
-          value={minutes}
-          onChange={(e) => {
-            setMinutes(Number(e.target.value));
-            setSaved(false);
-          }}
-        />
-      </label>
-      <button
-        type="button"
-        onClick={() => {
-          // Clamped again here, not only trusted to the `<input min/max>` the browser mostly
-          // enforces: a saved value must be something `readAutoLockMs` can use even if this
-          // field's DOM constraints were ever bypassed (e.g. a non-numeric paste coerced by
-          // `Number(...)` above into `NaN`).
-          const toSave = clampAutoLockMinutes(minutes);
-          void webext()
-            .storage!.local.set({ [AUTO_LOCK_MINUTES_STORAGE_KEY]: toSave })
-            .then(() => {
-              setMinutes(toSave);
-              setSaved(true);
-            });
+      <LockSettingsGroup
+        value={value}
+        idleMinutes={IDLE_MINUTES}
+        confirmDelayMs={LOCK_DISABLE_CONFIRM_DELAY_MS}
+        text={LOCK_TEXT}
+        onChange={(next) => {
+          const storage = webext().storage;
+          if (storage === undefined) {
+            return;
+          }
+          void client
+            .encodeLockSettings(next)
+            .then(async (record) => {
+              await storage.local.set({ [LOCK_SETTINGS_KEY]: record });
+              await storage.local.remove(LEGACY_AUTO_LOCK_KEY);
+              setValue(next);
+              setError(undefined);
+            })
+            .catch(() => setError(t("common.unknownError", { code: "lock_settings_failed" })));
         }}
-      >
-        Save
-      </button>
-      {saved ? <p>Saved.</p> : undefined}
+      />
+      {error !== undefined ? <p role="alert">{error}</p> : undefined}
       <ThirdPartyNotices />
     </main>
   );

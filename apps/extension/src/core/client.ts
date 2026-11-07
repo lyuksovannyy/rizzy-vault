@@ -14,6 +14,13 @@
 // `packages/core`-relocation, moving this file there later is a pure move, since it already
 // depends on nothing extension-specific beyond the injected `transport`.
 import type { PopupRecoveryNotice, PopupRequest, PopupResponse } from "../messaging/contract.ts";
+
+/** The three lock settings the options page can change (ADR 0110 §1). */
+export interface LockSettingsChoice {
+  readonly autoLock: boolean;
+  readonly idleMinutes: number;
+  readonly lockOnSleep: boolean;
+}
 import { ENSURE_CORE_MESSAGE } from "../background/ensure-core.ts";
 import { base64ToBytes } from "../messaging/bytes.ts";
 
@@ -82,6 +89,29 @@ export class ExtensionClient {
       ...(notice !== undefined ? { recoveryNotice: notice } : {}),
       ...(alarms.length > 0 ? { alarms } : {}),
     };
+  }
+
+  /** The lock settings of a stored record and legacy value (ADR 0110 §3), as Rust reads them in
+   * the long-lived context. */
+  async lockSettings(record: string | null, legacy: number | undefined): Promise<LockSettingsChoice> {
+    const response = await this.#transport({
+      type: "lock_settings_get",
+      record,
+      ...(legacy !== undefined ? { legacy } : {}),
+    });
+    if (response.type !== "lock_settings") {
+      throw this.#unexpected(response);
+    }
+    return response.settings;
+  }
+
+  /** The record text of `settings`, encoded by Rust, to store under `rizzy.lock_settings`. */
+  async encodeLockSettings(settings: LockSettingsChoice): Promise<string> {
+    const response = await this.#transport({ type: "lock_settings_encode", settings });
+    if (response.type !== "lock_settings_record") {
+      throw this.#unexpected(response);
+    }
+    return response.record;
   }
 
   /** "Remove this device", step 1: the refusal under an alarm, or the upload of the unsent own

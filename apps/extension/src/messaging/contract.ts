@@ -1059,6 +1059,15 @@ export type PopupRequest =
   | { readonly type: "reveal_field"; readonly itemId: string; readonly fieldId: string }
   | { readonly type: "generate_password"; readonly options: GeneratorOptions }
   | { readonly type: "get_status" }
+  /** The options page's Locking group (ADR 0110 §1–§3): the settings of the record and legacy
+   * value the page read from `storage.local` (the offscreen document has no `storage`),
+   * parsed, and the legacy value migrated, by Rust in this context. */
+  | { readonly type: "lock_settings_get"; readonly record: string | null; readonly legacy?: number }
+  /** The record text of a choice, encoded by Rust, for the options page to write. */
+  | {
+      readonly type: "lock_settings_encode";
+      readonly settings: { readonly autoLock: boolean; readonly idleMinutes: number; readonly lockOnSleep: boolean };
+    }
   /** The icon of an item's website host (ADR 0052 point 6), fetched by the core from the
    * account's server; only the hostname leaves the browser. */
   | { readonly type: "item_icon"; readonly websiteHost: string }
@@ -1154,6 +1163,11 @@ export type PopupResponse =
   /** `revocation_retry`'s answer: `retryAtMs` (Unix milliseconds, the long-lived context's
    * clock) is absent when the core's schedule is over; `notice` is ADR 0091 §2's sentence. */
   | { readonly type: "revocation_retry"; readonly retryAtMs?: number; readonly notice: string }
+  | {
+      readonly type: "lock_settings";
+      readonly settings: { readonly autoLock: boolean; readonly idleMinutes: number; readonly lockOnSleep: boolean };
+    }
+  | { readonly type: "lock_settings_record"; readonly record: string }
   | { readonly type: "error"; readonly code: string };
 
 /** Every message type this contract defines, used by `validate.ts` to size-check before shape

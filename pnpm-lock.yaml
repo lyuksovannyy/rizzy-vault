@@ -26,6 +26,9 @@ importers:
       '@rizzy-vault/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@rizzy-vault/i18n':
+        specifier: workspace:*
+        version: link:../../packages/i18n
       '@rizzy-vault/ui':
         specifier: workspace:*
         version: link:../../packages/ui

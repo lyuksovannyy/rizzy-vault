@@ -12,4 +12,4 @@ import { webext } from "../types/runtime-api.ts";
 
 // `acceptContentScripts: false`: the service worker (`background/service-worker.ts`) is the
 // one Chromium context that validates and forwards a raw content-script message here.
-installCoreContextListener(webext(), { acceptContentScripts: false });
+installCoreContextListener(webext(), { acceptContentScripts: false, lockSource: "service_worker" });

@@ -12,6 +12,12 @@ import {
   generatePasswordWithOptions,
   registrableDomainOf,
   revocationPendingNotice,
+  DEFAULT_LOCK_SETTINGS,
+  LockTimer,
+  encodeLockSettings,
+  lockSettingsFromLegacyMinutes,
+  parseLockSettings,
+  type LockSettings,
 } from "@rizzy-vault/core";
 
 import { deleteAccountConfig, readAccountConfig, saveAccountConfig } from "./account-config.ts";
@@ -45,7 +51,16 @@ import {
   updateLoginChangeset,
 } from "./bindings.ts";
 import { ExtensionCache, deleteCache } from "../cache/idb.ts";
-import { AutoLockTimer, readAutoLockMs } from "./lifecycle.ts";
+import { LockController, idleIntervalSeconds } from "./lifecycle.ts";
+import {
+  LEGACY_AUTO_LOCK_KEY,
+  LOCK_SETTINGS_KEY,
+  type IdleStatusQuery,
+  type LockSettingsMigrate,
+  idleStatusAnswerOf,
+  legacyMinutesOf,
+  recordTextOf,
+} from "../messaging/lock-messages.ts";
 import { createIframeInstanceStore } from "./iframe-instance.ts";
 import { type OfferRecord, type OfferRefusal, type OfferedItem, createOfferStore } from "./offer-store.ts";
 import {
@@ -71,7 +86,7 @@ import type {
 
 let session: DurableSession | undefined;
 let cache: ExtensionCache | undefined;
-let autoLock: AutoLockTimer | undefined;
+let lockController: LockController | undefined;
 
 /** Opens the one durable-device cache (ADR 0026 §3), creating its object stores on first use.
  * `cacheStoreNames()` needs `initCore()` to have resolved first (it calls the core's own
@@ -88,11 +103,9 @@ async function ensureCache(): Promise<ExtensionCache> {
 
 /** Starts the long-lived context: tries the `storage.session` fallback restore (ADR 0036 §2),
  * then starts the auto-lock timer if something was restored. Call once, at module load. */
-export async function startCoreContext(ext: WebExtNamespace): Promise<void> {
-  const autoLockMs = await readAutoLockMs(ext);
-  autoLock = new AutoLockTimer(() => {
-    void lock(ext);
-  }, autoLockMs);
+export async function startCoreContext(ext: WebExtNamespace, lockSource: LockSettingsSource): Promise<void> {
+  lockController = newLockController(ext, lockSource);
+  void startLockSettings(ext, lockSource);
   if (!hasSessionStorage(ext)) {
     // No fallback on this browser build: nothing to restore, stay locked, same as a fresh
     // start.
@@ -112,7 +125,7 @@ export async function startCoreContext(ext: WebExtNamespace): Promise<void> {
 async function lock(ext: WebExtNamespace): Promise<void> {
   session?.lock();
   session = undefined;
-  autoLock?.stop();
+  lockController?.locked();
   // Every submitted credential this context still holds for an unanswered save/update prompt,
   // and the location index pointing at it (`save-prompt-location.ts`'s own module docs), stop
   // existing on lock: "credentials in the pending offer stay in the long-lived context only"
@@ -128,11 +141,121 @@ async function lock(ext: WebExtNamespace): Promise<void> {
   }
 }
 
-/** Locks from outside a `PopupRequest` — the `chrome.idle`/`browser.idle` listener ADR 0036 §3
- * names alongside the timeout-based {@link AutoLockTimer}. Exported so `listener.ts` can wire it
- * without reaching into this module's private `lock`. */
-export function lockFromIdleState(ext: WebExtNamespace): Promise<void> {
-  return lock(ext);
+/**
+ * Where the long-lived context reads the lock settings (ADR 0110 §3 table, ADR 0111 §3):
+ * `"service_worker"` on Chromium (the offscreen document has no `storage` and no `idle`; the
+ * service worker relays both, and this context polls it while unlocked), `"own_storage"` on
+ * Firefox (the background page reads `storage.local` and receives `browser.idle` itself).
+ */
+export type LockSettingsSource = "service_worker" | "own_storage";
+
+/** The settings of a stored record and legacy value (ADR 0110 §3 points 3 and 5), by Rust. A
+ * present record is parsed (broken → the defaults); an absent one with a legacy integer is
+ * migrated, and `migrated` is then the record text to write once. */
+function resolveLockSettings(record: string | null, legacy: unknown): { settings: LockSettings; migrated?: string } {
+  if (record === null) {
+    const fromLegacy = lockSettingsFromLegacyMinutes(legacy);
+    if (fromLegacy !== undefined) {
+      return { settings: fromLegacy, migrated: encodeLockSettings(fromLegacy) };
+    }
+  }
+  return { settings: parseLockSettings(record) };
+}
+
+function newLockController(ext: WebExtNamespace, lockSource: LockSettingsSource): LockController {
+  const relay = lockSource === "service_worker";
+  return new LockController(
+    {
+      now: () => ({ monotonicMs: performance.now(), wallMs: Date.now() }),
+      setInterval: (f, ms) => globalThis.setInterval(f, ms),
+      clearInterval: (h) => globalThis.clearInterval(h as ReturnType<typeof setInterval>),
+      newTimer: (settings, now) => new LockTimer(settings, now),
+      lock: () => void lock(ext),
+      ...(relay
+        ? {
+            queryIdleStatus: () => ext.runtime.sendMessage({ type: "idle_status_query" } satisfies IdleStatusQuery),
+            settingsOfAnswer: (answer: unknown) => {
+              const a = idleStatusAnswerOf(answer);
+              if (a === undefined) {
+                return undefined;
+              }
+              const { settings, migrated } = resolveLockSettings(a.settings, a.legacy);
+              if (migrated !== undefined) {
+                // The service worker writes it only while the record is still absent (it has
+                // `storage`, this document has not). A failed send is retried by the next query.
+                void ext.runtime
+                  .sendMessage({ type: "lock_settings_migrate", settings: migrated } satisfies LockSettingsMigrate)
+                  .catch(() => undefined);
+              }
+              return settings;
+            },
+            stateOfAnswer: (answer: unknown) => idleStatusAnswerOf(answer)?.state,
+          }
+        : {}),
+    },
+    DEFAULT_LOCK_SETTINGS,
+  );
+}
+
+/** The first read of the settings when this context starts. Chromium: one query to the service
+ * worker, for the settings only. Firefox: `storage.local` itself, the one-time migration, and a
+ * re-read on every `storage.onChanged` of the record (ADR 0110 §3 point 6). */
+async function startLockSettings(ext: WebExtNamespace, lockSource: LockSettingsSource): Promise<void> {
+  try {
+    await initCore();
+  } catch {
+    return; // No core: nothing can be unlocked either; the defaults stay.
+  }
+  if (lockSource === "service_worker") {
+    await lockController?.refreshSettings();
+    return;
+  }
+  const storage = ext.storage;
+  if (storage === undefined) {
+    return;
+  }
+  const readAndApply = async () => {
+    const stored = await storage.local.get([LOCK_SETTINGS_KEY, LEGACY_AUTO_LOCK_KEY]);
+    const record = recordTextOf(stored[LOCK_SETTINGS_KEY]);
+    const { settings, migrated } = resolveLockSettings(record, legacyMinutesOf(stored[LEGACY_AUTO_LOCK_KEY]));
+    if (migrated !== undefined) {
+      await storage.local.set({ [LOCK_SETTINGS_KEY]: migrated });
+      await storage.local.remove(LEGACY_AUTO_LOCK_KEY);
+    }
+    applyLockSettings(ext, settings);
+  };
+  storage.onChanged?.addListener((changes, areaName) => {
+    if (areaName === "local" && LOCK_SETTINGS_KEY in changes) {
+      void readAndApply().catch(() => undefined);
+    }
+  });
+  await readAndApply().catch(() => undefined);
+}
+
+/** Applies settings, and on Firefox the matching `browser.idle` detection interval (ADR 0111
+ * §3.2: from the record, not from a default). */
+function applyLockSettings(ext: WebExtNamespace, settings: LockSettings): void {
+  lockController?.applySettings(settings);
+  if (ext.idle !== undefined) {
+    ext.idle.setDetectionInterval(idleIntervalSeconds(settings));
+  }
+}
+
+/** An OS idle state: pushed by the service worker (Chromium) or the `browser.idle` event
+ * (Firefox). Locks only as ADR 0111 §3's table allows. */
+export function applyIdleState(state: unknown): void {
+  lockController?.idleState(state);
+}
+
+/** The service worker's push of a changed record (Chromium, ADR 0111 §3.1 item 4). */
+export async function applyLockSettingsRecord(ext: WebExtNamespace, record: string | null): Promise<void> {
+  await initCore();
+  applyLockSettings(ext, resolveLockSettings(record, undefined).settings);
+}
+
+/** The settings applied now (ADR 0110 §6 point 5: handed to the core at passkey signing). */
+export function currentLockSettings(): LockSettings {
+  return lockController?.settings ?? DEFAULT_LOCK_SETTINGS;
 }
 
 /** The unlocked session, for `content-handler.ts`'s matching and fill (both run in this same
@@ -924,7 +1047,7 @@ function recoveryNoticeOf(s: DurableSession | undefined): PopupRecoveryNotice | 
  * start; the account-config read/write (`account-config.ts`) needs no `ext` — it is IndexedDB,
  * not `chrome.storage`, precisely so it keeps working inside the Chromium offscreen document. */
 export async function handlePopupRequest(ext: WebExtNamespace, request: PopupRequest): Promise<PopupResponse> {
-  autoLock?.activity();
+  lockController?.activity();
   switch (request.type) {
     case "get_status": {
       // Independent of the wasm core/cache init: a status check must answer instantly and must
@@ -942,6 +1065,31 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
         ...(notice !== undefined ? { recoveryNotice: notice } : {}),
         ...(alarms.length > 0 ? { alarms } : {}),
       };
+    }
+    case "lock_settings_get": {
+      try {
+        await initCore();
+        const record = typeof request.record === "string" ? request.record : null;
+        const { settings } = resolveLockSettings(record, request.legacy);
+        return {
+          type: "lock_settings",
+          settings: { autoLock: settings.autoLock, idleMinutes: settings.idleMinutes, lockOnSleep: settings.lockOnSleep },
+        };
+      } catch (e) {
+        return { type: "error", code: errorCode(e, "lock_settings_failed") };
+      }
+    }
+    case "lock_settings_encode": {
+      try {
+        await initCore();
+        const { autoLock, idleMinutes, lockOnSleep } = request.settings;
+        if (typeof autoLock !== "boolean" || typeof lockOnSleep !== "boolean" || typeof idleMinutes !== "number") {
+          return { type: "error", code: "invalid_input" };
+        }
+        return { type: "lock_settings_record", record: encodeLockSettings({ autoLock, idleMinutes, lockOnSleep }) };
+      } catch (e) {
+        return { type: "error", code: errorCode(e, "lock_settings_failed") };
+      }
     }
     case "enrol": {
       try {
@@ -962,7 +1110,7 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
         );
         session = newSession;
         await saveAccountConfig(request.serverOrigin, request.loginName);
-        autoLock?.start();
+        lockController?.unlocked();
         return { type: "enrolled" };
       } catch (e) {
         return { type: "error", code: errorCode(e, "enrol_failed") };
@@ -976,7 +1124,7 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
           return { type: "error", code: "not_enrolled" };
         }
         session = await unlockDevice(serverOrigin, store, request.masterPassword);
-        autoLock?.start();
+        lockController?.unlocked();
         return { type: "unlocked" };
       } catch (e) {
         return { type: "error", code: errorCode(e, "unlock_failed") };
