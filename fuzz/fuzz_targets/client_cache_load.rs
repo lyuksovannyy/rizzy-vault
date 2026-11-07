@@ -125,6 +125,7 @@ fn copy(rows: &CacheRows) -> CacheRows {
         item_index: rows.item_index.clone(),
         item_index_unreadable: rows.item_index_unreadable,
         pending_moves: rows.pending_moves.clone(),
+        attachment_cleanups: rows.attachment_cleanups.clone(),
     }
 }
 

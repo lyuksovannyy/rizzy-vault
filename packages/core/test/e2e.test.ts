@@ -823,13 +823,21 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     expect(await store.get("cache_meta", FLOOR)).toEqual(be64(0));
     // Cache format 3 (ADR 0056 §3): the extension keeps no `item_index` (owner answer 4), so its
     // format-3 store is its format-2 one with the format bumped; format 4 (ADR 0081 §A7) re-keys
-    // that table and adds `pending_move`, neither of which this host keeps (it makes no moves).
-    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 4]));
+    // that table and adds `pending_move`, neither of which this host keeps (it makes no moves);
+    // format 5 (ADR 0093 §1.2) adds `attachment_cleanup`, which it does not keep either.
+    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 5]));
+
+    // A format-4 store (as a pre-ADR-0093 build wrote it): unlocking bumps the format.
+    await store.put("cache_meta", FORMAT, new Uint8Array([0, 4]));
+    const fromFour = await unlockDurableDevice(transport, store, PASSWORD);
+    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 5]));
+    expect(fromFour.items()).toEqual([]);
+    fromFour.lock();
 
     // A format-3 store (as a pre-ADR-0081 build wrote it): unlocking bumps the format.
     await store.put("cache_meta", FORMAT, new Uint8Array([0, 3]));
     const fromThree = await unlockDurableDevice(transport, store, PASSWORD);
-    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 4]));
+    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 5]));
     expect(fromThree.items()).toEqual([]);
     fromThree.lock();
 
@@ -837,7 +845,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     // changes nothing else.
     await store.put("cache_meta", FORMAT, new Uint8Array([0, 2]));
     const bumped = await unlockDurableDevice(transport, store, PASSWORD);
-    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 4]));
+    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 5]));
     expect(await store.get("cache_meta", FLOOR)).toEqual(be64(0));
     expect(bumped.items()).toEqual([]);
     bumped.lock();
@@ -847,7 +855,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     await store.delete("cache_meta", FLOOR);
     await store.put("cache_meta", FORMAT, new Uint8Array([0, 1]));
     const migrated = await unlockDurableDevice(transport, store, PASSWORD);
-    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 4]));
+    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 5]));
     expect(await store.get("cache_meta", FLOOR)).toEqual(be64(0));
     expect(migrated.items()).toEqual([]);
     migrated.lock();
@@ -1515,7 +1523,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
 
     // Deleting an item for good (ADR 0093 §1.2): the Purge goes first, and the sync round that
     // uploads it deletes the item's files, so the account's usage comes back down in that round.
-    const second = await a.addAttachment(item, "second.txt", "text/plain", new Uint8Array([1, 2, 3]));
+    const second = await a.addAttachment(item, "second.bin", "application/octet-stream", new Uint8Array(100_000));
     a.trashItem(item);
     expect(a.attachments(item).map((x) => x.id)).toEqual([second]);
     await a.sync();
@@ -1532,8 +1540,9 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     await a.sync();
     expect(a.takeAttachmentCleanupFailures()).toBe(0);
     const after = await usage();
-    // The file's counted bytes (3 plaintext bytes + 90 per chunk + its 122-byte wrap) are gone.
-    expect((withFile ?? 0) - (after ?? 0)).toBeGreaterThanOrEqual(3 + 90 + 122);
+    // The file's counted bytes (100,000 plaintext bytes + 90 per chunk + its 122-byte wrap) are
+    // gone; the Purge op and the tombstone add a little back.
+    expect((withFile ?? 0) - (after ?? 0)).toBeGreaterThan(90_000);
     a.lock();
     b.lock();
   });

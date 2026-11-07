@@ -1809,7 +1809,7 @@ export class VaultSession {
     for (const ref of call(() => s.attachmentCleanupsDue())) {
       for (;;) {
         let status = 0;
-        let body = new Uint8Array();
+        let body: Uint8Array = new Uint8Array();
         try {
           const answer = await this.#transport(takeRequest(call(() => s.attachmentCleanupRequest(ref))));
           status = answer.status;
