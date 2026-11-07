@@ -59,12 +59,12 @@ Ten read-only reviewers checked every ADR (0000–0087) against the gap checklis
 
 | # | Finding | Raw ids | Route |
 |---|---|---|---|
-| D1 | Purging an item (and ADR 0081's move, which purges the source) never deletes its attachments, so blobs and quota leak. Confirmed in code: `move_item`/`purge_item` don't call `attachments/delete`. | G06-1 | erratum + code |
-| D2 | Export/import keeps `attachment/<id>/` fields but not the contents or keys, so re-import creates dangling attachments with no warning. | G03-12, G06-2 | new ADR |
+| D1 | Purging an item (and ADR 0081's move, which purges the source) never deletes its attachments, so blobs and quota leak. Confirmed in code: `move_item`/`purge_item` don't call `attachments/delete`. | G06-1 | erratum + code; answered by [ADR 0093](../adr/0093-attachment-lifecycle.md) §1 |
+| D2 | Export/import keeps `attachment/<id>/` fields but not the contents or keys, so re-import creates dangling attachments with no warning. | G03-12, G06-2 | new ADR; answered by [ADR 0093](../adr/0093-attachment-lifecycle.md) §2 |
 | D3 | ADR 0023's 2 GiB backup reader cap is below one account's 5 GiB default quota (attachments are DB rows), so one account can stop `backup`. The promised revisit in 0054 never happened. | G03-6, G06-3 | erratum |
 | D4 | Key rotation is one request, capped at 65,536 wraps per vault and by the 32 MiB body limit (about 115k wraps). Nothing caps growth, and no refusal code is defined: a large account can't revoke a stolen device or finish recovery. | G03-9 | new ADR |
 | D5 | No cap on security keys per account, although the login state carrying every credential is refused above 64 KiB. The code picked 32 on its own; list/remove endpoints and `pending_id` are defined only in code. | G08-6, G06-11 | erratum |
-| D6 | A retired `0x0009` (bank) item on a cross-vault move or "move items to Personal, then delete the vault": the importer refuses unsupported types, so the item can be lost with the vault. | G08-8 | erratum + code |
+| D6 | A retired `0x0009` (bank) item on a cross-vault move or "move items to Personal, then delete the vault": the importer refuses unsupported types, so the item can be lost with the vault. | G08-8 | erratum + code; answered by [ADR 0093](../adr/0093-attachment-lifecycle.md) §3 |
 | D7 | ADR 0042's PSL check runs on read: a PSL update can make a whole ACCOUNT_SETTINGS record unreadable, vault directory included. "Blocks writes until resolved" has no resolution path. | G05-1, G05-2 | erratum |
 | D8 | ADR 0046 has no exit when the user can't type the new master password of an interrupted recovery (`device forget` refuses stage 3; INV-71 forbids a new kit). | G05-13 | erratum |
 | D9 | ADR 0050: the sync cursor advances past a held header, with no rule for falling back when the hold lapses or is lost on restart; possibly a permanent stall (not confirmed). **Resolved** by [ADR 0109](../adr/0109-sync-cursor-held-header.md) (Accepted 2026-10-25): no permanent stall; the cursor is derived, never stored, passes a held link only for the next page of its own sequence, and rewinds at a lapse or a load. | G05-21 | erratum |
