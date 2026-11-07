@@ -138,9 +138,11 @@ export interface RunningServer {
 
 /** Starts a server with open signup. `host` names its origin: `127.0.0.1` by default, or
  * `localhost`, which the WebAuthn tests need (a browser refuses an IP address as an RP ID; the
- * listener stays on 127.0.0.1 either way). */
+ * listener stays on 127.0.0.1 either way). `extra` adds or overrides settings, such as
+ * `RIZZY_SOURCE_URL` (ADR 0106). */
 export async function startServer(
   host: "127.0.0.1" | "localhost" = "127.0.0.1",
+  extra: Readonly<Record<string, string>> = {},
 ): Promise<RunningServer> {
   const binary = serverBinary();
   const dir = mkdtempSync(join(tmpdir(), "rizzy-web-e2e-"));
@@ -154,6 +156,7 @@ export async function startServer(
     RIZZY_SIGNUP: "open",
     RIZZY_DATA_DIR: join(dir, "data"),
     RIZZY_SECRETS_FILE: join(dir, "secrets", "secrets.json"),
+    ...extra,
   });
   // The secrets file does not depend on the port.
   const init = spawnSync(binary, ["secrets", "init"], {

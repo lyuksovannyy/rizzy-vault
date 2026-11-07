@@ -285,8 +285,10 @@ async function run(m: CallMessage): Promise<unknown> {
   const api = {
     start: async () => {
       await init();
-      await checkServer(transport);
-      return { version: version() };
+      const server = await checkServer(transport);
+      return server.sourceUrl === undefined
+        ? { version: version() }
+        : { version: version(), sourceUrl: server.sourceUrl };
     },
     login: async () => {
       const s = await login(

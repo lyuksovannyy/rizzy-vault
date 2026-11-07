@@ -42,6 +42,28 @@ main:has(.shell) {
   padding: 0;
 }
 
+/* The footer on every screen (ADR 0106 §4): the "Source" link only. */
+.app-footer {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: var(--space-2) var(--space-4) var(--space-4);
+  font-size: var(--font-size-caption);
+}
+
+.app-footer a {
+  color: var(--color-text-muted);
+  text-decoration: underline;
+}
+
+.app-footer a:hover {
+  color: var(--color-text);
+}
+
+.app-footer a:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
 /* Visible to screen readers only (the favorite toggle's extra label; its icon alone is not a
    name). Clips, not `display: none`, so it stays in the accessibility tree. */
 .sr-only {

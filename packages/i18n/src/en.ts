@@ -134,6 +134,9 @@ export const en = {
   "login.busy": "Logging in…",
   "login.createAccount": "Create an account",
 
+  // ---- The footer on every screen (apps/web/src/SafeLink.tsx SourceLink; ADR 0106 §4) ----
+  "footer.source": "Source",
+
   // ---- Second factor at login (apps/web/src/views/TotpDialog.tsx) ----
   // ---- Attachments (ADR 0054) ----
   "attachments.heading": "Attachments",

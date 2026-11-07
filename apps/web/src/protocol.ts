@@ -94,8 +94,9 @@ export interface IdentityDraftMessage {
  * names a server origin: the Worker uses its own (`self.location.origin`), the vault's origin.
  */
 export interface CoreApi {
-  /** Loads the wasm module and checks that the server speaks `v1`. */
-  start(): { version: string };
+  /** Loads the wasm module and checks that the server speaks `v1`; `sourceUrl` is the
+   * server's valid `https://` source URL, if it sent one (ADR 0106 §3–§4). */
+  start(): { version: string; sourceUrl?: string };
   login(
     loginName: string,
     secretKey: Uint8Array,

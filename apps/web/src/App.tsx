@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type CoreClient, codeOf } from "./core-client.ts";
 import { messageFor } from "./messages.ts";
+import { SourceLink } from "./SafeLink.tsx";
 import type { SessionInfo } from "./protocol.ts";
 import { ThemeProvider } from "./theme.ts";
 import { LoginView } from "./views/LoginView.tsx";
@@ -33,6 +34,8 @@ export function App(props: { readonly client: CoreClient }) {
   const { client } = props;
   const [phase, setPhase] = useState<Phase>({ kind: "starting" });
   const [loginName, setLoginName] = useState("");
+  // The server's source URL (ADR 0106 §4), once `/api/meta` answered with one.
+  const [sourceUrl, setSourceUrl] = useState<string | undefined>();
   const [totpAsk, setTotpAsk] = useState<((code: string | null) => void) | undefined>();
   const [keyAsk, setKeyAsk] = useState<
     | {
@@ -72,7 +75,10 @@ export function App(props: { readonly client: CoreClient }) {
         }),
     );
     client.call("start").then(
-      () => setPhase({ kind: "login" }),
+      (started) => {
+        setSourceUrl(started.sourceUrl);
+        setPhase({ kind: "login" });
+      },
       (e: unknown) => setPhase({ kind: "unavailable", code: codeOf(e) }),
     );
   }, [client]);
@@ -141,6 +147,11 @@ export function App(props: { readonly client: CoreClient }) {
     <ThemeProvider>
       <ToastProvider>
         <main>{body}</main>
+        {sourceUrl !== undefined && (
+          <footer className="app-footer">
+            <SourceLink url={sourceUrl} />
+          </footer>
+        )}
         {totpAsk !== undefined && <TotpDialog onAnswer={totpAsk} />}
         {keyAsk !== undefined && (
           <SecurityKeyDialog
