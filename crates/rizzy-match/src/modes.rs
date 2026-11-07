@@ -11,6 +11,7 @@
 
 use crate::equivalence::{EquivalenceView, GroupId};
 use crate::normalize::NormalizedUrl;
+use crate::pattern::{RegexEvaluation, RegexSession};
 use crate::security::https_downgrade_blocks;
 
 /// The wire value of `uri/<id>/match` (ADR 0018 §7; ADR 0037 §4).
@@ -26,7 +27,8 @@ pub enum MatchMode {
     StartsWith,
     /// `0x0004`: byte-equal full normalised URL.
     Exact,
-    /// `0x0005`: not implemented by this build (see [`EffectiveMode::Regex`]).
+    /// `0x0005`: the URI's `pattern` searched in the page's normalised URL, after the same gates
+    /// as every mode (ADR 0097 §3).
     Regex,
     /// `0x0006`: never offered for autofill matching.
     Never,
@@ -97,10 +99,8 @@ pub enum EffectiveMode {
     StartsWith,
     /// Byte-equal full normalised URL, query and fragment dropped (ADR 0097 §2).
     Exact,
-    /// No regex crate is named by ADR 0037; this build implements
-    /// Never/Exact/Host/`StartsWith`/`BaseDomain` only. [`decide`] returns
-    /// [`MatchOutcome::NotSupported`] unconditionally for this mode, so a caller can tell "not
-    /// implemented" apart from "checked, does not match" (ADR 0037 §4 row `0x0005`).
+    /// The URI's `pattern` searched in the page's normalised URL (ADR 0097 §3), after the
+    /// HTTPS→HTTP rule and the registrable-domain gate.
     Regex,
     /// Never offered for autofill matching.
     Never,
@@ -125,10 +125,9 @@ impl MatchedVia {
     }
 }
 
-/// [`EffectiveMode`] narrowed to the four modes that reach the per-mode dispatch in [`decide`]:
-/// every variant except [`EffectiveMode::Regex`] and [`EffectiveMode::Never`], both of which
-/// `decide` already returns for before the registrable-domain gate runs. A value of this type
-/// cannot hold `Regex` or `Never` at all, so the dispatch match in [`decide`] is exhaustive with
+/// [`EffectiveMode`] narrowed to the five modes that reach the per-mode dispatch in [`decide`]:
+/// every variant except [`EffectiveMode::Never`], which `decide` already returns for before the
+/// registrable-domain gate runs. A value of this type cannot hold `Never` at all, so the dispatch match in [`decide`] is exhaustive with
 /// no catch-all arm and no panic path, unlike matching [`EffectiveMode`] directly there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum GatedMode {
@@ -141,6 +140,8 @@ enum GatedMode {
     StartsWith,
     /// Byte-equal full normalised URL.
     Exact,
+    /// The pattern searched in the page's normalised URL (ADR 0097 §3.2 steps 4–7).
+    Regex,
 }
 
 /// The result of [`decide`].
@@ -150,8 +151,12 @@ pub enum MatchOutcome {
     Match(MatchedVia),
     /// Checked; does not match (including *Never* and the HTTPS→HTTP rule).
     NoMatch,
-    /// *Regex* mode: this build cannot evaluate it (ADR 0037 §4 row `0x0005`).
-    NotSupported,
+    /// *Regex* mode: the gates passed, but the URI's pattern is not valid
+    /// ([`crate::pattern::compile`]; ADR 0097 §3.3). The pattern was not searched.
+    InvalidPattern,
+    /// *Regex* mode: the gates passed, but this call's [`RegexSession`] already evaluated
+    /// [`crate::error::MAX_REGEX_EVALUATIONS`] URIs (ADR 0097 §3.4). Not evaluated.
+    RegexBudgetExceeded,
 }
 
 /// The registrable-domain gate (ADR 0037 §4 "Narrowing only"; INV-38): the page and the URI
@@ -175,10 +180,15 @@ fn registrable_gate(
 
 /// Decides whether `uri` is a match candidate for `page`.
 ///
-/// Order, deliberately, so a future mode cannot widen past either rule: *Regex* is reported
-/// [`MatchOutcome::NotSupported`] before anything else (this build cannot evaluate it at all);
-/// then *Never* and the HTTPS→HTTP rule, both unconditional; only then the registrable-domain
-/// gate, which every remaining mode must pass before its own rule runs.
+/// Order, deliberately, so a future mode cannot widen past either rule: *Never* and the
+/// HTTPS→HTTP rule, both unconditional; only then the registrable-domain gate, which every
+/// remaining mode must pass before its own rule runs.
+///
+/// `pattern` (the URI's raw `uri/<id>/pattern`, `None` when absent or `Cleared`) and `regex`
+/// (the call's budget) are used by *Regex* only and ignored by every other mode. *Regex* runs
+/// ADR 0097 §3.2 steps 2–7 here, so the pattern is never compiled for a page that has not
+/// passed both gates: a page on another registrable domain costs nothing and never consults
+/// the pattern (INV-38).
 #[must_use]
 pub fn decide(
     page: &NormalizedUrl,
@@ -186,15 +196,16 @@ pub fn decide(
     mode: MatchMode,
     account_default: MatchMode,
     equivalence: &EquivalenceView<'_>,
+    pattern: Option<&str>,
+    regex: &mut RegexSession,
 ) -> MatchOutcome {
     let effective = mode.resolve(account_default);
     // One exhaustive match narrows `effective` to `GatedMode` (module docs, `GatedMode`) and
-    // returns early for the two modes that never reach the gates below, in the same order the
-    // two `if`s used to: *Regex* first (this build cannot evaluate it at all), then *Never*.
-    // `GatedMode` cannot hold either variant, so the per-mode dispatch further down is
-    // exhaustive with no catch-all arm and no panic path.
+    // returns early for *Never*, the one mode that never reaches the gates below. `GatedMode`
+    // cannot hold it, so the per-mode dispatch further down is exhaustive with no catch-all arm
+    // and no panic path.
     let gated = match effective {
-        EffectiveMode::Regex => return MatchOutcome::NotSupported,
+        EffectiveMode::Regex => GatedMode::Regex,
         EffectiveMode::Never => return MatchOutcome::NoMatch,
         EffectiveMode::BaseDomain => GatedMode::BaseDomain,
         EffectiveMode::Host => GatedMode::Host,
@@ -218,6 +229,12 @@ pub fn decide(
             .normalized_string()
             .starts_with(&uri.normalized_string()),
         GatedMode::Exact => page.normalized_string() == uri.normalized_string(),
+        GatedMode::Regex => match regex.evaluate(pattern, &page.normalized_string()) {
+            RegexEvaluation::Match => true,
+            RegexEvaluation::NoMatch => false,
+            RegexEvaluation::InvalidPattern => return MatchOutcome::InvalidPattern,
+            RegexEvaluation::BudgetExceeded => return MatchOutcome::RegexBudgetExceeded,
+        },
     };
     if passes_mode_rule {
         MatchOutcome::Match(matched_via)
@@ -238,6 +255,38 @@ mod tests {
 
     fn no_equivalence() -> EquivalenceView<'static> {
         EquivalenceView::empty()
+    }
+
+    /// [`super::decide`] for the modes that ignore `pattern` and `regex`: no pattern, a fresh
+    /// session. Shadows the glob import, so the non-*Regex* tests read as before ADR 0097.
+    fn decide(
+        page: &NormalizedUrl,
+        uri: &NormalizedUrl,
+        mode: MatchMode,
+        account_default: MatchMode,
+        equivalence: &EquivalenceView<'_>,
+    ) -> MatchOutcome {
+        super::decide(
+            page,
+            uri,
+            mode,
+            account_default,
+            equivalence,
+            None,
+            &mut RegexSession::new(),
+        )
+    }
+
+    fn decide_regex(page: &str, value: &str, pattern: &str) -> MatchOutcome {
+        super::decide(
+            &url(page),
+            &url(value),
+            MatchMode::Regex,
+            MatchMode::BaseDomain,
+            &no_equivalence(),
+            Some(pattern),
+            &mut RegexSession::new(),
+        )
     }
 
     #[test]
@@ -532,8 +581,9 @@ mod tests {
         );
     }
 
+    /// A *Regex* URI without a pattern never matches (ADR 0097 §3.1).
     #[test]
-    fn regex_is_not_supported() {
+    fn regex_without_a_pattern_is_invalid() {
         let page = url("https://example.com/");
         let uri = url("https://example.com/");
         assert_eq!(
@@ -544,7 +594,7 @@ mod tests {
                 MatchMode::BaseDomain,
                 &no_equivalence()
             ),
-            MatchOutcome::NotSupported
+            MatchOutcome::InvalidPattern
         );
     }
 
@@ -727,6 +777,237 @@ mod tests {
             ),
             MatchOutcome::Match(MatchedVia::RegistrableDomain)
         );
+    }
+
+    /// ADR 0097 §6 step 1: *Regex* never sees the query; an anchored pattern on the path does.
+    #[test]
+    fn regex_searches_the_normalised_url_without_query_adr0097() {
+        let page = "https://example.com/login?x=1";
+        let value = "https://example.com/";
+        assert_eq!(decide_regex(page, value, "x=1"), MatchOutcome::NoMatch);
+        assert_eq!(
+            decide_regex(page, value, r"^https://example\.com/login$"),
+            MatchOutcome::Match(MatchedVia::RegistrableDomain)
+        );
+    }
+
+    /// ADR 0097 §6 step 3, INV-38: a match-everything pattern never escapes the gate.
+    #[test]
+    fn regex_never_matches_another_registrable_domain_inv38() {
+        assert_eq!(
+            decide_regex("https://evil.example/", "https://example.com/", ".*"),
+            MatchOutcome::NoMatch
+        );
+    }
+
+    /// ADR 0097 §6 step 3, order: the gate runs before the pattern is compiled.
+    #[test]
+    fn regex_gate_runs_before_compilation() {
+        let mut session = RegexSession::new();
+        let outcome = super::decide(
+            &url("https://evil.example/"),
+            &url("https://example.com/"),
+            MatchMode::Regex,
+            MatchMode::BaseDomain,
+            &no_equivalence(),
+            Some("("),
+            &mut session,
+        );
+        assert_eq!(outcome, MatchOutcome::NoMatch);
+        assert_eq!(session.evaluations(), 0);
+        assert_eq!(
+            decide_regex("https://example.com/", "https://example.com/", "("),
+            MatchOutcome::InvalidPattern
+        );
+    }
+
+    /// ADR 0097 §6 step 3: the HTTPS→HTTP rule applies to *Regex* too.
+    #[test]
+    fn regex_obeys_the_https_downgrade_rule() {
+        assert_eq!(
+            decide_regex("http://example.com/", "https://example.com/", ".*"),
+            MatchOutcome::NoMatch
+        );
+    }
+
+    /// ADR 0097 §6 step 3: equivalence groups widen the gate for *Regex* as for every mode.
+    #[test]
+    fn regex_matches_through_an_equivalence_group() {
+        let group = EquivalenceGroup::new(
+            GroupId::from_bytes([1; 16]),
+            ["youtube.com", "youtu.be"],
+            false,
+        )
+        .unwrap();
+        let global = vec![group];
+        let disabled = BTreeSet::new();
+        let user = vec![];
+        let view = EquivalenceView::new(&global, &disabled, &user);
+        let outcome = super::decide(
+            &url("https://youtu.be/x"),
+            &url("https://youtube.com/"),
+            MatchMode::Regex,
+            MatchMode::BaseDomain,
+            &view,
+            Some(r"^https://youtu\.be/"),
+            &mut RegexSession::new(),
+        );
+        assert!(matches!(
+            outcome,
+            MatchOutcome::Match(MatchedVia::Equivalence(_))
+        ));
+    }
+
+    /// ADR 0097 §6 step 3: limits, refusals and case.
+    #[test]
+    fn regex_limits_and_case() {
+        let page = "https://example.com/";
+        let ok = format!("(?-i){}", "a".repeat(crate::error::MAX_PATTERN_LEN - 5));
+        assert_eq!(ok.len(), crate::error::MAX_PATTERN_LEN);
+        assert_eq!(decide_regex(page, page, &ok), MatchOutcome::NoMatch);
+        let long = "a".repeat(crate::error::MAX_PATTERN_LEN + 1);
+        assert_eq!(
+            decide_regex(page, page, &long),
+            MatchOutcome::InvalidPattern
+        );
+        let nested = format!("{}a{}", "(".repeat(40), ")".repeat(40));
+        for invalid in [
+            "",
+            "caf\u{e9}",
+            r"\p{L}",
+            r"a(?=b)",
+            r"(a)\1",
+            "[a-z]{5000}",
+            nested.as_str(),
+        ] {
+            assert_eq!(
+                decide_regex(page, page, invalid),
+                MatchOutcome::InvalidPattern,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            decide_regex(page, page, r"^HTTPS://EXAMPLE\.COM/"),
+            MatchOutcome::Match(MatchedVia::RegistrableDomain)
+        );
+        assert_eq!(
+            decide_regex(page, page, r"(?-i)^HTTPS://"),
+            MatchOutcome::NoMatch
+        );
+        // An absent pattern never matches (ADR 0097 §3.1).
+        let absent = super::decide(
+            &url(page),
+            &url(page),
+            MatchMode::Regex,
+            MatchMode::BaseDomain,
+            &no_equivalence(),
+            None,
+            &mut RegexSession::new(),
+        );
+        assert_eq!(absent, MatchOutcome::InvalidPattern);
+    }
+
+    /// ADR 0097 §6 step 3: a page URL over 4,096 bytes is `NoMatch`, never compiled.
+    #[test]
+    fn regex_oversize_haystack_is_no_match() {
+        // Under MAX_URL_LEN as typed; over it once each `é` is percent-encoded.
+        let page = format!("https://example.com/{}", "\u{e9}".repeat(1_400));
+        let page = NormalizedUrl::parse(&page).unwrap();
+        assert!(page.normalized_string().len() > crate::error::MAX_URL_LEN);
+        let mut session = RegexSession::new();
+        let outcome = super::decide(
+            &page,
+            &url("https://example.com/"),
+            MatchMode::Regex,
+            MatchMode::BaseDomain,
+            &no_equivalence(),
+            Some(".*"),
+            &mut session,
+        );
+        assert_eq!(outcome, MatchOutcome::NoMatch);
+        assert_eq!(session.evaluations(), 0);
+    }
+
+    /// ADR 0097 §3.1: an account default of *Regex* applies the URI's own pattern.
+    #[test]
+    fn regex_account_default_uses_the_uri_pattern() {
+        let outcome = super::decide(
+            &url("https://example.com/login"),
+            &url("https://example.com/"),
+            MatchMode::AccountDefault,
+            MatchMode::Regex,
+            &no_equivalence(),
+            Some("/login$"),
+            &mut RegexSession::new(),
+        );
+        assert_eq!(outcome, MatchOutcome::Match(MatchedVia::RegistrableDomain));
+    }
+
+    proptest::proptest! {
+        /// ADR 0097 §6 step 3, property: `decide` never panics on an arbitrary pattern and
+        /// page, and a *Regex* `Match` implies both gates passed.
+        #[test]
+        fn regex_never_panics_and_a_match_implies_the_gate(
+            pattern in proptest::prop_oneof![
+                proptest::string::string_regex(r"[\^$.*+?()\[\]{}|a-z0-9\\/:=-]{0,48}").unwrap(),
+                proptest::prelude::any::<String>(),
+            ],
+            page in r"https?://(a|b|example)\.(com|co\.uk|github\.io)(:[0-9]{1,4})?/[ -~]{0,40}",
+            value in r"https?://(a|b|example)\.(com|co\.uk|github\.io)/[a-z]{0,8}",
+        ) {
+            let (Ok(page), Ok(value)) = (NormalizedUrl::parse(&page), NormalizedUrl::parse(&value))
+            else {
+                return Ok(());
+            };
+            let mut session = RegexSession::new();
+            let outcome = super::decide(
+                &page,
+                &value,
+                MatchMode::Regex,
+                MatchMode::BaseDomain,
+                &no_equivalence(),
+                Some(&pattern),
+                &mut session,
+            );
+            if outcome != MatchOutcome::NoMatch {
+                proptest::prop_assert!(page.registrable_domain().is_some());
+                proptest::prop_assert_eq!(page.registrable_domain(), value.registrable_domain());
+                proptest::prop_assert!(!https_downgrade_blocks(value.scheme(), page.scheme()));
+            }
+            if matches!(outcome, MatchOutcome::Match(_)) {
+                proptest::prop_assert!(crate::pattern::compile(&pattern)
+                    .is_ok_and(|p| p.is_match(&page.normalized_string())));
+            }
+        }
+    }
+
+    /// ADR 0097 §3.4: the 33rd gated *Regex* URI of one session is over budget.
+    #[test]
+    fn regex_budget_is_per_session() {
+        let mut session = RegexSession::new();
+        let page = url("https://example.com/");
+        for _ in 0..crate::error::MAX_REGEX_EVALUATIONS {
+            let outcome = super::decide(
+                &page,
+                &page,
+                MatchMode::Regex,
+                MatchMode::BaseDomain,
+                &no_equivalence(),
+                Some("example"),
+                &mut session,
+            );
+            assert_eq!(outcome, MatchOutcome::Match(MatchedVia::RegistrableDomain));
+        }
+        let outcome = super::decide(
+            &page,
+            &page,
+            MatchMode::Regex,
+            MatchMode::BaseDomain,
+            &no_equivalence(),
+            Some("example"),
+            &mut session,
+        );
+        assert_eq!(outcome, MatchOutcome::RegexBudgetExceeded);
     }
 
     /// ADR 0097 §2: dot segments are resolved before comparing, on both sides.

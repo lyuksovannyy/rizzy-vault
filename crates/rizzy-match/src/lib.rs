@@ -29,6 +29,7 @@
 //!   merged [`equivalence::EquivalenceView`].
 //! - [`settings`]: the account's matching settings, tag `0x0001` of the `ACCOUNT_SETTINGS`
 //!   plaintext (ADR 0042 §3–§4): the match default, disabled global groups and user groups.
+//! - [`pattern`]: the *Regex* mode's pattern validity check and per-call budget (ADR 0097 §3).
 //! - [`error`]: every error type and size bound.
 //!
 //! # No compiled-in global list yet
@@ -45,12 +46,16 @@ pub mod equivalence;
 pub mod error;
 pub mod modes;
 pub mod normalize;
+pub mod pattern;
 pub mod security;
 pub mod settings;
 pub mod suffix;
 
 pub use equivalence::{EquivalenceGroup, EquivalenceList, EquivalenceView, GroupId};
-pub use error::{DomainError, EquivalenceListError, MatchingSettingsError, NormalizeError};
+pub use error::{
+    DomainError, EquivalenceListError, MatchingSettingsError, NormalizeError, PatternError,
+};
 pub use modes::{EffectiveMode, MatchMode, MatchOutcome, MatchedVia, decide};
 pub use normalize::{NormalizedUrl, Scheme, normalize_domain};
+pub use pattern::{Pattern, RegexSession};
 pub use settings::{MatchingSettings, user_group};

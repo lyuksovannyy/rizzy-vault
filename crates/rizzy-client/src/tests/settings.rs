@@ -116,6 +116,7 @@ fn candidates(web: &WebSession, page: &str, saved: &str) -> usize {
         item_id: [1; 16],
         uri_id: [2; 16],
         value: saved,
+        pattern: None,
         mode: MatchMode::AccountDefault,
     };
     let frame = FrameContext {

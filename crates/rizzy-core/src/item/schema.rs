@@ -18,6 +18,7 @@
 //! | `share/<share_id>/secret` | Bytes, 32 | all | not in M1 (M5) | yes |
 //! | `login.username`, `login.password`, `login.totp` | Text | Login | any | password, TOTP |
 //! | `uri/<id>/value` · `/match` · `/order` | Text · Enum · `SortKey` | Login | any; `match`'s values are [ADR 0037] §4 (Accepted, M2) | no |
+//! | `uri/<id>/pattern` | Text | Login | any; the *Regex* pattern, ADR 0097 §3.1 (Accepted), ignored in every other mode | no |
 //! | `pwhist/<id>/value` · `/ms` | Text · U64 | Login | any | no (see below) |
 //! | `attachment/<id>/name` · `/mime` · `/size` · `/order` | Text · Text · U64 · `SortKey` | all | any | no |
 //! | `card.holder`, `.number`, `.brand`, `.exp_month`, `.exp_year`, `.code`, `.pin` | Text | Card | any | number, code, PIN |
@@ -316,6 +317,10 @@ pub const ATTR_ORDER: &str = "order";
 /// Attribute `match` of a URI: Enum, values `0x0000`–`0x0006` per ADR 0037 §4 (Accepted, M2). A
 /// layout attribute.
 pub const ATTR_MATCH: &str = "match";
+/// Attribute `pattern` of a URI: Text, the pattern of a URI whose effective mode is *Regex*
+/// (`0x0005`), ignored in every other mode. A content attribute, shown, any writer (ADR 0097
+/// §3.1).
+pub const ATTR_PATTERN: &str = "pattern";
 /// Attribute `secret` of a share: Bytes, 32, the owner's copy of the share secret (M5).
 pub const ATTR_SECRET: &str = "secret";
 /// Attribute `ms` of a password-history entry: U64, Unix milliseconds.
@@ -775,7 +780,8 @@ fn classify_element(key: FieldKeyRef<'_>) -> KeyClass {
             Concealment::Concealed,
         ),
         (LIST_SHARE, _) => KeyClass::Reserved(ReservedFor::M5Share),
-        (LIST_URI | LIST_PWHIST, Some(ATTR_VALUE)) => {
+        // `uri/<id>/pattern`: ADR 0097 §3.1, the same class as a URI's `value`.
+        (LIST_URI | LIST_PWHIST, Some(ATTR_VALUE)) | (LIST_URI, Some(ATTR_PATTERN)) => {
             known(Expected::Text, LOGIN, Writers::Any, Concealment::Shown)
         }
         (LIST_URI, Some(ATTR_MATCH)) => {

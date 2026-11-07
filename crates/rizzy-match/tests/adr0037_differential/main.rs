@@ -61,10 +61,12 @@
 //!   with no surface in `rizzy-match`. Only INV-37's HTTPS→HTTP half
 //!   (`security::https_downgrade_blocks`) has a `rizzy-match` decision to differentially test,
 //!   and it is covered.
-//! - **`MatchMode::Regex`.** The current build has no regex engine in its dependency tree and
-//!   `decide` returns `MatchOutcome::NotSupported` unconditionally for it; the oracle mirrors
-//!   that fixed fact rather than independently verifying any regex-matching semantics, because
-//!   there are none built yet to verify.
+//! - **`MatchMode::Regex` beyond the oracle's pattern family.** The oracle evaluates *Regex*
+//!   (ADR 0097 §3.2) only for `oracle::PatSpec`'s patterns: absent, a syntax error, `.*`, and
+//!   an escaped literal searched, prefix-anchored, whole-anchored or case-sensitive. That
+//!   checks the gate order and the haystack (the page's normalised URL, never the saved
+//!   value), not `regex-lite`'s own syntax; the per-call budget is covered by
+//!   `rizzy-match`'s unit tests, since every case here uses a fresh `RegexSession`.
 //! - **IPv6 host forms.** Covered only by the curated pairs in `mod relational`
 //!   (`equal_notations_of_the_same_host_normalise_identically`), not by the combinatorial
 //!   generator — RFC 5952 canonical-compression re-derivation was judged out of the oracle's
@@ -78,8 +80,41 @@ use proptest::prelude::*;
 use proptest::test_runner::{TestRng, TestRunner};
 use rizzy_match::{
     EquivalenceGroup, EquivalenceView, GroupId, MatchMode, MatchOutcome, MatchedVia, NormalizedUrl,
-    decide,
+    RegexSession,
 };
+
+/// The real `rizzy_match::decide` with no pattern and a fresh session: the table tests'
+/// shape for the modes that ignore both.
+fn decide(
+    page: &NormalizedUrl,
+    uri: &NormalizedUrl,
+    mode: MatchMode,
+    account_default: MatchMode,
+    equivalence: &EquivalenceView<'_>,
+) -> MatchOutcome {
+    decide_with_pattern(page, uri, mode, account_default, equivalence, None)
+}
+
+/// The real `rizzy_match::decide` with the case's pattern and a fresh `RegexSession` per case:
+/// the matcher shape [`run_case_with`] drives.
+fn decide_with_pattern(
+    page: &NormalizedUrl,
+    uri: &NormalizedUrl,
+    mode: MatchMode,
+    account_default: MatchMode,
+    equivalence: &EquivalenceView<'_>,
+    pattern: Option<&str>,
+) -> MatchOutcome {
+    rizzy_match::decide(
+        page,
+        uri,
+        mode,
+        account_default,
+        equivalence,
+        pattern,
+        &mut RegexSession::new(),
+    )
+}
 
 /// Generated cases per PR run (a single [`run_case`] is cheap: a handful of string ops and a
 /// `psl` lookup, no I/O), kept well under the ~60s PR budget together with the smaller
@@ -219,6 +254,7 @@ fn run_case_with(
         MatchMode,
         MatchMode,
         &EquivalenceView<'_>,
+        Option<&str>,
     ) -> MatchOutcome,
 ) -> Sides {
     let page_raw = render_url(&case.page);
@@ -230,7 +266,14 @@ fn run_case_with(
     let real_uri = NormalizedUrl::parse(&uri_raw).ok();
 
     let real_outcome = match (&real_page, &real_uri) {
-        (Some(p), Some(u)) => Some(matcher(p, u, case.mode, case.account_default, &view)),
+        (Some(p), Some(u)) => Some(matcher(
+            p,
+            u,
+            case.mode,
+            case.account_default,
+            &view,
+            case.pattern.render().as_deref(),
+        )),
         _ => None,
     };
 
@@ -258,7 +301,7 @@ fn run_case_with(
 
 /// [`run_case_with`] against the real, production `decide`.
 fn run_case(case: &Case) -> Sides {
-    run_case_with(case, decide)
+    run_case_with(case, decide_with_pattern)
 }
 
 /// Compares one case's two sides. Returns `Err(diagnostic)` on any disagreement.
@@ -298,7 +341,10 @@ fn compare(case: &Case, sides: &Sides) -> Result<(), String> {
     let outcomes_agree = matches!(
         (real_outcome, &sides.oracle_outcome.decision),
         (MatchOutcome::NoMatch, oracle::Decision::NoMatch)
-            | (MatchOutcome::NotSupported, oracle::Decision::NotSupported)
+            | (
+                MatchOutcome::InvalidPattern,
+                oracle::Decision::InvalidPattern
+            )
             | (
                 MatchOutcome::Match(MatchedVia::RegistrableDomain),
                 oracle::Decision::MatchExact
@@ -375,6 +421,7 @@ fn run_batch_expect_a_disagreement(
         MatchMode,
         MatchMode,
         &EquivalenceView<'_>,
+        Option<&str>,
     ) -> MatchOutcome
     + Copy,
 ) {
@@ -449,6 +496,7 @@ fn regression_duplicate_domain_in_an_equivalence_group_spec_builds_no_group() {
         },
         mode: MatchMode::BaseDomain,
         account_default: MatchMode::BaseDomain,
+        pattern: oracle::PatSpec::Absent,
         groups: vec![oracle::EquivGroupSpec {
             is_global: false,
             disabled: false,
@@ -764,9 +812,11 @@ mod equivalence_ip_probe {
 // ---------------------------------------------------------------------------------------------
 
 mod mutants {
+    use rizzy_match::pattern::RegexEvaluation;
     use rizzy_match::security::https_downgrade_blocks;
     use rizzy_match::{
         EffectiveMode, EquivalenceView, MatchMode, MatchOutcome, MatchedVia, NormalizedUrl,
+        RegexSession,
     };
 
     /// Mutant 1: the registrable-domain gate is skipped entirely (ADR 0037 §4's "Alternatives
@@ -784,6 +834,7 @@ mod mutants {
         mode: MatchMode,
         account_default: MatchMode,
         equivalence: &EquivalenceView<'_>,
+        pattern: Option<&str>,
     ) -> MatchOutcome {
         let effective = mode.resolve(account_default);
         if matches!(effective, EffectiveMode::BaseDomain) {
@@ -792,7 +843,7 @@ mod mutants {
             }
             return MatchOutcome::Match(MatchedVia::RegistrableDomain);
         }
-        rizzy_match::decide(page, uri, mode, account_default, equivalence)
+        super::decide_with_pattern(page, uri, mode, account_default, equivalence, pattern)
     }
 
     /// Mutant 2: the gate compares the *public suffix* instead of the registrable domain (eTLD+1)
@@ -805,11 +856,9 @@ mod mutants {
         mode: MatchMode,
         account_default: MatchMode,
         _equivalence: &EquivalenceView<'_>,
+        pattern: Option<&str>,
     ) -> MatchOutcome {
         let effective = mode.resolve(account_default);
-        if matches!(effective, EffectiveMode::Regex) {
-            return MatchOutcome::NotSupported;
-        }
         if matches!(effective, EffectiveMode::Never) {
             return MatchOutcome::NoMatch;
         }
@@ -847,7 +896,15 @@ mod mutants {
                     MatchOutcome::NoMatch
                 }
             }
-            EffectiveMode::Regex | EffectiveMode::Never => unreachable!("handled above"),
+            EffectiveMode::Regex => {
+                match RegexSession::new().evaluate(pattern, &page.normalized_string()) {
+                    RegexEvaluation::Match => MatchOutcome::Match(MatchedVia::RegistrableDomain),
+                    RegexEvaluation::NoMatch => MatchOutcome::NoMatch,
+                    RegexEvaluation::InvalidPattern => MatchOutcome::InvalidPattern,
+                    RegexEvaluation::BudgetExceeded => MatchOutcome::RegexBudgetExceeded,
+                }
+            }
+            EffectiveMode::Never => unreachable!("handled above"),
         }
     }
 
@@ -862,7 +919,7 @@ mod mutants {
         let page = NormalizedUrl::parse("https://totally-unrelated.example/").unwrap();
         let uri = NormalizedUrl::parse("https://bank.com/").unwrap();
 
-        let real = rizzy_match::decide(
+        let real = super::decide(
             &page,
             &uri,
             MatchMode::BaseDomain,
@@ -881,6 +938,7 @@ mod mutants {
             MatchMode::BaseDomain,
             MatchMode::BaseDomain,
             &EquivalenceView::empty(),
+            None,
         );
         assert_eq!(
             mutated,
@@ -895,7 +953,7 @@ mod mutants {
     fn worked_example_the_public_suffix_gate() {
         let page = NormalizedUrl::parse("https://evil-youtube.com/").unwrap();
         let uri = NormalizedUrl::parse("https://youtube.com/").unwrap();
-        let real = rizzy_match::decide(
+        let real = super::decide(
             &page,
             &uri,
             MatchMode::BaseDomain,
@@ -909,6 +967,7 @@ mod mutants {
             MatchMode::BaseDomain,
             MatchMode::BaseDomain,
             &EquivalenceView::empty(),
+            None,
         );
         assert_eq!(
             mutated,

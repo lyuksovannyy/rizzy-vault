@@ -19,6 +19,50 @@ pub const MAX_URL_LEN: usize = 4096;
 /// and `idna` crates already enforce the per-label bound during IDNA processing.
 pub const MAX_HOST_LEN: usize = 253;
 
+/// The longest *Regex* pattern (`uri/<id>/pattern`) [`crate::pattern::compile`] accepts, in
+/// bytes (ADR 0097 §3.3). Checked before the pattern reaches the regex builder.
+pub const MAX_PATTERN_LEN: usize = 1_024;
+
+/// The compiled-program size limit handed to `regex-lite`'s builder (ADR 0097 §3.3). The
+/// measured worst case at this limit is about 20 ms per evaluation natively on a 4 KiB haystack
+/// (ADR 0097 Context). Changing it takes an owner-approved amendment of ADR 0097.
+pub const PATTERN_SIZE_LIMIT: usize = 32_768;
+
+/// The group-nesting limit handed to `regex-lite`'s builder (ADR 0097 §3.3).
+pub const PATTERN_NEST_LIMIT: u32 = 32;
+
+/// The most *Regex* URIs one [`crate::pattern::RegexSession`] evaluates (ADR 0097 §3.4).
+pub const MAX_REGEX_EVALUATIONS: usize = 32;
+
+/// Why a *Regex* pattern is not valid (ADR 0097 §3.3). No variant carries the pattern text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PatternError {
+    /// Absent, `Cleared` or the empty string.
+    Empty,
+    /// Longer than [`MAX_PATTERN_LEN`] bytes.
+    TooLong,
+    /// A byte outside printable ASCII (`0x20`–`0x7E`): it could never match the ASCII
+    /// normalised URL; a host is written in its `xn--` form.
+    NotAscii,
+    /// `regex-lite`'s builder refused it: a syntax error, an unsupported feature
+    /// (look-around, backreferences, Unicode classes), the size limit or the nesting limit.
+    Invalid,
+}
+
+impl fmt::Display for PatternError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("pattern is empty"),
+            Self::TooLong => f.write_str("pattern exceeds the maximum length"),
+            Self::NotAscii => f.write_str("pattern contains a character outside printable ascii"),
+            Self::Invalid => f.write_str("pattern is not a valid regular expression"),
+        }
+    }
+}
+
+impl core::error::Error for PatternError {}
+
 /// Why a URL did not normalise (ADR 0037 §2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]

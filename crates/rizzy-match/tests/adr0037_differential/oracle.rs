@@ -85,6 +85,69 @@ pub(crate) struct Case {
     pub mode: MatchMode,
     pub account_default: MatchMode,
     pub groups: Vec<EquivGroupSpec>,
+    /// The URI's `uri/<id>/pattern` (ADR 0097 §3.1), as a spec the oracle evaluates itself.
+    pub pattern: PatSpec,
+}
+
+/// A *Regex* pattern drawn from a small family whose meaning the oracle computes with plain
+/// string operations, independent of `regex-lite` (ADR 0097 §3.3: case-insensitive by default,
+/// a search unless anchored, `(?-i)` switches case-insensitivity off).
+#[derive(Clone, Debug)]
+pub(crate) enum PatSpec {
+    /// No `pattern` field: never valid (ADR 0097 §3.1).
+    Absent,
+    /// A syntax error: `(`.
+    Invalid,
+    /// `.*`: matches every page that reaches the pattern.
+    Anything,
+    /// The escaped literal anywhere, ASCII case-insensitive.
+    Contains(String),
+    /// `^` and the escaped literal, ASCII case-insensitive.
+    Prefix(String),
+    /// `^`, the escaped literal and `$`, ASCII case-insensitive.
+    Whole(String),
+    /// `(?-i)` and the escaped literal anywhere, case-sensitive.
+    CaseSensitive(String),
+}
+
+fn escape(literal: &str) -> String {
+    let mut out = String::with_capacity(literal.len());
+    for c in literal.chars() {
+        if ".+*?()|[]{}^$\\".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+impl PatSpec {
+    /// The pattern string handed to the real `decide`.
+    pub(crate) fn render(&self) -> Option<String> {
+        match self {
+            Self::Absent => None,
+            Self::Invalid => Some("(".to_owned()),
+            Self::Anything => Some(".*".to_owned()),
+            Self::Contains(s) => Some(escape(s)),
+            Self::Prefix(s) => Some(format!("^{}", escape(s))),
+            Self::Whole(s) => Some(format!("^{}$", escape(s))),
+            Self::CaseSensitive(s) => Some(format!("(?-i){}", escape(s))),
+        }
+    }
+
+    /// The oracle's own evaluation on the page's normalised URL: `None` for an invalid
+    /// pattern, else whether it matches.
+    fn evaluate(&self, haystack: &str) -> Option<bool> {
+        let lower = haystack.to_ascii_lowercase();
+        match self {
+            Self::Absent | Self::Invalid => None,
+            Self::Anything => Some(true),
+            Self::Contains(s) => Some(lower.contains(&s.to_ascii_lowercase())),
+            Self::Prefix(s) => Some(lower.starts_with(&s.to_ascii_lowercase())),
+            Self::Whole(s) => Some(lower == s.to_ascii_lowercase()),
+            Self::CaseSensitive(s) => Some(haystack.contains(s.as_str())),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -94,10 +157,8 @@ pub(crate) struct Case {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Decision {
     NoMatch,
-    /// ADR 0037 §4 row `0x0005`: this build does not evaluate *Regex* at all (no regex crate is
-    /// named by the ADR); see `adr0037_differential.rs`'s module docs for why the oracle takes
-    /// this as given rather than independently re-deriving it.
-    NotSupported,
+    /// *Regex* (ADR 0097 §3.2): both gates passed, but the pattern is not valid.
+    InvalidPattern,
     /// A match whose gate passed by plain registrable-domain equality.
     MatchExact,
     /// A match whose gate passed only through an equivalence group (ADR 0037 §5's warning case).
@@ -306,9 +367,7 @@ pub(crate) fn decide(case: &Case) -> Outcome {
 
     let effective = resolve(case.mode, case.account_default);
 
-    let outcome = if effective == Effective::Regex {
-        Decision::NotSupported
-    } else if effective == Effective::Never
+    let outcome = if effective == Effective::Never
         || https_downgrade_blocks(case.uri.scheme, case.page.scheme)
     {
         Decision::NoMatch
@@ -323,18 +382,21 @@ pub(crate) fn decide(case: &Case) -> Outcome {
             None => Decision::NoMatch,
             Some(via_equivalence) => {
                 let mode_ok = match effective {
-                    Effective::BaseDomain => true,
-                    Effective::Host => page_host == uri_host && page_port == uri_port,
-                    Effective::StartsWith => page_str.starts_with(&uri_str),
-                    Effective::Exact => page_str == uri_str,
-                    Effective::Regex | Effective::Never => {
-                        unreachable!("handled above")
-                    }
+                    Effective::BaseDomain => Some(true),
+                    Effective::Host => Some(page_host == uri_host && page_port == uri_port),
+                    Effective::StartsWith => Some(page_str.starts_with(&uri_str)),
+                    Effective::Exact => Some(page_str == uri_str),
+                    // ADR 0097 §3.2 steps 3–7: only after both gates, on the page only.
+                    Effective::Regex => case.pattern.evaluate(&page_str),
+                    Effective::Never => unreachable!("handled above"),
                 };
                 match (mode_ok, via_equivalence) {
-                    (true, false) => Decision::MatchExact,
-                    (true, true) => Decision::MatchEquivalence,
-                    (false, _) => Decision::NoMatch,
+                    (None, _) => Decision::InvalidPattern,
+                    (Some(ok), via) => match (ok, via) {
+                        (true, false) => Decision::MatchExact,
+                        (true, true) => Decision::MatchEquivalence,
+                        (false, _) => Decision::NoMatch,
+                    },
                 }
             }
         }
@@ -479,7 +541,29 @@ fn account_default_strategy() -> impl Strategy<Value = MatchMode> {
         Just(MatchMode::Host),
         Just(MatchMode::StartsWith),
         Just(MatchMode::Exact),
+        Just(MatchMode::Regex),
         Just(MatchMode::Never),
+    ]
+}
+
+/// Literals for [`PatSpec`]: fixed path pieces and case variants, plus (in
+/// [`case_strategy`]) the page's and the URI's own normalised URLs.
+const PATTERN_LITERALS: &[&str] = &["login", "LOGIN", "/account", "https://", "http://", "x=1"];
+
+fn pattern_strategy(page_str: String, uri_str: String) -> impl Strategy<Value = PatSpec> {
+    let literal = prop_oneof![
+        3 => prop::sample::select(PATTERN_LITERALS).prop_map(str::to_owned),
+        1 => Just(page_str),
+        1 => Just(uri_str),
+    ];
+    prop_oneof![
+        1 => Just(PatSpec::Absent),
+        1 => Just(PatSpec::Invalid),
+        1 => Just(PatSpec::Anything),
+        1 => literal.clone().prop_map(PatSpec::Contains),
+        1 => literal.clone().prop_map(PatSpec::Prefix),
+        1 => literal.clone().prop_map(PatSpec::Whole),
+        1 => literal.prop_map(PatSpec::CaseSensitive),
     ]
 }
 
@@ -548,15 +632,32 @@ pub(crate) fn case_strategy() -> impl Strategy<Value = Case> {
         account_default_strategy(),
     )
         .prop_flat_map(|(page, uri, mode, account_default)| {
-            let (_, page_domain) = host_and_domain(&page.host);
-            let (_, uri_domain) = host_and_domain(&uri.host);
-            groups_strategy(page_domain, uri_domain).prop_map(move |groups| Case {
-                page: page.clone(),
-                uri: uri.clone(),
-                mode,
-                account_default,
-                groups,
-            })
+            let (page_host, page_domain) = host_and_domain(&page.host);
+            let (uri_host, uri_domain) = host_and_domain(&uri.host);
+            let page_str = normalized_string(
+                &page_host,
+                page.scheme,
+                port_norm(page.scheme, page.port),
+                &page.path,
+            );
+            let uri_str = normalized_string(
+                &uri_host,
+                uri.scheme,
+                port_norm(uri.scheme, uri.port),
+                &uri.path,
+            );
+            (
+                groups_strategy(page_domain, uri_domain),
+                pattern_strategy(page_str, uri_str),
+            )
+                .prop_map(move |(groups, pattern)| Case {
+                    page: page.clone(),
+                    uri: uri.clone(),
+                    mode,
+                    account_default,
+                    groups,
+                    pattern,
+                })
         })
 }
 
@@ -615,7 +716,7 @@ mod reach {
             let outcome = decide(&case);
             r.decision_kinds.insert(match outcome.decision {
                 Decision::NoMatch => "NoMatch",
-                Decision::NotSupported => "NotSupported",
+                Decision::InvalidPattern => "InvalidPattern",
                 Decision::MatchExact => "MatchExact",
                 Decision::MatchEquivalence => "MatchEquivalence",
             });
@@ -667,7 +768,12 @@ mod reach {
     #[test]
     fn the_generator_reaches_every_decision_kind_and_attack_shape() {
         let r = reach(10_000);
-        for kind in ["NoMatch", "NotSupported", "MatchExact", "MatchEquivalence"] {
+        for kind in [
+            "NoMatch",
+            "InvalidPattern",
+            "MatchExact",
+            "MatchEquivalence",
+        ] {
             assert!(
                 r.decision_kinds.contains(kind),
                 "the generator never produced {kind:?} in 10000 draws: {r:?}"

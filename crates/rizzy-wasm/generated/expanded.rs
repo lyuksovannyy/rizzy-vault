@@ -39637,6 +39637,7 @@ pub mod matching {
                             item_id: *item_id,
                             uri_id: *uri_id,
                             value: input.value.as_str(),
+                            pattern: None,
                             mode: *mode,
                         }).collect();
         let frame = FrameContext { is_top_frame, frame_origin };
@@ -39973,6 +39974,7 @@ pub mod matching {
                             item_id: *item_id,
                             uri_id: *uri_id,
                             value: input.value.as_str(),
+                            pattern: None,
                             mode: *mode,
                         }).collect();
         let frame = FrameContext { is_top_frame, frame_origin };

@@ -305,6 +305,9 @@ pub fn decide_match_candidates(
             item_id: *item_id,
             uri_id: *uri_id,
             value: input.value.as_str(),
+            // The wasm and TypeScript bindings do not carry `pattern` yet (ADR 0097 §3.5, plan
+            // step 4): a *Regex* URI from a host is therefore skipped as `RegexInvalid`.
+            pattern: None,
             mode: *mode,
         })
         .collect();
@@ -415,6 +418,9 @@ pub(crate) fn decide_with_account(
             item_id: *item_id,
             uri_id: *uri_id,
             value: input.value.as_str(),
+            // The wasm and TypeScript bindings do not carry `pattern` yet (ADR 0097 §3.5, plan
+            // step 4): a *Regex* URI from a host is therefore skipped as `RegexInvalid`.
+            pattern: None,
             mode: *mode,
         })
         .collect();

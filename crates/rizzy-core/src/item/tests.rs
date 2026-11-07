@@ -1317,6 +1317,7 @@ fn writers_may_write_the_m1_schema() {
         element_key("uri", "order"),
         element_key("uri", "match"),
     );
+    let uri_pattern = element_key("uri", "pattern");
     let (field_value, field_kind) = (element_key("field", "value"), element_key("field", "kind"));
     let pwhist_ms = element_key("pwhist", "ms");
     check_cases(&[
@@ -1333,6 +1334,11 @@ fn writers_may_write_the_m1_schema() {
         (login, Create, &uri_match, ENUM_TWO, Ok(())),
         (login, Edit, &uri_match, ENUM_TWO, Ok(())),
         (login, Edit, &uri_match, CLEARED, Ok(())),
+        // `uri/<id>/pattern` (ADR 0097 §3.1, Accepted): Text, any writer, Login only.
+        (login, Create, &uri_pattern, TEXT, Ok(())),
+        (login, Edit, &uri_pattern, TEXT, Ok(())),
+        (login, Edit, &uri_pattern, CLEARED, Ok(())),
+        (login, Import, &uri_pattern, TEXT, Ok(())),
         (login, Edit, &pwhist_ms, U64_ONE, Ok(())),
         (login, Create, "tag/61", TRUE, Ok(())),
         (login, Edit, "tag/61", CLEARED, Ok(())),

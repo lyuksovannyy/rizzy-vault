@@ -32,9 +32,10 @@ pub use rizzy_match::{
     MatchedVia, NormalizedUrl, Scheme, normalize_domain,
 };
 
+use rizzy_match::RegexSession;
 use rizzy_match::security::frame_may_request_candidates;
 
-use rizzy_core::item::schema::{ATTR_MATCH, ATTR_VALUE, LIST_URI};
+use rizzy_core::item::schema::{ATTR_MATCH, ATTR_PATTERN, ATTR_VALUE, LIST_URI};
 use rizzy_core::item::types::ItemType;
 use rizzy_core::item::value::ValueRef;
 use rizzy_sync::merge::ItemLifecycle;
@@ -143,10 +144,12 @@ pub struct ItemUri<'a> {
     pub item_id: [u8; 16],
     /// The URI's own id (an item may hold several).
     pub uri_id: [u8; 16],
-    /// The saved string: a URL for every mode but *Regex*, where it is the pattern source
-    /// (ADR 0037 §4 row `0x0005`; not evaluated by this build, `rizzy_match::modes::decide`
-    /// already refuses it as [`MatchOutcome::NotSupported`]).
+    /// The saved URL (`uri/<id>/value`), in every mode: for *Regex* it still supplies the
+    /// URI-side scheme and registrable domain of the gates (ADR 0097 §3.1).
     pub value: &'a str,
+    /// The raw `uri/<id>/pattern` (ADR 0097 §3.1), `None` when absent or `Cleared`. Used only
+    /// when the effective mode is *Regex*; a *Regex* URI without one never matches.
+    pub pattern: Option<&'a str>,
     /// The URI's own match mode; `0x0000` resolves against `account_default` inside
     /// [`rizzy_match::modes::decide`].
     pub mode: MatchMode,
@@ -192,8 +195,13 @@ pub struct Candidate {
 pub enum Skipped {
     /// `rizzy_match::modes::decide` returned [`MatchOutcome::NoMatch`].
     NoMatch,
-    /// The URI is *Regex* mode, which this build cannot evaluate.
-    RegexNotSupported,
+    /// *Regex* mode: the gates passed but the URI's pattern is not valid
+    /// ([`MatchOutcome::InvalidPattern`]; ADR 0097 §3.5).
+    RegexInvalid,
+    /// *Regex* mode: the gates passed but this call already evaluated
+    /// [`rizzy_match::error::MAX_REGEX_EVALUATIONS`] *Regex* URIs
+    /// ([`MatchOutcome::RegexBudgetExceeded`]; ADR 0097 §3.4).
+    RegexBudgetExceeded,
     /// The saved URI did not parse as a normalised URL (ADR 0037 §2).
     UriDidNotNormalize,
 }
@@ -260,13 +268,25 @@ pub fn decide_candidates(
             return Ok(out);
         }
     }
+    // One *Regex* budget per call (ADR 0097 §3.4), dropped at the end: nothing compiled is kept.
+    let mut regex = RegexSession::new();
+    let mut regex_invalid_warned = false;
+    let mut regex_budget_warned = false;
     for item_uri in item_uris {
         let Ok(uri) = NormalizedUrl::parse(item_uri.value) else {
             out.warnings
                 .push("matching: a saved URI did not normalise and was skipped");
             continue;
         };
-        match rizzy_match::decide(&page, &uri, item_uri.mode, account_default, equivalence) {
+        match rizzy_match::decide(
+            &page,
+            &uri,
+            item_uri.mode,
+            account_default,
+            equivalence,
+            item_uri.pattern,
+            &mut regex,
+        ) {
             MatchOutcome::Match(matched_via) => out.candidates.push(Candidate {
                 item_id: item_uri.item_id,
                 uri_id: item_uri.uri_id,
@@ -275,9 +295,20 @@ pub fn decide_candidates(
                 saved_port: uri.port(),
             }),
             MatchOutcome::NoMatch => {}
-            MatchOutcome::NotSupported => {
-                out.warnings
-                    .push("matching: a saved URI uses Regex mode, not supported by this build");
+            MatchOutcome::InvalidPattern => {
+                if !regex_invalid_warned {
+                    regex_invalid_warned = true;
+                    out.warnings
+                        .push("matching: a saved URI's Regex pattern is invalid and was skipped");
+                }
+            }
+            MatchOutcome::RegexBudgetExceeded => {
+                if !regex_budget_warned {
+                    regex_budget_warned = true;
+                    out.warnings.push(
+                        "matching: more than 32 Regex URIs for this site; the rest were not evaluated",
+                    );
+                }
             }
         }
     }
@@ -326,6 +357,8 @@ pub struct SavedUri {
     /// [`MatchMode::Never`] for a value this build does not know (`0x0007`+, written by a newer
     /// client; narrowing only, INV-38).
     pub mode: MatchMode,
+    /// `uri/<id>/pattern` (ADR 0097 §3.1): `None` when absent, `Cleared` or not Text.
+    pub pattern: Option<Zeroizing<String>>,
 }
 
 impl core::fmt::Debug for SavedUri {
@@ -342,6 +375,7 @@ impl SavedUri {
             item_id: self.item_id,
             uri_id: self.uri_id,
             value: self.value.as_str(),
+            pattern: self.pattern.as_ref().map(|p| p.as_str()),
             mode: self.mode,
         }
     }
@@ -381,11 +415,19 @@ pub fn vault_item_uris(vault: &VaultSync) -> Vec<SavedUri> {
                 Some(Some(n)) => MatchMode::from_wire(n).unwrap_or(MatchMode::Never),
                 Some(None) => MatchMode::Never,
             };
+            let pattern_key = format!("{LIST_URI}/{}/{ATTR_PATTERN}", element.element.as_str());
+            let pattern = vault
+                .field_value(item, &pattern_key)
+                .and_then(|v| match v.decode() {
+                    Ok(ValueRef::Text(p)) => Some(Zeroizing::new(p.to_owned())),
+                    _ => None,
+                });
             out.push(SavedUri {
                 item_id: *item.as_bytes(),
                 uri_id,
                 value: Zeroizing::new(text.to_owned()),
                 mode,
+                pattern,
             });
         }
     }
@@ -427,6 +469,7 @@ pub(crate) mod tests {
             item_id: [1; 16],
             uri_id: [2; 16],
             value,
+            pattern: None,
             mode,
         }
     }
@@ -519,10 +562,46 @@ pub(crate) mod tests {
         assert!(decision.warnings.is_empty());
     }
 
+    fn regex_uri<'a>(value: &'a str, pattern: Option<&'a str>) -> ItemUri<'a> {
+        ItemUri {
+            pattern,
+            ..uri(value, MatchMode::Regex)
+        }
+    }
+
+    /// ADR 0097 §3: a *Regex* URI matches through its pattern, an invalid one is skipped with
+    /// one warning, and a pattern on another site is never evaluated.
     #[test]
-    fn regex_mode_is_reported_not_matched() {
+    fn regex_mode_matches_through_the_pattern() {
         let equivalence = EquivalenceView::empty();
-        let uris = [uri("not a real pattern", MatchMode::Regex)];
+        let uris = [
+            regex_uri("https://example.com/", Some(r"^https://example\.com/login")),
+            regex_uri("https://example.com/", Some("(")),
+            regex_uri("https://example.com/", None),
+            regex_uri("https://other.example/", Some("(")),
+        ];
+        let decision = decide_candidates(
+            "https://example.com/login?next=1",
+            &top(""),
+            MatchMode::BaseDomain,
+            &uris,
+            &equivalence,
+        )
+        .unwrap();
+        assert_eq!(decision.candidates.len(), 1);
+        assert_eq!(
+            decision.warnings,
+            ["matching: a saved URI's Regex pattern is invalid and was skipped"]
+        );
+    }
+
+    /// ADR 0097 §6 step 4: 33 same-site *Regex* URIs → 32 evaluated plus one warning.
+    #[test]
+    fn regex_budget_is_32_per_call_with_one_warning() {
+        let equivalence = EquivalenceView::empty();
+        let uris: Vec<ItemUri<'_>> = (0..33)
+            .map(|_| regex_uri("https://example.com/", Some("example")))
+            .collect();
         let decision = decide_candidates(
             "https://example.com/",
             &top(""),
@@ -531,8 +610,26 @@ pub(crate) mod tests {
             &equivalence,
         )
         .unwrap();
-        assert!(decision.candidates.is_empty());
-        assert_eq!(decision.warnings.len(), 1);
+        assert_eq!(decision.candidates.len(), 32);
+        assert_eq!(
+            decision.warnings,
+            ["matching: more than 32 Regex URIs for this site; the rest were not evaluated"]
+        );
+        // URIs on another site cost nothing: 40 foreign ones do not spend the budget.
+        let mut mixed: Vec<ItemUri<'_>> = (0..40)
+            .map(|_| regex_uri("https://other.example/", Some(".*")))
+            .collect();
+        mixed.push(regex_uri("https://example.com/", Some("example")));
+        let decision = decide_candidates(
+            "https://example.com/",
+            &top(""),
+            MatchMode::BaseDomain,
+            &mixed,
+            &equivalence,
+        )
+        .unwrap();
+        assert_eq!(decision.candidates.len(), 1);
+        assert!(decision.warnings.is_empty());
     }
 
     #[test]
