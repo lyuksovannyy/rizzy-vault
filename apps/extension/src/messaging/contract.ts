@@ -1068,7 +1068,10 @@ export type PopupRequest =
   | { readonly type: "removal_check" }
   /** "Remove this device", step 2, after the user confirmed: deletes the local data (refused
    * again under alarm 1, 2 or 3, read from the cache itself). */
-  | { readonly type: "remove_device" };
+  | { readonly type: "remove_device" }
+  /** After a sync the server refused `server_revocation_pending` (ADR 0091 §2): when to sync
+   * again, with `retriesDone` retries made, and the banner's sentence. */
+  | { readonly type: "revocation_retry"; readonly retriesDone: number };
 
 export interface GeneratorOptions {
   readonly kind: "password" | "passphrase";
@@ -1143,6 +1146,9 @@ export type PopupResponse =
       readonly unsentSnapshots?: number;
     }
   | { readonly type: "removed" }
+  /** `revocation_retry`'s answer: `retryAtMs` (Unix milliseconds, the long-lived context's
+   * clock) is absent when the core's schedule is over; `notice` is ADR 0091 §2's sentence. */
+  | { readonly type: "revocation_retry"; readonly retryAtMs?: number; readonly notice: string }
   | { readonly type: "error"; readonly code: string };
 
 /** Every message type this contract defines, used by `validate.ts` to size-check before shape
@@ -1183,6 +1189,7 @@ export const MESSAGE_TYPES = [
   "item_icon",
   "removal_check",
   "remove_device",
+  "revocation_retry",
   "status",
   "enrolled",
   "unlocked",

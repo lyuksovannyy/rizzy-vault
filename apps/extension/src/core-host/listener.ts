@@ -70,7 +70,8 @@ function isPopupRequest(value: unknown): value is PopupRequest {
     type === "get_status" ||
     type === "item_icon" ||
     type === "removal_check" ||
-    type === "remove_device"
+    type === "remove_device" ||
+    type === "revocation_retry"
   );
 }
 

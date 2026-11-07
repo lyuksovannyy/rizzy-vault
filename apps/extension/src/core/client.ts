@@ -145,6 +145,22 @@ export class ExtensionClient {
     return recoveryNotice(response.recoveryNotice);
   }
 
+  /** After a sync refused `server_revocation_pending` (ADR 0091 §2): when to sync again
+   * (`undefined` once the core's schedule is over) and the banner's sentence. An answer of
+   * the wrong shape reads as the end of the schedule. */
+  async revocationRetry(retriesDone: number): Promise<{ readonly retryAtMs: number | undefined; readonly notice: string }> {
+    const response = await this.#transport({ type: "revocation_retry", retriesDone });
+    if (response.type !== "revocation_retry") {
+      throw this.#unexpected(response);
+    }
+    const at: unknown = response.retryAtMs;
+    const notice: unknown = response.notice;
+    if (typeof notice !== "string" || notice === "") {
+      return { retryAtMs: undefined, notice: "" };
+    }
+    return { retryAtMs: typeof at === "number" && Number.isFinite(at) ? at : undefined, notice };
+  }
+
   async listItems(): Promise<
     ReadonlyArray<{ itemId: string; title: string; username: string; websiteHost?: string }>
   > {

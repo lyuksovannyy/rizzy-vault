@@ -7,7 +7,12 @@
 // restriction in `eslint.config.mjs`, which actually allows every file under `core-host/`). The
 // MV3 service worker (`background/service-worker.ts`) never imports this module: it only relays
 // messages to whichever entry point is running.
-import { generatePassphraseWithOptions, generatePasswordWithOptions, registrableDomainOf } from "@rizzy-vault/core";
+import {
+  generatePassphraseWithOptions,
+  generatePasswordWithOptions,
+  registrableDomainOf,
+  revocationPendingNotice,
+} from "@rizzy-vault/core";
 
 import { deleteAccountConfig, readAccountConfig, saveAccountConfig } from "./account-config.ts";
 import { createSavePromptLocationIndex } from "./save-prompt-location.ts";
@@ -1023,6 +1028,23 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
       return removalCheck();
     case "remove_device":
       return removeDevice(ext);
+    case "revocation_retry":
+      // ADR 0091 §2: the popup's retry of a sync refused `server_revocation_pending`, timed by
+      // the core's schedule and the session's last account answer (a fresh one: every sync
+      // starts with `account/state`). The popup holds the count and the timer.
+      if (session === undefined) {
+        return { type: "error", code: "locked" };
+      }
+      try {
+        const retryAtMs = session.revocationRetryAt(request.retriesDone);
+        return {
+          type: "revocation_retry",
+          notice: revocationPendingNotice(),
+          ...(retryAtMs !== undefined ? { retryAtMs } : {}),
+        };
+      } catch (e) {
+        return { type: "error", code: errorCode(e, "revocation_retry_failed") };
+      }
     case "item_fields":
       if (session === undefined) {
         return { type: "error", code: "locked" };

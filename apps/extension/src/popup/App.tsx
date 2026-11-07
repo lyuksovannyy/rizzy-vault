@@ -2,12 +2,13 @@
 
 // The popup's top-level view (ADR 0036 §4 "Popup... unlock, search, item list and detail with
 // copy, generator, lock, open web vault" — ROADMAP §4.4 wording).
-import { RecoveryNoticeBanner } from "@rizzy-vault/ui";
-import { useEffect, useState } from "react";
+import { RecoveryNoticeBanner, RevocationPendingBanner, RevocationRetry } from "@rizzy-vault/ui";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ExtensionClient } from "../core/client.ts";
 import type { PopupRecoveryNotice } from "../messaging/contract.ts";
 import { alarmDescription, isAlarmCode } from "./alarms.ts";
+import { REVOCATION_PENDING, REVOCATION_REFUSED, REVOCATION_RETRYING } from "./revocation.ts";
 import { EnrolView } from "./views/Enrol.tsx";
 import { GeneratorView } from "./views/Generator.tsx";
 import { ItemsView } from "./views/Items.tsx";
@@ -44,6 +45,21 @@ export function App({ client, openTab }: AppProps) {
   // is, across restarts), for the banner. Read with every status answer, and again after a sync
   // that failed, which may have raised one.
   const [alarms, setAlarms] = useState<readonly string[]>([]);
+  // ADR 0091 §2 (`revocation.ts`): the banner's sentence while a sync refused
+  // `server_revocation_pending` waits for its retry, and the retry itself, which calls the
+  // latest `runSync` through `runSyncRef`.
+  const [revocationNotice, setRevocationNotice] = useState<string | undefined>(undefined);
+  const revocationRetry = useMemo(
+    () =>
+      new RevocationRetry((paused) => {
+        if (!paused) {
+          setRevocationNotice(undefined);
+        }
+      }),
+    [],
+  );
+  const runSyncRef = useRef<() => void>(() => undefined);
+  useEffect(() => () => revocationRetry.ended(), [revocationRetry]);
 
   const refreshStatus = () => {
     void client
@@ -70,13 +86,27 @@ export function App({ client, openTab }: AppProps) {
     void client
       .sync()
       .then((notice) => {
+        revocationRetry.ended();
         setRecoveryNotice(notice);
         setSyncMessage("Synced.");
         setItemsRevision((r) => r + 1);
       })
       .catch((e: unknown) => {
         const code = e instanceof Error ? e.message : "sync_failed";
-        setSyncMessage(isAlarmCode(code) ? `Sync stopped: ${alarmDescription(code)}.` : code);
+        if (code === REVOCATION_PENDING) {
+          void client
+            .revocationRetry(revocationRetry.retriesDone)
+            .catch(() => ({ retryAtMs: undefined, notice: "" }))
+            .then(({ retryAtMs, notice }) => {
+              if (revocationRetry.refused(retryAtMs, Date.now(), () => runSyncRef.current())) {
+                setRevocationNotice(notice);
+              } else {
+                setSyncMessage(REVOCATION_REFUSED);
+              }
+            });
+        } else {
+          setSyncMessage(isAlarmCode(code) ? `Sync stopped: ${alarmDescription(code)}.` : code);
+        }
         void client
           .status()
           .then((status) => setAlarms(status.locked ? [] : (status.alarms ?? [])))
@@ -84,6 +114,9 @@ export function App({ client, openTab }: AppProps) {
       })
       .finally(() => setSyncing(false));
   };
+  useEffect(() => {
+    runSyncRef.current = runSync;
+  });
 
   // Mirrors the web vault's `VaultView` ("one sync on mount," `apps/web/src/views/VaultView.tsx`):
   // enrolment (CRYPTO.md §11.2) carries device certificates and account state, never an initial
@@ -110,6 +143,9 @@ export function App({ client, openTab }: AppProps) {
       {error !== undefined ? <p role="alert">{error}</p> : undefined}
       {unlocked && recoveryNotice !== undefined ? (
         <RecoveryNoticeBanner notice={recoveryNotice} nowMs={Date.now()} />
+      ) : undefined}
+      {unlocked && revocationNotice !== undefined ? (
+        <RevocationPendingBanner message={revocationNotice} detail={REVOCATION_RETRYING} />
       ) : undefined}
       {unlocked && alarms.length > 0 ? (
         <section aria-labelledby="alarm-heading" className="alarm-banner">
@@ -154,6 +190,7 @@ export function App({ client, openTab }: AppProps) {
           <button
             type="button"
             onClick={() => {
+              revocationRetry.ended();
               void client.lock().then(refreshStatus);
             }}
           >
