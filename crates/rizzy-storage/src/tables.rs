@@ -105,6 +105,27 @@ pub const TABLES: &[TableSpec] = &[
             col("last_recovery_at_ms", Kind::Integer, true),
         ],
     },
+    // ADR 0090 §11: directly after its one foreign key, so a dispute survives a restore.
+    TableSpec {
+        name: "auth_security_events",
+        select: include_str!("../queries/backup/auth_security_events.select.sql"),
+        insert: include_str!("../queries/backup/auth_security_events.insert.sql"),
+        columns: &[
+            col("event_id", Kind::Blob, false),
+            col("account_id", Kind::Blob, false),
+            col("at_ms", Kind::Integer, false),
+            col("kind", Kind::Integer, false),
+            col("class", Kind::Integer, false),
+            col("actor_kind", Kind::Integer, false),
+            col("actor_device_id", Kind::Blob, true),
+            col("actor_admin_id", Kind::Blob, true),
+            col("subject_device_id", Kind::Blob, true),
+            col("label", Kind::Text, true),
+            col("value_old", Kind::Integer, true),
+            col("value_new", Kind::Integer, true),
+            col("state_seq", Kind::Integer, true),
+        ],
+    },
     TableSpec {
         name: "auth_opaque_setups",
         select: include_str!("../queries/backup/auth_opaque_setups.select.sql"),

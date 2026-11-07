@@ -25,6 +25,7 @@ SELECT
   + (SELECT COUNT(*) FROM auth_webauthn_challenges)
   + (SELECT COUNT(*) FROM auth_invalidate_pending)
   + (SELECT COUNT(*) FROM auth_revocation_windows)
+  + (SELECT COUNT(*) FROM auth_security_events)
   + (SELECT COUNT(*) FROM vault_vaults)
   + (SELECT COUNT(*) FROM vault_self_grants)
   + (SELECT COUNT(*) FROM vault_item_key_wraps)

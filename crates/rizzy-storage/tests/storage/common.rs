@@ -107,6 +107,43 @@ pub(crate) fn fixture() -> Dump {
             ],
         ),
         (
+            "auth_security_events",
+            vec![
+                // Every column filled (a code 21 row with the device ids set for the test).
+                vec![
+                    idv(0x51),
+                    a1(),
+                    int(3_000),
+                    int(21),
+                    int(2),
+                    int(5),
+                    d1(),
+                    idv(0x5a),
+                    d2(),
+                    Value::Text("YubiKey 5C".into()),
+                    int(41),
+                    int(12),
+                    int(7),
+                ],
+                // Every nullable column NULL (a code 2 login).
+                vec![
+                    idv(0x52),
+                    a1(),
+                    int(3_100),
+                    int(2),
+                    int(1),
+                    int(5),
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                ],
+            ],
+        ),
+        (
             "auth_opaque_setups",
             vec![vec![int(1), blob(1, 32), int(10), Value::Null]],
         ),
@@ -521,14 +558,17 @@ pub(crate) async fn exercise_vault_kinds(db: &rizzy_storage::Database) {
 
     // The migration on a database where one account has two vaults fails and changes nothing.
     // Migrations 10 (ADR 0045's `last_recovery_at_ms`), 11 (ADR 0047's invalidate marker), 12
-    // (ADR 0091's revocation window), 13 (ADR 0092's rotation staging) and 14 (ADR 0093's
-    // per-item attachment index) came after it; undo all six, newest first.
+    // (ADR 0091's revocation window), 13 (ADR 0092's rotation staging), 14 (ADR 0093's
+    // per-item attachment index) and 15 (ADR 0090's security event log) came after it; undo all
+    // seven, newest first.
     let last = crate::common::last_migration();
     assert_eq!(
-        last, 14,
-        "migrations 10 to 14 are the only ones after vault kinds"
+        last, 15,
+        "migrations 10 to 15 are the only ones after vault kinds"
     );
     for undo in [
+        "DROP TABLE auth_security_events",
+        "DELETE FROM _sqlx_migrations WHERE version = 15",
         "DROP INDEX vault_attachments_by_item",
         "DELETE FROM _sqlx_migrations WHERE version = 14",
         "DROP TABLE vault_rotation_staging",
@@ -551,7 +591,7 @@ pub(crate) async fn exercise_vault_kinds(db: &rizzy_storage::Database) {
     assert!(db.migrate().await.is_err());
     assert_eq!(
         db.pending_migrations().await.unwrap(),
-        vec![9, 10, 11, 12, 13, 14]
+        vec![9, 10, 11, 12, 13, 14, 15]
     );
 }
 
@@ -565,7 +605,7 @@ pub(crate) async fn finish_vault_kinds(db: &rizzy_storage::Database) {
     let a1 = id(ACCOUNT_1);
     assert_eq!(
         db.pending_migrations().await.unwrap(),
-        vec![9, 10, 11, 12, 13, 14]
+        vec![9, 10, 11, 12, 13, 14, 15]
     );
     assert!(try_exec(db, "DELETE FROM vault_vaults WHERE id = $1", &[id(0xc1)]).await);
     db.migrate().await.unwrap();

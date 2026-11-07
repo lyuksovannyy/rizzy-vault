@@ -51,8 +51,10 @@
 //!   the remaining input before its row vector is reserved. That bound is at least as strict
 //!   as ADR 0023's `row_count × column_count`; a file the writer produces always meets it.
 //!   Memory stays proportional to the file: a decoded [`Value`] is 32 bytes and the smallest
-//!   encoded one 1 byte (a NULL), but every backed-up table has at most 2 nullable columns out
-//!   of at least 3, so a row decodes to at most about 8 times its encoded size.
+//!   encoded one 1 byte (a NULL), but the smallest encoded row of every backed-up table is at
+//!   least a sixteenth of its decoded values (at most 2 nullable columns out of at least 3, or,
+//!   for `auth_security_events`, 7 nullable out of 13 beside two blobs and four integers), so a
+//!   row decodes to at most 16 times its encoded size.
 //!
 //! The parser is pure (no I/O), never panics, and its errors name the table index, the row and
 //! the column, never a value (INV-48).
@@ -1891,9 +1893,13 @@ mod tests {
             assert!(valid_name(spec.name.as_bytes()), "{}", spec.name);
             assert!(!spec.columns.is_empty() && spec.columns.len() <= MAX_COLUMNS);
             assert!(min_row_len(spec.columns) >= spec.columns.len());
-            // The memory bound of the module docs: at most 2 nullable columns of at least 3.
-            let nullable = spec.columns.iter().filter(|c| c.nullable).count();
-            assert!(nullable <= 2 && spec.columns.len() >= 3, "{}", spec.name);
+            // The memory bound of the module docs: a row decodes to at most 16 times its
+            // smallest encoding.
+            assert!(
+                spec.columns.len() * size_of::<Value>() <= 16 * min_row_len(spec.columns),
+                "{}",
+                spec.name
+            );
             for c in spec.columns {
                 assert!(valid_name(c.name.as_bytes()), "{}.{}", spec.name, c.name);
             }

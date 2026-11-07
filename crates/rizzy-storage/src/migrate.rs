@@ -167,6 +167,15 @@ pub const MIGRATIONS: &[MigrationFile] = &[
         sqlite: include_str!("../migrations/sqlite/0014_vault_attachments_by_item.sql"),
         postgres: include_str!("../migrations/postgres/0014_vault_attachments_by_item.sql"),
     },
+    // ADR 0090 §4: the per-account security event log, in the next free number (the ADR's
+    // draft named 0012, taken by ADR 0091). Raises the backup `schema_version` to 15; the table
+    // is backed up (ADR 0090 §11).
+    MigrationFile {
+        version: 15,
+        description: "auth_security_events",
+        sqlite: include_str!("../migrations/sqlite/0015_auth_security_events.sql"),
+        postgres: include_str!("../migrations/postgres/0015_auth_security_events.sql"),
+    },
 ];
 
 /// This release's schema version: the last migration's version. A logical backup is stamped

@@ -871,8 +871,8 @@ fn pre_migration_copy() {
         let last = MIGRATIONS.last().unwrap().version;
         let mut w = db.begin_write().await.unwrap();
         on_engine!(w.conn(), |c| {
-            // Undo the last migration (0014: ADR 0093's per-item attachment index).
-            sqlx::query("DROP INDEX vault_attachments_by_item")
+            // Undo the last migration (0015: ADR 0090's security event log).
+            sqlx::query("DROP TABLE auth_security_events")
                 .execute(&mut *c)
                 .await
                 .unwrap();
