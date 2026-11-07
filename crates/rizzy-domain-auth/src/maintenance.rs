@@ -67,6 +67,8 @@ pub struct Purged {
     pub webauthn_pending: u64,
     /// Expired `WebAuthn` ceremony states (ADR 0077 §2).
     pub webauthn_challenges: u64,
+    /// Security events past their age or their (account, class) cap (ADR 0090 §5).
+    pub security_events: u64,
 }
 
 /// What one page of [`AuthService::reseal_totp_secrets`] did.
@@ -117,8 +119,8 @@ impl<V: VaultPort> AuthService<V> {
         Ok(filled)
     }
 
-    /// Deletes the short-lived auth state expired) at `now_ms` (ADR 0010 §5), in one
-    /// transaction.
+    /// Deletes the short-lived auth state expired) at `now_ms` (ADR 0010 §5), and the security
+    /// events past their retention or cap (ADR 0090 §5), in one transaction.
     ///
     /// # Errors
     /// Storage errors.
@@ -132,6 +134,7 @@ impl<V: VaultPort> AuthService<V> {
             rate_limits: exec!(tx.conn(), sql::RATE_DELETE_EXPIRED, now)?,
             webauthn_pending: exec!(tx.conn(), sql::WEBAUTHN_PENDING_DELETE_EXPIRED, now)?,
             webauthn_challenges: exec!(tx.conn(), sql::WEBAUTHN_CHALLENGES_DELETE_EXPIRED, now)?,
+            security_events: crate::events::purge(&mut tx, now_ms).await?,
         };
         tx.commit().await?;
         Ok(purged)

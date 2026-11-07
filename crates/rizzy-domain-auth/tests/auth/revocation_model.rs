@@ -282,6 +282,7 @@ async fn fork(base: &Base, seed: u64) -> Env {
         base.env.secrets.clone(),
         config,
         SharedVault(vault.clone()),
+        crate::common::event_ids(),
     )
     .unwrap();
     Env {

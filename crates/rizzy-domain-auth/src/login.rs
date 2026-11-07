@@ -35,16 +35,19 @@ use rizzy_proto::auth::{
     LoginFinishRequest, LoginFinishResponse, LoginStartRequest, LoginStartResponse,
 };
 use rizzy_proto::objects::AccountKeyServerWrap;
+use rizzy_proto::security_event::SecurityEventKind;
 use rizzy_proto::wire::{Bytes, Id, Text};
 use rizzy_storage::{WriteTx, lock_account};
 
 use crate::config::LOGIN_STATE_TTL_MS;
 use crate::error::AuthError;
+use crate::events::{self, Actor, Event};
 use crate::ports::VaultPort;
 use crate::ratelimit::{self, BucketKind, bucket};
 use crate::session::{self, Session, SessionKind};
 use crate::sql::{self, exec, fetch_opt};
 use crate::store::{self, Credential};
+use crate::totp::SecondFactor;
 use crate::trust::AccountTrust;
 use crate::view::{self, ViewScope};
 use crate::{AuthService, over_limit};
@@ -291,16 +294,24 @@ impl<V: VaultPort> AuthService<V> {
             .as_ref()
             .map(rizzy_proto::wire::SecretText::expose_secret);
         // A refused code still counts: the refusal is committed with the take.
-        if !self
+        let factor = self
             .check_second_factor(tx, account_id, code, now_ms)
-            .await?
-        {
+            .await?;
+        if factor == SecondFactor::Refused {
+            // ADR 0090 §3 code 3: a supplied code refused after KE3, in the refusal's committed
+            // transaction. A round without a code (`Missing`) writes nothing.
+            let failed =
+                Event::new(SecurityEventKind::SecondFactorFailed, Actor::sign_in(None)).value(1);
+            events::record(tx, &self.event_ids, account_id, now_ms, failed).await?;
+        }
+        if !matches!(factor, SecondFactor::NotEnrolled | SecondFactor::Totp) {
             // ADR 0058 point 3: an account with a security key keeps this verified login as a
             // 60 s, single-use second-factor-pending row named by its `login_id`, committed
             // with the refusal. A TOTP-only miss restarts the whole OPAQUE login, as before.
             crate::webauthn::demote_to_pending(tx, &req.login_id, account_id, now_ms).await?;
             return Err(AuthError::SecondFactorRequired);
         }
+        let used = if factor == SecondFactor::Totp { 1 } else { 0 };
         self.issue_login(
             tx,
             rng,
@@ -309,6 +320,7 @@ impl<V: VaultPort> AuthService<V> {
             &trust,
             source,
             reauth,
+            used,
             now_ms,
         )
         .await
@@ -316,7 +328,8 @@ impl<V: VaultPort> AuthService<V> {
 
     /// The end of a login once KE3 and the second factor verified (ADR 0058 point 3 shares it
     /// with `webauthn/login/finish`): the stale-record check, the new OPAQUE session, the
-    /// rate-limit reset and the account view.
+    /// rate-limit reset, the code 2 security event (ADR 0090 §3; `second_factor` 0 none, 1 TOTP,
+    /// 2 security key) and the account view.
     #[expect(
         clippy::too_many_arguments,
         reason = "the verified login's account, record and trust, plus the request's context"
@@ -330,6 +343,7 @@ impl<V: VaultPort> AuthService<V> {
         trust: &AccountTrust,
         source: &[u8],
         reauth: Option<&Session>,
+        second_factor: u64,
         now_ms: u64,
     ) -> Result<LoginFinishResponse, AuthError> {
         if credential.lags(&trust.state) {
@@ -358,6 +372,9 @@ impl<V: VaultPort> AuthService<V> {
             let key = bucket(BucketKind::LoginNameSource, &[name.as_bytes(), source]);
             ratelimit::clear(tx.conn(), &key).await?;
         }
+        let login = Event::new(SecurityEventKind::PasswordLogin, Actor::sign_in(device))
+            .value(second_factor);
+        events::record(tx, &self.event_ids, account_id, now_ms, login).await?;
         let devices = trust.devices(tx.conn()).await?;
         let account = view::build(
             &self.vault,

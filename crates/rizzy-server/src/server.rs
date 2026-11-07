@@ -112,7 +112,7 @@ use hyper_util::service::TowerToHyperService;
 use rand_core::Rng as _;
 use rizzy_bus::Bus;
 use rizzy_domain_auth::secrets::StartupCheckError;
-use rizzy_domain_auth::{AuthConfig, AuthError, AuthService, ConfigError, SignupPolicy};
+use rizzy_domain_auth::{AuthConfig, AuthError, AuthService, ConfigError, EventIds, SignupPolicy};
 use rizzy_domain_vault::{Quota, VaultDomain};
 use rizzy_storage::meta::ensure_restore_generation;
 use rizzy_storage::{
@@ -437,8 +437,14 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
         // instances (Q-15). Nothing enforces that here, so the operator is told.
         log::warn("recovery_wait_zero", &[]);
     }
-    let auth = AuthService::new(db.clone(), secrets, auth_config, VaultBridge::STANDARD)
-        .map_err(ServeError::AuthConfig)?;
+    let auth = AuthService::new(
+        db.clone(),
+        secrets,
+        auth_config,
+        VaultBridge::STANDARD,
+        event_ids(),
+    )
+    .map_err(ServeError::AuthConfig)?;
     // ADR 0032 §4: the rows migration 0005 found get their `account_key_epoch` from the
     // current signed state before anything is served.
     let filled = auth
@@ -468,6 +474,18 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
             )],
         );
     }
+    // ADR 0090 §6 point 2: the `api` role logs the recovery wait in force to every account whose
+    // log states another (or none) before its listener accepts; a failure refuses the start, so
+    // a change of the wait cannot take effect unlogged.
+    if config.roles.api {
+        let logged = auth
+            .check_recovery_wait(now_ms())
+            .await
+            .map_err(ServeError::Auth)?;
+        if logged > 0 {
+            log::info("recovery_wait_logged", &[Field::U64("accounts", logged)]);
+        }
+    }
     let bus = Bus::default();
     let vault = VaultDomain::new(db.clone(), AuthDirectory, bus.clone()).with_quota(Quota {
         quota_bytes: config.account_quota_bytes,
@@ -485,6 +503,15 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
         instance_lock: Some(instance_lock),
         bus,
         self_check_passed: Instant::now(),
+    })
+}
+
+/// The source of security-event ids (ADR 0090 §4): 16 bytes of the OS CSPRNG per id.
+fn event_ids() -> EventIds {
+    EventIds::new(|| {
+        let mut id = [0u8; 16];
+        os_rng().fill_bytes(&mut id);
+        id
     })
 }
 

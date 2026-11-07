@@ -155,6 +155,7 @@ pub mod session;
 
 mod change;
 mod device;
+mod events;
 mod healing;
 mod login;
 mod maintenance;
@@ -180,6 +181,7 @@ pub use change::{AccountChange, MAX_RETIRED_KEYS, RecoveryUpload, RetiredSecretK
 pub use config::{AuthConfig, ConfigError, InviteVerifier, RateLimits, RateRule, SignupPolicy};
 pub use device::RequestParts;
 pub use error::AuthError;
+pub use events::{EVENT_RETENTION_MS, EVENTS_PER_CLASS, EventIds};
 pub use maintenance::{Purged, Resealed};
 pub use ports::{PersonalVault, VaultPort};
 pub use recovery::{RecoveryPending, RecoveryRelease};
@@ -285,11 +287,14 @@ pub struct AuthService<V> {
     /// The `WebAuthn` relying party for `config.server_origin`; `None` when its host cannot be
     /// an RP ID (an IP address), and then no `WebAuthn` endpoint is served (`webauthn` module).
     webauthn: Option<webauthn_rs::Webauthn>,
+    /// The CSPRNG source of security-event ids (ADR 0090 §4).
+    event_ids: EventIds,
 }
 
 impl<V: VaultPort> AuthService<V> {
     /// Builds the service. Run [`ServerSecrets::check_database`] first: the server refuses to
-    /// start if it fails (CRYPTO.md §5.8, §5.11).
+    /// start if it fails (CRYPTO.md §5.8, §5.11). `event_ids` draws the ids of security events
+    /// from the server's CSPRNG (ADR 0090 §4).
     ///
     /// # Errors
     /// [`ConfigError`] when the configuration is outside the bounds the specs set.
@@ -298,6 +303,7 @@ impl<V: VaultPort> AuthService<V> {
         secrets: Arc<ServerSecrets>,
         config: AuthConfig,
         vault: V,
+        event_ids: EventIds,
     ) -> Result<Self, ConfigError> {
         config.validate()?;
         let webauthn = webauthn::relying_party(&config.server_origin);
@@ -307,6 +313,7 @@ impl<V: VaultPort> AuthService<V> {
             config,
             vault,
             webauthn,
+            event_ids,
         })
     }
 

@@ -31,9 +31,21 @@ use rizzy_core::sign::{
     SyncMode, Verified, VerifiedBundle,
 };
 use rizzy_domain_auth::{
-    AuthConfig, AuthError, AuthService, PersonalVault, RequestParts, ServerSecrets, Session,
-    SignupPolicy, VaultPort,
+    AuthConfig, AuthError, AuthService, EventIds, PersonalVault, RequestParts, ServerSecrets,
+    Session, SignupPolicy, VaultPort,
 };
+
+/// Security-event ids for the tests: distinct and increasing across the process (a counter in
+/// the low bytes), so ties in `at_ms` sort in insertion order. The server draws them from its
+/// CSPRNG (ADR 0090 §4).
+pub(crate) fn event_ids() -> EventIds {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    EventIds::new(|| {
+        let mut id = [0xe0; 16];
+        id[8..].copy_from_slice(&NEXT.fetch_add(1, Ordering::Relaxed).to_be_bytes());
+        id
+    })
+}
 use rizzy_proto::account::VaultSummary;
 use rizzy_proto::auth::{
     DeviceAuthFinishRequest, DeviceAuthStartRequest, LoginFinishRequest, LoginFinishResponse,
@@ -496,6 +508,7 @@ impl Env {
             secrets.clone(),
             config,
             SharedVault(vault.clone()),
+            event_ids(),
         )
         .unwrap();
         Self {
@@ -521,6 +534,7 @@ impl Env {
             self.secrets.clone(),
             config,
             SharedVault(self.vault.clone()),
+            event_ids(),
         )
         .unwrap();
         self.db = db;

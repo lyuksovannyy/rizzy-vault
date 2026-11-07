@@ -296,15 +296,14 @@ pub(crate) async fn end_kind_except(
     account_id: AccountId,
     kind: SessionKind,
     keep: &Session,
-) -> Result<(), AuthError> {
-    exec!(
+) -> Result<u64, AuthError> {
+    Ok(exec!(
         conn,
         sql::SESSIONS_DELETE_KIND_EXCEPT,
         &account_id.as_bytes()[..],
         kind.to_sql(),
         &keep.token_hash[..]
-    )?;
-    Ok(())
+    )?)
 }
 
 /// One row of [`list_account`]: a session's stored metadata, without its token hash or its
@@ -357,28 +356,31 @@ pub(crate) async fn list_account(
         .collect()
 }
 
-/// The kind of the session `session_id` of `account_id` if it is unexpired at `now_ms`, or
-/// `None` for an unknown, expired or other account's id (ADR 0075 R3).
+/// The kind and device of the session `session_id` of `account_id` if it is unexpired at
+/// `now_ms`, or `None` for an unknown, expired or other account's id (ADR 0075 R3).
 pub(crate) async fn kind_by_id(
     conn: Conn<'_>,
     account_id: AccountId,
     session_id: SessionId,
     now_ms: u64,
-) -> Result<Option<SessionKind>, AuthError> {
-    let row: Option<(i64, i64)> = fetch_opt!(
+) -> Result<Option<(SessionKind, Option<DeviceId>)>, AuthError> {
+    let row: Option<(i64, i64, Option<Vec<u8>>)> = fetch_opt!(
         conn,
-        (i64, i64),
+        (i64, i64, Option<Vec<u8>>),
         sql::SESSION_GET_BY_ID,
         &account_id.as_bytes()[..],
         &session_id.as_bytes()[..],
     )?;
-    let Some((kind, expires)) = row else {
+    let Some((kind, expires, device)) = row else {
         return Ok(None);
     };
     if now_ms >= sql::sql_u64(expires, "expires_at_ms")? {
         return Ok(None);
     }
-    SessionKind::from_sql(kind).map(Some)
+    let device = device
+        .map(|d| sql::id16(&d, "device_id").map(DeviceId::from_bytes))
+        .transpose()?;
+    Ok(Some((SessionKind::from_sql(kind)?, device)))
 }
 
 /// Ends the session `session_id` of `account_id` (ADR 0075 R3).

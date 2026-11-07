@@ -53,6 +53,7 @@ use rizzy_core::normalize::ServerOrigin;
 use rizzy_core::rng::CryptoRng;
 use rizzy_proto::auth::LoginFinishResponse;
 use rizzy_proto::limits::MAX_WEBAUTHN_CREDENTIALS;
+use rizzy_proto::security_event::SecurityEventKind;
 use rizzy_proto::webauthn::{
     WebauthnCredentialId, WebauthnCredentialView, WebauthnEnrolConfirmRequest,
     WebauthnEnrolStartResponse, WebauthnJson, WebauthnLabel, WebauthnListResponse,
@@ -70,6 +71,7 @@ use webauthn_rs::prelude::{
 use webauthn_rs::{Webauthn, WebauthnBuilder};
 
 use crate::error::AuthError;
+use crate::events::{self, Actor, Event};
 use crate::ports::VaultPort;
 use crate::ratelimit::{self, BucketKind, bucket};
 use crate::session::{self, Session, SessionKind};
@@ -429,9 +431,15 @@ impl<V: VaultPort> AuthService<V> {
         // ADR 0091 §2: frozen while another device's revocation window is open. The enrolment
         // challenge stays, so the same confirm can be retried after the window.
         crate::revocation::gate(tx.conn(), account, &session, now_ms).await?;
-        let outcome = self
+        let mut outcome = self
             .enrol_confirm_locked(&mut tx, rp, account, req, now_ms)
             .await;
+        if outcome.is_ok() {
+            // ADR 0090 §3 code 19, in the enrolment's transaction.
+            let added = Event::new(SecurityEventKind::SecurityKeyAdded, Actor::of(&session))
+                .label(req.label.as_str());
+            outcome = events::record(&mut tx, &self.event_ids, account, now_ms, added).await;
+        }
         self.settle_single_use(
             tx,
             outcome,
@@ -543,15 +551,31 @@ impl<V: VaultPort> AuthService<V> {
         session.require_fresh_opaque(now_ms)?;
         // ADR 0091 §2: frozen while another device's revocation window is open.
         crate::revocation::gate(tx.conn(), session.account_id, &session, now_ms).await?;
+        let label = list(tx.conn(), session.account_id)
+            .await?
+            .into_iter()
+            .find(|k| k.credential_id == req.credential_id.as_slice())
+            .map(|k| k.label);
         let removed = exec!(
             tx.conn(),
             sql::WEBAUTHN_DELETE,
             &session.account_id.as_bytes()[..],
             req.credential_id.as_slice(),
         )?;
-        if removed == 0 {
+        let (1.., Some(label)) = (removed, label) else {
             return Err(AuthError::NotFound);
-        }
+        };
+        // ADR 0090 §3 code 20, naming the removed key.
+        let removed =
+            Event::new(SecurityEventKind::SecurityKeyRemoved, Actor::of(&session)).label(&label);
+        events::record(
+            &mut tx,
+            &self.event_ids,
+            session.account_id,
+            now_ms,
+            removed,
+        )
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -680,7 +704,9 @@ impl<V: VaultPort> AuthService<V> {
         clippy::too_many_arguments,
         reason = "the arguments of `webauthn_login_finish` plus its transaction and the locked account"
     )]
-    /// [`AuthService::webauthn_login_finish`] under the account lock.
+    /// [`AuthService::webauthn_login_finish`] under the account lock. A refused assertion
+    /// writes code 3, a counter that did not advance code 21 (ADR 0090 §3), in the refusal's
+    /// committed transaction.
     async fn login_finish_locked<R: CryptoRng + Send + ?Sized>(
         &self,
         tx: &mut WriteTx,
@@ -716,11 +742,31 @@ impl<V: VaultPort> AuthService<V> {
         let result = match rp.finish_securitykey_authentication(&credential, &state) {
             Ok(result) => result,
             Err(WebauthnError::CredentialPossibleCompromise) => {
+                // The library's own counter check (INV-83's fourth case): code 21, naming the
+                // stored key the assertion claims; the received counter is not exposed.
+                let claimed: &[u8] = credential.raw_id.as_ref();
+                let stored = list(tx.conn(), account)
+                    .await?
+                    .into_iter()
+                    .find(|k| k.credential_id == claimed);
+                let mut clone = Event::new(
+                    SecurityEventKind::SecurityKeyPossibleClone,
+                    Actor::sign_in(None),
+                );
+                if let Some(stored) = &stored {
+                    clone = clone
+                        .label(&stored.label)
+                        .old(Some(u64::from(stored.sign_count)));
+                }
+                events::record(tx, &self.event_ids, account, now_ms, clone).await?;
                 return Err(AuthError::PossibleClone {
                     account_id: account.to_bytes(),
                 });
             }
-            Err(_) => return Err(AuthError::Unauthorized),
+            Err(_) => {
+                self.assertion_refused(tx, account, now_ms).await?;
+                return Err(AuthError::Unauthorized);
+            }
         };
         // ADR 0077 §2 rule 4: the account's current rows decide, not the state.
         let asserted: &[u8] = result.cred_id().as_ref();
@@ -729,10 +775,20 @@ impl<V: VaultPort> AuthService<V> {
             .into_iter()
             .find(|k| k.credential_id == asserted)
         else {
+            self.assertion_refused(tx, account, now_ms).await?;
             return Err(AuthError::Unauthorized);
         };
         let received = result.counter();
         if !counter_accepted(stored.sign_count, received) {
+            // ADR 0090 §3 code 21 (INV-83): flagged in the refusal's committed transaction.
+            let clone = Event::new(
+                SecurityEventKind::SecurityKeyPossibleClone,
+                Actor::sign_in(None),
+            )
+            .label(&stored.label)
+            .old(Some(u64::from(stored.sign_count)))
+            .value(u64::from(received));
+            events::record(tx, &self.event_ids, account, now_ms, clone).await?;
             return Err(AuthError::PossibleClone {
                 account_id: account.to_bytes(),
             });
@@ -756,8 +812,21 @@ impl<V: VaultPort> AuthService<V> {
         if record.password_epoch < trust.state.password_epoch {
             return Err(AuthError::Unauthorized);
         }
-        self.issue_login(tx, rng, account, &record, &trust, source, reauth, now_ms)
+        self.issue_login(tx, rng, account, &record, &trust, source, reauth, 2, now_ms)
             .await
+    }
+
+    /// ADR 0090 §3 code 3 for a security key: an assertion refused for a reason other than its
+    /// counter, after KE3 (the pending row proves it).
+    async fn assertion_refused(
+        &self,
+        tx: &mut WriteTx,
+        account: AccountId,
+        now_ms: u64,
+    ) -> Result<(), AuthError> {
+        let failed =
+            Event::new(SecurityEventKind::SecondFactorFailed, Actor::sign_in(None)).value(2);
+        events::record(tx, &self.event_ids, account, now_ms, failed).await
     }
 }
 

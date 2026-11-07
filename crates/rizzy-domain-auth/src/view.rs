@@ -132,6 +132,9 @@ pub(crate) async fn build<V: VaultPort>(
         crate::revocation::window(reborrow(&mut conn), trust.account_id, now_ms)
             .await?
             .map(|w| w.notice());
+    // ADR 0090 §7: the alert summary, advisory (INV-110), read on the same connection.
+    let security_alerts =
+        crate::events::summary(reborrow(&mut conn), trust.account_id, now_ms).await?;
     Ok(AccountView {
         account_state: Bytes::new(trust.state_wire.clone()).map_err(over_limit)?,
         bundles: List::new(bundles).map_err(over_limit)?,
@@ -167,7 +170,7 @@ pub(crate) async fn build<V: VaultPort>(
         revocation_window,
         wrap_rows,
         wrap_rows_limit: u32::try_from(MAX_ACCOUNT_WRAP_ROWS).unwrap_or(u32::MAX),
-        security_alerts: None,
+        security_alerts,
     })
 }
 

@@ -25,11 +25,13 @@ use rizzy_core::opaque::{
     CredentialIdentifier, server_registration_finish, server_registration_start,
 };
 use rizzy_proto::auth::{RegisterFinishRequest, RegisterStartRequest, RegisterStartResponse};
+use rizzy_proto::security_event::SecurityEventKind;
 use rizzy_proto::wire::Bytes;
 use rizzy_storage::{WriteTx, lock_account};
 
 use crate::config::SignupPolicy;
 use crate::error::AuthError;
+use crate::events::{self, Actor, Event};
 use crate::ports::{PersonalVault, VaultPort};
 use crate::ratelimit::{self, BucketKind, bucket};
 use crate::rules;
@@ -243,6 +245,10 @@ impl<V: VaultPort> AuthService<V> {
             PersonalVault::Created => {}
             PersonalVault::Identical | PersonalVault::Conflict => return Err(AuthError::Conflict),
         }
+        // ADR 0090 §3 code 1, with the recovery wait in force (§6's reference row).
+        let created = Event::new(SecurityEventKind::AccountCreated, Actor::sign_in(None))
+            .value(self.config.recovery_wait_ms);
+        events::record(&mut tx, &self.event_ids, account, now_ms, created).await?;
         tx.commit().await?;
         Ok(())
     }

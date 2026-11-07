@@ -27,10 +27,12 @@ use rizzy_core::envelope::purpose::ServerTotpSecretCtx;
 use rizzy_core::ids::AccountId;
 use rizzy_core::rng::CryptoRng;
 use rizzy_core::totp::{TotpParams, TotpSecret};
+use rizzy_proto::security_event::SecurityEventKind;
 use rizzy_storage::{WriteTx, lock_account};
 
 use crate::AuthService;
 use crate::error::AuthError;
+use crate::events::{self, Actor, Event};
 use crate::ports::VaultPort;
 use crate::ratelimit::{self, BucketKind, bucket};
 use crate::session::{self, Session};
@@ -97,6 +99,20 @@ fn current_step(now_ms: u64) -> u64 {
     TotpParams::DEFAULT.time_step(now_ms / 1000)
 }
 
+/// The second factor of a login whose KE3 verified (`AuthService::check_second_factor`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SecondFactor {
+    /// The account has no second factor: the login passes.
+    NotEnrolled,
+    /// A TOTP code matched: the login passes.
+    Totp,
+    /// A factor is needed and no TOTP code was checked: none was sent, or the account has only
+    /// security keys. The normal first round: not logged (ADR 0090 §3 code 3).
+    Missing,
+    /// A supplied TOTP code was refused (ADR 0090 §3 code 3).
+    Refused,
+}
+
 impl<V: VaultPort> AuthService<V> {
     /// Counts one TOTP check against the account's bucket, in `tx`.
     async fn hit_totp(
@@ -153,24 +169,29 @@ impl<V: VaultPort> AuthService<V> {
     /// §11.17), in the login's transaction: `true` when the account has neither a confirmed TOTP
     /// enrolment nor a security key, or `code` matches a confirmed TOTP enrolment (its step is
     /// then stored). Either kind satisfies the second factor on its own (ADR 0058 point 3); a
-    /// security key is checked only through `webauthn/login/finish`.
+    /// security key is checked only through `webauthn/login/finish`. The answer says which
+    /// (ADR 0090 §3 codes 2 and 3).
     pub(crate) async fn check_second_factor(
         &self,
         tx: &mut WriteTx,
         account_id: AccountId,
         code: Option<&str>,
         now_ms: u64,
-    ) -> Result<bool, AuthError> {
+    ) -> Result<SecondFactor, AuthError> {
         let confirmed: Vec<Stored> = list(tx, account_id)
             .await?
             .into_iter()
             .filter(|s| s.last_step.is_some())
             .collect();
         if confirmed.is_empty() {
-            return Ok(crate::webauthn::count(tx, account_id).await? == 0);
+            return Ok(if crate::webauthn::count(tx, account_id).await? == 0 {
+                SecondFactor::NotEnrolled
+            } else {
+                SecondFactor::Missing
+            });
         }
         let Some(code) = code else {
-            return Ok(false);
+            return Ok(SecondFactor::Missing);
         };
         self.hit_totp(tx, account_id, now_ms).await?;
         for stored in &confirmed {
@@ -178,10 +199,10 @@ impl<V: VaultPort> AuthService<V> {
                 .verify_stored(tx, account_id, stored, code, now_ms)
                 .await?
             {
-                return Ok(true);
+                return Ok(SecondFactor::Totp);
             }
         }
-        Ok(false)
+        Ok(SecondFactor::Refused)
     }
 
     /// Starts a TOTP enrolment over a fresh OPAQUE session (a security-relevant change needs a
@@ -281,6 +302,8 @@ impl<V: VaultPort> AuthService<V> {
             &account.as_bytes()[..],
             i64::from(totp_credential_seq),
         )?;
+        let enabled = Event::new(SecurityEventKind::TotpEnabled, Actor::of(&session));
+        events::record(&mut tx, &self.event_ids, account, now_ms, enabled).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -332,6 +355,8 @@ impl<V: VaultPort> AuthService<V> {
             return Err(AuthError::Unauthorized);
         }
         exec!(tx.conn(), sql::TOTP_DELETE_ALL, &account.as_bytes()[..])?;
+        let disabled = Event::new(SecurityEventKind::TotpDisabled, Actor::of(&session));
+        events::record(&mut tx, &self.event_ids, account, now_ms, disabled).await?;
         tx.commit().await?;
         Ok(())
     }

@@ -29,11 +29,13 @@
 
 use rizzy_core::ids::SessionId;
 use rizzy_proto::limits::MAX_SESSIONS_LISTED;
+use rizzy_proto::security_event::SecurityEventKind;
 use rizzy_proto::session::{SessionKindView, SessionListResponse, SessionView};
 use rizzy_proto::wire::{Id, List};
 use rizzy_storage::{WriteTx, lock_account};
 
 use crate::error::AuthError;
+use crate::events::{self, Actor, Event};
 use crate::ports::VaultPort;
 use crate::session::{self, Session, SessionKind};
 use crate::trust::AccountTrust;
@@ -133,12 +135,17 @@ impl<V: VaultPort> AuthService<V> {
     ) -> Result<(), AuthError> {
         let (mut tx, caller) = self.session_ender(session, now_ms).await?;
         let account = caller.account_id;
-        match session::kind_by_id(tx.conn(), account, target, now_ms).await? {
+        let (kind, device) = match session::kind_by_id(tx.conn(), account, target, now_ms).await? {
             None => return Err(AuthError::NotFound),
-            Some(SessionKind::Device) => return Err(AuthError::InvalidRequest),
-            Some(SessionKind::Opaque | SessionKind::Recovery) => {}
-        }
+            Some((SessionKind::Device, _)) => return Err(AuthError::InvalidRequest),
+            Some(found) => found,
+        };
         session::end_by_id(tx.conn(), account, target).await?;
+        // ADR 0090 §3 code 22: the ended session's kind and its bound durable device.
+        let ended = Event::new(SecurityEventKind::SessionEnded, Actor::of(&caller))
+            .subject(device)
+            .value(u64::try_from(kind.to_sql()).unwrap_or(0));
+        events::record(&mut tx, &self.event_ids, account, now_ms, ended).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -155,8 +162,17 @@ impl<V: VaultPort> AuthService<V> {
     ) -> Result<(), AuthError> {
         let (mut tx, caller) = self.session_ender(session, now_ms).await?;
         let account = caller.account_id;
-        session::end_kind_except(tx.conn(), account, SessionKind::Opaque, &caller).await?;
-        session::end_kind_except(tx.conn(), account, SessionKind::Recovery, &caller).await?;
+        let opaque =
+            session::end_kind_except(tx.conn(), account, SessionKind::Opaque, &caller).await?;
+        let recovery =
+            session::end_kind_except(tx.conn(), account, SessionKind::Recovery, &caller).await?;
+        let ended = opaque.saturating_add(recovery);
+        if ended > 0 {
+            // ADR 0090 §3 code 23, only when a session ended.
+            let event =
+                Event::new(SecurityEventKind::OtherSessionsEnded, Actor::of(&caller)).value(ended);
+            events::record(&mut tx, &self.event_ids, account, now_ms, event).await?;
+        }
         tx.commit().await?;
         Ok(())
     }

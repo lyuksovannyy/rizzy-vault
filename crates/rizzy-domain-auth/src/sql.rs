@@ -241,6 +241,24 @@ queries! {
     SESSION_DELETE_ID = "session_delete_id";
     /// Ends one session, by token hash (ADR 0075 R2).
     SESSION_DELETE = "session_delete";
+    /// Records one security event (ADR 0090 §4).
+    SECURITY_EVENT_INSERT = "security_event_insert";
+    /// Trims an account's rows of one class to the cap (ADR 0090 §5).
+    SECURITY_EVENT_TRIM = "security_event_trim";
+    /// The (account, class) pairs above the cap (ADR 0090 §5, worker).
+    SECURITY_EVENTS_OVER_CAP = "security_events_over_cap";
+    /// Deletes rows past the retention age (ADR 0090 §5, worker).
+    SECURITY_EVENTS_PURGE_AGE = "security_events_purge_age";
+    /// The newest page of an account's security events (ADR 0090 §7).
+    SECURITY_EVENTS_PAGE = "security_events_page";
+    /// A page of an account's security events below a cursor (ADR 0090 §7).
+    SECURITY_EVENTS_PAGE_BEFORE = "security_events_page_before";
+    /// The number of an account's recent alert-class rows (ADR 0090 §7).
+    SECURITY_ALERTS_COUNT = "security_alerts_count";
+    /// The newest of an account's recent alert-class rows (ADR 0090 §7).
+    SECURITY_ALERTS_NEWEST = "security_alerts_newest";
+    /// Every account with the wait its newest code 1 or 24 row states (ADR 0090 §6).
+    SECURITY_WAIT_ROWS = "security_wait_rows";
 }
 
 /// Runs a statement on a [`rizzy_storage::Conn`] and returns the number of rows it changed:

@@ -41,11 +41,13 @@ use rizzy_proto::auth::{
     DeviceAuthStartResponse, Reconciliation, RequestSignature,
 };
 use rizzy_proto::objects::DeviceGrant;
+use rizzy_proto::security_event::SecurityEventKind;
 use rizzy_proto::wire::{Bytes, Fixed, Id, List};
 use rizzy_storage::{WriteTx, lock_account};
 
 use crate::config::{CHALLENGE_TTL_MS, MAX_REQUEST_COUNTER};
 use crate::error::AuthError;
+use crate::events::{self, Actor, Event};
 use crate::healing::{open_epoch, verify_all};
 use crate::ports::VaultPort;
 use crate::revocation;
@@ -332,6 +334,12 @@ impl<V: VaultPort> AuthService<V> {
                 store::put_bundle(tx.conn(), account, bundle.bundle_seq, wire, now_ms).await?;
             }
             store::put_cert(tx.conn(), &rec.cert, &rec.cert_wire, now_ms).await?;
+            // ADR 0090 §3 code 4 (CRYPTO.md §11.2 step 8): only a device the database did not
+            // know reconciles.
+            let enrolled = Event::new(SecurityEventKind::DeviceEnrolled, Actor::device(device))
+                .subject(Some(device))
+                .value(u64::from(rec.cert.device_kind.to_u8()));
+            events::record(tx, &self.event_ids, account, now_ms, enrolled).await?;
         }
         let (token, session) = session::create(
             tx.conn(),
@@ -532,6 +540,11 @@ impl<V: VaultPort> AuthService<V> {
             return Err(AuthError::InvalidRequest);
         }
         store::put_cert(tx.conn(), &cert, req.device_certificate.as_slice(), now_ms).await?;
+        // ADR 0090 §3 code 4: the device had no certificate (checked above).
+        let enrolled = Event::new(SecurityEventKind::DeviceEnrolled, Actor::of(&session))
+            .subject(Some(cert.device_id))
+            .value(u64::from(cert.device_kind.to_u8()));
+        events::record(&mut tx, &self.event_ids, account, now_ms, enrolled).await?;
         store::cas_state(
             tx.conn(),
             account,
@@ -750,6 +763,10 @@ impl<V: VaultPort> AuthService<V> {
                 sql::u64_sql(now_ms, "suspended_at_ms")?,
             )?;
             session::end_device(tx.conn(), account, target).await?;
+            // ADR 0090 §3 code 5, when the suspension is new.
+            let suspended = Event::new(SecurityEventKind::DeviceSuspended, Actor::of(session))
+                .subject(Some(target));
+            events::record(&mut tx, &self.event_ids, account, now_ms, suspended).await?;
         }
         let last_seq = self.vault.device_head(tx.conn(), account, target).await?;
         tx.commit().await?;
@@ -781,6 +798,12 @@ impl<V: VaultPort> AuthService<V> {
             &account.as_bytes()[..],
             &target.as_bytes()[..],
         )?;
+        if devices.cert(target).is_some_and(|c| c.suspended) {
+            // ADR 0090 §3 code 6, when a suspension was lifted.
+            let lifted = Event::new(SecurityEventKind::DeviceUnsuspended, Actor::of(session))
+                .subject(Some(target));
+            events::record(&mut tx, &self.event_ids, account, now_ms, lifted).await?;
+        }
         let still_suspended = devices.certs.iter().any(|c| {
             c.suspended
                 && c.cert.device_id != target

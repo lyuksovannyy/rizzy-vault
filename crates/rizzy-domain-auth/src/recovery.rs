@@ -40,10 +40,12 @@ use rizzy_core::rng::CryptoRng;
 use rizzy_proto::account::{AccountView, PendingRecoveryNotice};
 use rizzy_proto::objects::AccountKeyRecoveryWrap;
 use rizzy_proto::recovery::{RecoveryVault, RecoveryWrapsRequest, RecoveryWrapsResponse};
+use rizzy_proto::security_event::SecurityEventKind;
 use rizzy_proto::wire::{Bytes, Id, SessionToken};
 use rizzy_storage::{Conn, WriteTx, lock_account};
 
 use crate::error::AuthError;
+use crate::events::{self, Actor, Event};
 use crate::ports::VaultPort;
 use crate::ratelimit::{self, BucketKind, bucket};
 use crate::session::{self, Session, SessionKind};
@@ -280,6 +282,10 @@ impl<V: VaultPort> AuthService<V> {
             sql::u64_sql(now_ms, "opened_at_ms")?,
             sql::u64_sql(available_at_ms, "available_at_ms")?,
         )?;
+        // ADR 0090 §3 code 13: a pending recovery opened, with its release time.
+        let started = Event::new(SecurityEventKind::RecoveryStarted, Actor::RECOVERY_CODE)
+            .value(available_at_ms);
+        events::record(&mut tx, &self.event_ids, account, now_ms, started).await?;
         tx.commit().await?;
         Ok(RecoveryPending {
             account_id: account,
@@ -313,6 +319,11 @@ impl<V: VaultPort> AuthService<V> {
             &account.as_bytes()[..]
         )?;
         session::end_kind(tx.conn(), account, SessionKind::Recovery).await?;
+        if deleted > 0 {
+            // ADR 0090 §3 code 14: only when a pending recovery closed.
+            let cancelled = Event::new(SecurityEventKind::RecoveryCancelled, Actor::of(&session));
+            events::record(&mut tx, &self.event_ids, account, now_ms, cancelled).await?;
+        }
         tx.commit().await?;
         Ok(deleted > 0)
     }
@@ -368,6 +379,12 @@ impl<V: VaultPort> AuthService<V> {
             crate::config::RECOVERY_SESSION_TTL_MS,
         )
         .await?;
+        // ADR 0090 §3 code 15: every release opens a recovery-only session.
+        let opened = Event::new(
+            SecurityEventKind::RecoverySessionOpened,
+            Actor::RECOVERY_CODE,
+        );
+        events::record(&mut tx, &self.event_ids, account, now_ms, opened).await?;
         let view = view::build(
             &self.vault,
             tx.conn(),

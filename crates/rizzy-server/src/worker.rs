@@ -476,7 +476,8 @@ pub async fn run_once(
                 .saturating_add(purged.challenges)
                 .saturating_add(purged.rate_limits)
                 .saturating_add(purged.webauthn_pending)
-                .saturating_add(purged.webauthn_challenges);
+                .saturating_add(purged.webauthn_challenges)
+                .saturating_add(purged.security_events);
         }
         Err(e) => log::error("worker_purge_failed", &[Field::Error("error", &e)]),
     }

@@ -65,11 +65,13 @@ use rizzy_proto::objects::{
     AccountKeyRecoveryWrap, AccountKeyServerWrap, AccountSettings, AccountStatement, DeviceGrant,
     IdentitySecretKeys, OpaqueMessage, VaultSelfGrant,
 };
+use rizzy_proto::security_event::SecurityEventKind;
 use rizzy_proto::wire::{Bytes, List};
 use rizzy_storage::{WriteTx, lock_account};
 
 use crate::AuthService;
 use crate::error::AuthError;
+use crate::events::{self, Actor, Event};
 use crate::ports::VaultPort;
 use crate::ratelimit::{self, BucketKind};
 use crate::revocation;
@@ -355,7 +357,75 @@ impl<V: VaultPort> AuthService<V> {
             now_ms,
         )
         .await?;
+        self.record_change(
+            &mut tx,
+            &session,
+            account,
+            &step,
+            &plan,
+            new.state_seq,
+            now_ms,
+        )
+        .await?;
         tx.commit().await?;
+        Ok(())
+    }
+
+    /// The security events of one commit (ADR 0090 §3 rules), all with its `at_ms` and
+    /// `state_seq`, in the order 16, 8, 10 or 9, 11 or 12, one 7 per newly revoked device,
+    /// one 4 per newly certified durable device. A step that sets none writes nothing.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the commit's transaction, session, account, step, plan, new state_seq and time"
+    )]
+    async fn record_change(
+        &self,
+        tx: &mut WriteTx,
+        session: &Session,
+        account: AccountId,
+        step: &Transition,
+        plan: &DevicePlan,
+        state_seq: u64,
+        now_ms: u64,
+    ) -> Result<(), AuthError> {
+        let actor = Actor::of(session);
+        let mut kinds = Vec::new();
+        if session.kind == SessionKind::Recovery {
+            kinds.push(SecurityEventKind::RecoveryCompleted);
+        }
+        if step.password_bumped {
+            kinds.push(SecurityEventKind::CredentialsChanged);
+        }
+        if step.identity_changed {
+            kinds.push(SecurityEventKind::IdentityRotated);
+        } else if step.account_key_rotated {
+            kinds.push(SecurityEventKind::AccountKeyRotated);
+        }
+        match step.recovery {
+            RecoveryTransition::NewCode => kinds.push(SecurityEventKind::RecoveryCodeChanged),
+            RecoveryTransition::Disabled => kinds.push(SecurityEventKind::RecoveryDisabled),
+            RecoveryTransition::Unchanged => {}
+        }
+        for kind in kinds {
+            let event = Event::new(kind, actor).seq(state_seq);
+            events::record(tx, &self.event_ids, account, now_ms, event).await?;
+        }
+        for (revocation, _) in &plan.new_revocations {
+            let event = Event::new(SecurityEventKind::DeviceRevoked, actor)
+                .subject(Some(revocation.device_id))
+                .seq(state_seq);
+            events::record(tx, &self.event_ids, account, now_ms, event).await?;
+        }
+        for (cert, _) in &plan.new_certs {
+            if !cert.in_device_set() {
+                continue;
+            }
+            let event = Event::new(SecurityEventKind::DeviceEnrolled, actor)
+                .subject(Some(cert.device_id))
+                .value(u64::from(cert.device_kind.to_u8()))
+                .seq(state_seq);
+            events::record(tx, &self.event_ids, account, now_ms, event).await?;
+        }
         Ok(())
     }
 
