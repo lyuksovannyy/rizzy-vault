@@ -51,21 +51,43 @@ async function virtualKey(
   return { cdp, authenticatorId };
 }
 
-/** The `publicKey` member of the options in the next answer from `path`, read as served (the
- * Worker's requests included), without touching the answer. */
-async function servedOptions(
-  page: Page,
-  path: string,
-): Promise<{
+/** The `publicKey` member of served WebAuthn options. */
+interface ServedOptions {
   userVerification?: string;
   authenticatorSelection?: { userVerification?: string };
   extensions?: Record<string, unknown>;
-}> {
-  const response = await page
-    .context()
-    .waitForEvent("response", { predicate: (r) => r.url().endsWith(path) });
-  const body = (await response.json()) as { options: string };
-  return (JSON.parse(body.options) as { publicKey: Record<string, unknown> }).publicKey;
+}
+
+/** Catches the next answer from `path` (the Worker's requests included): `next` is the
+ * `publicKey` member of its options, read as served, and the answer goes on to the page
+ * unchanged. Await it before the action that sends the request, so the route is in place.
+ *
+ * The answer is read in the route, not back from the browser (`response.json()` on a
+ * `response` event): Chromium now and then reports a Worker's fetch as cancelled
+ * (`net::ERR_ABORTED`) after its whole body arrived, and then keeps no copy of the body, so
+ * `Network.getResponseBody` fails with "No data found for resource". */
+async function servedOptions(page: Page, path: string): Promise<{ next: Promise<ServedOptions> }> {
+  let resolve: (options: ServedOptions) => void = () => undefined;
+  let reject: (error: unknown) => void = () => undefined;
+  const next = new Promise<ServedOptions>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  await page.context().route(
+    `**${path}`,
+    async (route) => {
+      const response = await route.fetch();
+      try {
+        const body = (await response.json()) as { options: string };
+        resolve((JSON.parse(body.options) as { publicKey: ServedOptions }).publicKey);
+      } catch (error) {
+        reject(error);
+      }
+      await route.fulfill({ response });
+    },
+    { times: 1 },
+  );
+  return { next };
 }
 
 /** The accessibility audit (`a11y.ts`). Its runner opens and closes a helper page, after which
@@ -189,10 +211,10 @@ test("security key: a key that can verify its user logs in with a touch alone", 
   // "discouraged" (observed: flags UP|UV|AT), as CTAP 2.1 keys with a PIN do; the facade's
   // earlier rule then demanded UV at every login.
   const { cdp, authenticatorId } = await virtualKey(page, true);
-  const enrolOptions = servedOptions(page, "/api/v1/webauthn/enrol/start");
+  const enrolOptions = await servedOptions(page, "/api/v1/webauthn/enrol/start");
   await section.getByLabel("Name for the new key").fill("PIN key");
   await section.getByRole("button", { name: "Add security key" }).click();
-  const creation = await enrolOptions;
+  const creation = await enrolOptions.next;
   expect(creation.authenticatorSelection?.userVerification).toBe("discouraged");
   expect(creation.extensions ?? {}).not.toHaveProperty("credentialProtectionPolicy");
   expect(creation.extensions ?? {}).not.toHaveProperty("enforceCredentialProtectionPolicy");
@@ -202,10 +224,10 @@ test("security key: a key that can verify its user logs in with a touch alone", 
 
   // From now on the key cannot verify its user: a login that needed UV would fail.
   await cdp.send("WebAuthn.setUserVerified", { authenticatorId, isUserVerified: false });
-  const loginOptions = servedOptions(page, "/api/v1/webauthn/login/challenge");
+  const loginOptions = await servedOptions(page, "/api/v1/webauthn/login/challenge");
   const prompt = await unlockToKeyPrompt(page, secretKey);
   await prompt.getByRole("button", { name: "Use security key" }).click();
-  expect((await loginOptions).userVerification).toBe("discouraged");
+  expect((await loginOptions.next).userVerification).toBe("discouraged");
   await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
   const after = await cdp.send("WebAuthn.getCredentials", { authenticatorId });
   expect(after.credentials[0]?.signCount).toBeGreaterThan(credentials[0]?.signCount ?? 0);
