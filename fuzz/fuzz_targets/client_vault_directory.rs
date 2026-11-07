@@ -17,7 +17,9 @@
 //! - the catalog of the directory against any served set opens only listed, openable vaults
 //!   that were served, and raises an alarm for every listed openable vault not served and every
 //!   served vault not listed (INV-102);
-//! - the same bytes as the value of tag `0x0002` in a settings record parse the same way.
+//! - the same bytes as the value of tag `0x0002` in a settings record parse the same way; a
+//!   value the directory parser refuses makes only that section unreadable, kept byte for byte
+//!   (ADR 0097 §1 (c)).
 //!
 //! ```text
 //! cargo +nightly fuzz run client_vault_directory
@@ -59,9 +61,16 @@ fuzz_target!(|data: &[u8]| {
     record.extend_from_slice(&u32::try_from(value.len()).unwrap_or(u32::MAX).to_be_bytes());
     record.extend_from_slice(value);
     match (AccountSettingsRecord::decode(&record), &parsed) {
-        (Ok(r), Ok(d)) => assert_eq!(r.vault_directory(), Some(d)),
-        (Err(e), Err(_)) => assert_eq!(e, ClientError::InvalidServerResponse),
-        (Ok(_), Err(_)) | (Err(_), Ok(_)) => panic!("the record and the tag disagree"),
+        (Ok(r), Ok(d)) => assert_eq!(r.vault_directory(), Ok(Some(d))),
+        (Ok(r), Err(_)) => {
+            assert_eq!(r.vault_directory(), Err(ClientError::SettingsUnreadable));
+            assert_eq!(
+                r.encode().expect("an unreadable section encodes").as_slice(),
+                record.as_slice()
+            );
+        }
+        // Only the outer bounds (an entry over 1 MiB) can fail the record itself.
+        (Err(e), _) => assert_eq!(e, ClientError::SettingsUnreadable),
     }
     let directory = match parsed {
         Ok(d) => d,
