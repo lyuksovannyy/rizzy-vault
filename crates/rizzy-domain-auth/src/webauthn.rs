@@ -410,7 +410,7 @@ impl<V: VaultPort> AuthService<V> {
     /// a failing attestation statement); [`AuthError::InvalidRequest`] for a credential that is
     /// not `WebAuthn` JSON; [`AuthError::KeyAlgorithm`] for a key that chose another algorithm
     /// than ES256 (ADR 0077 §6); [`AuthError::KeyTooLarge`] for a stored key JSON above
-    /// [`MAX_WEBAUTHN_SECURITY_KEY_LEN`] (ADR 0098 §2); [`AuthError::Conflict`] for a credential id
+    /// `MAX_WEBAUTHN_SECURITY_KEY_LEN` (ADR 0098 §2); [`AuthError::Conflict`] for a credential id
     /// already enrolled on the account or when the account already holds
     /// [`MAX_WEBAUTHN_CREDENTIALS`] keys (ADR 0098 §1 maps it to `invalid_request`);
     /// [`AuthError::NotFound`]; storage errors.
