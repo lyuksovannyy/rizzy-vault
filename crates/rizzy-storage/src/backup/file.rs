@@ -401,8 +401,9 @@ pub struct Encoder<W> {
     limit: u64,
     /// The tables begun so far.
     tables: usize,
-    /// The current table's declared `row_count`.
-    rows_declared: u64,
+    /// The current table's declared `row_count`; `None` for a table begun with
+    /// [`Encoder::table_unsized`] (pass 1).
+    rows_declared: Option<u64>,
     /// The rows written to the current table.
     rows: u64,
 }
@@ -452,7 +453,7 @@ impl<W: Write> Encoder<W> {
             len: 0,
             limit,
             tables: 0,
-            rows_declared: 0,
+            rows_declared: Some(0),
             rows: 0,
         };
         encoder.put(&MAGIC)?;
@@ -478,6 +479,29 @@ impl<W: Write> Encoder<W> {
     /// declared; [`FileError::Dump`] when every table has been written already;
     /// [`FileError::TooLarge`]; [`FileError::Write`].
     pub fn table(&mut self, row_count: u64) -> Result<(), FileError> {
+        self.begin_table(Some(row_count))
+    }
+
+    /// Pass 1 of [ADR 0094] §2: begins the next table without knowing its `row_count`,
+    /// which takes any number of rows; [`Encoder::table_rows`] then gives the count. The
+    /// `row_count` field is written as 0: its length, all pass 1 measures, does not depend on
+    /// it, but the bytes are not a valid file, so use this only over a discarding sink.
+    ///
+    /// # Errors
+    ///
+    /// As [`Encoder::table`].
+    pub fn table_unsized(&mut self) -> Result<(), FileError> {
+        self.begin_table(None)
+    }
+
+    /// The rows written to the current table so far.
+    #[must_use]
+    pub const fn table_rows(&self) -> u64 {
+        self.rows
+    }
+
+    /// [`Encoder::table`] and [`Encoder::table_unsized`].
+    fn begin_table(&mut self, row_count: Option<u64>) -> Result<(), FileError> {
         self.end_table()?;
         let table_index = self.tables;
         let spec = TABLES
@@ -499,7 +523,7 @@ impl<W: Write> Encoder<W> {
             self.put_bytes(column.name.as_bytes(), at)?;
             self.put(&[kind_byte(column.kind), u8::from(column.nullable)])?;
         }
-        self.put(&row_count.to_be_bytes())?;
+        self.put(&row_count.unwrap_or(0).to_be_bytes())?;
         self.tables = table_index.saturating_add(1);
         self.rows_declared = row_count;
         self.rows = 0;
@@ -518,7 +542,13 @@ impl<W: Write> Encoder<W> {
         let table_index = self.tables.saturating_sub(1);
         let spec = TABLES
             .get(table_index)
-            .filter(|_| self.tables > 0 && self.rows < self.rows_declared)
+            .filter(|_| {
+                self.tables > 0
+                    && match self.rows_declared {
+                        Some(declared) => self.rows < declared,
+                        None => true,
+                    }
+            })
             .ok_or(FileError::RowCount { table: table_index })?;
         let row_index = usize::try_from(self.rows).unwrap_or(usize::MAX);
         check_row(spec, row_index, row).map_err(FileError::Dump)?;
@@ -606,7 +636,10 @@ impl<W: Write> Encoder<W> {
 
     /// Requires the current table (if any) to have its declared rows.
     const fn end_table(&self) -> Result<(), FileError> {
-        if self.rows == self.rows_declared {
+        if match self.rows_declared {
+            Some(declared) => self.rows == declared,
+            None => true,
+        } {
             Ok(())
         } else {
             Err(FileError::RowCount {

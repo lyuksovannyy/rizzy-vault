@@ -479,6 +479,34 @@ fn write_transactions_are_serialised() {
     });
 }
 
+/// ADR 0094 §2: the two-pass streaming dump writes `file`'s bytes, sized first, and a refusal
+/// by `open` comes back before anything is written.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a test helper: a failure is the test failing"
+)]
+async fn assert_streamed_dump(reader: &Database, file: &[u8]) {
+    let len = u64::try_from(file.len()).unwrap();
+    let mut sized = None;
+    let streamed = reader
+        .dump_to(1_234, |l1| {
+            sized = Some(l1);
+            Ok::<_, ()>(Vec::new())
+        })
+        .await
+        .unwrap();
+    assert_eq!(streamed.out, file);
+    assert_eq!(sized, Some(len));
+    assert_eq!(streamed.len, len);
+    assert_eq!(streamed.schema_version, schema_version());
+    assert!(matches!(
+        reader
+            .dump_to(1_234, |_| Err::<Vec<u8>, _>("too large"))
+            .await,
+        Err(rizzy_storage::DumpError::Open("too large"))
+    ));
+}
+
 /// A dump restores into an empty database and reads back identical, with the restore hooks
 /// applied; the restored database dumps to the same rows again.
 #[test]
@@ -518,6 +546,9 @@ fn backup_restore_round_trip() {
 
         // Through the backup file (ADR 0023): written and parsed back to the same dump.
         let file = rizzy_storage::backup::file::write(&dump, 1_234).unwrap();
+
+        assert_streamed_dump(&reader, &file).await;
+
         let parsed = rizzy_storage::backup::file::parse(&file).unwrap();
         assert_eq!(parsed.created_at_ms, 1_234);
         let dump = parsed.dump;

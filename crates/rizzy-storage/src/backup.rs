@@ -41,6 +41,7 @@ pub mod file;
 
 use std::fmt;
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 
 use sqlx::Row;
@@ -121,6 +122,34 @@ pub struct RestoreReport {
     /// command tells the operator what that means, and that accounts whose devices never
     /// reconnect stay rolled back (AR-19).
     pub accounts_in_reconciliation: u64,
+}
+
+/// What [`Database::dump_to`] wrote.
+#[derive(Debug)]
+pub struct Dumped<W> {
+    /// The output `open` returned, flushed.
+    pub out: W,
+    /// The format version 1 file's length, `L1`.
+    pub len: u64,
+    /// The format version 1 file's trailing SHA-256.
+    pub digest: [u8; file::DIGEST_LEN],
+    /// The schema version the file is stamped with.
+    pub schema_version: i64,
+}
+
+/// Why [`Database::dump_to`] failed.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum DumpError<E> {
+    /// Reading the database failed, or it is not at this release's schema.
+    Storage(Error),
+    /// The encoder refused a value, or the output failed.
+    File(file::FileError),
+    /// `open` refused after pass 1, before anything was output.
+    Open(E),
+    /// Pass 2 saw another number of rows or bytes than pass 1: the two passes did not see one
+    /// snapshot (ADR 0094 §2 point 3).
+    SnapshotChanged,
 }
 
 impl Database {
@@ -217,6 +246,83 @@ impl Database {
         Ok(Dump {
             schema_version,
             tables,
+        })
+    }
+
+    /// Streams the database as a backup file (format version 1) in two passes over one read
+    /// snapshot ([ADR 0094] §2), holding neither the file nor the [`Dump`].
+    ///
+    /// In the one read transaction [`Database::dump`] uses, and after the same schema checks:
+    /// pass 1 runs every row through the [`file::Encoder`] into a discarding sink, recording
+    /// each table's row count and the file's length `L1`. Then `open(L1)` is called: it
+    /// decides on the output's length (for format version 2, ADR 0071's `sealed_len(L1)`),
+    /// refuses one over the limit, and only then creates the output. Pass 2 writes the file to
+    /// it with pass 1's row counts and an encoder limit of exactly `L1` bytes.
+    ///
+    /// # Errors
+    ///
+    /// - [`DumpError::Storage`] as [`Database::dump`].
+    /// - [`DumpError::File`] when the encoder refuses a value, or the output fails
+    ///   ([`file::FileError::Write`]).
+    /// - [`DumpError::Open`] when `open` refuses: nothing was output.
+    /// - [`DumpError::SnapshotChanged`] when pass 2 saw another number of rows or bytes
+    ///   than pass 1. The output then holds a partial file the caller must remove or discard.
+    ///
+    /// [ADR 0094]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0094-backup-container-limits.md
+    pub async fn dump_to<W: Write, E>(
+        &self,
+        created_at_ms: u64,
+        open: impl FnOnce(u64) -> Result<W, E>,
+    ) -> Result<Dumped<W>, DumpError<E>> {
+        let mut tx = self.begin_read().await.map_err(DumpError::Storage)?;
+        let applied = applied_on(tx.conn()).await.map_err(DumpError::Storage)?;
+        let pending = check_applied(self.engine(), &applied).map_err(DumpError::Storage)?;
+        if !pending.is_empty() {
+            return Err(DumpError::Storage(Error::SchemaNotCurrent { pending }));
+        }
+        let schema_version = schema_version();
+        // Pass 1 (sizing): no limit here, so the caller learns the exact length it refuses.
+        let mut counter =
+            file::Encoder::with_limit(std::io::sink(), schema_version, created_at_ms, u64::MAX)
+                .map_err(DumpError::File)?;
+        let mut counts = Vec::with_capacity(TABLES.len());
+        for spec in TABLES {
+            counter.table_unsized().map_err(DumpError::File)?;
+            each_row(tx.conn(), spec, |row| counter.row(&row))
+                .await
+                .map_err(DumpError::Storage)?
+                .map_err(DumpError::File)?;
+            counts.push(counter.table_rows());
+        }
+        let (_, _, plain_len) = counter.finish().map_err(DumpError::File)?;
+        let out = open(plain_len).map_err(DumpError::Open)?;
+        // Pass 2 (writing): a row or byte more or less than pass 1 counted is a changed
+        // snapshot.
+        let changed = |e: file::FileError| match e {
+            file::FileError::RowCount { .. } | file::FileError::TooLarge => {
+                DumpError::SnapshotChanged
+            }
+            e => DumpError::File(e),
+        };
+        let mut encoder = file::Encoder::with_limit(out, schema_version, created_at_ms, plain_len)
+            .map_err(changed)?;
+        for (spec, &count) in TABLES.iter().zip(&counts) {
+            encoder.table(count).map_err(changed)?;
+            each_row(tx.conn(), spec, |row| encoder.row(&row))
+                .await
+                .map_err(DumpError::Storage)?
+                .map_err(changed)?;
+        }
+        let (out, digest, len) = encoder.finish().map_err(changed)?;
+        if len != plain_len {
+            return Err(DumpError::SnapshotChanged);
+        }
+        tx.finish().await.map_err(DumpError::Storage)?;
+        Ok(Dumped {
+            out,
+            len,
+            digest,
+            schema_version,
         })
     }
 
@@ -388,8 +494,30 @@ fn check_row(spec: &TableSpec, row_index: usize, row: &[Value]) -> Result<(), Re
 
 /// Reads every row of one table.
 async fn dump_table(conn: Conn<'_>, spec: &TableSpec) -> Result<Vec<Vec<Value>>, Error> {
+    let mut rows = Vec::new();
+    each_row(conn, spec, |row| {
+        rows.push(row);
+        Ok(())
+    })
+    .await?
+    .unwrap_or_else(|never: core::convert::Infallible| match never {});
+    Ok(rows)
+}
+
+/// Hands every row of one table, in its `select` order, to `f`, one at a time; stops at the
+/// first error `f` returns and returns it as the inner error.
+///
+/// The rows are decoded and handed over one by one, but sqlx 0.9's row stream (`fetch`)
+/// cannot be consumed without a `futures` trait this crate does not depend on, so the
+/// driver still fetches one table at a time (`fetch_all`): the one place ADR 0094 §2's
+/// "never `fetch_all`" is not met yet.
+async fn each_row<X>(
+    conn: Conn<'_>,
+    spec: &TableSpec,
+    mut f: impl FnMut(Vec<Value>) -> Result<(), X>,
+) -> Result<Result<(), X>, Error> {
     Ok(crate::on_engine!(conn, |c| {
-        let mut rows = Vec::new();
+        let mut outcome = Ok(());
         for row in sqlx::query(spec.select).fetch_all(&mut *c).await? {
             let mut values = Vec::with_capacity(spec.columns.len());
             for (i, column) in spec.columns.iter().enumerate() {
@@ -400,9 +528,12 @@ async fn dump_table(conn: Conn<'_>, spec: &TableSpec) -> Result<Vec<Vec<Value>>,
                 };
                 values.push(value.unwrap_or(Value::Null));
             }
-            rows.push(values);
+            outcome = f(values);
+            if outcome.is_err() {
+                break;
+            }
         }
-        rows
+        outcome
     }))
 }
 
