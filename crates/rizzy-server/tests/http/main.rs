@@ -21,6 +21,9 @@
 //! Encrypted attachments (`attachments`, ADR 0054): upload, a second device's byte-identical
 //! download, retries and conflicts, exact chunk lengths and indices, another account's id, the
 //! 25 MiB cap and the quota answered `quota_exceeded`, and the counter released at delete.
+//! The revocation window (`revocation_window`, ADR 0091 §1–§2): another device's `vault/upload`
+//! answered `409 revocation_pending` through the real bridge, the revoker's stored, an op of the
+//! suspended device refused over another device's session.
 //!
 //! The admin listener's boundary (`admin_panel`, ADR 0060 §1, §2): its own router under its own
 //! CSP, every path a plain `404` at M3, a vault session reaching nothing there, and `/admin/...`
@@ -50,6 +53,7 @@ mod paged_fetch;
 mod password_equivalents;
 mod quota;
 mod recovery;
+mod revocation_window;
 mod rotation;
 mod secrets_ops;
 mod sessions;
