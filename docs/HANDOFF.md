@@ -293,8 +293,27 @@ The dated bullets below are a log: an ADR status in a bullet is the status on th
     - The local-index property test keyed by (vault, item).
     - The PostgreSQL deadlock in a 0092 rotation test.
     - The security-key e2e reading a Worker response body that Chromium had cancelled.
-  - **Migrations shipped:** 0001–0014; the backup `schema_version` is 14. 0015 is taken by 0090, which is in progress.
-- **In progress:** 0110/0111 part 2 (extension lock settings, Firefox MV2, passkey UV), 0090 (security event log, migration 0015), 0113.
+  - **Migrations shipped:** 0001–0014; the backup `schema_version` is 14. 0015 is reserved for ADR 0090 (see below).
+- **Also integrated after the first list:**
+  - **0110/0111 part 2:** extension lock settings and options page; the OS idle lock; no storage.session fallback; a Firefox MV2 persistent background page; passkey UV decided in Rust; INV-123/124/127 and AR-33/34.
+  - **0113:** the breach endpoint contract pinned by tests; no behaviour change.
+- **Work stopped at the owner's request (2026-10-25). Nothing is running.**
+  - **ADR 0090, half done.** The server half is on branch `wip/impl-0090` (pushed, 6 commits on top of `655e9a4`, not integrated):
+    - **What it has:** migration 0015 (backup `schema_version` 15, KAT regenerated with a new empty table section), `rizzy_proto::security_event`, recording of codes 1–23 (plus 24 at start-up), `POST /api/v1/security-events/list`, tests, and docs (INV-110, ROADMAP §4.3 row).
+    - **Its last full gate with PostgreSQL** (before the rebase): every Rust step green, check-js red (minimatch), and one web e2e flake (`keyboard-nav.spec.ts:295`) that passes alone.
+    - **Still to do:**
+      - rizzy-client/wasm/core calls and the alert summary.
+      - The web vault "Security activity" section and banner.
+      - The extension banner.
+      - `rv account events`.
+      - The extra tests the ADR lists, including `a_possible_clone_raises_the_alert_summary`, which INV-83's Verified-by already names.
+    - **Before integrating:** finish part 2, rerun the full gate with PostgreSQL.
+  - **ADR 0096:** not started (the worktree was empty and has been removed).
+  - **ADR 0097 leftovers:**
+    - No UI or binding for `SettingsEdit::ResetSection` (the §4.5 confirmation dialog).
+    - The fill UI doesn't link the fail-closed warning to Settings.
+  - **ADR 0092 leftover:** after a recovery commit's `state_conflict`, the client doesn't re-read the wraps from the start and stage the missing rows (§5). It keeps the abandon-and-rerun rule.
+  - **Known flake:** `apps/web/e2e/keyboard-nav.spec.ts:295` (attachments, file chooser timeout under load). The security-key flake is fixed.
 - **Lead decisions pending owner errata:**
   - **ADR 0093 §1.2:** a 409 `revocation_pending` answer to `attachments/delete-item` keeps the cleanup row (Keep) instead of dropping it. ADR 0091's freeze would otherwise leak quota.
   - **ADR 0110 §7:** the extension's popup sender check also accepts the popup page opened at its own URL in a tab. It is not web-accessible, and the e2e needs it.
@@ -304,7 +323,8 @@ The dated bullets below are a log: an ADR status in a bullet is the status on th
 - **Blocked on the owner:** `check-js` fails on every gate on GHSA-g3hv-75wg-m249 (minimatch via eslint, dev-only). The patched versions are BlueOak-1.0.0, which is not on the licence allow-list. The owner picks: allow BlueOak-1.0.0 for JS dev tooling, or a scoped audit ignore.
 - **Status lines:** each implemented ADR lists in its "On acceptance" section the status edits of the ADRs it partly supersedes. None are made; they are the owner's.
 - **What is left for agents:**
-  - The rest of the roadmap: 0089, 0096, 0105, 0107, 0102, 0101, then the admin set (0114, 0085, 0086, 0087, 0103, 0104, 0100).
+  - **Finish first:** ADR 0090 part 2 on `wip/impl-0090`.
+  - **Then the rest of the roadmap:** 0089, 0096, 0105, 0107, 0102, 0101, then the admin set (0114, 0085, 0086, 0087, 0103, 0104, 0100). 0100 needs 0086 and 0090.
   - The post-v1.0 ADRs (0061, 0063–0070, 0072) wait for the owner to say whether to build them now.
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
