@@ -16,10 +16,12 @@ TypeScript ([ADR 0014](../../docs/adr/0014-ui-stack.md)), served by the `web` ro
   and `src/protocol.ts`, and imports only types from `@rizzy-vault/core` (an ESLint rule).
   Typed secrets cross as UTF-8 byte arrays whose buffers are transferred and zeroed by the core.
 - **Nothing is persisted** ([CRYPTO.md](../../docs/CRYPTO.md) §11.4): every session is an
-  OPAQUE login, so a lock or a reload means logging in again. It locks itself after 15 minutes
-  without input (`src/autolock.ts`), after one last sync of unsent changes bounded to 10 s. A
-  lock never waits on the network or the clipboard. Every request has a 60 s deadline, and a
-  lock aborts the requests in flight (`src/bounded-fetch.ts`).
+  OPAQUE login, so a lock or a reload means logging in again. It locks itself under the
+  per-device lock settings (`rizzy.lock_settings` in `localStorage`, ADR 0110): by default after
+  5 minutes without input, checked on a 10 s tick, so at N minutes plus up to one tick
+  (`src/autolock.ts`), after one last sync of unsent changes bounded to 10 s. A lock never waits
+  on the network or the clipboard. Every request has a 60 s deadline, and a lock aborts the
+  requests in flight (`src/bounded-fetch.ts`).
 - **Secret fields** are rendered only by `SecretField` of `@rizzy-vault/ui` (INV-68). Item
   URLs open only through `src/SafeLink.tsx` (`http:` and `https:` only, INV-42). Copied values
   are cleared from the clipboard after 30 s, on lock and on `pagehide`; a clear the browser
