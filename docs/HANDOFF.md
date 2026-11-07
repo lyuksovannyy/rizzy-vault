@@ -267,10 +267,45 @@ The dated bullets below are a log: an ADR status in a bullet is the status on th
     - **Still open, decided by Proposed ADR 0111:** Chromium ignores the user's auto-lock setting.
     - **Extension divergences:** it never raises alarm 3 (no identity-change flow), and IndexedDB writes are one transaction per row.
     - **Verified:** CI run 40222588461 is green.
+- **Owner acceptance, 2026-10-25:**
+  - **Accepted:** every ADR that was still Proposed, namely 0061, 0063–0070, 0072 and 0083–0114 (commit `ec7208b`, under the owner's name).
+  - **Order:** implementation follows [docs/reviews/2026-10-25-implementation-roadmap.md](reviews/2026-10-25-implementation-roadmap.md).
+- **Implemented and integrated since:** each track passed `gate.sh` (`--full` where web or extension code changed). The only red step was check-js (see below).
+  - **Errata, no behaviour change:**
+    - **0083** (backup `plaintext_len` docs).
+    - **0088** (device-state grammar, plus v1→v2 and oversize tests).
+    - **0095** (owner answers verified against code, plus alarm tests).
+    - **0109** (the healing guard while a hold is open, plus restart property tests).
+  - **Server/client limits:**
+    - **0098** (security-key caps).
+    - **0094** (streaming backup writer/reader, 1 TiB; `futures-core` became a direct dependency of rizzy-storage, already in the lockfile through sqlx, lead-approved).
+    - **0091** (revocation window, `revocation_pending`, `rv device revoke/unsuspend`, migration 0012).
+    - **0092** (wrap-row caps, `rotation_limit`, staged rotation, paged recovery wraps, migration 0013).
+    - **0093** (`attachments/delete-item`, cache format 5, cleanup table, unsupported-item refusals, migration 0014).
+  - **Clients:**
+    - **0099** (website icons per-account setting, on by default; INV-114, AR-32).
+    - **0097** (Regex mode with `regex-lite =0.1.9`, inert user groups, fail-closed unreadable settings sections, Pattern input).
+    - **0110 part 1** (lock settings record, LockTimer, web vault Settings → Locking).
+    - **0112** (rv panic hook, exit 101, AR-31).
+    - **0106** (`RIZZY_SOURCE_URL`, `/api/meta source_url`, footer link).
+    - **0108** (`rv recovery abandon`, INV-122).
+  - **Test fixes:**
+    - The local-index property test keyed by (vault, item).
+    - The PostgreSQL deadlock in a 0092 rotation test.
+    - The security-key e2e reading a Worker response body that Chromium had cancelled.
+  - **Migrations shipped:** 0001–0014; the backup `schema_version` is 14. 0015 is taken by 0090, which is in progress.
+- **In progress:** 0110/0111 part 2 (extension lock settings, Firefox MV2, passkey UV), 0090 (security event log, migration 0015), 0113.
+- **Lead decisions pending owner errata:**
+  - **ADR 0093 §1.2:** a 409 `revocation_pending` answer to `attachments/delete-item` keeps the cleanup row (Keep) instead of dropping it. ADR 0091's freeze would otherwise leak quota.
+  - **ADR 0110 §7:** the extension's popup sender check also accepts the popup page opened at its own URL in a tab. It is not web-accessible, and the e2e needs it.
+  - **ADR 0092:**
+    - The paged `recovery/wraps` read is session-gated without its own 5/h bucket.
+    - `ROTATION_URGENT_ROWS` is 62,259 (the table), not ⌈0.95×65,536⌉.
+- **Blocked on the owner:** `check-js` fails on every gate on GHSA-g3hv-75wg-m249 (minimatch via eslint, dev-only). The patched versions are BlueOak-1.0.0, which is not on the licence allow-list. The owner picks: allow BlueOak-1.0.0 for JS dev tooling, or a scoped audit ignore.
+- **Status lines:** each implemented ADR lists in its "On acceptance" section the status edits of the ADRs it partly supersedes. None are made; they are the owner's.
 - **What is left for agents:**
-  - The code gaps above.
-  - After the owner accepts drafts: their implementation, in dependency order.
-  - Everything else waits on owner answers (the open questions in each draft).
+  - The rest of the roadmap: 0089, 0096, 0105, 0107, 0102, 0101, then the admin set (0114, 0085, 0086, 0087, 0103, 0104, 0100).
+  - The post-v1.0 ADRs (0061, 0063–0070, 0072) wait for the owner to say whether to build them now.
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
