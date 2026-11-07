@@ -353,11 +353,32 @@ function nowOf(clock: Clock): bigint {
   return BigInt(Math.trunc(clock()));
 }
 
-/** `GET /api/meta`: whether the server speaks `v1`, checked before anything secret is typed. */
-export async function checkServer(transport: Transport): Promise<void> {
+/** What {@link checkServer} reads from `/api/meta` (ADR 0106 §3–§4). */
+export interface ServerInfo {
+  readonly serverVersion: string;
+  /**
+   * Where users get the server's source (AGPL §13): present only when the server sent a valid
+   * `https://` source URL. Absent from an older server, or invalid: the host shows no link.
+   */
+  readonly sourceUrl?: string;
+}
+
+/**
+ * `GET /api/meta`: whether the server speaks `v1`, checked before anything secret is typed,
+ * with the server's version and source URL. A bad `source_url` is never an error.
+ */
+export async function checkServer(transport: Transport): Promise<ServerInfo> {
   ensureReady();
   const answer = await transport(takeRequest(metaRequest()));
-  call(() => checkMeta(answer.status, answer.body));
+  return mapOne(
+    call(() => checkMeta(answer.status, answer.body)),
+    (meta): ServerInfo => {
+      const sourceUrl = meta.sourceUrl;
+      return sourceUrl === undefined
+        ? { serverVersion: meta.serverVersion }
+        : { serverVersion: meta.serverVersion, sourceUrl };
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------------------------

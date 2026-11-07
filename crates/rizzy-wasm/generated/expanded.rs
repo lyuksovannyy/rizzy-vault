@@ -34,7 +34,7 @@
 //! | [`Session`], [`AttachmentView`] | the unlocked session: sync driver, items, attachments (ADR 0054), TOTP, export, import, devices, 2FA, lock |
 //! | [`ItemDraft`], [`ItemSummary`], [`FieldView`] | item edits and views |
 //! | [`autofill::CustomFieldAutofillView`], [`autofill::AutofillOffer`], [`autofill::FillValues`], [`autofill::SaveRowView`] | autocomplete-driven autofill (ADR 0076): the editor's id states, the offer's disclosure, one fill's values, the save dialog's rows |
-//! | [`HttpRequest`], [`meta_request`], [`check_meta`], [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
+//! | [`HttpRequest`], [`meta_request`], [`check_meta`] ([`ServerMeta`]), [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
 //! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], [`Generated`] | the generator, every option ([`generator`]) |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
 //! | [`create_passkey`] (`createPasskey`), [`CreatedPasskey`], [`Session::passkey_assertion`] (`passkeyAssertion`), [`PasskeyAssertion`] | `WebAuthn` passkey registration and assertion ([`passkey`]; ADR 0039) |
@@ -21468,19 +21468,537 @@ pub mod http {
             static _GENERATED: [u8; _LEN] =
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc =
+    " What [`check_meta`] reads from `/api/meta` for the host: the server\'s version and, when"]
+    #[doc =
+    " the server sent a valid one, its source URL ([ADR 0106] §3–§4)."]
+    #[doc = ""]
+    #[doc =
+    " [ADR 0106]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0106-agpl-source-url.md"]
+    pub struct ServerMeta {
+        #[doc = " `server_version`."]
+        server_version: String,
+        #[doc =
+        " `source_url`, only if it passed `SourceUrl::parse` (so only `https:`)."]
+        source_url: Option<String>,
+    }
+    #[automatically_derived]
+    impl ::core::fmt::Debug for ServerMeta {
+        #[inline]
+        fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            ::core::fmt::Formatter::debug_struct_field2_finish(f,
+                "ServerMeta", "server_version", &self.server_version,
+                "source_url", &&self.source_url)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for ServerMeta { }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for ServerMeta {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for ServerMeta { }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for ServerMeta {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(10u32);
+            inform(83u32);
+            inform(101u32);
+            inform(114u32);
+            inform(118u32);
+            inform(101u32);
+            inform(114u32);
+            inform(77u32);
+            inform(101u32);
+            inform(116u32);
+            inform(97u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for ServerMeta {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ServerMeta>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<ServerMeta>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for ServerMeta {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ServerMeta>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<ServerMeta> for
+        wasm_bindgen::JsValue {
+        fn from(value: ServerMeta) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_servermeta_new_e09cc0eb35f8b583"]
+                fn __wbg_servermeta_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ServerMeta>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_servermeta_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_servermeta_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_servermeta_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ServerMeta>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <ServerMeta as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for ServerMeta {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ServerMeta>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<ServerMeta>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for ServerMeta {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ServerMeta>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<ServerMeta>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for ServerMeta {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ServerMeta>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<ServerMeta>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for ServerMeta {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ServerMeta>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for ServerMeta {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for ServerMeta {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_servermeta_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_servermeta_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ServerMeta>>;
+            }
+            let ptr = unsafe { __wbg_servermeta_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for ServerMeta {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <ServerMeta as wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for ServerMeta {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[ServerMeta]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for ServerMeta {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[ServerMeta]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\nServerMeta\0\x04X What [`check_meta`] reads from `/api/meta` for the host: the server's version and, whenD the server sent a valid one, its source URL ([ADR 0106] \xc2\xa73\xe2\x80\x93\xc2\xa74).\0c [ADR 0106]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0106-agpl-source-url.md\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl ServerMeta {
+        #[doc = " The server\'s version."]
+        #[must_use]
+        pub fn server_version(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The server\'s version."]
+                    #[must_use]
+                    #[export_name = "servermeta_serverVersion_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ServerMeta_serverVersion(me:
+                            <ServerMeta as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<ServerMeta>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<ServerMeta>();
+                                            let me =
+                                                unsafe {
+                                                    <ServerMeta as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.server_version();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The server\'s version."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_servermeta_serverVersion_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nServerMeta\x01\x16 The server's version.\0\0\0\0\rserverVersion\x01\x01\0\0\0\0\x01\0\x02\rserverVersion\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.server_version.clone()
+        }
+        #[doc =
+        " Where users get the server\'s source; `undefined` when the server sent none, or one"]
+        #[doc =
+        " that is not a valid `https://` source URL (the host then shows no link)."]
+        #[must_use]
+        pub fn source_url(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Where users get the server\'s source; `undefined` when the server sent none, or one"]
+                    #[doc =
+                    " that is not a valid `https://` source URL (the host then shows no link)."]
+                    #[must_use]
+                    #[export_name = "servermeta_sourceUrl_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ServerMeta_sourceUrl(me:
+                            <ServerMeta as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<ServerMeta>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<ServerMeta>();
+                                            let me =
+                                                unsafe {
+                                                    <ServerMeta as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.source_url();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Where users get the server\'s source; `undefined` when the server sent none, or one"]
+                    #[doc =
+                    " that is not a valid `https://` source URL (the host then shows no link)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_servermeta_sourceUrl_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nServerMeta\x02S Where users get the server's source; `undefined` when the server sent none, or oneI that is not a valid `https://` source URL (the host then shows no link).\0\0\0\0\tsourceUrl\x01\x01\0\0\0\0\x01\0\x02\tsourceUrl\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.source_url.clone()
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
     #[allow(dead_code)]
     #[doc =
     " Whether the answer to [`meta_request`] says the server speaks `v1`, as `rv` checks before"]
-    #[doc = " a login or signup."]
+    #[doc =
+    " a login or signup, and what the host shows from it ([`ServerMeta`]). An absent or invalid"]
+    #[doc = " `source_url` is not an error ([ADR 0106] §3)."]
     #[doc = ""]
     #[doc = " # Errors"]
     #[doc =
     " The server\'s code; `invalid_server_response`; `server_api_version_gone` when `v1` is not"]
     #[doc = " listed."]
-    pub fn check_meta(status: u16, body: &[u8]) -> Result<(), CoreError> {
+    #[doc = ""]
+    #[doc =
+    " [ADR 0106]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0106-agpl-source-url.md"]
+    pub fn check_meta(status: u16, body: &[u8])
+        -> Result<ServerMeta, CoreError> {
         let meta: MetaResponse = json(status, body)?;
         if meta.api_versions.iter().any(|v| v.as_str() == API_V1) {
-            Ok(())
+            Ok(ServerMeta {
+                    server_version: meta.server_version.as_str().to_owned(),
+                    source_url: meta.source_url.map(|u| u.as_str().to_owned()),
+                })
         } else { Err(CoreError::server(ErrorCode::ApiVersionGone)) }
     }
     #[automatically_derived]
@@ -21488,12 +22006,17 @@ pub mod http {
         {
             #[doc =
             " Whether the answer to [`meta_request`] says the server speaks `v1`, as `rv` checks before"]
-            #[doc = " a login or signup."]
+            #[doc =
+            " a login or signup, and what the host shows from it ([`ServerMeta`]). An absent or invalid"]
+            #[doc = " `source_url` is not an error ([ADR 0106] §3)."]
             #[doc = ""]
             #[doc = " # Errors"]
             #[doc =
             " The server\'s code; `invalid_server_response`; `server_api_version_gone` when `v1` is not"]
             #[doc = " listed."]
+            #[doc = ""]
+            #[doc =
+            " [ADR 0106]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0106-agpl-source-url.md"]
             #[export_name = "checkMeta_e09cc0eb35f8b583"]
             pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_checkMeta(arg0_1:
                     <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
@@ -21520,8 +22043,8 @@ pub mod http {
                     <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                     wasm_bindgen::convert::WasmAbi>::Prim4)
                 ->
-                    wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
-                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                    wasm_bindgen::convert::WasmRet<<Result<ServerMeta,
+                    CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
                 const _: () = {};
                 let _ret =
                     wasm_bindgen::__rt::maybe_catch_unwind(||
@@ -21550,7 +22073,7 @@ pub mod http {
                                     _ret
                                 }
                             });
-                <Result<(), CoreError> as
+                <Result<ServerMeta, CoreError> as
                             wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
             }
         };
@@ -21559,12 +22082,17 @@ pub mod http {
         {
             #[doc =
             " Whether the answer to [`meta_request`] says the server speaks `v1`, as `rv` checks before"]
-            #[doc = " a login or signup."]
+            #[doc =
+            " a login or signup, and what the host shows from it ([`ServerMeta`]). An absent or invalid"]
+            #[doc = " `source_url` is not an error ([ADR 0106] §3)."]
             #[doc = ""]
             #[doc = " # Errors"]
             #[doc =
             " The server\'s code; `invalid_server_response`; `server_api_version_gone` when `v1` is not"]
             #[doc = " listed."]
+            #[doc = ""]
+            #[doc =
+            " [ADR 0106]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0106-agpl-source-url.md"]
             #[no_mangle]
             #[doc(hidden)]
             pub extern "C-unwind" fn __wbindgen_describe_checkMeta_e09cc0eb35f8b583() {
@@ -21575,8 +22103,8 @@ pub mod http {
                 inform(2u32);
                 <u16 as WasmDescribe>::describe();
                 <&[u8] as WasmDescribe>::describe();
-                <Result<(), CoreError> as WasmDescribe>::describe();
-                <Result<(), CoreError> as WasmDescribe>::describe();
+                <Result<ServerMeta, CoreError> as WasmDescribe>::describe();
+                <Result<ServerMeta, CoreError> as WasmDescribe>::describe();
             }
         };
     #[automatically_derived]
@@ -21587,7 +22115,7 @@ pub mod http {
             const _ENCODED_BYTES: &[u8] =
                 {
                     const _CHUNK_SLICES: [&[u8]; 1usize] =
-                        [b"\x01\0\x06Z Whether the answer to [`meta_request`] says the server speaks `v1`, as `rv` checks before\x13 a login or signup.\0\t # ErrorsY The server's code; `invalid_server_response`; `server_api_version_gone` when `v1` is not\x08 listed.\0\x02\x06status\0\0\0\x04body\0\0\0\0\0\tcheckMeta\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        [b"\x01\0\tZ Whether the answer to [`meta_request`] says the server speaks `v1`, as `rv` checks beforeZ a login or signup, and what the host shows from it ([`ServerMeta`]). An absent or invalid/ `source_url` is not an error ([ADR 0106] \xc2\xa73).\0\t # ErrorsY The server's code; `invalid_server_response`; `server_api_version_gone` when `v1` is not\x08 listed.\0c [ADR 0106]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0106-agpl-source-url.md\0\x02\x06status\0\0\0\x04body\0\0\0\0\0\tcheckMeta\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                     #[allow(long_running_const_eval)]
                     const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                     #[allow(long_running_const_eval)]
@@ -86916,7 +87444,9 @@ pub use generator::{
     generate_password_with_options, generator_limits, passphrase_entropy,
     password_entropy,
 };
-pub use http::{HttpRequest, check_meta, expect_no_content, meta_request};
+pub use http::{
+    HttpRequest, ServerMeta, check_meta, expect_no_content, meta_request,
+};
 pub use icons::IconFetch;
 pub use items::{
     FieldView, HistoryEntryView, ItemDraft, ItemSummary, generate_element_id,

@@ -154,6 +154,21 @@ describe("errors", () => {
       "Another of your devices is removing a device. Changes are paused for up to 10 minutes.",
     );
   });
+
+  it("return the server's version and its source URL only when valid (ADR 0106 §3)", async () => {
+    const head = '"server_version":"0.1.0","api_versions":["v1"],"min_client_versions":[]';
+    const without = await checkServer(fixed(200, `{${head}}`).transport);
+    expect(without).toEqual({ serverVersion: "0.1.0" });
+    expect("sourceUrl" in without).toBe(false);
+    const withUrl = await checkServer(
+      fixed(200, `{${head},"source_url":"https://example.com/src?x=1#y"}`).transport,
+    );
+    expect(withUrl).toEqual({ serverVersion: "0.1.0", sourceUrl: "https://example.com/src?x=1#y" });
+    for (const bad of ['"http://example.com/src"', '"javascript:alert(1)"', "5", "null", "[]"]) {
+      const info = await checkServer(fixed(200, `{${head},"source_url":${bad}}`).transport);
+      expect(info).toEqual({ serverVersion: "0.1.0" });
+    }
+  });
 });
 
 describe("the transport", () => {

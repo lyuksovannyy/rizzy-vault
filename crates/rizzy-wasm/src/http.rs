@@ -344,17 +344,54 @@ pub fn meta_request() -> HttpRequest {
     }
 }
 
+/// What [`check_meta`] reads from `/api/meta` for the host: the server's version and, when
+/// the server sent a valid one, its source URL ([ADR 0106] §3–§4).
+///
+/// [ADR 0106]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0106-agpl-source-url.md
+#[wasm_bindgen]
+#[derive(Debug)]
+pub struct ServerMeta {
+    /// `server_version`.
+    server_version: String,
+    /// `source_url`, only if it passed `SourceUrl::parse` (so only `https:`).
+    source_url: Option<String>,
+}
+
+#[wasm_bindgen]
+impl ServerMeta {
+    /// The server's version.
+    #[wasm_bindgen(getter, js_name = serverVersion)]
+    #[must_use]
+    pub fn server_version(&self) -> String {
+        self.server_version.clone()
+    }
+
+    /// Where users get the server's source; `undefined` when the server sent none, or one
+    /// that is not a valid `https://` source URL (the host then shows no link).
+    #[wasm_bindgen(getter, js_name = sourceUrl)]
+    #[must_use]
+    pub fn source_url(&self) -> Option<String> {
+        self.source_url.clone()
+    }
+}
+
 /// Whether the answer to [`meta_request`] says the server speaks `v1`, as `rv` checks before
-/// a login or signup.
+/// a login or signup, and what the host shows from it ([`ServerMeta`]). An absent or invalid
+/// `source_url` is not an error ([ADR 0106] §3).
 ///
 /// # Errors
 /// The server's code; `invalid_server_response`; `server_api_version_gone` when `v1` is not
 /// listed.
+///
+/// [ADR 0106]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0106-agpl-source-url.md
 #[wasm_bindgen(js_name = checkMeta)]
-pub fn check_meta(status: u16, body: &[u8]) -> Result<(), CoreError> {
+pub fn check_meta(status: u16, body: &[u8]) -> Result<ServerMeta, CoreError> {
     let meta: MetaResponse = json(status, body)?;
     if meta.api_versions.iter().any(|v| v.as_str() == API_V1) {
-        Ok(())
+        Ok(ServerMeta {
+            server_version: meta.server_version.as_str().to_owned(),
+            source_url: meta.source_url.map(|u| u.as_str().to_owned()),
+        })
     } else {
         Err(CoreError::server(ErrorCode::ApiVersionGone))
     }
@@ -416,7 +453,30 @@ mod tests {
     #[test]
     fn meta_is_checked_for_v1() {
         let ok = br#"{"server_version":"0.1.0","api_versions":["v1"],"min_client_versions":[]}"#;
-        assert!(check_meta(200, ok).is_ok());
+        let meta = check_meta(200, ok).unwrap();
+        assert_eq!(meta.server_version(), "0.1.0");
+        assert_eq!(meta.source_url(), None);
+        // ADR 0106 §3: the member when valid; absent when invalid, the answer still good.
+        let with = br#"{"server_version":"0.1.0","api_versions":["v1"],"min_client_versions":[],"source_url":"https://example.com/src"}"#;
+        assert_eq!(
+            check_meta(200, with).unwrap().source_url().as_deref(),
+            Some("https://example.com/src")
+        );
+        for bad in [
+            r#""http://example.com/src""#,
+            "5",
+            "null",
+            r#""javascript:alert(1)""#,
+        ] {
+            let body = format!(
+                r#"{{"server_version":"0.1.0","api_versions":["v1"],"min_client_versions":[],"source_url":{bad}}}"#
+            );
+            assert_eq!(
+                check_meta(200, body.as_bytes()).unwrap().source_url(),
+                None,
+                "{bad}"
+            );
+        }
         let gone = br#"{"server_version":"9.0.0","api_versions":["v9"],"min_client_versions":[]}"#;
         assert_eq!(
             check_meta(200, gone).unwrap_err().as_str(),

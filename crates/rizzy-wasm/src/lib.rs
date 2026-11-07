@@ -33,7 +33,7 @@
 //! | [`Session`], [`AttachmentView`] | the unlocked session: sync driver, items, attachments (ADR 0054), TOTP, export, import, devices, 2FA, lock |
 //! | [`ItemDraft`], [`ItemSummary`], [`FieldView`] | item edits and views |
 //! | [`autofill::CustomFieldAutofillView`], [`autofill::AutofillOffer`], [`autofill::FillValues`], [`autofill::SaveRowView`] | autocomplete-driven autofill (ADR 0076): the editor's id states, the offer's disclosure, one fill's values, the save dialog's rows |
-//! | [`HttpRequest`], [`meta_request`], [`check_meta`], [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
+//! | [`HttpRequest`], [`meta_request`], [`check_meta`] ([`ServerMeta`]), [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
 //! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], [`Generated`] | the generator, every option ([`generator`]) |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
 //! | [`create_passkey`] (`createPasskey`), [`CreatedPasskey`], [`Session::passkey_assertion`] (`passkeyAssertion`), [`PasskeyAssertion`] | `WebAuthn` passkey registration and assertion ([`passkey`]; ADR 0039) |
@@ -127,7 +127,7 @@ pub use generator::{
     Generated, GeneratorLimits, generate_passphrase_with_options, generate_password_with_options,
     generator_limits, passphrase_entropy, password_entropy,
 };
-pub use http::{HttpRequest, check_meta, expect_no_content, meta_request};
+pub use http::{HttpRequest, ServerMeta, check_meta, expect_no_content, meta_request};
 pub use icons::IconFetch;
 pub use items::{FieldView, HistoryEntryView, ItemDraft, ItemSummary, generate_element_id};
 pub use lock::{
