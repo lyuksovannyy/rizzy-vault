@@ -375,6 +375,33 @@ Firefox: not automated, same reason as the rest of this file (no Playwright-auto
 unpacked-extension flow) — the create/get interception and the consent UI are plain
 `postMessage`/DOM code with nothing Chromium-specific in it, but that is untested, not proven.
 
+### Passkey user verification (ADR 0110 §5–§8, INV-123)
+
+The `UV` flag of every passkey ceremony is decided in Rust at signing (`DurableSession.createPasskey`/
+`passkeyAssertion`), from the page's `userVerification` (relayed by the shim only as a string of
+at most 16 UTF-16 code units), the lock settings the long-lived context applies at that moment
+(`currentLockSettings()`) and the session's own memory-only `verified_at`:
+
+- Locking on with 1, 2 or 5 idle minutes (the default) and a master-password unlock: `UV=1`,
+  nobody is prompted.
+- Otherwise a master-password verification less than 5 minutes old gives `UV=1`; without one a
+  Preferred or Discouraged request signs with `UV=0`, and a Required one is not signed: the
+  consent iframe's approval then waits (`awaiting_verification`), the toolbar badge shows `!`
+  (set through the service worker on Chromium, whose offscreen document has no `action` API),
+  and the **toolbar popup** asks for the master password (`passkey_verify_pending`/
+  `_submit`/`_cancel`, accepted from the popup only; never the iframe, the inline menu or any
+  other window). Five wrong passwords decline the ceremony; the right one signs with `UV=1`
+  and the page gets the result as after a plain approval. A lock clears the waiting ceremony and
+  its badge.
+- `action.openPopup()` is tried when the ceremony starts waiting; whether a browser allows it
+  without a user gesture is unverified (ADR 0110 **U**), so the iframe's text tells the user to
+  click the button.
+
+`e2e/passkey.spec.ts`'s ADR 0110 test covers it on Chromium: it moves the offscreen document's
+`Date.now` forward through CDP to make the enrolment's verification stale, and opens the popup
+at its own URL with the RP page as the active tab (`isPopupSender` accepts the popup document
+both as the toolbar popup and opened at its own URL in a tab).
+
 ### M3: multi-step login forms (ROADMAP §4.4)
 
 The inline menu is offered on each step of a login split across steps, and each step's fill

@@ -109,6 +109,26 @@ export interface Es256PublicKeyPoint {
   readonly y: Buffer;
 }
 
+/** The flags byte of `authenticatorData` (WebAuthn §6.1: right after the 32-byte rpIdHash).
+ * ADR 0110 §6: exactly 0x1D/0x19 for an assertion, 0x5D/0x59 for a registration (UV 1/0). */
+export function authenticatorDataFlags(authenticatorData: Buffer): number {
+  const flags = authenticatorData[32];
+  if (flags === undefined) {
+    throw new Error("webauthn-verify: authenticatorData is shorter than 33 bytes");
+  }
+  return flags;
+}
+
+/** The flags byte of a registration, read from the `authData` of its CBOR `attestationObject`. */
+export function registrationFlags(attestationObject: Buffer): number {
+  const top = decodeOneCbor(attestationObject);
+  const authData = top instanceof Map ? top.get("authData") : undefined;
+  if (!Buffer.isBuffer(authData)) {
+    throw new Error("webauthn-verify: attestationObject has no authData byte string");
+  }
+  return authenticatorDataFlags(authData);
+}
+
 export function extractEs256PublicKeyFromAttestationObject(attestationObject: Buffer): Es256PublicKeyPoint {
   const top = decodeOneCbor(attestationObject);
   if (!(top instanceof Map)) {

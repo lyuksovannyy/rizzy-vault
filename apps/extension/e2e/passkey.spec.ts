@@ -19,7 +19,12 @@ import { signUp } from "./account.ts";
 import { type RunningHttpsServer, startHttpsTestPage } from "./https-server.ts";
 import { type RunningServer, startServer } from "./server.ts";
 import { withProfileDir } from "./profile.ts";
-import { extractEs256PublicKeyFromAttestationObject, verifyEs256Assertion } from "./webauthn-verify.ts";
+import {
+  authenticatorDataFlags,
+  extractEs256PublicKeyFromAttestationObject,
+  registrationFlags,
+  verifyEs256Assertion,
+} from "./webauthn-verify.ts";
 
 const EXTENSION_PATH = fileURLToPath(new URL("../dist/chromium", import.meta.url));
 const TEST_ACCOUNT_PASSWORD = "correct horse battery staple";
@@ -58,6 +63,7 @@ window.rizzyTestCreate = async (opts) => {
       challenge: b64ToBuf(opts.challengeB64),
       pubKeyCredParams: [{ type: "public-key", alg: -7 }],
       timeout: opts.timeoutMs,
+      ...(opts.userVerification !== undefined ? { authenticatorSelection: { userVerification: opts.userVerification } } : {}),
     },
   });
   return {
@@ -71,6 +77,7 @@ window.rizzyTestGet = async (opts) => {
     publicKey: {
       challenge: b64ToBuf(opts.challengeB64),
       timeout: opts.timeoutMs,
+      ...(opts.userVerification !== undefined ? { userVerification: opts.userVerification } : {}),
       ...(opts.allowCredentialIdsB64 !== undefined
         ? { allowCredentials: opts.allowCredentialIdsB64.map((id) => ({ type: "public-key", id: b64urlToBuf(id) })) }
         : {}),
@@ -111,8 +118,14 @@ declare global {
       userDisplayName: string;
       challengeB64: string;
       timeoutMs: number;
+      userVerification?: string;
     }): Promise<CreateResult>;
-    rizzyTestGet(opts: { challengeB64: string; timeoutMs: number; allowCredentialIdsB64?: readonly string[] }): Promise<GetResult>;
+    rizzyTestGet(opts: {
+      challengeB64: string;
+      timeoutMs: number;
+      allowCredentialIdsB64?: readonly string[];
+      userVerification?: string;
+    }): Promise<GetResult>;
   }
 }
 
@@ -613,4 +626,171 @@ test("logging in to the web vault settles even when the extension's own inline m
   await vault.getByLabel("Master password", { exact: true }).fill(TEST_ACCOUNT_PASSWORD);
   await expect(vault.locator("iframe[data-rizzy-inline-menu]")).toBeVisible({ timeout: 10_000 });
   await submitWebVaultLogin(vault);
+});
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0110 §6–§7 (plan step 6): the UV flag under the lock settings, and the toolbar popup's
+// master-password re-verification of a Required request.
+
+/** The flags byte of a `get()` result's `authenticatorData`. */
+function flagsOf(result: GetResult): number {
+  return authenticatorDataFlags(Buffer.from(result.authenticatorDataB64, "base64"));
+}
+
+/** Writes `rizzy.lock_settings` to `storage.local` through the service worker, which relays it
+ * to the offscreen document (as the options page's write does). */
+async function storeLockSettings(context: BrowserContext, record: string): Promise<void> {
+  const worker = context.serviceWorkers()[0] ?? (await context.waitForEvent("serviceworker"));
+  await worker.evaluate(async (text) => {
+    await chrome!.storage!.local.set({ "rizzy.lock_settings": text });
+  }, record);
+}
+
+const LOCKING_OFF = '{"v":1,"auto_lock":false,"idle_minutes":5,"lock_on_restart":true,"lock_on_sleep":true}';
+
+/**
+ * Moves the offscreen document's `Date.now` forward by `ms` (test-only, through CDP from
+ * outside the extension; nothing in the extension reads this hook): `verified_at` is the
+ * enrolment's unlock time, so making it stale (ADR 0110 §6 point 2: `UV_FRESH_MS`, 5 minutes)
+ * needs a clock that moved, not a 5-minute wait. With locking off nothing else in the offscreen
+ * document locks on a jump.
+ */
+async function advanceOffscreenClock(context: BrowserContext, page: Page, ms: number): Promise<void> {
+  const cdp = await context.newCDPSession(page);
+  try {
+    const { targetInfos } = await cdp.send("Target.getTargets");
+    const offscreen = targetInfos.find((t) => t.url.endsWith("/src/core-host/offscreen.html"));
+    if (offscreen === undefined) {
+      throw new Error("advanceOffscreenClock: no offscreen document target");
+    }
+    const { sessionId } = await cdp.send("Target.attachToTarget", { targetId: offscreen.targetId, flatten: false });
+    const expression = `(() => {
+      const g = globalThis;
+      if (g.__rizzyE2eRealNow === undefined) {
+        g.__rizzyE2eRealNow = Date.now.bind(Date);
+        g.__rizzyE2eOffsetMs = 0;
+        Date.now = () => g.__rizzyE2eRealNow() + g.__rizzyE2eOffsetMs;
+      }
+      g.__rizzyE2eOffsetMs += ${ms};
+      return g.__rizzyE2eOffsetMs;
+    })()`;
+    const answered = new Promise<void>((resolve) => {
+      cdp.on("Target.receivedMessageFromTarget", (event) => {
+        if (event.sessionId === sessionId && (JSON.parse(event.message) as { id?: number }).id === 1) {
+          resolve();
+        }
+      });
+    });
+    await cdp.send("Target.sendMessageToTarget", {
+      sessionId,
+      message: JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression } }),
+    });
+    await answered;
+    await cdp.send("Target.detachFromTarget", { sessionId });
+  } finally {
+    await cdp.detach();
+  }
+}
+
+/** Opens the popup at its own URL in a tab, then makes `rpPage` the active tab again and reloads
+ * the popup, so the popup's active-tab look-up (ADR 0110 §7 point 3) finds the RP page, as the
+ * real toolbar popup does. */
+async function openPopupFor(context: BrowserContext, extensionId: string, rpPage: Page): Promise<Page> {
+  const popup = await context.newPage();
+  await popup.goto(`chrome-extension://${extensionId}/src/popup/index.html`);
+  await rpPage.bringToFront();
+  await popup.reload();
+  return popup;
+}
+
+test("passkey UV follows the lock settings, and a Required request is verified in the toolbar popup (ADR 0110)", async ({
+  context,
+  extensionId,
+  server,
+  rp,
+}) => {
+  test.setTimeout(120_000);
+  await enrol(context, extensionId, server, "pkuv");
+  const page = await openTestRpPage(context, rp.origin);
+  await installVirtualAuthenticator(context, page);
+  const consentFrame = page.frameLocator("iframe[data-rizzy-passkey-consent]");
+
+  // 1. Defaults (on, 5 minutes: bounding) + Required: UV=1 (0x5D, then 0x1D), no prompt.
+  const createPromise = page.evaluate((opts) => window.rizzyTestCreate(opts), {
+    rpName: "Test RP",
+    userIdB64: b64("uv-user"),
+    userName: "uvuser",
+    userDisplayName: "UV User",
+    challengeB64: b64("uv-create"),
+    timeoutMs: 20_000,
+    userVerification: "required",
+  });
+  await expect(consentFrame.getByRole("button", { name: "Test RP" })).toBeVisible({ timeout: 10_000 });
+  await consentFrame.getByRole("button", { name: "Test RP" }).click();
+  const created = await createPromise;
+  expect(registrationFlags(Buffer.from(created.attestationObjectB64, "base64"))).toBe(0x5d);
+  const publicKey = extractEs256PublicKeyFromAttestationObject(Buffer.from(created.attestationObjectB64, "base64"));
+
+  const signIn = async (challenge: string, userVerification: string | undefined, label: string): Promise<GetResult> => {
+    const getPromise = page.evaluate((opts) => window.rizzyTestGet(opts), {
+      challengeB64: b64(challenge),
+      timeoutMs: 20_000,
+      ...(userVerification !== undefined ? { userVerification } : {}),
+    });
+    await expect(consentFrame.getByRole("button", { name: label })).toBeVisible({ timeout: 10_000 });
+    await consentFrame.getByRole("button", { name: label }).click();
+    return getPromise;
+  };
+  const plainLabel = "Test RP (uvuser)";
+  const first = await signIn("uv-get-1", "required", plainLabel);
+  expect(flagsOf(first)).toBe(0x1d);
+
+  // 2. Locking off, the enrolment's verification stale: Required → the consent label says the
+  //    toolbar button will ask, the iframe waits, the popup verifies (a wrong password first).
+  await storeLockSettings(context, LOCKING_OFF);
+  await advanceOffscreenClock(context, page, 6 * 60 * 1000);
+  const waitingPromise = page.evaluate((opts) => window.rizzyTestGet(opts), {
+    challengeB64: b64("uv-get-2"),
+    timeoutMs: 60_000,
+    userVerification: "required",
+  });
+  await expect(consentFrame.getByText("The rizzy toolbar button will ask for your master password.")).toBeVisible({ timeout: 10_000 });
+  await consentFrame.getByRole("button", { name: "Verify and use passkey" }).click();
+  await expect(consentFrame.getByText("Waiting for verification in the rizzy toolbar button")).toBeVisible();
+  await expect(consentFrame.getByRole("button", { name: "Cancel" })).toBeVisible();
+
+  const popup = await openPopupFor(context, extensionId, page);
+  await expect(popup.getByRole("heading", { name: "Verify to continue" })).toBeVisible({ timeout: 10_000 });
+  await expect(popup.getByText(rp.origin, { exact: true })).toBeVisible();
+  await expect(popup.getByText("uvuser", { exact: true })).toBeVisible();
+  await popup.getByLabel("Master password").fill("not the master password");
+  await popup.getByRole("button", { name: "Verify" }).click();
+  await expect(popup.getByRole("alert")).toHaveText("Wrong master password. Try again.");
+  await popup.getByLabel("Master password").fill(TEST_ACCOUNT_PASSWORD);
+  await popup.getByRole("button", { name: "Verify" }).click();
+  const verified = await waitingPromise;
+  expect(flagsOf(verified)).toBe(0x1d);
+  expect(
+    verifyEs256Assertion(
+      publicKey,
+      Buffer.from(verified.authenticatorDataB64, "base64"),
+      Buffer.from(verified.clientDataJsonB64, "base64"),
+      Buffer.from(verified.signatureB64, "base64"),
+    ),
+  ).toBe(true);
+  await expect(consentFrame.locator("body")).toHaveCount(0, { timeout: 10_000 });
+  if (!popup.isClosed()) {
+    await popup.close();
+  }
+
+  // 3. Re-verified within 5 minutes: a second Required request signs with UV=1, no prompt.
+  const again = await signIn("uv-get-3", "required", plainLabel);
+  expect(flagsOf(again)).toBe(0x1d);
+
+  // 4. Locking off, the verification stale again: Preferred signs with UV=0 (0x19), no prompt.
+  await advanceOffscreenClock(context, page, 6 * 60 * 1000);
+  const preferred = await signIn("uv-get-4", "preferred", plainLabel);
+  expect(flagsOf(preferred)).toBe(0x19);
+  const absent = await signIn("uv-get-5", undefined, plainLabel);
+  expect(flagsOf(absent)).toBe(0x19);
 });

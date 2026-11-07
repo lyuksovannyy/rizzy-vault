@@ -594,7 +594,7 @@ export function offerPasskeyCreate(
  * signing (§6 point 5); a failure here only means the plain label. */
 function verifyFirst(s: DurableSession, userVerification: string | undefined): boolean {
   try {
-    return s.passkeyUvDecision(passkeyUvInput(userVerification, currentLockSettings())) === UV_REQUIRED;
+    return s.passkeyUvDecision(passkeyUvInput(userVerification, currentLockSettings(), Date.now())) === UV_REQUIRED;
   } catch {
     return false;
   }
