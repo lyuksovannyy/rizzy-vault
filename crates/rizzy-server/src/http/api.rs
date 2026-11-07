@@ -33,6 +33,7 @@
 //! | `POST /api/v1/healing/grants` | `PublishGrantsRequest` → 204 | any |
 //! | `POST /api/v1/account/reregister/start` | `ReregisterStartRequest` → `ReregisterStartResponse` | any (fresh OPAQUE, recovery-only or device; checked by the domain) |
 //! | `POST /api/v1/account/commit` | `CommitChangeRequest` → 204 | any (per change; checked by the domain) |
+//! | `POST /api/v1/account/rotation/stage` | `StageRequest` → `StageResponse` | fresh OPAQUE or recovery-only (as the rotation commit; checked by the domain) |
 //! | `POST /api/v1/devices/suspend` | `DeviceSuspensionRequest` → `SuspendDeviceResponse` | OPAQUE or device (fresh OPAQUE bound to another device; checked by the domain) |
 //! | `POST /api/v1/devices/unsuspend` | `DeviceSuspensionRequest` → 204 | OPAQUE or device (as suspend) |
 //! | `POST /api/v1/recovery/start` | `RecoveryRequest` → `RecoveryStartResponse` | none |
@@ -369,6 +370,8 @@ pub enum Endpoint {
     ReregisterStart,
     /// The atomic commit of a credential, settings or device change.
     CommitChange,
+    /// Rotation staging (ADR 0092 §4).
+    RotationStage,
     /// Revocation phase 1: suspension.
     SuspendDevice,
     /// Lifting a suspension.
@@ -442,6 +445,7 @@ impl Endpoint {
         Self::PublishGrants,
         Self::ReregisterStart,
         Self::CommitChange,
+        Self::RotationStage,
         Self::SuspendDevice,
         Self::UnsuspendDevice,
         Self::RecoveryStart,
@@ -490,6 +494,7 @@ impl Endpoint {
             Self::PublishGrants => paths::HEALING_GRANTS,
             Self::ReregisterStart => paths::ACCOUNT_REREGISTER_START,
             Self::CommitChange => paths::ACCOUNT_COMMIT,
+            Self::RotationStage => paths::ACCOUNT_ROTATION_STAGE,
             Self::SuspendDevice => paths::DEVICES_SUSPEND,
             Self::UnsuspendDevice => paths::DEVICES_UNSUSPEND,
             Self::RecoveryStart => paths::RECOVERY_START,
@@ -551,6 +556,7 @@ impl Endpoint {
             | Self::PublishGrants
             | Self::ReregisterStart
             | Self::CommitChange
+            | Self::RotationStage
             | Self::SessionsCurrentEnd => SessionNeed::Required,
             Self::SuspendDevice
             | Self::UnsuspendDevice
@@ -576,8 +582,9 @@ impl Endpoint {
         }
     }
 
-    /// The body-size limit: [`BODY_LIMIT`], the configured upload limit for upload, healing and
-    /// the account commit (which carries a rotation's re-wrapped wrap set, ADR 0025 §1),
+    /// The body-size limit: [`BODY_LIMIT`], the configured upload limit for upload, healing,
+    /// the account commit (which carries a rotation's re-wrapped wrap set, ADR 0025 §1) and
+    /// rotation staging (ADR 0092 §0 item 3),
     /// and 0 for the endpoints that take no body (the `GET` endpoint, recovery cancel and TOTP
     /// enrolment start). The empty-body `sessions` endpoints keep [`BODY_LIMIT`], as [ADR 0075]
     /// §2 says ("The default body limit (`MAX_BODY_LEN`) applies"); their body is not read.
@@ -586,7 +593,9 @@ impl Endpoint {
     #[must_use]
     pub const fn body_limit(self, max_upload_bytes: usize) -> usize {
         match self {
-            Self::Upload | Self::Heal | Self::CommitChange => max_upload_bytes,
+            Self::Upload | Self::Heal | Self::CommitChange | Self::RotationStage => {
+                max_upload_bytes
+            }
             Self::DeviceGrants
             | Self::RecoveryCancel
             | Self::TotpEnrolStart
@@ -1173,6 +1182,12 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
                 .map_err(ae)?;
             Ok(Reply::Empty)
         }
+        Endpoint::RotationStage => json(
+            &auth
+                .stage_rotation(need()?, &parse(&body)?, now)
+                .await
+                .map_err(ae)?,
+        ),
         Endpoint::SuspendDevice => json(
             &auth
                 .suspend_device_request(need()?, &parse(&body)?, now)
@@ -1386,6 +1401,7 @@ mod tests {
             | Endpoint::PublishGrants
             | Endpoint::ReregisterStart
             | Endpoint::CommitChange
+            | Endpoint::RotationStage
             | Endpoint::SuspendDevice
             | Endpoint::UnsuspendDevice
             | Endpoint::RecoveryStart
@@ -1417,7 +1433,7 @@ mod tests {
 
     #[test]
     fn all_is_complete_and_paths_unique() {
-        assert_eq!(Endpoint::ALL.len(), 42);
+        assert_eq!(Endpoint::ALL.len(), 43);
         assert!(Endpoint::ALL.iter().all(|e| listed(*e)));
         let unique: HashSet<_> = Endpoint::ALL.iter().copied().map(Endpoint::path).collect();
         assert_eq!(unique.len(), Endpoint::ALL.len());
@@ -1632,6 +1648,7 @@ mod tests {
         // The recovery commit and re-registration take the recovery-only session; the domain
         // applies their rules (CRYPTO.md §11.9 step 5).
         assert_eq!(Endpoint::CommitChange.session(), SessionNeed::Required);
+        assert_eq!(Endpoint::RotationStage.session(), SessionNeed::Required);
         assert_eq!(Endpoint::ReregisterStart.session(), SessionNeed::Required);
         for e in [Endpoint::RecoveryStart, Endpoint::RecoveryComplete] {
             assert_eq!(e.session(), SessionNeed::None, "{e:?}");
@@ -1643,7 +1660,10 @@ mod tests {
         let upload = 7 * BODY_LIMIT;
         for e in Endpoint::ALL {
             let expected = match e {
-                Endpoint::Upload | Endpoint::Heal | Endpoint::CommitChange => upload,
+                Endpoint::Upload
+                | Endpoint::Heal
+                | Endpoint::CommitChange
+                | Endpoint::RotationStage => upload,
                 Endpoint::DeviceGrants
                 | Endpoint::RecoveryCancel
                 | Endpoint::TotpEnrolStart

@@ -541,6 +541,10 @@ impl<V: VaultPort> AuthService<V> {
             now_ms,
         )
         .await?;
+        // ADR 0092 §4 "Expiry": the enrolment advances `state_seq`.
+        self.vault
+            .discard_rotation_staging(&mut tx, account)
+            .await?;
         tx.commit().await?;
         Ok(())
     }

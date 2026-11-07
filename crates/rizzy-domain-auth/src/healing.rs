@@ -240,6 +240,10 @@ impl<V: VaultPort> AuthService<V> {
                 now_ms,
             )
             .await?;
+            // ADR 0092 §4 "Expiry": the adopted state advances `state_seq`.
+            self.vault
+                .discard_rotation_staging(&mut tx, account)
+                .await?;
         }
         // ADR 0032 §3: the lag repairs, checked against the signed state now held.
         let current = AccountTrust::load(tx.conn(), account).await?;

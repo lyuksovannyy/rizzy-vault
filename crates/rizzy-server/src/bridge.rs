@@ -31,14 +31,15 @@ use rizzy_domain_auth::directory::{DeviceStanding, device_authors, signed_accoun
 use rizzy_domain_auth::revocation::stored_window;
 use rizzy_domain_auth::types::{AccountId, DeviceId};
 use rizzy_domain_auth::types::{
-    RecoveryVault, VaultId, VaultRotationUpload, VaultSelfGrant, VaultSummary,
+    RecoveryVault, StageRequest, StageResponse, VaultId, VaultRotationUpload, VaultSelfGrant,
+    VaultSummary,
 };
 use rizzy_domain_auth::{AuthError, PersonalVault, VaultPort};
 use rizzy_domain_vault::{
     AccountKeyState, AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError,
     PersonalVaultOutcome, RevocationWindow, VaultError, create_owned_vault, delete_vault,
 };
-use rizzy_domain_vault::{port, rotation};
+use rizzy_domain_vault::{port, rotation, staging};
 use rizzy_storage::{Conn, WriteTx};
 
 /// The `auth` domain's view of the `vault` domain (module docs).
@@ -68,6 +69,7 @@ impl VaultPort for VaultBridge {
         new_account_key_epoch: u32,
         new_account_key_id: [u8; 16],
         rotation: &Self::Rotation,
+        base_state_seq: u64,
         now_ms: u64,
     ) -> Result<(), AuthError> {
         rotation::apply_rotation(
@@ -76,10 +78,33 @@ impl VaultPort for VaultBridge {
             new_account_key_epoch,
             &new_account_key_id,
             rotation,
+            base_state_seq,
             now_ms,
         )
         .await
         .map_err(|e| vault_error(&e))
+    }
+
+    async fn stage_rotation(
+        &self,
+        tx: &mut WriteTx,
+        account_id: AccountId,
+        request: &StageRequest,
+        now_ms: u64,
+    ) -> Result<StageResponse, AuthError> {
+        staging::stage_rotation(tx, account_id, request, now_ms)
+            .await
+            .map_err(|e| vault_error(&e))
+    }
+
+    async fn discard_rotation_staging(
+        &self,
+        tx: &mut WriteTx,
+        account_id: AccountId,
+    ) -> Result<(), AuthError> {
+        staging::discard_staging(tx, account_id)
+            .await
+            .map_err(|e| vault_error(&e))
     }
 
     async fn recovery_vaults(

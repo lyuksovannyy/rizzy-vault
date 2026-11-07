@@ -143,6 +143,7 @@ pub mod keys;
 pub mod port;
 mod repo;
 pub mod rotation;
+pub mod staging;
 mod store;
 pub mod upload;
 pub mod usage;

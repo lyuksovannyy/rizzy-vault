@@ -59,6 +59,7 @@ use rizzy_core::sign::{
     VerifiedBundle,
 };
 use rizzy_proto::auth::RecoveryRegistration;
+use rizzy_proto::change::{StageRequest, StageResponse};
 use rizzy_proto::limits::{MAX_DEVICE_GRANTS, MAX_DEVICE_STATEMENTS};
 use rizzy_proto::objects::{
     AccountKeyRecoveryWrap, AccountKeyServerWrap, AccountSettings, AccountStatement, DeviceGrant,
@@ -358,6 +359,51 @@ impl<V: VaultPort> AuthService<V> {
         Ok(())
     }
 
+    /// A rotation stage request ([ADR 0092] §4 "Opening"): rows of the commit's vault half sent
+    /// ahead of it, when the inline commit would not fit one body. Under the account lock, in
+    /// one transaction: the session is authorised as the rotation commit it prepares (a fresh
+    /// OPAQUE session or the recovery-only session, the rotation rows of the module docs'
+    /// table), frozen like that commit by another device's open revocation window (ADR 0091 §2;
+    /// never a recovery session), and `base_state_seq` must be the stored `state_seq`; then
+    /// the vault domain's checks and writes ([`VaultPort::stage_rotation`]). Staging is never
+    /// refused for size (INV-115).
+    ///
+    /// # Errors
+    /// [`AuthError::FreshSessionRequired`] for another session; [`AuthError::StateConflict`]
+    /// when `base_state_seq` is not the stored one; [`AuthError::InvalidRequest`] from the
+    /// vault side; the revocation window's refusal; [`AuthError::Unauthorized`] for an ended
+    /// session; storage errors.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    pub async fn stage_rotation(
+        &self,
+        session: &Session,
+        request: &StageRequest,
+        now_ms: u64,
+    ) -> Result<StageResponse, AuthError> {
+        let account = session.account_id;
+        let mut tx = self.db.begin_write().await?;
+        lock_account(&mut tx, account.as_bytes()).await?;
+        let session = session::reload(tx.conn(), session, now_ms).await?;
+        match session.kind {
+            SessionKind::Recovery => {}
+            SessionKind::Opaque if session.is_fresh_opaque(now_ms) => {
+                revocation::gate(tx.conn(), account, &session, now_ms).await?;
+            }
+            _ => return Err(AuthError::FreshSessionRequired),
+        }
+        let trust = AccountTrust::load(tx.conn(), account).await?;
+        if request.base_state_seq != trust.state.state_seq {
+            return Err(AuthError::StateConflict);
+        }
+        let answer = self
+            .vault
+            .stage_rotation(&mut tx, account, request, now_ms)
+            .await?;
+        tx.commit().await?;
+        Ok(answer)
+    }
+
     /// Checks every certificate and revocation of the change against the stored ones and
     /// sorts them into a [`DevicePlan`] (module docs; CRYPTO.md §11.6 step 7, §11.8).
     #[expect(
@@ -635,6 +681,7 @@ impl<V: VaultPort> AuthService<V> {
                     new.account_key_epoch,
                     *new.account_key_id.as_bytes(),
                     rotation,
+                    trust.state.state_seq,
                     now_ms,
                 )
                 .await?;
@@ -648,6 +695,9 @@ impl<V: VaultPort> AuthService<V> {
             now_ms,
         )
         .await?;
+        // ADR 0092 §4 "Expiry": a commit that advances `state_seq` deletes the account's
+        // rotation staging in its own transaction.
+        self.vault.discard_rotation_staging(tx, account).await?;
         // ADR 0091 §2 "Closing": the revocation commit (one that revokes at least one device)
         // and a recovery commit delete the account's revocation window.
         if session.kind == SessionKind::Recovery || !plan.new_revocations.is_empty() {

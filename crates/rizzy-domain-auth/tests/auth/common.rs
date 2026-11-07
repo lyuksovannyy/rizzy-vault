@@ -163,6 +163,7 @@ impl VaultPort for SharedVault {
         new_account_key_epoch: u32,
         _new_account_key_id: [u8; 16],
         rotation: &Self::Rotation,
+        _base_state_seq: u64,
         _now_ms: u64,
     ) -> Result<(), AuthError> {
         if rotation
@@ -175,6 +176,29 @@ impl VaultPort for SharedVault {
             .lock()
             .unwrap()
             .insert(account_id.to_bytes(), rotation.clone());
+        Ok(())
+    }
+
+    /// The fake stages nothing: it answers the rows of the request, so the auth-side checks
+    /// (authorisation, the revocation window, `base_state_seq`) can be tested alone.
+    async fn stage_rotation(
+        &self,
+        _tx: &mut WriteTx,
+        _account_id: AccountId,
+        request: &rizzy_proto::change::StageRequest,
+        _now_ms: u64,
+    ) -> Result<rizzy_proto::change::StageResponse, AuthError> {
+        let rows = request.item_key_wraps.len() + request.dropped.len();
+        Ok(rizzy_proto::change::StageResponse {
+            staged_rows: u32::try_from(rows).unwrap(),
+        })
+    }
+
+    async fn discard_rotation_staging(
+        &self,
+        _tx: &mut WriteTx,
+        _account_id: AccountId,
+    ) -> Result<(), AuthError> {
         Ok(())
     }
 

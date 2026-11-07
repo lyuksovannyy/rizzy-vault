@@ -29,7 +29,7 @@ use core::future::Future;
 
 use rizzy_core::ids::{AccountId, DeviceId, VaultId};
 use rizzy_proto::account::VaultSummary;
-use rizzy_proto::change::VaultRotationUpload;
+use rizzy_proto::change::{StageRequest, StageResponse, VaultRotationUpload};
 use rizzy_proto::objects::VaultSelfGrant;
 use rizzy_proto::recovery::RecoveryVault;
 use rizzy_storage::{Conn, WriteTx};
@@ -68,6 +68,14 @@ pub trait VaultPort: Send + Sync {
     /// stores the grants and re-wraps, deletes the dropped rows and the superseded wraps.
     /// Refuses with [`AuthError::StateConflict`] when the server holds what the rotator has not
     /// seen and [`AuthError::InvalidRequest`] when the upload is malformed or incomplete.
+    /// `base_state_seq` is the stored `state_seq` the change advances: a staged rotation's
+    /// staging must have been opened on it ([ADR 0092] §0 item 4).
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the verified parts of one rotation commit, passed once from `commit_change`"
+    )]
     fn apply_rotation(
         &self,
         tx: &mut WriteTx,
@@ -75,7 +83,32 @@ pub trait VaultPort: Send + Sync {
         new_account_key_epoch: u32,
         new_account_key_id: [u8; 16],
         rotation: &Self::Rotation,
+        base_state_seq: u64,
         now_ms: u64,
+    ) -> impl Future<Output = Result<(), AuthError>> + Send;
+
+    /// A rotation stage request ([ADR 0092] §4 "Opening"), in `tx`, which holds the account
+    /// lock, after this crate authorised the session as the commit it prepares and found
+    /// `request.base_state_seq` equal to the stored `state_seq`: the vault domain's checks
+    /// and the staged rows. Refuses with [`AuthError::InvalidRequest`].
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    fn stage_rotation(
+        &self,
+        tx: &mut WriteTx,
+        account_id: AccountId,
+        request: &StageRequest,
+        now_ms: u64,
+    ) -> impl Future<Output = Result<StageResponse, AuthError>> + Send;
+
+    /// Deletes the account's rotation staging, if any, in `tx` ([ADR 0092] §4 "Expiry": every
+    /// commit that advances `state_seq` calls this in its own transaction).
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    fn discard_rotation_staging(
+        &self,
+        tx: &mut WriteTx,
+        account_id: AccountId,
     ) -> impl Future<Output = Result<(), AuthError>> + Send;
 
     /// Signup (§11.1 step 8): creates the personal vault named by `grant.vault_id` for

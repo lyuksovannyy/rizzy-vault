@@ -101,6 +101,8 @@ pub mod paths {
     pub const ACCOUNT_REREGISTER_START: &str = "/api/v1/account/reregister/start";
     /// The atomic commit of a credential, settings, device or key-rotation change.
     pub const ACCOUNT_COMMIT: &str = "/api/v1/account/commit";
+    /// Rotation staging: rows of a rotation sent ahead of its commit (ADR 0092 §4).
+    pub const ACCOUNT_ROTATION_STAGE: &str = "/api/v1/account/rotation/stage";
     /// Enrolment of a durable device.
     pub const DEVICES_ENROL: &str = "/api/v1/devices/enrol";
     /// The web vault's kind-4 certificate.
@@ -185,7 +187,7 @@ pub mod paths {
     pub const ICONS_PREFIX: &str = "/api/v1/icons/";
 
     /// Every `/api/v1` path, in the order above.
-    pub const ALL: [&str; 42] = [
+    pub const ALL: [&str; 43] = [
         REGISTER_START,
         REGISTER_FINISH,
         LOGIN_START,
@@ -195,6 +197,7 @@ pub mod paths {
         ACCOUNT_STATE,
         ACCOUNT_REREGISTER_START,
         ACCOUNT_COMMIT,
+        ACCOUNT_ROTATION_STAGE,
         DEVICES_ENROL,
         DEVICES_WEB_CERTIFICATE,
         DEVICES_GRANTS,
@@ -265,7 +268,7 @@ mod tests {
         let mut sorted = paths::ALL.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 42);
+        assert_eq!(sorted.len(), 43);
         for path in paths::ALL {
             assert!(path.starts_with(API_V1_PREFIX), "{path}");
             // Nothing a proxy or a URL library would rewrite, and no query.

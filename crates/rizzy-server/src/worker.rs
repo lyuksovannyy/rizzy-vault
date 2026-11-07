@@ -29,8 +29,12 @@
 //!    releases its counted bytes (`rizzy_domain_vault::VaultDomain::sweep_attachments`, at most
 //!    256 per run). A complete attachment no item references is not caught (ADR 0054 "Owner
 //!    answers" 3).
+//!
+//!    4c. **Expired rotation stagings** (ADR 0092 §4 "Expiry"): a staging whose last stage
+//!    request is older than 24 h is deleted, each account in its own account-locked
+//!    transaction (`rizzy_domain_vault::VaultDomain::expire_rotation_stagings`).
 //! 5. **`SQLite` space** (ADR 0011 "`SQLite` settings", `auto_vacuum`): `PRAGMA
-//!    incremental_vacuum` when step 1, 4 or 4b deleted anything.
+//!    incremental_vacuum` when step 1, 4, 4b or 4c deleted anything.
 //! 6. **The pre-migration copy** (ADR 0011 point 9: "`worker` deletes the copy 24 h after the
 //!    migrated server started and passed its startup self-check"): deleted once 24 h have
 //!    passed since this process passed its startup self-check ([`PreMigrationCopy`]). The
@@ -141,6 +145,8 @@ pub struct RunReport {
     pub compaction_failures: usize,
     /// Unfinished attachment uploads deleted by the 24 h sweep (ADR 0054 §7).
     pub attachments_swept: u64,
+    /// Rotation stagings deleted 24 h after their last stage request (ADR 0092 §4).
+    pub stagings_expired: usize,
     /// Whether the pre-migration copy was deleted.
     pub copy_removed: bool,
     /// Whether the run stopped because the leader lock was lost (module docs); the steps after
@@ -426,6 +432,23 @@ async fn reseal_totp_secrets(api: &Api, leader: &mut WorkerLeader, report: &mut 
     true
 }
 
+/// Steps 4b and 4c (module docs): unfinished attachment uploads and expired rotation stagings.
+/// A failure is logged; the run goes on.
+async fn sweep(api: &Api, now: u64, report: &mut RunReport) {
+    match api.vault.sweep_attachments(now).await {
+        Ok(swept) => report.attachments_swept = swept,
+        Err(e) => log::error(
+            "worker_attachment_sweep_failed",
+            &[Field::Error("error", &e)],
+        ),
+    }
+    // ADR 0092 §4 "Expiry": rotation stagings whose last stage request is older than 24 h.
+    match api.vault.expire_rotation_stagings(now).await {
+        Ok(expired) => report.stagings_expired = expired,
+        Err(e) => log::error("worker_staging_expiry_failed", &[Field::Error("error", &e)]),
+    }
+}
+
 /// One worker run (module docs), as the holder of `leader`. Never fails: each step's error is
 /// logged and the next step runs. Before every step and every compaction batch it checks that
 /// `leader` still holds the leader lock; when not, it returns at once with
@@ -508,17 +531,12 @@ pub async fn run_once(
             ..report
         };
     }
-    match api.vault.sweep_attachments(now).await {
-        Ok(swept) => report.attachments_swept = swept,
-        Err(e) => log::error(
-            "worker_attachment_sweep_failed",
-            &[Field::Error("error", &e)],
-        ),
-    }
+    sweep(api, now, &mut report).await;
     let deleted = report.auth_rows_purged > 0
         || report.bodies_deleted > 0
         || report.snapshots_dropped > 0
-        || report.attachments_swept > 0;
+        || report.attachments_swept > 0
+        || report.stagings_expired > 0;
     if deleted && db.engine() == Engine::Sqlite {
         // SQLite: the leader is the writer lock, which cannot be lost while `db` lives; no
         // check is needed before this step.

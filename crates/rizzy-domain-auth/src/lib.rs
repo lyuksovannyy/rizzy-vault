@@ -228,6 +228,11 @@ pub mod types {
     /// which [`crate::VaultPort`] takes from and hands to the vault domain (ADR 0081 §A11).
     pub use rizzy_core::ids::VaultId;
     pub use rizzy_proto::account::VaultSummary;
+    /// A rotation stage request and its answer ([ADR 0092] §4), which [`crate::VaultPort`]
+    /// hands to the vault domain.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    pub use rizzy_proto::change::{StageRequest, StageResponse};
     /// `/api/v1` errors and `/api/meta` (ADR 0002 point 3).
     pub use rizzy_proto::error::{ErrorCode, ErrorResponse};
     /// `/api/meta` and the `Rizzy-Client` header (ADR 0002 point 3, as ADR 0022 amends it; ADR

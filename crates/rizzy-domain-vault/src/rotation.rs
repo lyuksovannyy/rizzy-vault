@@ -52,7 +52,7 @@
 //!
 //! [ADR 0025]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0025-rotation-vault-half.md
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rizzy_core::envelope::parse::{EnvelopeRef, parse as parse_envelope};
 use rizzy_core::envelope::symmetric::OVERHEAD;
@@ -63,15 +63,13 @@ use rizzy_storage::WriteTx;
 
 use crate::error::VaultError;
 use crate::repo::{self, SelfGrantRow, WrapRow};
+use crate::staging::{self, Locator};
 use crate::to_sql_time;
 
 /// The length of an `ITEM_KEY_WRAP` envelope: the symmetric envelope's overhead (CRYPTO.md
 /// §9.1, 90 bytes) around the fixed 37-byte plaintext `u8 wrap_version ‖ u32
 /// created_vault_key_epoch ‖ item_key` (§8.4), 127 bytes (ADR 0025 §3 check 3).
 pub const ITEM_KEY_WRAP_ENVELOPE_LEN: usize = OVERHEAD + 1 + 4 + 32;
-
-/// One wrap-set row's locator: the item and the wrapped item key's id.
-type Locator = (ItemId, [u8; 16]);
 
 /// The checked writes of one vault (module docs, "Writes").
 struct VaultPlan {
@@ -89,11 +87,15 @@ struct VaultPlan {
 
 /// The vault half of a rotation, in `tx`, which holds the account lock and the `auth` domain's
 /// writes of the same change (module docs). `new_account_key_epoch` and `new_account_key_id`
-/// come from the verified new `account-state`.
+/// come from the verified new `account-state`, and `base_state_seq` is the stored `state_seq`
+/// the change advances. An upload that names a staging ([ADR 0092] §4 "Committing") is checked
+/// over the union of its inline and staged rows, and the staging is deleted with the writes.
 ///
 /// # Errors
 /// [`VaultError::Invalid`] for a failed check 1, 2 or 3; [`VaultError::StateConflict`] for a
-/// stored row in neither list or a failed cut-off (check 4); [`VaultError::Storage`] or
+/// stored row in neither list or a failed cut-off (check 4), and for a named staging that is not
+/// the account's open one on `base_state_seq`, `new_account_key_id` and each vault's new
+/// epoch, or one of whose staged rows the server no longer holds; [`VaultError::Storage`] or
 /// [`VaultError::Corrupt`] (a re-wrap or a drop that did not change exactly one row). The
 /// caller drops the transaction on any error.
 pub async fn apply_rotation(
@@ -102,9 +104,21 @@ pub async fn apply_rotation(
     new_account_key_epoch: u32,
     new_account_key_id: &[u8; 16],
     upload: &VaultRotationUpload,
+    base_state_seq: u64,
     now_ms: u64,
 ) -> Result<(), VaultError> {
     let now = to_sql_time(now_ms)?;
+    if let Some(rotation_id) = upload.staging() {
+        staging::check_named(
+            tx.conn(),
+            account_id,
+            rotation_id,
+            base_state_seq,
+            new_account_key_id,
+            now_ms,
+        )
+        .await?;
+    }
     // Check 1: one entry per vault, none other. Both lists are ascending by id. No vault is
     // shared before ADR 0081 Part B, so every vault is in V and `regrants` must be empty (ADR
     // 0081 §0 item 3, §A9: "the server refuses a `regrants` list that does not name exactly
@@ -130,6 +144,7 @@ pub async fn apply_rotation(
                 new_account_key_epoch,
                 new_account_key_id,
                 rotation,
+                upload.staging().is_some(),
             )
             .await?,
         );
@@ -137,6 +152,9 @@ pub async fn apply_rotation(
     for plan in &plans {
         write_vault(tx, account_id, plan, now).await?;
     }
+    // ADR 0092 §4 "Committing": the same transaction deletes the staging (any staging: a
+    // commit that advances `state_seq` makes every other one useless).
+    staging::discard_staging(tx, account_id).await?;
     Ok(())
 }
 
@@ -148,6 +166,7 @@ async fn check_vault(
     new_account_key_epoch: u32,
     new_account_key_id: &[u8; 16],
     rotation: &VaultRotation,
+    staged: bool,
 ) -> Result<VaultPlan, VaultError> {
     let vault = repo::vault(tx.conn(), vault_id)
         .await?
@@ -168,7 +187,18 @@ async fn check_vault(
     // Check 3: the wraps against the stored wrap set.
     let limit = MAX_ITEM_KEY_WRAPS.saturating_add(1);
     let stored = repo::wraps_after(tx.conn(), vault_id, None, limit).await?;
-    let (rewrapped, dropped) = check_wraps(&stored, rotation, new_epoch)?;
+    let staged_rows = if staged {
+        if staging::staged_epoch(tx.conn(), account_id, vault_id)
+            .await?
+            .is_some_and(|e| e != new_epoch)
+        {
+            return Err(VaultError::StateConflict);
+        }
+        staging::staged_rows(tx.conn(), account_id, vault_id).await?
+    } else {
+        BTreeMap::new()
+    };
+    let (rewrapped, dropped) = check_wraps(&stored, rotation, &staged_rows, new_epoch)?;
     // Check 4: the exact cursor, and every retained snapshot's clamped VV below it.
     check_cutoff(tx, vault_id, rotation).await?;
     let has_grant = repo::self_grant(tx.conn(), vault_id).await?.is_some();
@@ -185,11 +215,12 @@ async fn check_vault(
     })
 }
 
-/// Check 3 of one vault (module docs) against its `stored` rows: the rows to overwrite and to
-/// delete.
+/// Check 3 of one vault (module docs) against its `stored` rows, over the inline rows of
+/// `rotation` and the `staged` ones (ADR 0092 §0 item 4): the rows to overwrite and to delete.
 fn check_wraps(
     stored: &[WrapRow],
     rotation: &VaultRotation,
+    staged: &BTreeMap<Locator, Option<Vec<u8>>>,
     new_epoch: u32,
 ) -> Result<(Vec<WrapRow>, Vec<Locator>), VaultError> {
     if stored.len() > MAX_ITEM_KEY_WRAPS {
@@ -239,6 +270,38 @@ fn check_wraps(
         );
         if !stored_rows.contains(&at) || rewrapped_at.contains(&at) || !dropped_at.insert(at) {
             return Err(VaultError::Invalid);
+        }
+    }
+    // The staged rows (ADR 0092 §4 "Committing"): each was checked when staged, but the stored
+    // rows may have changed since. One whose stored row is gone is `state_conflict` (a purge
+    // by another device); a locator also uploaded inline is uploaded twice.
+    for (at, wrap) in staged {
+        if rewrapped_at.contains(at) || dropped_at.contains(at) {
+            return Err(VaultError::Invalid);
+        }
+        if !stored_rows.contains(at) {
+            return Err(VaultError::StateConflict);
+        }
+        match wrap {
+            Some(envelope) => {
+                let Some(key_id) = staging::wrap_key_id(envelope) else {
+                    return Err(VaultError::Invalid);
+                };
+                if *wrap_key_id.get_or_insert(key_id) != key_id || stored_key_ids.contains(&key_id)
+                {
+                    return Err(VaultError::Invalid);
+                }
+                rewrapped_at.insert(*at);
+                rewrapped.push(WrapRow {
+                    item_id: at.0,
+                    item_key_id: at.1,
+                    vault_key_epoch: new_epoch,
+                    envelope: envelope.clone(),
+                });
+            }
+            None => {
+                dropped_at.insert(*at);
+            }
         }
     }
     if stored_rows

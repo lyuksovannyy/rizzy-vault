@@ -20,14 +20,16 @@ use rizzy_core::keys::{AccountKey, ItemKey, VaultKey};
 use rizzy_domain_vault::VaultError;
 use rizzy_domain_vault::port::recovery_vaults;
 use rizzy_domain_vault::rotation::apply_rotation;
-use rizzy_proto::change::{VaultRotation, VaultRotationUpload, WrapLocator};
+use rizzy_domain_vault::staging::stage_rotation;
+use rizzy_proto::change::{StageRequest, VaultRotation, VaultRotationUpload, WrapLocator};
 use rizzy_proto::error::ErrorCode;
+use rizzy_proto::limits::ROTATION_STAGE_TTL_MS;
 use rizzy_proto::objects::{ItemKeyWrap, KeyEnvelope, VaultSelfGrant};
 use rizzy_proto::vault::{
     FetchResponse, HealingRequest, Record, SeqEntry, SeqVector, UploadResult,
 };
 use rizzy_proto::wire::{Id, List};
-use rizzy_storage::lock_account;
+use rizzy_storage::{lock_account, on_engine};
 
 use crate::common::{
     ACCOUNT, Device, Env, ITEM_KEY_ID, NOW, OpSpec, VAULT, block_on, item, ops_of, sign_op,
@@ -176,6 +178,10 @@ impl Half {
     }
 }
 
+/// The `state_seq` a rotation advances, as the `auth` domain passes it: a staging is checked
+/// against it (ADR 0092 §0 item 4); an inline upload ignores it.
+pub(crate) const BASE_STATE_SEQ: u64 = 7;
+
 /// Runs the vault half as the bridge does: one write transaction under the account lock,
 /// committed on success and rolled back on a refusal.
 async fn apply(
@@ -192,6 +198,7 @@ async fn apply(
         account_key_epoch,
         &account_key_id,
         upload,
+        BASE_STATE_SEQ,
         NOW,
     )
     .await;
@@ -1038,5 +1045,338 @@ fn a_recovery_cursor_behind_an_op_stored_since_is_refused() {
             .unwrap_err();
         assert_eq!(err.code(), ErrorCode::StateConflict);
         assert_eq!(observe(&env).await, before);
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rotation staging (ADR 0092 §4, §8 tests 5–8).
+// ---------------------------------------------------------------------------------------------
+
+/// A stage request for `VAULT` under staging `rotation`, opened on [`BASE_STATE_SEQ`].
+fn stage_request(
+    keys: &Keys,
+    rotation: u8,
+    wraps: Vec<ItemKeyWrap>,
+    dropped: Vec<WrapLocator>,
+) -> StageRequest {
+    StageRequest {
+        rotation_id: Id::from_bytes([rotation; 16]),
+        base_state_seq: BASE_STATE_SEQ,
+        account_key_id: Id::from_bytes(keys.account_key_id()),
+        vault_id: Id::from_bytes(VAULT.to_bytes()),
+        vault_key_epoch: keys.new_vault.epoch(),
+        item_key_wraps: List::new(wraps).unwrap(),
+        dropped: List::new(dropped).unwrap(),
+    }
+}
+
+/// Runs a stage request as the bridge does, at `now_ms`: committed on success, rolled back on
+/// a refusal.
+async fn stage(env: &Env, request: &StageRequest, now_ms: u64) -> Result<u32, VaultError> {
+    let mut tx = env.db.begin_write().await.unwrap();
+    lock_account(&mut tx, ACCOUNT.as_bytes()).await.unwrap();
+    let result = stage_rotation(&mut tx, ACCOUNT, request, now_ms).await;
+    if result.is_ok() {
+        tx.commit().await.unwrap();
+    } else {
+        tx.rollback().await.unwrap();
+    }
+    result.map(|r| r.staged_rows)
+}
+
+/// The rows of the three staging tables: stagings, per-vault epochs, staged rows.
+async fn staging_rows(env: &Env) -> [i64; 3] {
+    let mut out = [0; 3];
+    let mut r = env.db.begin_read().await.unwrap();
+    for (slot, query) in out.iter_mut().zip([
+        "SELECT CAST(COUNT(*) AS BIGINT) FROM vault_rotation_stagings",
+        "SELECT CAST(COUNT(*) AS BIGINT) FROM vault_rotation_staging_vaults",
+        "SELECT CAST(COUNT(*) AS BIGINT) FROM vault_rotation_staging",
+    ]) {
+        *slot = on_engine!(r.conn(), |c| sqlx::query_scalar::<_, i64>(query)
+            .fetch_one(&mut *c)
+            .await
+            .unwrap());
+    }
+    r.finish().await.unwrap();
+    out
+}
+
+/// The vault half of `populated`'s vault: item 1 re-wrapped, item 2 dropped, the exact cursor.
+fn populated_half(keys: &mut Keys, a: &Device, b: &Device) -> Half {
+    Half {
+        grant: keys.grant(),
+        cursor: cursor(&[(a, 2), (b, 1)]),
+        wraps: vec![rewrap(keys, 1)],
+        dropped: vec![locator(2)],
+    }
+}
+
+/// ADR 0092 §8 test 5, over every split of the rows between inline and staged: a staged
+/// commit stores the same rows, epoch, self-grant and nulled record wraps as the inline commit
+/// of the same rows, and deletes the staging. Staged rows are invisible until the commit.
+#[test]
+fn a_staged_rotation_equals_the_inline_one() {
+    block_on(async {
+        let mut keys = Keys::new(21, 1);
+        let (env, a, b) = populated(&mut keys).await;
+        let half = populated_half(&mut keys, &a, &b);
+        apply(&env, &half.upload(), 1, keys.account_key_id())
+            .await
+            .unwrap();
+        let inline = observe(&env).await;
+        // (wrap staged, drop staged) for each of the four splits.
+        for (wrap_staged, drop_staged) in [(true, true), (true, false), (false, true)] {
+            let mut keys = Keys::new(21, 1);
+            let (env, a, b) = populated(&mut keys).await;
+            let half = populated_half(&mut keys, &a, &b);
+            let before = observe(&env).await;
+            let (staged_wraps, inline_wraps) = if wrap_staged {
+                (half.wraps.clone(), Vec::new())
+            } else {
+                (Vec::new(), half.wraps.clone())
+            };
+            let (staged_drops, inline_drops) = if drop_staged {
+                (half.dropped.clone(), Vec::new())
+            } else {
+                (Vec::new(), half.dropped.clone())
+            };
+            let request = stage_request(&keys, 9, staged_wraps, staged_drops);
+            let staged = stage(&env, &request, NOW).await.unwrap();
+            assert_eq!(staged, u32::from(wrap_staged) + u32::from(drop_staged));
+            // Staged rows are not state: Fetch and the self-grant are unchanged.
+            assert_eq!(observe(&env).await, before);
+            let upload = Half {
+                wraps: inline_wraps,
+                dropped: inline_drops,
+                ..half
+            }
+            .upload()
+            .with_staging(Id::from_bytes([9; 16]));
+            apply(&env, &upload, 1, keys.account_key_id())
+                .await
+                .unwrap();
+            assert_eq!(observe(&env).await, inline, "{wrap_staged} {drop_staged}");
+            assert_eq!(staging_rows(&env).await, [0, 0, 0]);
+        }
+    });
+}
+
+/// ADR 0092 §4 steps 2–4 and §8 test 7: a repeated stage is a no-op, a conflicting one is
+/// refused, the per-row checks hold, a new `rotation_id` replaces the old staging, and a commit
+/// naming a deleted or expired staging is `state_conflict`; the worker's expiry deletes it.
+#[test]
+fn staging_checks_and_expiry() {
+    block_on(async {
+        let mut keys = Keys::new(22, 1);
+        let (env, a, b) = populated(&mut keys).await;
+        let half = populated_half(&mut keys, &a, &b);
+        let first = stage_request(&keys, 1, half.wraps.clone(), Vec::new());
+        assert_eq!(stage(&env, &first, NOW).await.unwrap(), 1);
+        // Idempotent retry: no-op.
+        assert_eq!(stage(&env, &first, NOW).await.unwrap(), 1);
+        // The same locator with another wrap, or as a drop: refused.
+        let again = rewrap(&mut keys, 1);
+        let other = stage_request(&keys, 1, vec![again], Vec::new());
+        assert!(matches!(
+            stage(&env, &other, NOW).await,
+            Err(VaultError::Invalid)
+        ));
+        let as_drop = stage_request(&keys, 1, Vec::new(), vec![locator(1)]);
+        assert!(matches!(
+            stage(&env, &as_drop, NOW).await,
+            Err(VaultError::Invalid)
+        ));
+        // The fixed triple and the vault's fixed epoch.
+        let mut moved = stage_request(&keys, 1, Vec::new(), vec![locator(2)]);
+        moved.base_state_seq += 1;
+        assert!(matches!(
+            stage(&env, &moved, NOW).await,
+            Err(VaultError::Invalid)
+        ));
+        let mut epoch = stage_request(&keys, 1, Vec::new(), vec![locator(2)]);
+        epoch.vault_key_epoch += 1;
+        assert!(matches!(
+            stage(&env, &epoch, NOW).await,
+            Err(VaultError::Invalid)
+        ));
+        // Per row: a locator the server does not hold, a wrap at another epoch, a wrap and a
+        // drop of the same row.
+        let unknown = stage_request(&keys, 1, Vec::new(), vec![locator(9)]);
+        assert!(matches!(
+            stage(&env, &unknown, NOW).await,
+            Err(VaultError::Invalid)
+        ));
+        let mut wrong = rewrap(&mut keys, 2);
+        wrong.vault_key_epoch = 0;
+        let wrong = stage_request(&keys, 1, vec![wrong], Vec::new());
+        assert!(matches!(
+            stage(&env, &wrong, NOW).await,
+            Err(VaultError::Invalid)
+        ));
+        let wrap_2 = rewrap(&mut keys, 2);
+        let both = stage_request(&keys, 1, vec![wrap_2], vec![locator(2)]);
+        assert!(matches!(
+            stage(&env, &both, NOW).await,
+            Err(VaultError::Invalid)
+        ));
+        // A vault the account does not own.
+        let mut foreign = stage_request(&keys, 1, Vec::new(), vec![locator(2)]);
+        foreign.vault_id = Id::from_bytes([0xee; 16]);
+        assert!(matches!(
+            stage(&env, &foreign, NOW).await,
+            Err(VaultError::Invalid)
+        ));
+        assert_eq!(staging_rows(&env).await, [1, 1, 1]);
+
+        // A new rotation_id deletes the old staging; the commit naming the old one conflicts.
+        let second = stage_request(&keys, 2, Vec::new(), vec![locator(2)]);
+        assert_eq!(stage(&env, &second, NOW).await.unwrap(), 1);
+        assert_eq!(staging_rows(&env).await, [1, 1, 1]);
+        let before = observe(&env).await;
+        let old = Half {
+            wraps: Vec::new(),
+            dropped: Vec::new(),
+            ..half.clone()
+        }
+        .upload()
+        .with_staging(Id::from_bytes([1; 16]));
+        let err = apply(&env, &old, 1, keys.account_key_id())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::StateConflict);
+        assert_eq!(observe(&env).await, before);
+
+        // An expired staging: a commit naming it conflicts, and the worker deletes it.
+        let expired = stage_request(&keys, 3, Vec::new(), vec![locator(2)]);
+        let long_ago = NOW - ROTATION_STAGE_TTL_MS;
+        assert_eq!(stage(&env, &expired, long_ago).await.unwrap(), 1);
+        let named = Half {
+            dropped: Vec::new(),
+            ..half.clone()
+        }
+        .upload()
+        .with_staging(Id::from_bytes([3; 16]));
+        let err = apply(&env, &named, 1, keys.account_key_id())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::StateConflict);
+        assert_eq!(
+            env.domain.expire_rotation_stagings(long_ago).await.unwrap(),
+            0
+        );
+        assert_eq!(env.domain.expire_rotation_stagings(NOW).await.unwrap(), 1);
+        assert_eq!(staging_rows(&env).await, [0, 0, 0]);
+        assert_eq!(observe(&env).await, before);
+    });
+}
+
+/// ADR 0092 §8 tests 6 and 8: a staged commit that fails a check leaves the wrap set, the
+/// epoch and the staging unchanged; rows added or deleted since staging conflict, and staging
+/// the delta under the same `rotation_id` then commits.
+#[test]
+fn a_staged_commit_is_atomic_and_conflicts_on_a_race() {
+    block_on(async {
+        let mut keys = Keys::new(23, 1);
+        let (env, a, b) = populated(&mut keys).await;
+        let half = populated_half(&mut keys, &a, &b);
+        let request = stage_request(&keys, 4, half.wraps.clone(), half.dropped.clone());
+        assert_eq!(stage(&env, &request, NOW).await.unwrap(), 2);
+        let staged = |h: &Half| {
+            Half {
+                wraps: Vec::new(),
+                dropped: Vec::new(),
+                ..h.clone()
+            }
+            .upload()
+            .with_staging(Id::from_bytes([4; 16]))
+        };
+        // A failed cut-off (check 4): nothing changes, the staging stays.
+        let before = observe(&env).await;
+        let behind = Half {
+            cursor: cursor(&[(&a, 1), (&b, 1)]),
+            ..half.clone()
+        };
+        let err = apply(&env, &staged(&behind), 1, keys.account_key_id())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::StateConflict);
+        // A wrong self-grant epoch against the staged one (check 2 passes, the staging's epoch
+        // differs): state_conflict.
+        let mut other_keys = Keys::new(23, 2);
+        let other_epoch = Half {
+            grant: other_keys.grant(),
+            ..half.clone()
+        };
+        let err = apply(&env, &staged(&other_epoch), 1, keys.account_key_id())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::StateConflict);
+        assert_eq!(observe(&env).await, before);
+        assert_eq!(staging_rows(&env).await, [1, 1, 2]);
+
+        // Another device adds a row: the staged commit conflicts (a stored row in neither).
+        let wrap_3 = keys.wrap(&VaultKeyChoice::Old, item(3));
+        env.store(vec![Record::Op(sign_op(
+            &b,
+            VAULT,
+            &OpSpec {
+                wrap: Some(wrap_3),
+                ..OpSpec::new(item(3), 2, 1)
+            },
+        ))])
+        .await;
+        let raced = Half {
+            cursor: cursor(&[(&a, 2), (&b, 2)]),
+            ..half.clone()
+        };
+        let err = apply(&env, &staged(&raced), 1, keys.account_key_id())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::StateConflict);
+        // The client fetches, stages the delta under the same rotation_id, and commits.
+        let wrap_3 = rewrap(&mut keys, 3);
+        let delta = stage_request(&keys, 4, vec![wrap_3], Vec::new());
+        assert_eq!(stage(&env, &delta, NOW).await.unwrap(), 3);
+        apply(&env, &staged(&raced), 1, keys.account_key_id())
+            .await
+            .unwrap();
+        assert_eq!(staging_rows(&env).await, [0, 0, 0]);
+        let (grant, _) = observe(&env).await;
+        assert_eq!(grant.vault_key_epoch, 1);
+    });
+}
+
+/// ADR 0092 §4 "Committing": a staged row whose stored row was deleted since fails "subset of
+/// the stored rows" as `state_conflict`, not `invalid_request`.
+#[test]
+fn a_staged_row_deleted_since_conflicts() {
+    block_on(async {
+        let mut keys = Keys::new(24, 1);
+        let (env, a, b) = populated(&mut keys).await;
+        let half = populated_half(&mut keys, &a, &b);
+        let request = stage_request(&keys, 5, half.wraps.clone(), half.dropped.clone());
+        stage(&env, &request, NOW).await.unwrap();
+        let mut tx = env.db.begin_write().await.unwrap();
+        on_engine!(tx.conn(), |c| sqlx::query(
+            "DELETE FROM vault_item_key_wraps WHERE item_id = $1"
+        )
+        .bind(&item(2).as_bytes()[..])
+        .execute(&mut *c)
+        .await
+        .unwrap()
+        .rows_affected());
+        tx.commit().await.unwrap();
+        let upload = Half {
+            wraps: Vec::new(),
+            dropped: Vec::new(),
+            ..half
+        }
+        .upload()
+        .with_staging(Id::from_bytes([5; 16]));
+        let err = apply(&env, &upload, 1, keys.account_key_id())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::StateConflict);
     });
 }
