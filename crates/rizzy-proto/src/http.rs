@@ -127,6 +127,8 @@ pub mod paths {
     pub const RECOVERY_CANCEL: &str = "/api/v1/recovery/cancel";
     /// Recovery complete.
     pub const RECOVERY_COMPLETE: &str = "/api/v1/recovery/complete";
+    /// The paged recovery read of the wrap-set rows (ADR 0092 §5).
+    pub const RECOVERY_WRAPS: &str = "/api/v1/recovery/wraps";
     /// TOTP enrolment start.
     pub const TOTP_ENROL_START: &str = "/api/v1/totp/enrol/start";
     /// TOTP enrolment confirmation.
@@ -187,7 +189,7 @@ pub mod paths {
     pub const ICONS_PREFIX: &str = "/api/v1/icons/";
 
     /// Every `/api/v1` path, in the order above.
-    pub const ALL: [&str; 43] = [
+    pub const ALL: [&str; 44] = [
         REGISTER_START,
         REGISTER_FINISH,
         LOGIN_START,
@@ -210,6 +212,7 @@ pub mod paths {
         RECOVERY_START,
         RECOVERY_CANCEL,
         RECOVERY_COMPLETE,
+        RECOVERY_WRAPS,
         TOTP_ENROL_START,
         TOTP_ENROL_CONFIRM,
         TOTP_DISABLE,
@@ -268,7 +271,7 @@ mod tests {
         let mut sorted = paths::ALL.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 43);
+        assert_eq!(sorted.len(), 44);
         for path in paths::ALL {
             assert!(path.starts_with(API_V1_PREFIX), "{path}");
             // Nothing a proxy or a URL library would rewrite, and no query.

@@ -39,7 +39,7 @@ use rizzy_core::normalize::LoginName;
 use rizzy_core::rng::CryptoRng;
 use rizzy_proto::account::{AccountView, PendingRecoveryNotice};
 use rizzy_proto::objects::AccountKeyRecoveryWrap;
-use rizzy_proto::recovery::RecoveryVault;
+use rizzy_proto::recovery::{RecoveryVault, RecoveryWrapsRequest, RecoveryWrapsResponse};
 use rizzy_proto::wire::{Bytes, Id, SessionToken};
 use rizzy_storage::{Conn, WriteTx, lock_account};
 
@@ -86,6 +86,10 @@ pub struct RecoveryRelease {
     /// rotation cursor, so the recovery-only session stays off the vault endpoints (ADR 0025
     /// open question 7, decided).
     pub vaults: Vec<RecoveryVault>,
+    /// Whether the wrap sets are left empty for the paged read ([ADR 0092] §0 item 2, §5).
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    pub wraps_paged: bool,
 }
 
 impl core::fmt::Debug for RecoveryRelease {
@@ -372,7 +376,7 @@ impl<V: VaultPort> AuthService<V> {
             now_ms,
         )
         .await?;
-        let vaults = self.vault.recovery_vaults(tx.conn(), account).await?;
+        let (vaults, wraps_paged) = self.vault.recovery_vaults(tx.conn(), account).await?;
         tx.commit().await?;
         Ok(RecoveryRelease {
             session_token: token,
@@ -384,6 +388,40 @@ impl<V: VaultPort> AuthService<V> {
             },
             account: view,
             vaults,
+            wraps_paged,
         })
+    }
+
+    /// One page of the paged recovery read ([ADR 0092] §5, `POST /api/v1/recovery/wraps`),
+    /// for the recovery-only session only, as one consistent read under the account lock. The
+    /// session itself is the product of the rate-limited `recovery/complete` and lives 10
+    /// minutes; no bucket of its own is charged per page (see the implementation report: the
+    /// recovery buckets' 5 an hour would cap a paged recovery at 5 pages).
+    ///
+    /// # Errors
+    /// [`AuthError::FreshSessionRequired`] for any other session; [`AuthError::NotFound`] for a
+    /// vault of another account; [`AuthError::Unauthorized`] for an ended session; storage
+    /// errors.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    pub async fn recovery_wraps(
+        &self,
+        session: &Session,
+        request: &RecoveryWrapsRequest,
+        now_ms: u64,
+    ) -> Result<RecoveryWrapsResponse, AuthError> {
+        let account = session.account_id;
+        let mut tx = self.db.begin_write().await?;
+        lock_account(&mut tx, account.as_bytes()).await?;
+        let session = session::reload(tx.conn(), session, now_ms).await?;
+        if session.kind != SessionKind::Recovery {
+            return Err(AuthError::FreshSessionRequired);
+        }
+        let page = self
+            .vault
+            .recovery_wraps(tx.conn(), account, request)
+            .await?;
+        tx.commit().await?;
+        Ok(page)
     }
 }

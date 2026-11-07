@@ -31,8 +31,8 @@ use rizzy_domain_auth::directory::{DeviceStanding, device_authors, signed_accoun
 use rizzy_domain_auth::revocation::stored_window;
 use rizzy_domain_auth::types::{AccountId, DeviceId};
 use rizzy_domain_auth::types::{
-    RecoveryVault, StageRequest, StageResponse, VaultId, VaultRotationUpload, VaultSelfGrant,
-    VaultSummary,
+    RecoveryVault, RecoveryWrapsRequest, RecoveryWrapsResponse, StageRequest, StageResponse,
+    VaultId, VaultRotationUpload, VaultSelfGrant, VaultSummary,
 };
 use rizzy_domain_auth::{AuthError, PersonalVault, VaultPort};
 use rizzy_domain_vault::{
@@ -111,10 +111,24 @@ impl VaultPort for VaultBridge {
         &self,
         conn: Conn<'_>,
         account_id: AccountId,
-    ) -> Result<Vec<RecoveryVault>, AuthError> {
+    ) -> Result<(Vec<RecoveryVault>, bool), AuthError> {
         port::recovery_vaults(conn, account_id)
             .await
             .map_err(|e| vault_error(&e))
+    }
+
+    async fn recovery_wraps(
+        &self,
+        conn: Conn<'_>,
+        account_id: AccountId,
+        request: &RecoveryWrapsRequest,
+    ) -> Result<RecoveryWrapsResponse, AuthError> {
+        port::recovery_wraps(conn, account_id, request)
+            .await
+            .map_err(|e| match e {
+                VaultError::NotFound => AuthError::NotFound,
+                e => vault_error(&e),
+            })
     }
 
     async fn create_personal_vault(

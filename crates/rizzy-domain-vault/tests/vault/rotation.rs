@@ -16,15 +16,17 @@ use chacha20::ChaCha20Rng;
 use rand_core::SeedableRng;
 use rizzy_core::envelope::purpose::{ItemKeyWrapCtx, VaultKeySelfGrantCtx};
 use rizzy_core::ids::ItemId;
+use rizzy_core::ids::VaultId;
 use rizzy_core::keys::{AccountKey, ItemKey, VaultKey};
-use rizzy_domain_vault::VaultError;
-use rizzy_domain_vault::port::recovery_vaults;
+use rizzy_domain_vault::port::{recovery_vaults, recovery_wraps};
 use rizzy_domain_vault::rotation::apply_rotation;
 use rizzy_domain_vault::staging::stage_rotation;
+use rizzy_domain_vault::{VaultError, VaultKind, create_vault};
 use rizzy_proto::change::{StageRequest, VaultRotation, VaultRotationUpload, WrapLocator};
 use rizzy_proto::error::ErrorCode;
-use rizzy_proto::limits::ROTATION_STAGE_TTL_MS;
+use rizzy_proto::limits::{MAX_ACCOUNT_WRAP_ROWS, ROTATION_STAGE_ROWS, ROTATION_STAGE_TTL_MS};
 use rizzy_proto::objects::{ItemKeyWrap, KeyEnvelope, VaultSelfGrant};
+use rizzy_proto::recovery::RecoveryWrapsRequest;
 use rizzy_proto::vault::{
     FetchResponse, HealingRequest, Record, SeqEntry, SeqVector, UploadResult,
 };
@@ -781,7 +783,8 @@ fn recovery_vaults_are_a_rotation_cursor() {
         let mut keys = Keys::new(7, 1);
         let (env, a, b) = populated(&mut keys).await;
         let mut tx = env.db.begin_read().await.unwrap();
-        let vaults = recovery_vaults(tx.conn(), ACCOUNT).await.unwrap();
+        let (vaults, paged) = recovery_vaults(tx.conn(), ACCOUNT).await.unwrap();
+        assert!(!paged);
         tx.finish().await.unwrap();
         assert_eq!(vaults.len(), 1);
         let vault = &vaults[0];
@@ -1025,7 +1028,8 @@ fn a_recovery_cursor_behind_an_op_stored_since_is_refused() {
         let mut keys = Keys::new(11, 1);
         let (env, _, b) = populated(&mut keys).await;
         let mut tx = env.db.begin_read().await.unwrap();
-        let vaults = recovery_vaults(tx.conn(), ACCOUNT).await.unwrap();
+        let (vaults, paged) = recovery_vaults(tx.conn(), ACCOUNT).await.unwrap();
+        assert!(!paged);
         tx.finish().await.unwrap();
         env.store(vec![Record::Op(sign_op(
             &b,
@@ -1378,5 +1382,165 @@ fn a_staged_row_deleted_since_conflicts() {
             .await
             .unwrap_err();
         assert_eq!(err.code(), ErrorCode::StateConflict);
+    });
+}
+
+/// Seeds `n` wrap-set rows in `vault` directly (the write cap forbids it through the API, ADR
+/// 0092 §8 test 10): item `i` big-endian, the test item key id, epoch 0, a placeholder envelope.
+async fn seed_rows(env: &Env, vault: VaultId, n: u32) {
+    let mut tx = env.db.begin_write().await.unwrap();
+    for i in 0..n {
+        let mut item = [0u8; 16];
+        item[12..].copy_from_slice(&i.to_be_bytes());
+        on_engine!(tx.conn(), |c| sqlx::query(
+            "INSERT INTO vault_item_key_wraps \
+             (vault_id, item_id, item_key_id, vault_key_epoch, envelope, updated_at_ms) \
+             VALUES ($1, $2, $3, 0, $4, 1)"
+        )
+        .bind(&vault.as_bytes()[..])
+        .bind(&item[..])
+        .bind(&ITEM_KEY_ID[..])
+        .bind(&[0x77u8; 98][..])
+        .execute(&mut *c)
+        .await
+        .unwrap()
+        .rows_affected());
+    }
+    tx.commit().await.unwrap();
+}
+
+/// Every row of `vault` through the paged recovery read, and the number of pages; asserts each
+/// page's bound.
+async fn page_all(env: &Env, vault: VaultId) -> (Vec<WrapLocator>, usize) {
+    let mut r = env.db.begin_read().await.unwrap();
+    let mut seen: Vec<WrapLocator> = Vec::new();
+    let mut after = None;
+    let mut pages = 0;
+    loop {
+        let request = RecoveryWrapsRequest {
+            vault_id: Id::from_bytes(vault.to_bytes()),
+            after,
+        };
+        let page = recovery_wraps(r.conn(), ACCOUNT, &request).await.unwrap();
+        pages += 1;
+        assert!(page.item_key_wraps.len() <= ROTATION_STAGE_ROWS);
+        seen.extend(page.item_key_wraps.iter().map(|w| WrapLocator {
+            item_id: w.item_id,
+            item_key_id: w.item_key_id,
+        }));
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    r.finish().await.unwrap();
+    (seen, pages)
+}
+
+/// ADR 0092 §8 tests 9 and 10 at the vault domain: an account above `MAX_ACCOUNT_WRAP_ROWS`
+/// over two vaults answers `wraps_paged` with empty wrap sets, the paged read returns every
+/// row once in order, and the recovering client's rotation goes through staging and commits;
+/// nothing is refused for size.
+#[test]
+fn an_account_above_the_cap_pages_its_recovery_and_rotates_staged() {
+    block_on(async {
+        let vault_2 = VaultId::from_bytes([0xb2; 16]);
+        let mut keys = Keys::new(25, 1);
+        let env = Env::new(1).await;
+        let mut tx = env.db.begin_write().await.unwrap();
+        lock_account(&mut tx, ACCOUNT.as_bytes()).await.unwrap();
+        let grant_0 = VaultSelfGrant {
+            vault_id: Id::from_bytes(vault_2.to_bytes()),
+            account_key_epoch: 0,
+            vault_key_epoch: 0,
+            envelope: KeyEnvelope::new(vec![0x5a; 98]).unwrap(),
+        };
+        create_vault(&mut tx, ACCOUNT, &grant_0, VaultKind::Owned, NOW)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        // 65,537 rows: above the account cap, each vault under its own.
+        let first = 40_000;
+        let second = u32::try_from(MAX_ACCOUNT_WRAP_ROWS).unwrap() + 1 - first;
+        seed_rows(&env, VAULT, first).await;
+        seed_rows(&env, vault_2, second).await;
+        let mut r = env.db.begin_read().await.unwrap();
+        let (vaults, paged) = recovery_vaults(r.conn(), ACCOUNT).await.unwrap();
+        r.finish().await.unwrap();
+        assert!(paged);
+        assert!(vaults.iter().all(|v| v.item_key_wraps.is_empty()));
+        for (vault, n) in [(VAULT, first), (vault_2, second)] {
+            let (seen, page_count) = page_all(&env, vault).await;
+            let n = usize::try_from(n).unwrap();
+            assert_eq!(page_count, n.div_ceil(ROTATION_STAGE_ROWS));
+            assert_eq!(seen.len(), n);
+            assert!(
+                seen.windows(2).all(|w| w[0] < w[1]),
+                "strictly ascending, each once"
+            );
+            // None of the placeholder rows opens: every row is staged as dropped.
+            for chunk in seen.chunks(ROTATION_STAGE_ROWS) {
+                let mut request = stage_request(&keys, 7, Vec::new(), chunk.to_vec());
+                request.vault_id = Id::from_bytes(vault.to_bytes());
+                stage(&env, &request, NOW).await.unwrap();
+            }
+        }
+        // Another account's vault is not found.
+        let mut r = env.db.begin_read().await.unwrap();
+        let request = RecoveryWrapsRequest {
+            vault_id: Id::from_bytes(VAULT.to_bytes()),
+            after: None,
+        };
+        assert!(matches!(
+            recovery_wraps(r.conn(), crate::common::OTHER_ACCOUNT, &request).await,
+            Err(VaultError::NotFound)
+        ));
+        r.finish().await.unwrap();
+        // The commit carries no row inline; vault 2's self-grant is under the same new account
+        // key at epoch 1.
+        let vault_key_2 = VaultKey::generate(&mut keys.rng, vault_2, 1);
+        let envelope = keys
+            .account
+            .wrap_vault_key(
+                &mut keys.rng,
+                &VaultKeySelfGrantCtx {
+                    account_id: ACCOUNT,
+                    vault_id: vault_2,
+                    account_key_epoch: 1,
+                    vault_key_epoch: 1,
+                },
+                &vault_key_2,
+            )
+            .unwrap();
+        let rotation = |grant: VaultSelfGrant, heads: SeqVector| VaultRotation {
+            self_grant: grant,
+            cursor: heads,
+            item_key_wraps: List::empty(),
+            dropped: List::empty(),
+        };
+        let upload = VaultRotationUpload::new(vec![
+            rotation(keys.grant(), vaults[0].heads.clone()),
+            rotation(
+                VaultSelfGrant {
+                    vault_id: Id::from_bytes(vault_2.to_bytes()),
+                    account_key_epoch: 1,
+                    vault_key_epoch: 1,
+                    envelope: KeyEnvelope::new(envelope).unwrap(),
+                },
+                vaults[1].heads.clone(),
+            ),
+        ])
+        .unwrap()
+        .with_staging(Id::from_bytes([7; 16]));
+        apply(&env, &upload, 1, keys.account_key_id())
+            .await
+            .unwrap();
+        let mut r = env.db.begin_read().await.unwrap();
+        let (vaults, paged) = recovery_vaults(r.conn(), ACCOUNT).await.unwrap();
+        r.finish().await.unwrap();
+        assert!(!paged);
+        assert!(vaults.iter().all(|v| v.item_key_wraps.is_empty()));
+        assert!(vaults.iter().all(|v| v.self_grant.vault_key_epoch == 1));
+        assert_eq!(staging_rows(&env).await, [0, 0, 0]);
     });
 }

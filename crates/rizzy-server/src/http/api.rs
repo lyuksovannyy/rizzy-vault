@@ -33,6 +33,7 @@
 //! | `POST /api/v1/healing/grants` | `PublishGrantsRequest` → 204 | any |
 //! | `POST /api/v1/account/reregister/start` | `ReregisterStartRequest` → `ReregisterStartResponse` | any (fresh OPAQUE, recovery-only or device; checked by the domain) |
 //! | `POST /api/v1/account/commit` | `CommitChangeRequest` → 204 | any (per change; checked by the domain) |
+//! | `POST /api/v1/recovery/wraps` | `RecoveryWrapsRequest` → `RecoveryWrapsResponse` | recovery-only (checked by the domain; ADR 0092 §5) |
 //! | `POST /api/v1/account/rotation/stage` | `StageRequest` → `StageResponse` | fresh OPAQUE or recovery-only (as the rotation commit; checked by the domain) |
 //! | `POST /api/v1/devices/suspend` | `DeviceSuspensionRequest` → `SuspendDeviceResponse` | OPAQUE or device (fresh OPAQUE bound to another device; checked by the domain) |
 //! | `POST /api/v1/devices/unsuspend` | `DeviceSuspensionRequest` → 204 | OPAQUE or device (as suspend) |
@@ -382,6 +383,8 @@ pub enum Endpoint {
     RecoveryCancel,
     /// Recovery complete.
     RecoveryComplete,
+    /// The paged recovery read (ADR 0092 §5).
+    RecoveryWraps,
     /// TOTP enrolment start.
     TotpEnrolStart,
     /// TOTP enrolment confirmation.
@@ -451,6 +454,7 @@ impl Endpoint {
         Self::RecoveryStart,
         Self::RecoveryCancel,
         Self::RecoveryComplete,
+        Self::RecoveryWraps,
         Self::TotpEnrolStart,
         Self::TotpEnrolConfirm,
         Self::TotpDisable,
@@ -500,6 +504,7 @@ impl Endpoint {
             Self::RecoveryStart => paths::RECOVERY_START,
             Self::RecoveryCancel => paths::RECOVERY_CANCEL,
             Self::RecoveryComplete => paths::RECOVERY_COMPLETE,
+            Self::RecoveryWraps => paths::RECOVERY_WRAPS,
             Self::TotpEnrolStart => paths::TOTP_ENROL_START,
             Self::TotpEnrolConfirm => paths::TOTP_ENROL_CONFIRM,
             Self::TotpDisable => paths::TOTP_DISABLE,
@@ -557,6 +562,7 @@ impl Endpoint {
             | Self::ReregisterStart
             | Self::CommitChange
             | Self::RotationStage
+            | Self::RecoveryWraps
             | Self::SessionsCurrentEnd => SessionNeed::Required,
             Self::SuspendDevice
             | Self::UnsuspendDevice
@@ -1182,6 +1188,12 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
                 .map_err(ae)?;
             Ok(Reply::Empty)
         }
+        Endpoint::RecoveryWraps => json(
+            &auth
+                .recovery_wraps(need()?, &parse(&body)?, now)
+                .await
+                .map_err(ae)?,
+        ),
         Endpoint::RotationStage => json(
             &auth
                 .stage_rotation(need()?, &parse(&body)?, now)
@@ -1407,6 +1419,7 @@ mod tests {
             | Endpoint::RecoveryStart
             | Endpoint::RecoveryCancel
             | Endpoint::RecoveryComplete
+            | Endpoint::RecoveryWraps
             | Endpoint::TotpEnrolStart
             | Endpoint::TotpEnrolConfirm
             | Endpoint::TotpDisable
@@ -1433,7 +1446,7 @@ mod tests {
 
     #[test]
     fn all_is_complete_and_paths_unique() {
-        assert_eq!(Endpoint::ALL.len(), 43);
+        assert_eq!(Endpoint::ALL.len(), 44);
         assert!(Endpoint::ALL.iter().all(|e| listed(*e)));
         let unique: HashSet<_> = Endpoint::ALL.iter().copied().map(Endpoint::path).collect();
         assert_eq!(unique.len(), Endpoint::ALL.len());

@@ -38,7 +38,7 @@ use crate::objects::{
 };
 use crate::recovery::{
     RecoveryAuthToken, RecoveryCancelResponse, RecoveryCompleteResponse, RecoveryRequest,
-    RecoveryStartResponse, RecoveryVault,
+    RecoveryStartResponse, RecoveryVault, RecoveryWrapsRequest, RecoveryWrapsResponse,
 };
 use crate::totp::{
     TotpDisableRequest, TotpEnrolConfirmRequest, TotpEnrolStartResponse, TotpSecretBytes,
@@ -813,6 +813,21 @@ fn every_change_recovery_and_totp_message_round_trips() {
         },
         account: account_view(),
         vaults: l(vec![recovery_vault()]),
+        wraps_paged: true,
+    });
+    // ADR 0092 §5: the paged recovery read.
+    round_trip(&RecoveryWrapsRequest {
+        vault_id: id(1),
+        after: None,
+    });
+    round_trip(&RecoveryWrapsResponse {
+        heads: SeqVector::default(),
+        self_grant: recovery_vault().self_grant,
+        item_key_wraps: List::empty(),
+        next: Some(crate::change::WrapLocator {
+            item_id: id(2),
+            item_key_id: id(3),
+        }),
     });
     round_trip(&TotpDisableRequest {
         code: TotpCode::new("000000").unwrap(),
@@ -906,6 +921,7 @@ fn change_recovery_and_totp_debug_output_never_shows_secrets() {
         },
         account: account_view(),
         vaults: List::empty(),
+        wraps_paged: false,
     };
     let session_text = complete.session_token.to_b64url();
     let confirm = TotpEnrolConfirmRequest {
@@ -1221,6 +1237,7 @@ fn recovery_complete_carries_vaults_and_ignores_unknown_fields() {
         },
         account: account_view(),
         vaults: l(vec![recovery_vault()]),
+        wraps_paged: false,
     };
     let mut value = serde_json::to_value(&complete).unwrap();
     value["vaults"][0]["later"] = 1.into();
@@ -1495,4 +1512,84 @@ fn attachment_messages_round_trip_and_are_bounded() {
     assert!(serde_json::from_str::<DownloadChunkRequest>(&extra).is_err());
     let response = r#"{"envelope":"AQID","chunk_count":3}"#;
     assert!(serde_json::from_str::<DownloadChunkResponse>(response).is_ok());
+}
+
+/// ADR 0092 §8 test 2 (the vault half): the worst-case inline vault half at the account cap,
+/// 64 vaults and 65,536 rows with the longest encodings (every id and epoch at its widest),
+/// cursors of 4,096 entries each. A row is about 290 bytes of JSON (ADR 0025 §1's estimate,
+/// which ADR 0092 §1 relies on). The auth half is not built here: the vault half already
+/// passes the floor at the worst-case cursors.
+#[test]
+fn the_inline_rotation_at_the_cap_fits_the_body_floor() {
+    use crate::change::{VaultRotation, VaultRotationUpload};
+    use crate::limits::{DEFAULT_UPLOAD_BODY_LEN, MAX_ACCOUNT_WRAP_ROWS, MAX_OWNED_VAULTS};
+    use crate::objects::KeyEnvelope;
+    let rows_per_vault = MAX_ACCOUNT_WRAP_ROWS / MAX_OWNED_VAULTS;
+    let wrap = |v: usize, r: usize| ItemKeyWrap {
+        item_id: Id::from_bytes(
+            [
+                [0xffu8; 8],
+                (u64::try_from(v * rows_per_vault + r).unwrap()).to_be_bytes(),
+            ]
+            .concat()
+            .try_into()
+            .unwrap(),
+        ),
+        item_key_id: Id::from_bytes([0xff; 16]),
+        vault_key_epoch: u32::MAX,
+        envelope: KeyEnvelope::new(vec![0xff; 127]).unwrap(),
+    };
+    let one_row = serde_json::to_string(&wrap(0, 0)).unwrap().len() + 1;
+    assert!((250..=300).contains(&one_row), "{one_row} bytes a row");
+    let cursor = |v: usize, entries: usize| {
+        SeqVector::new(
+            (0..entries)
+                .map(|d| {
+                    let mut id = [0u8; 16];
+                    id[..8].copy_from_slice(&u64::try_from(v).unwrap().to_be_bytes());
+                    id[8..].copy_from_slice(&u64::try_from(d).unwrap().to_be_bytes());
+                    SeqEntry {
+                        device_id: Id::from_bytes(id),
+                        seq: u64::MAX,
+                    }
+                })
+                .collect(),
+        )
+        .unwrap()
+    };
+    let half = |entries: usize| {
+        VaultRotationUpload::new(
+            (0..MAX_OWNED_VAULTS)
+                .map(|v| {
+                    let mut vault = [0xffu8; 16];
+                    vault[15] = u8::try_from(v).unwrap();
+                    VaultRotation {
+                        self_grant: VaultSelfGrant {
+                            vault_id: Id::from_bytes(vault),
+                            account_key_epoch: u32::MAX,
+                            vault_key_epoch: u32::MAX,
+                            envelope: KeyEnvelope::new(vec![0xff; 256]).unwrap(),
+                        },
+                        cursor: cursor(v, entries),
+                        item_key_wraps: List::new(
+                            (0..rows_per_vault).map(|r| wrap(v, r)).collect(),
+                        )
+                        .unwrap(),
+                        dropped: List::empty(),
+                    }
+                })
+                .collect(),
+        )
+        .unwrap()
+    };
+    let rows_only = serde_json::to_vec(&half(0)).unwrap().len();
+    let with_cursors = serde_json::to_vec(&half(4096)).unwrap().len();
+    // The rows alone: 289 bytes a row, 18,972,762 bytes (18.1 MiB, ADR 0092 §1's figure).
+    assert!(rows_only < 19_000_000, "{rows_only}");
+    // With every cursor at 4,096 entries the vault half alone is 36,274,202 bytes, past the
+    // 32 MiB floor before the auth half is counted: ADR 0092 §1's "fits with headroom" does
+    // not hold at the worst-case cursors, so this test says so (§8 test 2). Correctness does
+    // not depend on it: the client stages whenever the encoded commit exceeds the floor (§0
+    // item 3); the cap's value is ADR 0092 open question 1, reported to the owner.
+    assert!(with_cursors > DEFAULT_UPLOAD_BODY_LEN, "{with_cursors}");
 }

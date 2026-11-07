@@ -680,6 +680,10 @@ fn seed_value(endpoint: Endpoint, me: &Account) -> Value {
             "registration_upload": opaque(192),
             "setup_id": 1,
         }),
+        // ADR 0092 §5: the first page of the caller's own vault.
+        Endpoint::RecoveryWraps => json!({
+            "vault_id": b64(&me.vault_id.to_bytes()),
+        }),
         // ADR 0092 §4: a stage request for the caller's own vault, no rows.
         Endpoint::RotationStage => json!({
             "rotation_id": b64(&[0x51u8; 16]),

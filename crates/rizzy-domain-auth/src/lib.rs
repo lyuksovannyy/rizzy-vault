@@ -243,6 +243,10 @@ pub mod types {
     };
     /// The self-grants [`crate::VaultPort`] moves between the domains.
     pub use rizzy_proto::objects::VaultSelfGrant;
+    /// A page of the paged recovery read and its request ([ADR 0092] §5).
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    pub use rizzy_proto::recovery::{RecoveryWrapsRequest, RecoveryWrapsResponse};
     /// The bearer token and the request signature, as the headers carry them (CRYPTO.md
     /// §5.10).
     pub use rizzy_proto::{

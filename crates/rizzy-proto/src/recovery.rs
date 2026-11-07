@@ -18,7 +18,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::account::AccountView;
 use crate::auth::LoginName;
-use crate::limits::{MAX_ITEM_KEY_WRAPS, MAX_VAULT_GRANTS, RECOVERY_AUTH_TOKEN_LEN};
+use crate::change::WrapLocator;
+use crate::limits::{
+    MAX_ITEM_KEY_WRAPS, MAX_VAULT_GRANTS, RECOVERY_AUTH_TOKEN_LEN, ROTATION_STAGE_ROWS,
+};
 use crate::objects::{AccountKeyRecoveryWrap, ItemKeyWrap, VaultSelfGrant};
 use crate::vault::SeqVector;
 use crate::wire::{Id, List, SecretFixed, SessionToken};
@@ -102,4 +105,50 @@ pub struct RecoveryCompleteResponse {
     pub account: AccountView,
     /// Every vault of the account, ascending by id, with its heads and wrap set (ADR 0025 §1).
     pub vaults: List<RecoveryVault, MAX_VAULT_GRANTS>,
+    /// Whether the wrap sets are read page by page ([ADR 0092] §0 item 2, §5): false when the
+    /// account's wrap-set rows over all its vaults number at most `MAX_ACCOUNT_WRAP_ROWS`, and
+    /// every vault's `item_key_wraps` is complete; true otherwise, every `item_key_wraps` is
+    /// empty and the client reads the rows through [`RecoveryWrapsRequest`]. Absent from an
+    /// older server's answer: false.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    #[serde(default)]
+    pub wraps_paged: bool,
+}
+
+/// `POST /api/v1/recovery/wraps` ([ADR 0092] §5): one page of a vault's wrap-set rows for the
+/// recovery-only session, used only when [`RecoveryCompleteResponse::wraps_paged`] is true.
+/// `after` is the last locator of the previous page (`None` for the first).
+///
+/// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryWrapsRequest {
+    /// The vault.
+    pub vault_id: Id,
+    /// The page starts after this row.
+    #[serde(default)]
+    pub after: Option<WrapLocator>,
+}
+
+/// The answer to [`RecoveryWrapsRequest`] ([ADR 0092] §5), one consistent read: the vault's
+/// heads and self-grant at that read, and its rows strictly ascending by `(item_id,
+/// item_key_id)` after `after`, at most [`ROTATION_STAGE_ROWS`]. `next` names the last row
+/// of the page when more follow, `None` on the last page. The client uses the heads of each
+/// vault's last page as that vault's rotation cursor.
+///
+/// A response type: unknown fields are ignored.
+///
+/// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryWrapsResponse {
+    /// The server's head h(V, d) for every device with ops in the vault, at this page's read.
+    pub heads: SeqVector,
+    /// The vault's current self-grant.
+    pub self_grant: VaultSelfGrant,
+    /// The page's rows.
+    pub item_key_wraps: List<ItemKeyWrap, ROTATION_STAGE_ROWS>,
+    /// The page's last row when more follow.
+    #[serde(default)]
+    pub next: Option<WrapLocator>,
 }

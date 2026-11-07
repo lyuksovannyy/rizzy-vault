@@ -31,7 +31,7 @@ use rizzy_core::ids::{AccountId, DeviceId, VaultId};
 use rizzy_proto::account::VaultSummary;
 use rizzy_proto::change::{StageRequest, StageResponse, VaultRotationUpload};
 use rizzy_proto::objects::VaultSelfGrant;
-use rizzy_proto::recovery::RecoveryVault;
+use rizzy_proto::recovery::{RecoveryVault, RecoveryWrapsRequest, RecoveryWrapsResponse};
 use rizzy_storage::{Conn, WriteTx};
 
 use crate::error::AuthError;
@@ -174,12 +174,28 @@ pub trait VaultPort: Send + Sync {
 
     /// Recovery complete (§11.9 step 3; ADR 0025 §1): every vault of the account with its
     /// current self-grant, heads and wrap set, ascending by vault id, on the caller's
-    /// connection (one consistent read with the rest of the answer).
+    /// connection (one consistent read with the rest of the answer), and `wraps_paged`
+    /// ([ADR 0092] §0 item 2): true when the account holds more than `MAX_ACCOUNT_WRAP_ROWS`
+    /// wrap-set rows, and then every vault's wrap set is left empty for the paged read.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
     fn recovery_vaults(
         &self,
         conn: Conn<'_>,
         account_id: AccountId,
-    ) -> impl Future<Output = Result<Vec<RecoveryVault>, AuthError>> + Send;
+    ) -> impl Future<Output = Result<(Vec<RecoveryVault>, bool), AuthError>> + Send;
+
+    /// One page of the paged recovery read ([ADR 0092] §5), on the caller's connection: the
+    /// vault's heads, self-grant and rows after `request.after`. Refuses a vault of another
+    /// account with [`AuthError::NotFound`].
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    fn recovery_wraps(
+        &self,
+        conn: Conn<'_>,
+        account_id: AccountId,
+        request: &RecoveryWrapsRequest,
+    ) -> impl Future<Output = Result<RecoveryWrapsResponse, AuthError>> + Send;
 
     /// H: the highest `device_seq` the server holds from `device_id` in any of the account's
     /// vaults, 0 for none (§11.8 step 0, ADR 0012 §6).

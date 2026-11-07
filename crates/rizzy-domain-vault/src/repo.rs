@@ -78,6 +78,8 @@ const WRAP_REPLACE: &str = include_str!("../queries/wrap_replace.sql");
 const WRAP_BY_ENVELOPE: &str = include_str!("../queries/wrap_by_envelope.sql");
 /// See `queries/wraps_after.sql`.
 const WRAPS_AFTER: &str = include_str!("../queries/wraps_after.sql");
+/// See `queries/wraps_page.sql`.
+const WRAPS_PAGE: &str = include_str!("../queries/wraps_page.sql");
 /// See `queries/wrap_count_vault.sql`.
 const WRAP_COUNT_VAULT: &str = include_str!("../queries/wrap_count_vault.sql");
 /// See `queries/wrap_count_account.sql`.
@@ -980,6 +982,45 @@ pub(crate) async fn wraps_after(
         for r in sqlx::query(WRAPS_AFTER)
             .bind(&vault_id.as_bytes()[..])
             .bind(after)
+            .bind(limit)
+            .fetch_all(&mut *c)
+            .await?
+        {
+            out.push((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?, r.try_get(3)?));
+        }
+        out
+    });
+    rows.into_iter()
+        .map(|(item, key, epoch, envelope)| {
+            Ok(WrapRow {
+                item_id: ItemId::from_bytes(id16(&item, "vault_item_key_wraps.item_id")?),
+                item_key_id: id16(&key, "vault_item_key_wraps.item_key_id")?,
+                vault_key_epoch: sql_to_u32(epoch, "vault_item_key_wraps.vault_key_epoch")?,
+                envelope,
+            })
+        })
+        .collect()
+}
+
+/// The wrap-set rows strictly after `after` in `(item_id, item_key_id)` order (from the first
+/// when `None`), at most `limit` (ADR 0092 §5).
+pub(crate) async fn wraps_page(
+    conn: Conn<'_>,
+    vault_id: VaultId,
+    after: Option<(ItemId, [u8; 16])>,
+    limit: usize,
+) -> Result<Vec<WrapRow>, VaultError> {
+    let (item, key): (&[u8], &[u8]) = match &after {
+        Some((item, key)) => (&item.as_bytes()[..], &key[..]),
+        None => (&[], &[]),
+    };
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows: Vec<WrapColumns> = on_engine!(conn, |c| {
+        let mut out = Vec::new();
+        for r in sqlx::query(WRAPS_PAGE)
+            .bind(&vault_id.as_bytes()[..])
+            .bind(item)
+            .bind(key)
             .bind(limit)
             .fetch_all(&mut *c)
             .await?

@@ -246,8 +246,8 @@ impl VaultPort for SharedVault {
         &self,
         _conn: Conn<'_>,
         account_id: AccountId,
-    ) -> Result<Vec<RecoveryVault>, AuthError> {
-        Ok(self
+    ) -> Result<(Vec<RecoveryVault>, bool), AuthError> {
+        let vaults = self
             .grants
             .lock()
             .unwrap()
@@ -263,7 +263,28 @@ impl VaultPort for SharedVault {
                     })
                     .collect()
             })
-            .unwrap_or_default())
+            .unwrap_or_default();
+        Ok((vaults, false))
+    }
+
+    /// The fake holds no wrap set: every page is empty and the last.
+    async fn recovery_wraps(
+        &self,
+        _conn: Conn<'_>,
+        account_id: AccountId,
+        request: &rizzy_proto::recovery::RecoveryWrapsRequest,
+    ) -> Result<rizzy_proto::recovery::RecoveryWrapsResponse, AuthError> {
+        let grants = self.grants.lock().unwrap();
+        let grant = grants
+            .get(&account_id.to_bytes())
+            .and_then(|g| g.iter().find(|g| g.vault_id == request.vault_id))
+            .ok_or(AuthError::NotFound)?;
+        Ok(rizzy_proto::recovery::RecoveryWrapsResponse {
+            heads: SeqVector::default(),
+            self_grant: grant.clone(),
+            item_key_wraps: List::empty(),
+            next: None,
+        })
     }
 
     async fn device_head(

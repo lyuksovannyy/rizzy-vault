@@ -20,9 +20,10 @@
 
 use rizzy_core::ids::{AccountId, DeviceId, VaultId};
 use rizzy_proto::account::VaultSummary;
-use rizzy_proto::limits::MAX_ITEM_KEY_WRAPS;
+use rizzy_proto::change::WrapLocator;
+use rizzy_proto::limits::{MAX_ACCOUNT_WRAP_ROWS, MAX_ITEM_KEY_WRAPS, ROTATION_STAGE_ROWS};
 use rizzy_proto::objects::{ItemKeyWrap, KeyEnvelope, VaultSelfGrant};
-use rizzy_proto::recovery::RecoveryVault;
+use rizzy_proto::recovery::{RecoveryVault, RecoveryWrapsRequest, RecoveryWrapsResponse};
 use rizzy_proto::vault::{SeqEntry, SeqVector};
 use rizzy_proto::wire::{Id, List};
 use rizzy_storage::{Conn, WriteTx};
@@ -161,69 +162,154 @@ pub async fn device_head(
     Ok(head)
 }
 
+/// The wire form of stored heads.
+fn wire_heads(heads: &rizzy_sync::vv::VersionVector) -> Result<SeqVector, VaultError> {
+    SeqVector::new(
+        heads
+            .entries()
+            .map(|dot| SeqEntry {
+                device_id: Id::from_bytes(dot.device_id().to_bytes()),
+                seq: dot.seq(),
+            })
+            .collect(),
+    )
+    .map_err(|_| VaultError::Corrupt {
+        what: "vault_ops heads",
+    })
+}
+
+/// The wire form of stored wrap-set rows.
+fn wire_wraps(rows: Vec<repo::WrapRow>) -> Result<Vec<ItemKeyWrap>, VaultError> {
+    rows.into_iter()
+        .map(|row| {
+            Ok(ItemKeyWrap {
+                item_id: Id::from_bytes(row.item_id.to_bytes()),
+                item_key_id: Id::from_bytes(row.item_key_id),
+                vault_key_epoch: row.vault_key_epoch,
+                envelope: KeyEnvelope::new(row.envelope).map_err(|_| VaultError::Corrupt {
+                    what: "vault_item_key_wraps.envelope length",
+                })?,
+            })
+        })
+        .collect()
+}
+
+/// The current self-grant of `vault_id`, in its wire form.
+async fn wire_grant(conn: Conn<'_>, vault_id: VaultId) -> Result<VaultSelfGrant, VaultError> {
+    let grant = repo::self_grant(conn, vault_id)
+        .await?
+        .ok_or(VaultError::Corrupt {
+            what: "a vault without a self-grant",
+        })?;
+    Ok(VaultSelfGrant {
+        vault_id: Id::from_bytes(vault_id.to_bytes()),
+        account_key_epoch: grant.account_key_epoch,
+        vault_key_epoch: grant.vault_key_epoch,
+        envelope: KeyEnvelope::new(grant.envelope).map_err(|_| VaultError::Corrupt {
+            what: "vault_self_grants.envelope length",
+        })?,
+    })
+}
+
 /// Every vault of the account for the recovery of CRYPTO.md §11.9 step 3 (ADR 0025 §1): its
 /// current self-grant, its heads h(V, d) and its whole wrap set, ascending by vault id, read on
 /// the caller's connection so it is one consistent read with the rest of the recovery answer.
 /// The recovering client sends the heads as its rotation cursor.
 ///
+/// The second value is `wraps_paged` ([ADR 0092] §0 item 2): when the account's wrap-set rows
+/// over all its vaults number more than [`MAX_ACCOUNT_WRAP_ROWS`], every vault's
+/// `item_key_wraps` is left empty and the client reads the rows through [`recovery_wraps`].
+///
 /// # Errors
 /// [`VaultError::WrapSetTooLarge`] when a vault's wrap set does not fit one response
-/// ([`MAX_ITEM_KEY_WRAPS`]); [`VaultError::Corrupt`] for a vault without a self-grant or a
-/// stored value outside its wire bound; [`VaultError::Storage`].
+/// ([`MAX_ITEM_KEY_WRAPS`]) and the rows are not paged; [`VaultError::Corrupt`] for a vault
+/// without a self-grant or a stored value outside its wire bound; [`VaultError::Storage`].
+///
+/// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
 pub async fn recovery_vaults(
     mut conn: Conn<'_>,
     account_id: AccountId,
-) -> Result<Vec<RecoveryVault>, VaultError> {
+) -> Result<(Vec<RecoveryVault>, bool), VaultError> {
+    let paged = repo::account_wrap_rows(reborrow(&mut conn), account_id).await?
+        > MAX_ACCOUNT_WRAP_ROWS as u64;
     let vaults = repo::list_vaults(reborrow(&mut conn), account_id).await?;
     let mut out = Vec::with_capacity(vaults.len());
     for vault_id in vaults {
-        let grant = repo::self_grant(reborrow(&mut conn), vault_id)
-            .await?
-            .ok_or(VaultError::Corrupt {
-                what: "a vault without a self-grant",
-            })?;
-        let heads = repo::heads(reborrow(&mut conn), vault_id).await?;
-        let limit = MAX_ITEM_KEY_WRAPS.saturating_add(1);
-        let rows = repo::wraps_after(reborrow(&mut conn), vault_id, None, limit).await?;
-        if rows.len() > MAX_ITEM_KEY_WRAPS {
-            return Err(VaultError::WrapSetTooLarge);
-        }
-        let corrupt = |what: &'static str| move |_| VaultError::Corrupt { what };
-        let wraps = rows
-            .into_iter()
-            .map(|row| {
-                Ok(ItemKeyWrap {
-                    item_id: Id::from_bytes(row.item_id.to_bytes()),
-                    item_key_id: Id::from_bytes(row.item_key_id),
-                    vault_key_epoch: row.vault_key_epoch,
-                    envelope: KeyEnvelope::new(row.envelope)
-                        .map_err(corrupt("vault_item_key_wraps.envelope length"))?,
-                })
-            })
-            .collect::<Result<Vec<_>, VaultError>>()?;
-        let heads = SeqVector::new(
-            heads
-                .entries()
-                .map(|dot| SeqEntry {
-                    device_id: Id::from_bytes(dot.device_id().to_bytes()),
-                    seq: dot.seq(),
-                })
-                .collect(),
-        )
-        .map_err(corrupt("vault_ops heads"))?;
-        let id = Id::from_bytes(vault_id.to_bytes());
+        let self_grant = wire_grant(reborrow(&mut conn), vault_id).await?;
+        let heads = wire_heads(&repo::heads(reborrow(&mut conn), vault_id).await?)?;
+        let wraps = if paged {
+            Vec::new()
+        } else {
+            let limit = MAX_ITEM_KEY_WRAPS.saturating_add(1);
+            let rows = repo::wraps_after(reborrow(&mut conn), vault_id, None, limit).await?;
+            if rows.len() > MAX_ITEM_KEY_WRAPS {
+                return Err(VaultError::WrapSetTooLarge);
+            }
+            wire_wraps(rows)?
+        };
         out.push(RecoveryVault {
-            vault_id: id,
-            self_grant: VaultSelfGrant {
-                vault_id: id,
-                account_key_epoch: grant.account_key_epoch,
-                vault_key_epoch: grant.vault_key_epoch,
-                envelope: KeyEnvelope::new(grant.envelope)
-                    .map_err(corrupt("vault_self_grants.envelope length"))?,
-            },
+            vault_id: Id::from_bytes(vault_id.to_bytes()),
+            self_grant,
             heads,
-            item_key_wraps: List::new(wraps).map_err(corrupt("vault_item_key_wraps count"))?,
+            item_key_wraps: List::new(wraps).map_err(|_| VaultError::Corrupt {
+                what: "vault_item_key_wraps count",
+            })?,
         });
     }
-    Ok(out)
+    Ok((out, paged))
+}
+
+/// One page of the paged recovery read ([ADR 0092] §5, `POST /api/v1/recovery/wraps`), on the
+/// caller's connection (one consistent read): the vault's heads and self-grant, and at most
+/// [`ROTATION_STAGE_ROWS`] rows strictly after `request.after`, with `next` set when more
+/// follow. The caller checked the recovery-only session.
+///
+/// # Errors
+/// [`VaultError::NotFound`] for a vault that does not exist or belongs to another account;
+/// [`VaultError::Corrupt`] or [`VaultError::Storage`].
+///
+/// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+pub async fn recovery_wraps(
+    mut conn: Conn<'_>,
+    account_id: AccountId,
+    request: &RecoveryWrapsRequest,
+) -> Result<RecoveryWrapsResponse, VaultError> {
+    let vault_id = VaultId::from_bytes(request.vault_id.to_bytes());
+    repo::vault(reborrow(&mut conn), vault_id)
+        .await?
+        .filter(|v| v.account_id == account_id)
+        .ok_or(VaultError::NotFound)?;
+    let self_grant = wire_grant(reborrow(&mut conn), vault_id).await?;
+    let heads = wire_heads(&repo::heads(reborrow(&mut conn), vault_id).await?)?;
+    let after = request.after.map(|at| {
+        (
+            rizzy_core::ids::ItemId::from_bytes(at.item_id.to_bytes()),
+            at.item_key_id.to_bytes(),
+        )
+    });
+    let mut rows = repo::wraps_page(
+        reborrow(&mut conn),
+        vault_id,
+        after,
+        ROTATION_STAGE_ROWS.saturating_add(1),
+    )
+    .await?;
+    let more = rows.len() > ROTATION_STAGE_ROWS;
+    rows.truncate(ROTATION_STAGE_ROWS);
+    let next = if more {
+        rows.last().map(|row| WrapLocator {
+            item_id: Id::from_bytes(row.item_id.to_bytes()),
+            item_key_id: Id::from_bytes(row.item_key_id),
+        })
+    } else {
+        None
+    };
+    Ok(RecoveryWrapsResponse {
+        heads,
+        self_grant,
+        item_key_wraps: List::new(wire_wraps(rows)?).map_err(|_| VaultError::Corrupt {
+            what: "a recovery page over its bound",
+        })?,
+        next,
+    })
 }

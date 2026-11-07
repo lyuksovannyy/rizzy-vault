@@ -202,6 +202,7 @@ impl<V: VaultPort> AuthService<V> {
             recovery_wrap: release.recovery_wrap,
             account: release.account,
             vaults: List::new(release.vaults).map_err(crate::over_limit)?,
+            wraps_paged: release.wraps_paged,
         })
     }
 
