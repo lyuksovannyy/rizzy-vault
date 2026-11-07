@@ -15,6 +15,8 @@
 //!   commit" below).
 //! - `rv recovery cancel`, on an enrolled device: cancels a pending recovery (§11.9 step 2:
 //!   "Any enrolled device with a device-authenticated session can cancel").
+//! - `rv recovery abandon`: leaves an interrupted recovery whose new master password is lost
+//!   (see "Leaving an attempt" below).
 //! - Every command that goes online on an enrolled device warns, loudly and every time, while
 //!   the server reports a pending recovery ([ADR 0045] open question 3), and `rv account
 //!   status` shows it ([`notice_warning`], [`status`]). The notice is the server's word,
@@ -77,7 +79,22 @@
 //! one unconfirmed recovery commit's secrets per account (threat model INV-71). A new attempt
 //! for an account whose cache file exists is refused ([`CliError::AlreadyEnrolled`]) before
 //! any secret is generated, and every other command, `rv device forget` included, refuses a
-//! stage-3 record and points at `rv recovery complete`.
+//! stage-3 record and points at `rv recovery complete`, except `rv recovery abandon`.
+//!
+//! ## Leaving an attempt whose new master password is lost ([ADR 0108])
+//!
+//! Step 1 of the resume needs the new master password. A user who cannot type it runs
+//! `rv recovery abandon --server <origin> --name <login> --confirm` ([`abandon_command`]):
+//! under the account's lock for the whole run, it reads `H_rec′` from the stored commit,
+//! checks the unfinished attempt's own recovery code R′ against it locally, then asks the server
+//! through real recovery starts: probe A with R′ (`200`: the commit landed), else probe B with
+//! the code R the attempt started from (`200`: it had not landed). Only after one of those
+//! `200`s is the record removed, exactly as step 5 removes it; any other answer keeps it. On
+//! the server, each `recovery/complete` ends the account's earlier recovery-only sessions
+//! (INV-122), so a commit of the abandoned attempt still in transit cannot land once a new
+//! attempt's `recovery/complete` was answered.
+//!
+//! [ADR 0108]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0108-interrupted-recovery-exit.md
 //!
 //! [ADR 0046]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0046-recovery-pending-device-stage.md
 
@@ -85,13 +102,17 @@ use rizzy_client::ClientError;
 use rizzy_client::account::RecoveryNotice;
 use rizzy_client::identity_gen::CivilDate;
 use rizzy_client::login::{LoginInput, start_login};
-use rizzy_client::recovery::{PendingRecovery, RecoveryInput, RecoveryOptions, start_recovery};
+use rizzy_client::recovery::{
+    PendingRecovery, RecoveryInput, RecoveryOptions, RecoveryStarted, start_recovery,
+    stored_recovery_token_hash,
+};
 use rizzy_client::rizzy_proto::auth::{
     DeviceAuthFinishResponse, DeviceAuthStartResponse, LoginFinishResponse, LoginStartResponse,
 };
 use rizzy_client::rizzy_proto::change::{CommitChangeRequest, ReregisterStartResponse};
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
+use rizzy_client::rizzy_proto::limits::MAX_UPLOAD_BODY_LEN;
 use rizzy_client::rizzy_proto::recovery::{RecoveryCompleteResponse, RecoveryStartResponse};
 use rizzy_client::rizzy_proto::wire::SessionToken;
 use rizzy_client::session::{
@@ -111,7 +132,9 @@ use crate::db::Db;
 use crate::device::{Device, Env, copy_token, send_stages};
 use crate::error::CliError;
 use crate::http::{Auth, Http};
-use crate::paths::{AccountLock, cache_path, check_data_dir, enrolled_accounts, ensure_data_dir};
+use crate::paths::{
+    AccountLock, cache_path, check_data_dir, enrolled_accounts, ensure_data_dir, hex,
+};
 use crate::sys::{OsRng, now_ms, os_rng};
 
 /// `recovery start`.
@@ -190,9 +213,35 @@ pub async fn prepare(
 /// a new attempt for an account whose file exists stops that attempt before any secret is
 /// generated.
 async fn pending_recovery(env: &Env<'_>, http: &Http) -> Result<Option<[u8; 16]>, CliError> {
+    Ok(stage_3_records(env, http).await?.found.first().copied())
+}
+
+/// What the search of ADR 0046 §2 found in the data directory for one origin.
+struct Search {
+    /// The accounts whose cache holds a stage-3 record for the origin, in directory order.
+    found: Vec<[u8; 16]>,
+    /// The accounts whose cache another process held, so they were passed over unread.
+    busy: Vec<[u8; 16]>,
+}
+
+/// Every stage-3 record for `http`'s origin in the data directory (ADR 0046 §2 "Finding the
+/// record on the next invocation"; [ADR 0108] §2 step 1 needs all of them). A cache another
+/// process holds is listed in [`Search::busy`]; one that does not open is passed over.
+///
+/// [ADR 0108]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0108-interrupted-recovery-exit.md
+async fn stage_3_records(env: &Env<'_>, http: &Http) -> Result<Search, CliError> {
+    let mut search = Search {
+        found: Vec::new(),
+        busy: Vec::new(),
+    };
     for account in enrolled_accounts(&env.data_dir)? {
-        let Ok(lock) = AccountLock::acquire(&env.data_dir, &account) else {
-            continue;
+        let lock = match AccountLock::acquire(&env.data_dir, &account) {
+            Ok(lock) => lock,
+            Err(CliError::InUse) => {
+                search.busy.push(account);
+                continue;
+            }
+            Err(_) => continue,
         };
         let Ok(mut db) = Db::open(&cache_path(&env.data_dir, &account)).await else {
             continue;
@@ -208,10 +257,10 @@ async fn pending_recovery(env: &Env<'_>, http: &Http) -> Result<Option<[u8; 16]>
         if record.stage() == Stage::RecoveryPending
             && record.server_origin().as_str() == http.origin().as_str()
         {
-            return Ok(Some(account));
+            search.found.push(account);
         }
     }
-    Ok(None)
+    Ok(search)
 }
 
 /// A recovery attempt whose `recovery/complete` answer verified, the account's lock taken.
@@ -591,7 +640,19 @@ async fn resume(
     let password = env
         .ui
         .secret("New master password chosen in the unfinished recovery")?;
-    let unlocked = record.unlock_recovery_pending(&password)?;
+    let unlocked = match record.unlock_recovery_pending(&password) {
+        Ok(unlocked) => unlocked,
+        // ADR 0108, superseded part 2 of ADR 0046 §3 step 1: the record stays, and the way out
+        // for a user who cannot type this password is named.
+        Err(e @ ClientError::WrongPasswordOrSecretKey) => {
+            env.ui.note(&format!(
+                "If you cannot type the new master password of the unfinished recovery, leave                  it with `rv recovery abandon --server {} --name {login_name} --confirm`.",
+                http.origin().as_str()
+            ));
+            return Err(e.into());
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     // Step 2: the device-auth short-circuit, never with reconciliation objects.
     match device_auth_probe(&http, &record, &unlocked).await {
@@ -783,6 +844,298 @@ async fn login_probe(
         Ok(_) | Err(CliError::Server(ErrorCode::SecondFactorRequired)) => Probe::Landed,
         Err(CliError::Server(ErrorCode::Unauthorized)) => Probe::NotLanded,
         Err(e) => Probe::Unknown(e),
+    }
+}
+
+/// The usage error of `rv recovery abandon` without `--confirm` ([ADR 0108] §2 step 0).
+///
+/// [ADR 0108]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0108-interrupted-recovery-exit.md
+const ABANDON_NEEDS_CONFIRM: &str =
+    "rv recovery abandon removes the unfinished recovery from this computer: pass --confirm";
+
+/// `recovery abandon` ([ADR 0108] §2): leaves an interrupted recovery whose new master
+/// password is lost. The server's own answer to a recovery start with one of the two kits'
+/// codes decides whether the attempt landed; only then is the stage-3 record removed.
+///
+/// # Errors
+/// [`CliError::Usage`] without `confirm` (nothing is opened or sent); as
+/// [`abandon_until_the_removal`]; the removal's I/O errors.
+///
+/// [ADR 0108]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0108-interrupted-recovery-exit.md
+pub async fn abandon_command(
+    env: &mut Env<'_>,
+    server: &str,
+    login_name: &str,
+    confirm: bool,
+) -> Result<(), CliError> {
+    if !confirm {
+        return Err(CliError::Usage(ABANDON_NEEDS_CONFIRM.to_owned()));
+    }
+    let decided = Box::pin(abandon_until_the_removal(env, server, login_name)).await?;
+    decided.remove(env).await
+}
+
+/// Which probe of [ADR 0108] §2 answered `200`.
+///
+/// [ADR 0108]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0108-interrupted-recovery-exit.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AbandonOutcome {
+    /// Probe A, with the unfinished attempt's own code: its commit landed.
+    Landed,
+    /// Probe B, with the code the attempt started from: its commit had not landed.
+    NotLanded,
+}
+
+/// `rv recovery abandon` after its deciding probe and before the removal ([ADR 0108] §2 step 6),
+/// the account's lock still held. Dropping it is a crash before the removal: the record stays,
+/// and a rerun repeats the same probe.
+///
+/// [ADR 0108]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0108-interrupted-recovery-exit.md
+pub struct AbandonDecided {
+    /// Which probe answered.
+    outcome: AbandonOutcome,
+    /// The pending recovery's `available_at_ms`, as the probe's answer gave it.
+    available_at_ms: u64,
+    /// The server origin.
+    origin: String,
+    /// The login name.
+    login_name: String,
+    /// The stage-3 record's device id, in hex.
+    device: String,
+    /// The account id.
+    account: [u8; 16],
+    /// The stage-3 cache.
+    db: Db,
+    /// The account's lock, held since before the probes.
+    lock: AccountLock,
+}
+
+impl std::fmt::Debug for AbandonDecided {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AbandonDecided")
+            .field("outcome", &self.outcome)
+            .field("available_at_ms", &self.available_at_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AbandonDecided {
+    /// Which probe answered `200`.
+    #[must_use]
+    pub const fn outcome(&self) -> AbandonOutcome {
+        self.outcome
+    }
+
+    /// The pending recovery's `available_at_ms`.
+    #[must_use]
+    pub const fn available_at_ms(&self) -> u64 {
+        self.available_at_ms
+    }
+
+    /// Step 6 and step 7: removes the record exactly as ADR 0046 §3 step 5 does, then says what
+    /// happened on standard error and prints `landed <ms>` or `not-landed <ms>`.
+    ///
+    /// # Errors
+    /// The removal's I/O errors; the output's.
+    pub async fn remove(self, env: &mut Env<'_>) -> Result<(), CliError> {
+        let Self {
+            outcome,
+            available_at_ms,
+            origin,
+            login_name,
+            device,
+            account,
+            db,
+            lock,
+        } = self;
+        abandon(env, &account, db, lock).await?;
+        let time = iso_utc(available_at_ms);
+        let (note, word) = match outcome {
+            AbandonOutcome::Landed => (
+                format!(
+                    "The unfinished recovery had reached the server: the Emergency Kit it made is                      the valid one, and its new master password was set. A recovery with that                      kit's code is now pending. After {time}, run `rv recovery complete --server                      {origin} --name {login_name}` and type that kit's recovery code. Then revoke                      the device {device}, which this computer can no longer use."
+                ),
+                "landed",
+            ),
+            AbandonOutcome::NotLanded => (
+                format!(
+                    "The unfinished recovery had not reached the server and was removed from this                      computer. Keep its Emergency Kit until a new recovery finishes: until then, a                      copy of its commit still in transit could make it the valid one, and `rv                      recovery complete` would then refuse the old code. A recovery with the old                      code is pending; after {time}, run `rv recovery complete --server {origin}                      --name {login_name}`."
+                ),
+                "not-landed",
+            ),
+        };
+        env.ui.note(&note);
+        env.ui.print(&format!("{word} {available_at_ms}"))
+    }
+}
+
+/// `rv recovery abandon`'s steps 1–5 ([ADR 0108] §2): finds the stage-3 record for `server`,
+/// takes the account's lock, reads `H_rec′` from the stored commit, checks the unfinished
+/// attempt's code against it locally, and runs probe A, then probe B. Stops before the removal;
+/// [`abandon_command`] then calls [`AbandonDecided::remove`]. Nothing is written here.
+///
+/// # Errors
+/// [`CliError::NoUnfinishedRecovery`]; [`CliError::SeveralAccounts`]; [`CliError::InUse`];
+/// [`ClientError::CacheCorrupt`] for a stored commit without a readable `H_rec′`;
+/// [`CliError::BadInput`] for a code that is not the unfinished attempt's (nothing is sent);
+/// [`CliError::RecoveryNotSettled`] when neither code was accepted; any other answer of a
+/// probe, the transport's errors and the input's, with the record kept.
+///
+/// [ADR 0108]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0108-interrupted-recovery-exit.md
+pub async fn abandon_until_the_removal(
+    env: &mut Env<'_>,
+    server: &str,
+    login_name: &str,
+) -> Result<AbandonDecided, CliError> {
+    let http = Http::new(server, &env.trust)?;
+    // Step 1: the record, then its lock for the rest of the run.
+    let search = stage_3_records(env, &http).await?;
+    let account = match (env.account, search.found.as_slice()) {
+        (Some(wanted), found) if found.contains(&wanted) => wanted,
+        (None, [one]) => *one,
+        (None, [_, _, ..]) => return Err(CliError::SeveralAccounts),
+        // Not found: a cache another `rv` held was not read, so it may be the record.
+        (wanted, _) => {
+            let busy = wanted.map_or(!search.busy.is_empty(), |w| search.busy.contains(&w));
+            return Err(if busy {
+                CliError::InUse
+            } else {
+                CliError::NoUnfinishedRecovery
+            });
+        }
+    };
+    check_data_dir(&env.data_dir)?;
+    let lock = AccountLock::acquire(&env.data_dir, &account)?;
+    let mut db = Db::open(&cache_path(&env.data_dir, &account)).await?;
+    let mut rows = db.read().await?;
+    let record = load::open(&rows, false)?;
+    if record.stage() != Stage::RecoveryPending
+        || record.server_origin().as_str() != http.origin().as_str()
+    {
+        return Err(CliError::NoUnfinishedRecovery);
+    }
+    // Step 2: `H_rec′`, from the stored commit.
+    let stored = rows
+        .pending_commit
+        .take()
+        .ok_or(ClientError::CacheCorrupt)?;
+    drop(rows);
+    let stored_hash = stored_hash(&stored)?;
+    drop(stored);
+    let device = hex(record.device_id().as_bytes());
+    drop(record);
+
+    // Step 3: the unfinished attempt's own code, checked before anything is sent.
+    let typed = env.ui.secret(
+        "Recovery code from the Emergency Kit made by the unfinished recovery (leave empty if          you do not have it)",
+    )?;
+    let decided = |outcome, available_at_ms| AbandonDecided {
+        outcome,
+        available_at_ms,
+        origin: http.origin().as_str().to_owned(),
+        login_name: login_name.to_owned(),
+        device: device.clone(),
+        account,
+        db,
+        lock,
+    };
+    if !typed.trim().is_empty() {
+        let started = typed_code(&http, login_name, &typed)?;
+        if !started.matches_token_hash(&stored_hash)? {
+            return Err(CliError::BadInput(
+                "this is not the recovery code of the unfinished recovery's Emergency Kit",
+            ));
+        }
+        // Step 4, probe A: did it land?
+        match probe(&http, &started).await {
+            Ok(available_at_ms) => return Ok(decided(AbandonOutcome::Landed, available_at_ms)),
+            Err(CliError::Server(ErrorCode::Unauthorized)) => {}
+            Err(e) => {
+                env.ui.note(STILL_UNSETTLED);
+                return Err(e);
+            }
+        }
+    }
+    drop(typed);
+
+    // Step 5, probe B: had it not landed?
+    let old = env
+        .ui
+        .secret("Recovery code of the Emergency Kit this recovery started from")?;
+    if old.trim().is_empty() {
+        return Err(CliError::RecoveryNotSettled);
+    }
+    let started = typed_code(&http, login_name, &old)?;
+    drop(old);
+    match probe(&http, &started).await {
+        Ok(available_at_ms) => Ok(decided(AbandonOutcome::NotLanded, available_at_ms)),
+        Err(CliError::Server(ErrorCode::Unauthorized)) => Err(CliError::RecoveryNotSettled),
+        Err(e) => {
+            env.ui.note(STILL_UNSETTLED);
+            Err(e)
+        }
+    }
+}
+
+/// `H_rec′` of a stored recovery commit ([ADR 0108] §2 step 2): the body parsed as a
+/// [`CommitChangeRequest`], size-limited first.
+///
+/// # Errors
+/// [`ClientError::CacheCorrupt`] for a body that is oversized, does not parse, or holds no
+/// recovery registration.
+///
+/// [ADR 0108]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0108-interrupted-recovery-exit.md
+fn stored_hash(body: &[u8]) -> Result<[u8; 32], CliError> {
+    if body.len() > MAX_UPLOAD_BODY_LEN {
+        return Err(ClientError::CacheCorrupt.into());
+    }
+    let request: CommitChangeRequest =
+        serde_json::from_slice(body).map_err(|_| ClientError::CacheCorrupt)?;
+    Ok(stored_recovery_token_hash(&request)?)
+}
+
+/// A typed recovery code, parsed (format and check-character errors as every recovery-code
+/// prompt answers them).
+fn typed_code(http: &Http, login_name: &str, code: &str) -> Result<RecoveryStarted, CliError> {
+    Ok(start_recovery(&RecoveryInput {
+        server_origin: http.origin().as_str(),
+        login_name,
+        recovery_code: code,
+    })?)
+}
+
+/// One probe of [ADR 0108] §2: a real `recovery/start` with the code; its `available_at_ms`.
+///
+/// # Errors
+/// The server's answer and the transport's errors.
+///
+/// [ADR 0108]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0108-interrupted-recovery-exit.md
+async fn probe(http: &Http, started: &RecoveryStarted) -> Result<u64, CliError> {
+    let answer: RecoveryStartResponse = http
+        .post(paths::RECOVERY_START, &started.request()?, Auth::None)
+        .await?;
+    Ok(answer.available_at_ms)
+}
+
+/// A time the server reported, as an ISO-8601 UTC time to the second
+/// ("2026-10-24T13:05:09Z"); a value no calendar date holds prints as [`utc_text`] does.
+#[must_use]
+pub fn iso_utc(ms: u64) -> String {
+    let day_ms = 86_400_000;
+    let date = i64::try_from(ms / day_ms)
+        .ok()
+        .and_then(CivilDate::from_days);
+    match date {
+        Some(date) => {
+            let seconds = (ms % day_ms) / 1000;
+            format!(
+                "{date}T{:02}:{:02}:{:02}Z",
+                seconds / 3600,
+                (seconds % 3600) / 60,
+                seconds % 60
+            )
+        }
+        None => utc_text(ms),
     }
 }
 

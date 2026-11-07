@@ -63,6 +63,16 @@ pub enum CliError {
     SeveralAccounts,
     /// A device is already enrolled for this account in the data directory.
     AlreadyEnrolled,
+    /// `rv recovery abandon` found no stage-3 (recovery-pending) record for the server in the
+    /// data directory ([ADR 0108] §2 step 1).
+    ///
+    /// [ADR 0108]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0108-interrupted-recovery-exit.md
+    NoUnfinishedRecovery,
+    /// `rv recovery abandon`: the server accepted neither recovery code, or none was typed for
+    /// probe B; the stage-3 record is kept as it was ([ADR 0108] §2 step 5).
+    ///
+    /// [ADR 0108]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0108-interrupted-recovery-exit.md
+    RecoveryNotSettled,
     /// A secret was asked for, but standard input is a terminal whose echo cannot be turned
     /// off; or a phrase that must be typed at a terminal was asked for without one.
     NoTerminal,
@@ -275,6 +285,12 @@ impl fmt::Display for CliError {
                 f.write_str("file exists; name another path or remove it (rv never overwrites)")
             }
             Self::InUse => f.write_str("the local data is in use by another rv"),
+            Self::NoUnfinishedRecovery => {
+                f.write_str("no unfinished recovery for this server is saved on this computer")
+            }
+            Self::RecoveryNotSettled => f.write_str(
+                "the server accepted neither recovery code; the unfinished recovery is kept on this computer",
+            ),
             Self::Database => f.write_str("the local data could not be read or written"),
             Self::NotEnrolled => f.write_str(
                 "no device is enrolled here; run `rv signup` or `rv login` (or pass --account)",

@@ -64,6 +64,7 @@ USAGE:
     rv recovery start --server <url> --name <login>
     rv recovery complete --server <url> --name <login> [--skip-rotation]
     rv recovery cancel
+    rv recovery abandon --server <url> --name <login> --confirm
     rv recovery repair --name <login> [--retype]
     rv password --name <login> [--rotate]
     rv secret-key --name <login> [--skip-rotation | --full-rotation]
@@ -554,6 +555,16 @@ pub enum Command {
     },
     /// `recovery cancel`.
     RecoveryCancel,
+    /// `recovery abandon` (ADR 0108 §2): leaves an interrupted recovery whose new master
+    /// password is lost, after the server settled which kit is live.
+    RecoveryAbandon {
+        /// `--server`.
+        server: String,
+        /// `--name`.
+        name: String,
+        /// `--confirm`; without it the command refuses with a usage error and sends nothing.
+        confirm: bool,
+    },
     /// `account status` (ADR 0045): the account as this device verified it, with the server's
     /// recovery notice.
     AccountStatus,
@@ -764,7 +775,7 @@ pub fn parse(arguments: Vec<OsString>) -> Result<Invocation, CliError> {
     })
 }
 
-/// `recovery start`, `complete`, `cancel` or `repair`, after the word `recovery`.
+/// `recovery start`, `complete`, `cancel`, `abandon` or `repair`, after the word `recovery`.
 fn recovery_command(args: &mut Args) -> Result<Command, CliError> {
     Ok(match args.next().as_deref() {
         Some("start") => {
@@ -788,6 +799,22 @@ fn recovery_command(args: &mut Args) -> Result<Command, CliError> {
             }
         }
         Some("cancel") => Command::RecoveryCancel,
+        Some("abandon") => {
+            let (mut server, mut name, mut confirm) = (None, None, false);
+            while let Some(option) = args.next() {
+                match option.as_str() {
+                    "--server" => server = Some(args.value("--server")?),
+                    "--name" => name = Some(args.value("--name")?),
+                    "--confirm" => confirm = true,
+                    other => return Err(unknown(other)),
+                }
+            }
+            Command::RecoveryAbandon {
+                server: required(server, "--server")?,
+                name: required(name, "--name")?,
+                confirm,
+            }
+        }
         Some("repair") => {
             let (mut name, mut retype) = (None, false);
             while let Some(option) = args.next() {
@@ -1405,6 +1432,33 @@ mod tests {
         assert_eq!(command("cache reindex"), Command::CacheReindex);
         assert!(parsed("cache").is_err());
         assert!(parsed("cache reindex now").is_err());
+    }
+
+    /// `recovery abandon` (ADR 0108 §2): `--server` and `--name` required; `--confirm` is
+    /// parsed here and enforced by the command, which refuses without it before anything opens.
+    #[test]
+    fn recovery_abandon_parses() {
+        assert_eq!(
+            command("recovery abandon --server https://v.example --name alice --confirm"),
+            Command::RecoveryAbandon {
+                server: "https://v.example".to_owned(),
+                name: "alice".to_owned(),
+                confirm: true
+            }
+        );
+        assert_eq!(
+            command("recovery abandon --name alice --server https://v.example"),
+            Command::RecoveryAbandon {
+                server: "https://v.example".to_owned(),
+                name: "alice".to_owned(),
+                confirm: false
+            }
+        );
+        assert!(parsed("recovery abandon --server https://v.example --confirm").is_err());
+        assert!(parsed("recovery abandon --name alice --confirm").is_err());
+        assert!(
+            parsed("recovery abandon --server https://v.example --name alice --force").is_err()
+        );
     }
 
     /// `recovery repair` (ADR 0032 §4 step 6): `--name` required, `--retype` optional.
