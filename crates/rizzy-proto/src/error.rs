@@ -18,7 +18,8 @@
 //!   at most 5 minutes), `setup_retired` (ADR 0031 point 3: a registration whose echoed OPAQUE
 //!   `setup_id` is retired or unknown), `credentials_stale` (ADR 0032 §4: after KE3 verified, the
 //!   account's OPAQUE record lags its signed state), `quota_exceeded` (ADR 0048 §3 and §5: the
-//!   record would push the account's counted bytes past its quota and headroom).
+//!   record would push the account's counted bytes past its quota and headroom),
+//!   `revocation_pending` (ADR 0091 §2 and §6: another device's revocation window is open).
 //! - Generic, this crate's: `invalid_request`, `payload_too_large`, `unauthorized`,
 //!   `second_factor_required`, `rate_limited`, `not_found`, `internal`.
 //!
@@ -27,7 +28,8 @@
 //! `fresh_session_required` 403; `not_found` 404; `state_conflict`, `stale_epoch`,
 //! `record_conflict`, `prev_seq_mismatch`, `setup_retired` (ADR 0031 point 3, which adds it to
 //! item 3's list), `credentials_stale` (ADR 0032, which adds it to item 3's list) and
-//! `quota_exceeded` (ADR 0048 §5, which restates the whole sentence with it) 409;
+//! `quota_exceeded` (ADR 0048 §5, which restates the whole sentence with it) and
+//! `revocation_pending` (ADR 0091 §6, which restates it again) 409;
 //! `api_version_gone` 410; `payload_too_large` 413; `rate_limited` 429, with `Retry-After` in
 //! whole seconds; `internal` 500. A method a route does not serve is `405` with
 //! `invalid_request`. **Clients branch on the code, never on the status.**
@@ -99,6 +101,13 @@ pub enum ErrorCode {
     /// never for a healing request. Distinct from [`ErrorCode::PayloadTooLarge`], which is the
     /// per-request body limit checked before any body byte is parsed.
     QuotaExceeded,
+    /// Another device's revocation window is open ([ADR 0091] §2, §6): the account's writes are
+    /// frozen for every session not bound to the revoking device until the revocation commits
+    /// or the window expires. No detail: the client reads `revocation_window` from
+    /// `account/state` and retries the same request (§2 "What clients see").
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+    RevocationPending,
     /// The server failed. No detail.
     Internal,
     /// A code this build does not know; only ever produced by parsing a newer server's answer.
@@ -161,6 +170,7 @@ mod tests {
             ErrorCode::SetupRetired,
             ErrorCode::CredentialsStale,
             ErrorCode::QuotaExceeded,
+            ErrorCode::RevocationPending,
         ] {
             let json = serde_json::to_string(&ErrorResponse::new(code)).unwrap();
             assert_eq!(

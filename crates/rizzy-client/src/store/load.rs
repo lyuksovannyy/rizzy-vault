@@ -298,6 +298,8 @@ fn account_view(rows: &CacheRows) -> Result<AccountView, ClientError> {
         vaults: List::empty(),
         // The recovery notice (ADR 0045) is advisory and never cached (point 9).
         pending_recovery: None,
+        suspended_devices: List::empty(),
+        revocation_window: None,
     })
 }
 

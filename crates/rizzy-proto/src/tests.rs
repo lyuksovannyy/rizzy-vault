@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 use crate::account::{
     AccountStateQuery, AccountView, AckDeviceGrantsRequest, DeviceGrantsResponse,
     EnrolDeviceRequest, PendingRecoveryNotice, PublishAccountStateRequest, PublishBundlesRequest,
-    PublishGrantsRequest, UploadWebDeviceCertificateRequest, VaultSummary,
+    PublishGrantsRequest, RevocationWindowNotice, UploadWebDeviceCertificateRequest, VaultSummary,
 };
 use crate::attachments::{
     AttachmentRequest, CreateAttachmentRequest, DownloadChunkRequest, DownloadChunkResponse,
@@ -100,6 +100,11 @@ fn account_view() -> AccountView {
             bytes_used: 1_000,
         }]),
         pending_recovery: None,
+        suspended_devices: l(vec![id(0x21)]),
+        revocation_window: Some(RevocationWindowNotice {
+            revoker_device_id: id(0x22),
+            expires_at_ms: 600_000,
+        }),
     }
 }
 
@@ -1116,6 +1121,40 @@ fn account_view_vaults_default_to_empty() {
     view.as_object_mut().unwrap().remove("vaults");
     let parsed: AccountView = serde_json::from_value(view).unwrap();
     assert!(parsed.vaults.is_empty());
+}
+
+#[test]
+fn account_view_revocation_fields_of_adr_0091() {
+    // §2 "What clients see": two additive response fields, absent from an older server.
+    let view = serde_json::to_value(account_view()).unwrap();
+    assert_eq!(
+        view["revocation_window"],
+        serde_json::json!({
+            "revoker_device_id": "IiIiIiIiIiIiIiIiIiIiIg",
+            "expires_at_ms": 600_000
+        })
+    );
+    assert_eq!(view["suspended_devices"][0], "ISEhISEhISEhISEhISEhIQ");
+    let mut old = view;
+    let object = old.as_object_mut().unwrap();
+    object.remove("revocation_window");
+    object.remove("suspended_devices");
+    let parsed: AccountView = serde_json::from_value(old).unwrap();
+    assert!(parsed.suspended_devices.is_empty());
+    assert_eq!(parsed.revocation_window, None);
+    // No window: the field is left out.
+    let mut closed = account_view();
+    closed.revocation_window = None;
+    let json = serde_json::to_value(&closed).unwrap();
+    assert!(json.get("revocation_window").is_none());
+    // §6: `revocation_pending` on the wire.
+    assert_eq!(
+        serde_json::to_string(&crate::error::ErrorResponse::new(
+            ErrorCode::RevocationPending
+        ))
+        .unwrap(),
+        r#"{"error":"revocation_pending"}"#
+    );
 }
 
 #[test]

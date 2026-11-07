@@ -80,6 +80,39 @@ pub struct AccountView {
     /// [ADR 0045]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0045-recovery-pending-notification.md
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_recovery: Option<PendingRecoveryNotice>,
+    /// The ids of the account's suspended, unrevoked device certificates, ascending ([ADR 0091]
+    /// §2 "What clients see"). Absent from an older server.
+    ///
+    /// For display and retry timing only, never trusted for a security decision: a device
+    /// that finds it non-empty with no pending record of its own offers to finish or cancel the
+    /// removal (§3 step 8).
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+    #[serde(default)]
+    pub suspended_devices: List<Id, MAX_DEVICE_STATEMENTS>,
+    /// The account's open revocation window ([ADR 0091] §2), absent while none is open and from
+    /// an older server. For display and retry timing only, never trusted for a security
+    /// decision: a server that lies in it gains only a delayed or a needless retry.
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation_window: Option<RevocationWindowNotice>,
+}
+
+/// The server's unsigned view of an open revocation window ([ADR 0091] §2): the device whose
+/// revocation holds it, and when it expires.
+///
+/// Advisory: a client reads it to time its retry of a
+/// [`revocation_pending`](crate::error::ErrorCode::RevocationPending) answer, never for a
+/// security decision. A response type: unknown fields are ignored.
+///
+/// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevocationWindowNotice {
+    /// The revoking device: the only device whose sessions may write while the window is open.
+    pub revoker_device_id: Id,
+    /// When the window expires, in Unix milliseconds, unless the revocation commits first.
+    pub expires_at_ms: u64,
 }
 
 /// The server's unsigned notice of a pending account recovery ([ADR 0045] point 1): when the

@@ -254,6 +254,8 @@ impl Server {
             quota_bytes: 5 << 30,
             vaults: List::empty(),
             pending_recovery: None,
+            suspended_devices: List::empty(),
+            revocation_window: None,
         };
         self.capture(serde_json::to_vec(&view));
         view
