@@ -44,9 +44,11 @@ fuzz_target!(|data: &[u8]| {
     let encoded = read.encode();
     assert!(encoded.len() <= MAX_LOCK_SETTINGS_LEN);
     assert_eq!(LockSettings::parse_strict(encoded.as_bytes()), Some(read));
-    if strict.is_some() && data == encoded.as_bytes() {
-        assert_eq!(read.encode().as_bytes(), data, "the canonical text is its own encoding");
-    }
+    assert_eq!(
+        LockSettings::parse(encoded.as_bytes()).encode(),
+        encoded,
+        "the canonical text is its own encoding"
+    );
 
     // The timer, with the input's bytes as a stream of clock readings.
     let reading = |chunk: &[u8]| {
