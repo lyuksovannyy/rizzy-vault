@@ -43,7 +43,7 @@ use std::collections::BTreeSet;
 
 use core::fmt;
 
-use rizzy_core::ids::VaultId;
+use rizzy_core::ids::{ItemId, VaultId};
 use rizzy_core::sign::PublicKeyBundle;
 use rizzy_proto::account::AccountView;
 use rizzy_proto::limits::{MAX_ENVELOPE_LEN, MAX_UPLOAD_BODY_LEN};
@@ -94,7 +94,8 @@ impl fmt::Debug for Loaded {
 /// adds the `item_index` table, which for raw rows is nothing to write (an empty
 /// [`CacheRows::item_index`]); format 3 → 4 ([ADR 0081] §A7) drops every index row (the table
 /// is keyed by `(vault_id, item_id)` from now on and rebuilt at the next load) and adds the empty
-/// `pending_move` table; the last write bumps `format`. Nothing else is read, re-parsed
+/// `pending_move` table; format 4 → 5 ([ADR 0093] §1.2) adds the empty `attachment_cleanup`
+/// table, for raw rows nothing to write; the last write bumps `format`. Nothing else is read, re-parsed
 /// or re-encrypted, and no plaintext-bearing row is copied. These writes are not
 /// [`Floors::admit`]ted: they
 /// run before any floor exists, and the format bump is the one change of a set-once row a
@@ -104,16 +105,22 @@ impl fmt::Debug for Loaded {
 /// [`ClientError::CacheUpdateRequired`] for a format newer than this build's;
 /// [`ClientError::CacheCorrupt`] for a missing or malformed format, format 0, a format-1
 /// cache that already holds a key format 1 does not have, or a format-2 cache that already
-/// holds `item_index` rows, or a cache below format 4 that holds `pending_move` rows.
+/// holds `item_index` rows, a cache below format 4 that holds `pending_move` rows, or a cache
+/// below format 5 that holds `attachment_cleanup` rows.
 ///
 /// [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
 /// [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
 /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+/// [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
 pub fn migration_writes(rows: &CacheRows) -> Result<Changeset, ClientError> {
     let corrupt = ClientError::CacheCorrupt;
     let format = rows.meta.get(meta::FORMAT).ok_or(corrupt)?;
     let format = u16::from_be_bytes(format.as_slice().try_into().map_err(|_| corrupt)?);
     let mut changeset = Changeset::new();
+    // ADR 0093 §1.2: no writer below format 5 makes an `attachment_cleanup` row.
+    if format < CACHE_FORMAT && !rows.attachment_cleanups.is_empty() {
+        return Err(corrupt);
+    }
     match format {
         CACHE_FORMAT => {}
         1 => {
@@ -149,6 +156,13 @@ pub fn migration_writes(rows: &CacheRows) -> Result<Changeset, ClientError> {
                 return Err(corrupt);
             }
             changeset.push(Write::IndexReset);
+            changeset.push(Write::Meta {
+                key: meta::FORMAT,
+                value: CACHE_FORMAT.to_be_bytes().to_vec(),
+            });
+        }
+        // ADR 0093 §1.2: `attachment_cleanup` starts empty; nothing else changes.
+        4 => {
             changeset.push(Write::Meta {
                 key: meta::FORMAT,
                 value: CACHE_FORMAT.to_be_bytes().to_vec(),
@@ -443,6 +457,14 @@ pub fn load(
                 .snapshots
                 .iter()
                 .filter(|s| s.vault_id == id_bytes)
+                .collect(),
+            // ADR 0093 §1.2: ids only, nothing to verify. A row of a vault the account no longer
+            // holds belongs to no driver and is never run.
+            cleanups: rows
+                .attachment_cleanups
+                .iter()
+                .filter(|c| c.vault_id == id_bytes)
+                .map(|c| (ItemId::from_bytes(c.item_id), c.purge_seq))
                 .collect(),
         };
         let mut vault = VaultSync::restore(key, unlocked, &authors, &image, now_ms)?;

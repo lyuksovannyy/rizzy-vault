@@ -653,6 +653,8 @@ impl Pending<'_> {
             | Write::IndexCopyUsage { .. }
             | Write::PendingMovePut(_)
             | Write::PendingMoveDelete { .. }
+            | Write::AttachmentCleanupPut(_)
+            | Write::AttachmentCleanupDelete { .. }
             | Write::DropVault { .. }
             | Write::IndexReset => Ok(()),
         }

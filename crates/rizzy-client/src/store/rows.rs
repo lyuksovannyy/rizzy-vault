@@ -52,14 +52,16 @@ use crate::store::index::{IndexEntry, IndexRow};
 /// [`meta::HIGHEST_EQUIVALENCE_LIST_VERSION`] row ([ADR 0051] §2); format 3 added the
 /// `item_index` table ([ADR 0056] §3); format 4 re-keys it by `(vault_id, item_id)`
 /// ([`ITEM_INDEX_TABLE`]) and adds the `pending_move` table ([ADR 0081] §A7,
-/// [`PENDING_MOVE_TABLE`]). An older cache is upgraded by
+/// [`PENDING_MOVE_TABLE`]); format 5 adds the `attachment_cleanup` table ([ADR 0093] §1.2,
+/// [`ATTACHMENT_CLEANUP_TABLE`]). An older cache is upgraded by
 /// [`MIGRATIONS`] (or, for a host that stores raw rows,
 /// [`crate::store::load::migration_writes`]) before it is opened.
 ///
 /// [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
 /// [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
 /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
-pub const CACHE_FORMAT: u16 = 4;
+/// [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
+pub const CACHE_FORMAT: u16 = 5;
 
 /// The `item_index` table of [ADR 0056] §3 as [ADR 0081] §0 item 7 replaces it, the M3 local
 /// index ([`crate::store::index`]), keyed by `(vault_id, item_id)` (INV-103). Every column is
@@ -84,6 +86,19 @@ pub const ITEM_INDEX_TABLE: &str = "CREATE TABLE item_index(vault_id BLOB NOT NU
 pub const PENDING_MOVE_TABLE: &str = "CREATE TABLE pending_move(source_vault_id BLOB NOT NULL, \
      source_item_id BLOB NOT NULL, target_vault_id BLOB NOT NULL, target_item_id BLOB NOT NULL, \
      PRIMARY KEY (source_vault_id, source_item_id))";
+
+/// The `attachment_cleanup` table of [ADR 0093] §1.2: one row per item whose attachments this
+/// device still has to delete on the server (`attachments/delete-item`) after a Purge. Written
+/// in the same cache write as the state that causes it (an own Purge op, a received Purge of a
+/// live item that named attachments, a late op on a tombstone that names one), and deleted when
+/// the cleanup is done or given up ([`crate::sync::VaultSync::attachment_cleanup_respond`]).
+/// `purge_seq` is the `device_seq` of this device's own Purge op, `0` when there is none to
+/// wait for. Ids only, no user content, like `pending_move`; it goes with its vault
+/// ([`Write::DropVault`]).
+///
+/// [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
+pub const ATTACHMENT_CLEANUP_TABLE: &str = "CREATE TABLE attachment_cleanup(vault_id BLOB NOT \
+     NULL, item_id BLOB NOT NULL, purge_seq INTEGER NOT NULL, PRIMARY KEY (vault_id, item_id))";
 
 /// The statements of [`Write::IndexReset`]: the table dropped, whatever shape it had, and
 /// created again empty ([ADR 0056] §4: a corrupt table or a schema mismatch scoped to it is
@@ -118,6 +133,8 @@ pub struct Migration {
 ///   `(vault_id, item_id)` (its rows are rebuilt from the merged state at the next load, ADR
 ///   0056 §4: no index data is migrated), and creates the empty `pending_move` table (a table
 ///   of that name already in the file, which no format-3 writer makes, is dropped unread).
+/// - Format 4 → 5 ([ADR 0093] §1.2) creates the empty `attachment_cleanup` table (a table of
+///   that name already in the file, which no format-4 writer makes, is dropped unread).
 ///
 /// None reads, re-parses or re-encrypts anything else, and neither copies a plaintext-bearing
 /// row (ADR 0026 §5). [`crate::store::load::migration_writes`] is the same chain over
@@ -150,6 +167,14 @@ pub const MIGRATIONS: &[Migration] = &[
         ],
         rows: &["UPDATE cache_meta SET v = X'0004' WHERE k = 'format' AND v = X'0003'"],
     },
+    Migration {
+        from: 4,
+        schema: &[
+            "DROP TABLE IF EXISTS attachment_cleanup",
+            ATTACHMENT_CLEANUP_TABLE,
+        ],
+        rows: &["UPDATE cache_meta SET v = X'0005' WHERE k = 'format' AND v = X'0004'"],
+    },
 ];
 
 /// The statements that create the current cache format, in order (ADR 0026 §3). Run once, in one
@@ -176,6 +201,7 @@ pub const SCHEMA: &[&str] = &[
      own INTEGER NOT NULL, sent_generation BLOB, PRIMARY KEY (vault_id, snapshot_id))",
     ITEM_INDEX_TABLE,
     PENDING_MOVE_TABLE,
+    ATTACHMENT_CLEANUP_TABLE,
 ];
 
 /// The connection settings of ADR 0026 §3 "Settings", run on every connection before anything
@@ -592,16 +618,39 @@ pub enum Write {
         /// The source item.
         source_item_id: [u8; 16],
     },
+    /// Inserts an `attachment_cleanup` row ([ADR 0093] §1.2), or, when the item has one,
+    /// keeps it with `purge_seq` = the larger of the two.
+    ///
+    /// [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
+    AttachmentCleanupPut(AttachmentCleanupRow),
+    /// Deletes the `attachment_cleanup` row of an item: its cleanup is done or given up.
+    AttachmentCleanupDelete {
+        /// The vault.
+        vault_id: [u8; 16],
+        /// The item.
+        item_id: [u8; 16],
+    },
     /// Deletes every row of a vault this account no longer holds ([ADR 0081] §A5: "Other
     /// devices learn of it from the new directory and drop the vault's cache rows and index
-    /// rows"): its `vaults`, `wraps`, `ops`, `snapshots` and `item_index` rows, and every
-    /// `pending_move` row naming it.
+    /// rows"): its `vaults`, `wraps`, `ops`, `snapshots`, `item_index` and
+    /// `attachment_cleanup` rows, and every `pending_move` row naming it.
     ///
     /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
     DropVault {
         /// The vault.
         vault_id: [u8; 16],
     },
+}
+
+/// One `attachment_cleanup` row ([`ATTACHMENT_CLEANUP_TABLE`]): ids only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttachmentCleanupRow {
+    /// The vault.
+    pub vault_id: [u8; 16],
+    /// The purged item.
+    pub item_id: [u8; 16],
+    /// The `device_seq` of this device's own Purge op of the item; `0` for none.
+    pub purge_seq: u64,
 }
 
 /// One `pending_move` row ([`PENDING_MOVE_TABLE`]): ids only.
@@ -646,6 +695,8 @@ impl fmt::Debug for Write {
             Self::IndexReset => "Write::IndexReset",
             Self::PendingMovePut(_) => "Write::PendingMovePut",
             Self::PendingMoveDelete { .. } => "Write::PendingMoveDelete",
+            Self::AttachmentCleanupPut(_) => "Write::AttachmentCleanupPut",
+            Self::AttachmentCleanupDelete { .. } => "Write::AttachmentCleanupDelete",
             Self::DropVault { .. } => "Write::DropVault",
         })
     }
@@ -732,6 +783,10 @@ pub struct CacheRows {
     ///
     /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
     pub pending_moves: Vec<PendingMoveRow>,
+    /// `attachment_cleanup` ([ADR 0093] §1.2): the cleanups after a Purge still to run.
+    ///
+    /// [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
+    pub attachment_cleanups: Vec<AttachmentCleanupRow>,
 }
 
 impl fmt::Debug for CacheRows {
@@ -743,6 +798,7 @@ impl fmt::Debug for CacheRows {
             .field("ops", &self.ops.len())
             .field("snapshots", &self.snapshots.len())
             .field("item_index", &self.item_index.len())
+            .field("attachment_cleanups", &self.attachment_cleanups.len())
             .finish_non_exhaustive()
     }
 }
@@ -980,7 +1036,21 @@ impl CacheRows {
                 self.item_index.retain(|r| r.vault_id != *vault_id);
                 self.pending_moves
                     .retain(|m| m.source_vault_id != *vault_id && m.target_vault_id != *vault_id);
+                self.attachment_cleanups.retain(|c| c.vault_id != *vault_id);
             }
+            Write::AttachmentCleanupPut(row) => {
+                match self
+                    .attachment_cleanups
+                    .iter_mut()
+                    .find(|c| c.vault_id == row.vault_id && c.item_id == row.item_id)
+                {
+                    Some(held) => held.purge_seq = held.purge_seq.max(row.purge_seq),
+                    None => self.attachment_cleanups.push(*row),
+                }
+            }
+            Write::AttachmentCleanupDelete { vault_id, item_id } => self
+                .attachment_cleanups
+                .retain(|c| c.vault_id != *vault_id || c.item_id != *item_id),
         }
     }
 

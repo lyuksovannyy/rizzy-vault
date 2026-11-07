@@ -105,7 +105,10 @@
 //! `device_seq` when it builds the driver, and reads it back with
 //! [`VaultSync::next_device_seq`].
 
+mod cleanup;
 mod heal;
+
+pub use cleanup::{CleanupStep, MAX_CALLS_PER_ROUND};
 
 pub use heal::HealingOutcome;
 
@@ -324,6 +327,8 @@ pub(crate) struct VaultImage<'a> {
     pub(crate) ops: Vec<&'a OpRow>,
     /// The snapshot rows of this vault.
     pub(crate) snapshots: Vec<&'a SnapshotRow>,
+    /// Its `attachment_cleanup` rows: item and `purge_seq` (ADR 0093 §1.2).
+    pub(crate) cleanups: Vec<(ItemId, u64)>,
 }
 
 /// What [`VaultSync::settle`] accepted, for the cache journal.
@@ -478,6 +483,8 @@ pub struct VaultSync {
     healing: Option<heal::HealInFlight>,
     /// The device's counters, shared with its other vaults' drivers ([`DeviceCounters`]).
     counters: Option<DeviceCounters>,
+    /// The `attachment_cleanup` rows of this vault, by item (ADR 0093 §1.2; [`cleanup`]).
+    cleanups: BTreeMap<ItemId, cleanup::Cleanup>,
 }
 
 /// The per-device counters, `device_seq` and the HLC, shared by every [`VaultSync`] of one
@@ -619,6 +626,7 @@ impl VaultSync {
             wraps_complete_at: None,
             healing: None,
             counters: None,
+            cleanups: BTreeMap::new(),
         })
     }
 
@@ -1467,6 +1475,8 @@ impl VaultSync {
     ) -> Option<Absorb> {
         let data = parse_snapshot(&header.covered, plaintext.expose_secret()).ok()?;
         let item = header.item_id;
+        // ADR 0093 §1.2 case 2: a tombstone cover over an item held live with attachments.
+        let was_live = self.live_with_attachments(item);
         let page_bodies: Vec<(&OpHeader, SymmetricKeyId, &SecretBytes)> = served
             .iter()
             .filter(|s| s.header.item_id == item && s.body == BodyStatus::Verified)
@@ -1508,6 +1518,7 @@ impl VaultSync {
                     self.clock = receipt.clock;
                 }
                 touched.insert(item);
+                self.note_received(item, was_live, false);
                 Some(Absorb::Taken)
             }
             AbsorbOutcome::Refused(refusal) if refusal.holds_cover() => Some(Absorb::Hold),
@@ -1687,19 +1698,31 @@ impl VaultSync {
             let Ok(data) = parse_op(body.expose_secret()) else {
                 continue;
             };
+            // ADR 0093 §1.2 cases 2 and 3: what the op may leave to clean up.
+            let was_live = data.lifecycle() == rizzy_sync::record::Lifecycle::Purge
+                && self.live_with_attachments(delivery.item_id);
+            let names_attachment = data
+                .writes()
+                .iter()
+                .any(|w| cleanup::is_attachment_key(w.key().expose_secret()));
             let merge = Self::merge_mut(&mut self.items, &self.item_keys, delivery.item_id);
+            let mut took = false;
             if let Ok(result) = merge.apply_op(OpInput {
                 header,
                 key_id: *key_id,
                 data: &data,
             }) {
                 applied += 1;
+                took = true;
                 touched.insert(delivery.item_id);
                 if let Some(hlc) = result.receive_hlc
                     && let Ok(receipt) = self.clock.receive(hlc, now_ms)
                 {
                     self.clock = receipt.clock;
                 }
+            }
+            if took {
+                self.note_received(delivery.item_id, was_live, names_attachment);
             }
         }
         applied
@@ -2966,6 +2989,11 @@ impl VaultSync {
         }
         vault.next_seq = image.next_device_seq;
         vault.synced = false;
+        for (item, purge_seq) in &image.cleanups {
+            vault
+                .cleanups
+                .insert(*item, cleanup::Cleanup::new(*purge_seq));
+        }
         vault.journal = Some(Vec::new());
         vault.journaled = Journaled {
             next_seq: image.next_device_seq,

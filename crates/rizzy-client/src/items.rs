@@ -595,6 +595,7 @@ impl VaultSync {
             Lifecycle::Trashed,
             now_ms,
         )
+        .map(|_| ())
     }
 
     /// Restores a trashed item (ADR 0012 §5).
@@ -617,10 +618,13 @@ impl VaultSync {
             Lifecycle::Active,
             now_ms,
         )
+        .map(|_| ())
     }
 
     /// Purges a trashed item for good (ADR 0012 §5, ADR 0018 §3): allowed only while it
-    /// displays Trashed and no record of it waits unapplied (ADR 0018 §11).
+    /// displays Trashed and no record of it waits unapplied (ADR 0018 §11). The same journal
+    /// step writes the item's `attachment_cleanup` row (ADR 0093 §1.2), which the host runs once
+    /// the server has acknowledged this Purge ([`VaultSync::attachment_cleanups_due`]).
     ///
     /// # Errors
     /// [`ClientError::UnknownItem`] if the item is not trashed; [`ClientError::InvalidEdit`]
@@ -632,14 +636,17 @@ impl VaultSync {
         item: ItemId,
         now_ms: u64,
     ) -> Result<(), ClientError> {
-        self.lifecycle_op(
+        let dot = self.lifecycle_op(
             rng,
             unlocked,
             item,
             ItemLifecycle::Trashed,
             Lifecycle::Purge,
             now_ms,
-        )
+        )?;
+        // ADR 0093 §1.2 case 1: the cleanup row, in the journal step of the Purge op itself.
+        self.note_cleanup(item, dot.seq());
+        Ok(())
     }
 
     /// Purges every trashed item whose retention period has elapsed (ADR 0012 §5: "manually,
@@ -699,7 +706,7 @@ impl VaultSync {
         from: ItemLifecycle,
         lifecycle: Lifecycle,
         now_ms: u64,
-    ) -> Result<(), ClientError> {
+    ) -> Result<Dot, ClientError> {
         if self.item_lifecycle(item) != from {
             return Err(ClientError::UnknownItem);
         }
@@ -713,7 +720,6 @@ impl VaultSync {
             },
             now_ms,
         )
-        .map(|_| ())
     }
 
     /// What the item is: absent, active, trashed or purged.

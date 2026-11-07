@@ -53,8 +53,8 @@ use rizzy_client::store::index::{self, IndexRow, MAX_DISPLAY_NAME_LEN, MAX_SEARC
 use rizzy_client::store::record::MAX_DEVICE_STATE_LEN;
 use rizzy_client::store::rows::limits::{MAX_KEY_COLUMN_LEN, MAX_SELF_GRANT_JSON_LEN};
 use rizzy_client::store::rows::{
-    CACHE_FORMAT, CacheRows, Changeset, INDEX_RESET, MIGRATIONS, ObjectRow, OpRow, PRAGMAS,
-    PendingMoveRow, SCHEMA, SnapshotRow, VaultRow, WrapRow, Write, kind, meta, own,
+    AttachmentCleanupRow, CACHE_FORMAT, CacheRows, Changeset, INDEX_RESET, MIGRATIONS, ObjectRow,
+    OpRow, PRAGMAS, PendingMoveRow, SCHEMA, SnapshotRow, VaultRow, WrapRow, Write, kind, meta, own,
 };
 use sqlx_client as sqlx;
 use sqlx_client::sqlite::{
@@ -240,6 +240,18 @@ const PUT_PENDING_MOVE: &str = "INSERT OR REPLACE INTO pending_move(source_vault
 /// Deletes the `pending_move` row of a source item.
 const DELETE_PENDING_MOVE: &str =
     "DELETE FROM pending_move WHERE source_vault_id = ?1 AND source_item_id = ?2";
+/// The `attachment_cleanup` rows over the key-column cap (ADR 0093 §1.2).
+const OVERSIZE_CLEANUPS: &str = "SELECT COUNT(*) FROM attachment_cleanup \
+     WHERE length(vault_id) > ?1 OR length(item_id) > ?1";
+/// Every `attachment_cleanup` row (ADR 0093 §1.2).
+const SELECT_CLEANUPS: &str =
+    "SELECT vault_id, item_id, purge_seq FROM attachment_cleanup ORDER BY vault_id, item_id";
+/// Inserts an `attachment_cleanup` row, or keeps the larger `purge_seq` of an existing one.
+const PUT_CLEANUP: &str = "INSERT INTO attachment_cleanup(vault_id, item_id, purge_seq) \
+     VALUES(?1, ?2, ?3) ON CONFLICT(vault_id, item_id) \
+     DO UPDATE SET purge_seq = max(purge_seq, excluded.purge_seq)";
+/// Deletes the `attachment_cleanup` row of an item.
+const DELETE_CLEANUP: &str = "DELETE FROM attachment_cleanup WHERE vault_id = ?1 AND item_id = ?2";
 /// The statements of [`Write::DropVault`] (ADR 0081 §A5), each bound to the vault id.
 const DROP_VAULT: &[&str] = &[
     "DELETE FROM wraps WHERE vault_id = ?1",
@@ -247,6 +259,7 @@ const DROP_VAULT: &[&str] = &[
     "DELETE FROM snapshots WHERE vault_id = ?1",
     "DELETE FROM item_index WHERE vault_id = ?1",
     "DELETE FROM pending_move WHERE source_vault_id = ?1 OR target_vault_id = ?1",
+    "DELETE FROM attachment_cleanup WHERE vault_id = ?1",
     "DELETE FROM vaults WHERE vault_id = ?1",
 ];
 
@@ -769,6 +782,24 @@ async fn read_rows(conn: &mut SqliteConnection) -> Result<CacheRows, sqlx::Error
         });
     }
 
+    // ADR 0093 §1.2: ids and a counter only.
+    no_oversize(conn, OVERSIZE_CLEANUPS, &[key_cap]).await?;
+    for row in sqlx::query(SELECT_CLEANUPS).fetch_all(&mut *conn).await? {
+        let id = |i: usize| -> Result<[u8; 16], sqlx::Error> {
+            let bytes: Vec<u8> = row.try_get(i)?;
+            <[u8; 16]>::try_from(bytes.as_slice())
+                .map_err(|_| sqlx::Error::Decode("an attachment_cleanup id is not 16 bytes".into()))
+        };
+        let purge_seq: i64 = row.try_get(2)?;
+        rows.attachment_cleanups.push(AttachmentCleanupRow {
+            vault_id: id(0)?,
+            item_id: id(1)?,
+            purge_seq: u64::try_from(purge_seq).map_err(|_| {
+                sqlx::Error::Decode("an attachment_cleanup purge_seq is negative".into())
+            })?,
+        });
+    }
+
     match read_index(conn).await {
         Ok(index) => rows.item_index = index,
         Err(_) => rows.item_index_unreadable = true,
@@ -1083,6 +1114,23 @@ async fn apply(conn: &mut SqliteConnection, write: &Write) -> Result<(), sqlx::E
             sqlx::query(DELETE_PENDING_MOVE)
                 .bind(source_vault_id.as_slice())
                 .bind(source_item_id.as_slice())
+                .execute(&mut *conn)
+                .await?;
+            Ok(())
+        }
+        Write::AttachmentCleanupPut(row) => {
+            let done = sqlx::query(PUT_CLEANUP)
+                .bind(row.vault_id.as_slice())
+                .bind(row.item_id.as_slice())
+                .bind(i64::try_from(row.purge_seq).unwrap_or(i64::MAX))
+                .execute(&mut *conn)
+                .await?;
+            one_row(done.rows_affected())
+        }
+        Write::AttachmentCleanupDelete { vault_id, item_id } => {
+            sqlx::query(DELETE_CLEANUP)
+                .bind(vault_id.as_slice())
+                .bind(item_id.as_slice())
                 .execute(&mut *conn)
                 .await?;
             Ok(())
@@ -1403,6 +1451,28 @@ mod tests {
                 },
             ],
             vec![Write::IndexReset, Write::IndexPut(entry(4, "new", "x"))],
+            // ADR 0093 §1.2: cleanup rows, a repeat keeping the larger seq, a delete.
+            vec![
+                Write::AttachmentCleanupPut(AttachmentCleanupRow {
+                    vault_id: VAULT,
+                    item_id: id(5),
+                    purge_seq: 9,
+                }),
+                Write::AttachmentCleanupPut(AttachmentCleanupRow {
+                    vault_id: VAULT,
+                    item_id: id(5),
+                    purge_seq: 4,
+                }),
+                Write::AttachmentCleanupPut(AttachmentCleanupRow {
+                    vault_id: VAULT,
+                    item_id: id(6),
+                    purge_seq: 0,
+                }),
+            ],
+            vec![Write::AttachmentCleanupDelete {
+                vault_id: VAULT,
+                item_id: id(6),
+            }],
         ];
         sets.into_iter()
             .map(|writes| writes.into_iter().collect())
@@ -1421,6 +1491,11 @@ mod tests {
             rows.wraps,
             (rows.ops, rows.snapshots),
             (rows.item_index, rows.item_index_unreadable),
+            {
+                let mut cleanups = rows.attachment_cleanups;
+                cleanups.sort_by_key(|c| (c.vault_id, c.item_id));
+                cleanups
+            },
         )
     }
 
@@ -1618,7 +1693,45 @@ mod tests {
             item_index: rows.item_index.clone(),
             item_index_unreadable: rows.item_index_unreadable,
             pending_moves: rows.pending_moves.clone(),
+            attachment_cleanups: rows.attachment_cleanups.clone(),
         }
+    }
+
+    /// ADR 0093 §1.2: `Db::open` migrates a format-4 file to format 5 as the reference does
+    /// (the empty `attachment_cleanup` table, the format bumped, nothing else), and the table
+    /// takes rows afterwards.
+    #[test]
+    fn a_format_4_file_gets_an_empty_cleanup_table() {
+        block_on(async {
+            let path = temp_file("migrate-4");
+            let mut db = Db::create(&path, &first()).await.unwrap();
+            for statement in [
+                "DROP TABLE attachment_cleanup",
+                "UPDATE cache_meta SET v = X'0004' WHERE k = 'format'",
+            ] {
+                sqlx::query(statement).execute(&mut db.conn).await.unwrap();
+            }
+            let mut v4 = CacheRows::default();
+            v4.apply(&first());
+            v4.meta
+                .insert(meta::FORMAT.to_owned(), 4u16.to_be_bytes().to_vec());
+            db.close().await;
+            let mut db = Db::open(&path).await.unwrap();
+            let migrated = db.read().await.unwrap();
+            let migration = rizzy_client::store::load::migration_writes(&v4).unwrap();
+            assert_eq!(migration.writes().len(), 1);
+            v4.apply(&migration);
+            assert_eq!(parts(migrated), parts(copy(&v4)));
+            let put: Changeset = [Write::AttachmentCleanupPut(AttachmentCleanupRow {
+                vault_id: VAULT,
+                item_id: id(1),
+                purge_seq: 3,
+            })]
+            .into_iter()
+            .collect();
+            db.write(&put).await.unwrap();
+            assert_eq!(db.read().await.unwrap().attachment_cleanups.len(), 1);
+        });
     }
 
     /// ADR 0051 §2: `Db::open` migrates a format-1 file to format 2 exactly as the reference

@@ -48,6 +48,7 @@ fn copy_rows(rows: &CacheRows) -> CacheRows {
         item_index: rows.item_index.clone(),
         item_index_unreadable: rows.item_index_unreadable,
         pending_moves: rows.pending_moves.clone(),
+        attachment_cleanups: rows.attachment_cleanups.clone(),
     }
 }
 
@@ -2933,6 +2934,436 @@ mod adr_0109_restart_properties {
             seed in any::<u64>(),
         ) {
             super::adr_0109_one_restart_run(page_len, restart_prob, max_restarts, seed);
+        }
+    }
+}
+
+/// The cleanup after a Purge ([ADR 0093] §1.2, INV-113 (a), (b)) against the persisted cache.
+///
+/// [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
+mod attachment_cleanup {
+    use std::collections::BTreeSet;
+
+    use proptest::prelude::*;
+    use rizzy_proto::attachments::AttachmentItemResponse;
+
+    use super::*;
+    use crate::store::rows::AttachmentCleanupRow;
+    use crate::sync::{CleanupStep, MAX_CALLS_PER_ROUND};
+
+    const DONE: AttachmentItemResponse = AttachmentItemResponse { remaining: false };
+    const MORE: AttachmentItemResponse = AttachmentItemResponse { remaining: true };
+
+    /// The cache's cleanup rows.
+    fn rows(dev: &Dev) -> Vec<AttachmentCleanupRow> {
+        dev.cache.rows.attachment_cleanups.clone()
+    }
+
+    /// Adds an attachment to `item` (the item op only; the blob is the server's business).
+    fn attach(dev: &mut Dev, rng: &mut ChaCha20Rng, item: ItemId) {
+        dev.vault
+            .add_attachment(
+                rng,
+                &dev.unlocked,
+                item,
+                "a.txt",
+                "text/plain",
+                b"hello",
+                T0 + 1,
+            )
+            .unwrap();
+    }
+
+    /// Trashes and purges `item`. The purge step's one cache write holds both the Purge op and
+    /// the cleanup row with the op's `device_seq` (INV-113 (a): no crash separates them).
+    fn purge(dev: &mut Dev, rng: &mut ChaCha20Rng, item: ItemId) {
+        dev.vault
+            .trash_item(rng, &dev.unlocked, item, T0 + 10)
+            .unwrap();
+        dev.flush();
+        dev.vault
+            .purge_item(rng, &dev.unlocked, item, T0 + 11)
+            .unwrap();
+        let seq = dev.vault.next_device_seq() - 1;
+        let writes = dev.vault.take_writes();
+        assert!(writes.writes().iter().any(|w| matches!(w, Write::PutOp(_))));
+        assert!(writes.writes().iter().any(|w| matches!(
+            w,
+            Write::AttachmentCleanupPut(r) if r.item_id == item.to_bytes() && r.purge_seq >= seq
+        )));
+        dev.cache.commit(writes);
+    }
+
+    #[test]
+    fn an_own_purge_writes_its_row_with_the_op_and_runs_after_the_ack() {
+        let mut rng = ChaCha20Rng::seed_from_u64(0x9301);
+        let mut server = Server::new(0x9302);
+        let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+        a.fetch(&server);
+        // No attachment at all: the row is written anyway (case 1).
+        let item = a.create(&mut rng, "doomed");
+        a.flush();
+        purge(&mut a, &mut rng, item);
+        assert_eq!(rows(&a).len(), 1);
+        assert_eq!(rows(&a)[0].purge_seq, a.vault.next_device_seq() - 1);
+        // INV-113 (b): nothing is due before the server holds the Purge.
+        assert!(a.vault.attachment_cleanups_due().is_empty());
+        // A crash before the upload: the row is on disk, and still not due.
+        a.restart();
+        assert_eq!(rows(&a).len(), 1);
+        assert!(a.vault.attachment_cleanups_due().is_empty());
+        a.upload(&mut server, &mut rng);
+        // A crash after the ack, before the delete: the next round runs it.
+        a.restart();
+        assert_eq!(a.vault.attachment_cleanups_due(), vec![item]);
+        let request = a.vault.attachment_cleanup_request(item);
+        assert_eq!(request.item_id.to_bytes(), item.to_bytes());
+        assert_eq!(request.vault_id.to_bytes(), a.vault.vault_id().to_bytes());
+        assert_eq!(
+            a.vault
+                .attachment_cleanup_respond(item, 200, Some(&DONE))
+                .unwrap(),
+            CleanupStep::Done
+        );
+        a.flush();
+        assert!(rows(&a).is_empty());
+        assert!(a.vault.attachment_cleanups_due().is_empty());
+    }
+
+    #[test]
+    fn auto_purge_writes_rows_too() {
+        let mut rng = ChaCha20Rng::seed_from_u64(0x9303);
+        let mut server = Server::new(0x9304);
+        let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+        a.fetch(&server);
+        let item = a.create(&mut rng, "old");
+        a.vault
+            .trash_item(&mut rng, &a.unlocked, item, T0 + 10)
+            .unwrap();
+        a.flush();
+        let purged = a
+            .vault
+            .auto_purge_due(&mut rng, &a.unlocked, T0 + 10_000, 1_000)
+            .unwrap();
+        assert_eq!(purged, vec![item]);
+        a.flush();
+        assert_eq!(rows(&a).len(), 1);
+        assert_eq!(rows(&a)[0].item_id, item.to_bytes());
+    }
+
+    #[test]
+    fn the_answer_table_and_the_64_call_bound() {
+        let mut rng = ChaCha20Rng::seed_from_u64(0x9305);
+        let mut server = Server::new(0x9306);
+        let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+        a.fetch(&server);
+        let items: Vec<ItemId> = (0..4)
+            .map(|i| a.create(&mut rng, &format!("i{i}")))
+            .collect();
+        a.flush();
+        for item in &items {
+            purge(&mut a, &mut rng, *item);
+        }
+        a.upload(&mut server, &mut rng);
+        let (many, gone, refused, kept) = (items[0], items[1], items[2], items[3]);
+        assert_eq!(a.vault.attachment_cleanups_due().len(), 4);
+        // `remaining: true` repeats, at most 64 calls this round, then waits for the next.
+        let mut calls = 0;
+        loop {
+            calls += 1;
+            match a
+                .vault
+                .attachment_cleanup_respond(many, 200, Some(&MORE))
+                .unwrap()
+            {
+                CleanupStep::Again => {}
+                CleanupStep::Keep => break,
+                CleanupStep::Done => panic!("more remained"),
+            }
+        }
+        assert_eq!(calls, MAX_CALLS_PER_ROUND);
+        // 404: the vault is gone, the row goes.
+        assert_eq!(
+            a.vault.attachment_cleanup_respond(gone, 404, None).unwrap(),
+            CleanupStep::Done
+        );
+        // Any other 4xx: the row goes, reported once.
+        assert_eq!(
+            a.vault.attachment_cleanup_respond(refused, 403, None),
+            Err(ClientError::AttachmentCleanupFailed)
+        );
+        assert_eq!(
+            a.vault.attachment_cleanup_respond(refused, 403, None),
+            Err(ClientError::UnknownItem),
+            "the report is one-time: the row is gone"
+        );
+        // No answer, 5xx, 429 and 401 keep the row; an unparsable 200 too.
+        for status in [0, 500, 503, 429, 401] {
+            assert_eq!(
+                a.vault
+                    .attachment_cleanup_respond(kept, status, None)
+                    .unwrap(),
+                CleanupStep::Keep
+            );
+        }
+        assert_eq!(
+            a.vault.attachment_cleanup_respond(kept, 200, None),
+            Err(ClientError::InvalidServerResponse)
+        );
+        a.flush();
+        let left: Vec<[u8; 16]> = rows(&a).iter().map(|r| r.item_id).collect();
+        assert_eq!(left.len(), 2);
+        assert!(left.contains(&many.to_bytes()) && left.contains(&kept.to_bytes()));
+        // The next round starts the count again.
+        assert_eq!(a.vault.attachment_cleanups_due().len(), 2);
+        assert_eq!(
+            a.vault
+                .attachment_cleanup_respond(many, 200, Some(&MORE))
+                .unwrap(),
+            CleanupStep::Again
+        );
+    }
+
+    #[test]
+    fn a_received_purge_writes_a_row_only_for_a_live_item_with_attachments() {
+        let mut rng = ChaCha20Rng::seed_from_u64(0x9307);
+        let mut server = Server::new(0x9308);
+        let (mut a, sk, _code) = Dev::signed_up(&mut server, &mut rng);
+        a.fetch(&server);
+        let with = a.create(&mut rng, "with");
+        let without = a.create(&mut rng, "without");
+        attach(&mut a, &mut rng, with);
+        a.flush();
+        a.upload(&mut server, &mut rng);
+        let mut b = Dev::enrolled(&mut server, &mut rng, &sk);
+        b.fetch(&server);
+        assert_eq!(b.vault.attachments(with).len(), 1);
+        purge(&mut a, &mut rng, with);
+        purge(&mut a, &mut rng, without);
+        a.upload(&mut server, &mut rng);
+        b.fetch(&server);
+        assert_eq!(b.vault.item_lifecycle(with), ItemLifecycle::Purged);
+        let got = rows(&b);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].item_id, with.to_bytes());
+        assert_eq!(got[0].purge_seq, 0);
+        // purge_seq 0: due at once. A second device cleans up when the purger is gone.
+        assert_eq!(b.vault.attachment_cleanups_due(), vec![with]);
+        // A device that only ever sees the tombstone (a compacted server serves its cover)
+        // writes nothing.
+        server.compact = true;
+        let mut c = Dev::enrolled(&mut server, &mut rng, &sk);
+        c.fetch(&server);
+        assert!(rows(&c).is_empty());
+    }
+
+    #[test]
+    fn a_late_op_naming_an_attachment_on_a_tombstone_writes_a_row() {
+        let mut rng = ChaCha20Rng::seed_from_u64(0x9309);
+        let mut server = Server::new(0x930a);
+        let (mut a, sk, _code) = Dev::signed_up(&mut server, &mut rng);
+        a.fetch(&server);
+        let item = a.create(&mut rng, "item");
+        a.flush();
+        a.upload(&mut server, &mut rng);
+        let mut b = Dev::enrolled(&mut server, &mut rng, &sk);
+        b.fetch(&server);
+        // B, offline, adds an attachment while A purges.
+        attach(&mut b, &mut rng, item);
+        b.flush();
+        purge(&mut a, &mut rng, item);
+        a.upload(&mut server, &mut rng);
+        // C sees only the tombstone: no row.
+        let mut c = Dev::enrolled(&mut server, &mut rng, &sk);
+        c.fetch(&server);
+        assert!(rows(&c).is_empty());
+        // B's late op arrives: C writes a row whatever its user later answers.
+        b.upload(&mut server, &mut rng);
+        c.fetch(&server);
+        assert_eq!(c.vault.item_lifecycle(item), ItemLifecycle::Purged);
+        assert_eq!(rows(&c).len(), 1);
+        assert_eq!(rows(&c)[0].purge_seq, 0);
+    }
+
+    #[test]
+    fn a_dropped_vault_drops_its_rows_and_a_repeat_keeps_the_larger_seq() {
+        let mut rows = CacheRows::default();
+        let row = |v: u8, i: u8, s: u64| AttachmentCleanupRow {
+            vault_id: [v; 16],
+            item_id: [i; 16],
+            purge_seq: s,
+        };
+        let c: Changeset = [
+            Write::AttachmentCleanupPut(row(1, 1, 5)),
+            Write::AttachmentCleanupPut(row(1, 1, 3)),
+            Write::AttachmentCleanupPut(row(1, 2, 0)),
+            Write::AttachmentCleanupPut(row(2, 1, 7)),
+        ]
+        .into_iter()
+        .collect();
+        rows.apply(&c);
+        assert_eq!(
+            rows.attachment_cleanups,
+            vec![row(1, 1, 5), row(1, 2, 0), row(2, 1, 7)]
+        );
+        rows.apply(
+            &[Write::DropVault { vault_id: [1; 16] }]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(rows.attachment_cleanups, vec![row(2, 1, 7)]);
+        rows.apply(
+            &[Write::AttachmentCleanupDelete {
+                vault_id: [2; 16],
+                item_id: [1; 16],
+            }]
+            .into_iter()
+            .collect(),
+        );
+        assert!(rows.attachment_cleanups.is_empty());
+    }
+
+    #[test]
+    fn a_format_4_cache_migrates_to_format_5() {
+        let mut rng = ChaCha20Rng::seed_from_u64(0x930b);
+        let mut server = Server::new(0x930c);
+        let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+        a.fetch(&server);
+        a.create(&mut rng, "kept");
+        a.flush();
+        let mut v4 = copy_rows(&a.cache.rows);
+        v4.meta
+            .insert(meta::FORMAT.to_owned(), 4u16.to_be_bytes().to_vec());
+        assert_eq!(
+            load::open(&v4, false).unwrap_err(),
+            ClientError::CacheCorrupt
+        );
+        let migration = load::migration_writes(&v4).unwrap();
+        assert_eq!(migration.writes().len(), 1);
+        v4.apply(&migration);
+        assert_eq!(
+            v4.meta.get(meta::FORMAT).map(Vec::as_slice),
+            Some(5u16.to_be_bytes().as_slice())
+        );
+        assert_eq!(CACHE_FORMAT, 5);
+        let loaded = load_rows(&v4, &a.unlocked).unwrap();
+        assert_same_vault(&a.vault, &loaded.vaults[0]);
+        // No format-4 writer makes a cleanup row: one there is corruption.
+        let mut bad = copy_rows(&a.cache.rows);
+        bad.meta
+            .insert(meta::FORMAT.to_owned(), 4u16.to_be_bytes().to_vec());
+        bad.attachment_cleanups.push(AttachmentCleanupRow {
+            vault_id: a.vault.vault_id().to_bytes(),
+            item_id: [3; 16],
+            purge_seq: 0,
+        });
+        assert_eq!(
+            load::migration_writes(&bad).unwrap_err(),
+            ClientError::CacheCorrupt
+        );
+    }
+
+    /// One step of the property test.
+    #[derive(Clone, Copy, Debug)]
+    enum Step {
+        /// Purge item `n` (if it is still live).
+        Purge(usize),
+        /// Upload everything queued (the server acknowledges).
+        Ack,
+        /// Restart from the cache.
+        Crash,
+        /// Run one cleanup round against the fake attachment store.
+        Round,
+    }
+
+    fn step() -> impl Strategy<Value = Step> {
+        prop_oneof![
+            (0usize..3).prop_map(Step::Purge),
+            Just(Step::Ack),
+            Just(Step::Crash),
+            Just(Step::Round),
+        ]
+    }
+
+    /// Runs one cleanup round: `delete-item` never before the Purge's ack (INV-113 (b)), and
+    /// the fake server deletes one attachment per call.
+    fn round(a: &mut Dev, acked: &BTreeSet<ItemId>, blobs: &mut BTreeMap<ItemId, u32>) {
+        for item in a.vault.attachment_cleanups_due() {
+            assert!(
+                acked.contains(&item),
+                "delete-item before the server held the Purge"
+            );
+            loop {
+                let left = blobs.entry(item).or_insert(0);
+                *left = left.saturating_sub(1);
+                let answer = AttachmentItemResponse {
+                    remaining: *left > 0,
+                };
+                match a
+                    .vault
+                    .attachment_cleanup_respond(item, 200, Some(&answer))
+                    .unwrap()
+                {
+                    CleanupStep::Again => {}
+                    CleanupStep::Done | CleanupStep::Keep => break,
+                }
+            }
+        }
+        a.flush();
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        /// Random interleavings of purge, crash, ack and cleanup never send `delete-item`
+        /// before the Purge's ack, and end with no cleanup row and no server attachment.
+        #[test]
+        fn cleanup_follows_the_ack_and_always_finishes(steps in prop::collection::vec(step(), 1..14)) {
+            let mut rng = ChaCha20Rng::seed_from_u64(0x930d);
+            let mut server = Server::new(0x930e);
+            let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+            a.fetch(&server);
+            let items: Vec<ItemId> = (0..3).map(|i| a.create(&mut rng, &format!("i{i}"))).collect();
+            a.flush();
+            a.upload(&mut server, &mut rng);
+            // Each item's attachments on the server: 1, 20 and 70 (70 needs two rounds).
+            let mut blobs: BTreeMap<ItemId, u32> =
+                items.iter().zip([1, 20, 70]).map(|(i, n)| (*i, n)).collect();
+            // The items whose Purge the server acknowledged.
+            let mut acked = BTreeSet::new();
+            for s in steps {
+                match s {
+                    Step::Purge(n) => {
+                        let item = items[n];
+                        if a.vault.item_lifecycle(item) == ItemLifecycle::Active {
+                            purge(&mut a, &mut rng, item);
+                        }
+                    }
+                    Step::Ack => {
+                        a.upload(&mut server, &mut rng);
+                        for item in &items {
+                            if a.vault.item_lifecycle(*item) == ItemLifecycle::Purged {
+                                acked.insert(*item);
+                            }
+                        }
+                    }
+                    Step::Crash => a.restart(),
+                    Step::Round => round(&mut a, &acked, &mut blobs),
+                }
+            }
+            // Then everything is purged, acknowledged, and rounds run until nothing is left.
+            for item in &items {
+                if a.vault.item_lifecycle(*item) == ItemLifecycle::Active {
+                    purge(&mut a, &mut rng, *item);
+                }
+            }
+            a.upload(&mut server, &mut rng);
+            acked.extend(items.iter().copied());
+            for _ in 0..3 {
+                round(&mut a, &acked, &mut blobs);
+            }
+            prop_assert!(a.cache.rows.attachment_cleanups.is_empty());
+            prop_assert!(blobs.values().all(|n| *n == 0), "{blobs:?}");
         }
     }
 }

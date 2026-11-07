@@ -223,6 +223,13 @@ pub enum ClientError {
     ///
     /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
     RotationLimit,
+    /// ADR 0093 §3: an item whose type this client does not support as a user type (unknown,
+    /// newer, or the retired `0x0009`) cannot be copied or moved; for a move of a whole vault,
+    /// the vault holds at least one. Nothing was written.
+    UnsupportedItem,
+    /// ADR 0093 §1.2: the server refused to delete a purged item's attachments for a reason a
+    /// retry cannot fix. Reported once; the files still count toward the account's storage.
+    AttachmentCleanupFailed,
     /// An internal step failed that the inputs cannot cause: a sealing, signing, encoding or
     /// derivation call that is unreachable for valid state. No detail is kept on purpose.
     Internal,
@@ -290,6 +297,8 @@ impl ClientError {
             Self::VaultLimitReached => "vault_limit_reached",
             Self::VaultSetMismatch => "vault_set_mismatch",
             Self::RotationLimit => "rotation_limit",
+            Self::UnsupportedItem => "unsupported_item",
+            Self::AttachmentCleanupFailed => "attachment_cleanup_failed",
             Self::Internal => "internal",
         }
     }
@@ -387,6 +396,14 @@ impl fmt::Display for ClientError {
             Self::VaultLimitReached => "the account holds the most vaults allowed",
             Self::VaultSetMismatch => "the server's vaults do not match the account's vault list",
             Self::RotationLimit => "the account or the vault is at its item limit",
+            Self::UnsupportedItem => {
+                "This item's type is not supported by this version, so it cannot be copied or \
+                 moved. Update rizzy-vault, or copy its fields out by hand."
+            }
+            Self::AttachmentCleanupFailed => {
+                "Files of a deleted item could not be removed from the server and still count \
+                 toward your storage."
+            }
             Self::Internal => "internal error",
         })
     }
@@ -463,6 +480,8 @@ mod tests {
             ClientError::VaultLimitReached,
             ClientError::VaultSetMismatch,
             ClientError::RotationLimit,
+            ClientError::UnsupportedItem,
+            ClientError::AttachmentCleanupFailed,
             ClientError::Internal,
         ];
         let mut codes: Vec<&str> = all.iter().map(|e| e.code()).collect();
