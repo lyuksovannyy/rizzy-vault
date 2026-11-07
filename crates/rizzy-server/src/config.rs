@@ -61,9 +61,8 @@
 //!   ADR 0010 owner decision 5). Its breach check has its own switch, `RIZZY_BREACH_CHECK` =
 //!   `off` (the default) or `on` (ADR 0053 item 5, owner answer 2). Its cache volume is `RIZZY_ICON_CACHE_DIR` (default
 //!   `/cache`), with ADR 0052's `RIZZY_ICON_CACHE_TTL_SECS` (default 14 days, 60 s to 365
-//!   days) and `RIZZY_ICON_CACHE_MAX_BYTES` (default 256 MiB, at least 1 MiB). The names
-//!   `RIZZY_BREACH_CHECK` and `RIZZY_ICON_CACHE_DIR` and the bounds are this crate's choice,
-//!   reported to the owner. `RIZZY_LISTEN` is the role's listener; `RIZZY_TRUSTED_PROXIES`
+//!   days) and `RIZZY_ICON_CACHE_MAX_BYTES` (default 256 MiB, at least 1 MiB). The names,
+//!   values, defaults and bounds are [ADR 0113] §6's. `RIZZY_LISTEN` is the role's listener; `RIZZY_TRUSTED_PROXIES`
 //!   names the proxies whose `X-Forwarded-For` its rate limit reads.
 //! - **The source URL** ([ADR 0106] §1; [ADR 0017] §7, AGPL §13): `RIZZY_SOURCE_URL`, where
 //!   users get the source of the running server and web vault, served as `/api/meta`'s
@@ -82,6 +81,7 @@
 //! [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
 //! [ADR 0017]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0017-licensing.md
 //! [ADR 0106]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0106-agpl-source-url.md
+//! [ADR 0113]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0113-breach-check-endpoint.md
 
 use core::fmt;
 use std::collections::BTreeMap;

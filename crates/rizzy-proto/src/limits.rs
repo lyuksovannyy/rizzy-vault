@@ -216,17 +216,20 @@ pub const MAX_WEBAUTHN_LABEL_LEN: usize = 64;
 /// [ADR 0052]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0052-icon-proxy-role.md
 pub const MAX_ICON_PNG_LEN: usize = 96 * 1024;
 
-/// Byte limit (this crate's choice): one upstream breach-check range response ([ADR 0053];
+/// Byte limit ([ADR 0113] §3): one upstream breach-check range response ([ADR 0053];
 /// CRYPTO.md §11.16), relayed as one JSON string. A range line is at most 58 bytes (35 suffix
 /// characters, a colon, a count of at most 20 digits, CRLF), and the upstream's padded answers
 /// hold 800 to 1,000 lines plus the real ones; 512 KiB leaves a wide margin above the about
 /// 50 KB answers seen in practice (U: the upstream publishes no maximum).
 ///
 /// [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
+/// [ADR 0113]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0113-breach-check-endpoint.md
 pub const MAX_BREACH_RANGE_LEN: usize = 512 * 1024;
 
-/// Count limit (this crate's choice): entries in one breach-check range response; 8,192 lines
+/// Count limit ([ADR 0113] §3): entries in one breach-check range response; 8,192 lines
 /// of the longest form fill about [`MAX_BREACH_RANGE_LEN`].
+///
+/// [ADR 0113]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0113-breach-check-endpoint.md
 pub const MAX_BREACH_RANGE_ENTRIES: usize = 8192;
 
 /// Count limit (this crate's choice): API versions and minimum client versions in

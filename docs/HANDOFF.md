@@ -131,7 +131,7 @@ The dated bullets below are a log: an ADR status in a bullet is the status on th
   - **ADR 0053, HIBP breach check:**
     - The `icons` role, which runs alone; minimal ADR 0052 scaffolding in the new crate `rizzy-icon-proxy`.
     - `POST /api/v1/icons/breach-range`; "Check for breaches" plus a "Password health" report.
-    - Judgment calls for the owner: the path name; the `{"range":…}` response; upstream failure answers 500; the setting names `RIZZY_BREACH_CHECK` / `RIZZY_ICON_CACHE_DIR`.
+    - Judgment calls for the owner (the path name; the `{"range":…}` response; upstream failure answers 500; the setting names `RIZZY_BREACH_CHECK` / `RIZZY_ICON_CACHE_DIR`): closed by [ADR 0113](adr/0113-breach-check-endpoint.md), which records them as shipped.
     - Deploy files don't include the icons service yet. Never run against the real HIBP API.
   - **ADR 0060, admin panel, partial:** only the separate admin listener (`RIZZY_ADMIN_LISTEN`, default 127.0.0.1:8081, its own router and CSP, 404 everywhere).
     - **Every screen waits on new ADRs:** admin login, bootstrap token, 2FA and sessions (INV-69); an ADR 0011 settings-schema follow-up; invite-only signup; a metrics endpoint; and a name/ctx for purpose 0x0103.
