@@ -33,6 +33,8 @@ import type {
   ItemChange,
   ItemSummary,
   ItemType,
+  LockSettings,
+  LockSettingsChoice,
   MatchDecisionResult,
   MatchSettings,
   Notice,
@@ -252,6 +254,12 @@ export interface CoreApi {
   passwordEntropy(options: Partial<PasswordOptions>): number;
   passphraseEntropy(options: Partial<PassphraseOptions>): number;
   generatorLimits(): GeneratorLimits;
+  /** Reads the `rizzy.lock_settings` text (`null`: none stored) with Rust's one parser; a broken
+   * record is the defaults (ADR 0110 §3). Needs no session. */
+  lockSettings(record: string | null): LockSettings;
+  /** The record text to store for `choice` (ADR 0110 §3); `invalid_input` for an idle time
+   * outside the list. Needs no session. */
+  encodeLockSettings(choice: LockSettingsChoice): string;
   plaintextExportWarning(): string;
   plaintextExportPhrase(): string;
   /** The CXF passkey export's own warning (ADR 0074 §2). */
@@ -372,6 +380,8 @@ export const METHODS: readonly Method[] = [
   "passwordEntropy",
   "passphraseEntropy",
   "generatorLimits",
+  "lockSettings",
+  "encodeLockSettings",
   "plaintextExportWarning",
   "plaintextExportPhrase",
   "cxfExportWarning",

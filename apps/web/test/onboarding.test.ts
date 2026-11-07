@@ -130,6 +130,8 @@ function fakeContext(): VaultContext {
     vaults: [],
     personalVaultId: undefined,
     vaultAlarms: [],
+    lockSettings: undefined,
+    changeLockSettings: () => Promise.resolve(),
   };
 }
 

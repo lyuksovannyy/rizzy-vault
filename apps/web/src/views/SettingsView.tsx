@@ -10,10 +10,16 @@
 // identity and its email domain (ADR 0079 Open question 7). "Third-party notices" carries the
 // attributions THIRD_PARTY_NOTICES.md requires (the EFF wordlist; the default site groups,
 // ADR 0080; the identity generator's data, ADR 0079). "Website icons" (`WebsiteIconsPane.tsx`) is
-// the account's switch for item icons and its disclosure (ADR 0099 §6).
-import { ThirdPartyNotices } from "@rizzy-vault/ui";
+// the account's switch for item icons and its disclosure (ADR 0099 §6). "Locking" is this
+// device's lock settings (ADR 0110 §1–§2; packages/ui `LockSettingsGroup.tsx`, `autolock.ts`).
+import { t } from "@rizzy-vault/i18n";
+import { LockSettingsGroup, type LockSettingsText, ThirdPartyNotices } from "@rizzy-vault/ui";
+import { useState } from "react";
 
+import { IDLE_MINUTES, LOCK_DISABLE_CONFIRM_DELAY_MS } from "../autolock.ts";
+import { codeOf } from "../core-client.ts";
 import { isTheme, useThemeContext } from "../theme.ts";
+import { ErrorText } from "./common.tsx";
 import type { VaultContext } from "./VaultView.tsx";
 import { DevicesPane } from "./DevicesPane.tsx";
 import { IdentityDefaultsPane } from "./IdentityDefaultsPane.tsx";
@@ -51,6 +57,48 @@ function AppearanceGroup() {
   );
 }
 
+/** The Locking group's words (ADR 0110 §1–§2, §4.1: the browser's restart line). */
+const LOCK_TEXT: LockSettingsText = {
+  title: t("lock.settings.title"),
+  autoLock: t("lock.settings.autoLock"),
+  idleBefore: t("lock.settings.idleBefore"),
+  idleAfter: t("lock.settings.idleAfter"),
+  restart: t("lock.settings.restartBrowser"),
+  restartHint: t("lock.settings.restartBrowserHint"),
+  sleep: t("lock.settings.sleep"),
+  sleepHint: t("lock.settings.sleepHint"),
+  offHint: t("lock.settings.offHint"),
+  disableTitle: t("lock.disable.title"),
+  disableBody: t("lock.disable.body"),
+  disableConfirm: t("lock.disable.confirm"),
+  disableConfirmCountdown: (seconds) => t("lock.disable.confirmCountdown", { seconds: String(seconds) }),
+  disableCancel: t("lock.disable.cancel"),
+  disableWait: t("lock.disable.wait"),
+  disableReady: t("lock.disable.ready"),
+};
+
+/** The Locking group: this device's lock settings (module docs). */
+function LockingGroup(props: { readonly ctx: VaultContext }) {
+  const [error, setError] = useState<string | undefined>();
+  return (
+    <>
+      <LockSettingsGroup
+        value={props.ctx.lockSettings}
+        idleMinutes={IDLE_MINUTES}
+        confirmDelayMs={LOCK_DISABLE_CONFIRM_DELAY_MS}
+        text={LOCK_TEXT}
+        onChange={(next) => {
+          props.ctx.changeLockSettings(next).then(
+            () => setError(undefined),
+            (e: unknown) => setError(codeOf(e)),
+          );
+        }}
+      />
+      <ErrorText code={error} />
+    </>
+  );
+}
+
 /** The "Getting started" group: re-opens the guide (module docs). */
 function GettingStartedGroup(props: { readonly onOpenGuide: () => void }) {
   return (
@@ -79,6 +127,7 @@ export function SettingsView(props: { readonly ctx: VaultContext; readonly onOpe
       <MatchingPane ctx={props.ctx} />
       <IdentityDefaultsPane ctx={props.ctx} />
       <WebsiteIconsPane ctx={props.ctx} />
+      <LockingGroup ctx={props.ctx} />
       <AppearanceGroup />
       <TransparencyPane ctx={props.ctx} />
       <GettingStartedGroup onOpenGuide={props.onOpenGuide} />

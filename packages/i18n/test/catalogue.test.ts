@@ -6,7 +6,9 @@ import { describe, expect, it } from "vitest";
 
 import { CATALOGUES, LOCALES, en, placeholders, type MessageKey } from "../src/index.ts";
 
-const KEY = /^[a-z][A-Za-z0-9]*\.[a-z][A-Za-z0-9_]*$/;
+// `<area>.<name>`, or `<area>.<group>.<name>` where an ADR names the keys so (ADR 0110 §2's
+// `lock.disable.*`).
+const KEY = /^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*)?\.[a-z][A-Za-z0-9_]*$/;
 const englishKeys = Object.keys(en).sort();
 
 describe.each(LOCALES)("the %s catalogue", (locale) => {

@@ -177,6 +177,28 @@ export const en = {
   "transfer.formatRizzyCxf": "rizzy-vault passkey export (CXF, encrypted)",
   "transfer.credentialsSkipped": "CXF credentials not imported (only passkeys are): {count}.",
 
+  // ---- Locking (ADR 0110 §1–§2, §4.1; packages/ui LockSettingsGroup.tsx). The lock.disable.*
+  // keys are the ADR's own names. ----
+  "lock.settings.title": "Locking",
+  "lock.settings.autoLock": "Lock the vault automatically",
+  "lock.settings.idleBefore": "Lock after",
+  "lock.settings.idleAfter": "minutes idle",
+  "lock.settings.restartBrowser": "Lock when the browser restarts",
+  "lock.settings.restartBrowserHint": "This browser cannot keep the vault unlocked after a restart.",
+  "lock.settings.sleep": "Lock when the computer sleeps or hibernates",
+  "lock.settings.sleepHint": "Also locks when the screen locks, where this device reports it.",
+  "lock.settings.offHint": "Turn on automatic locking to change these.",
+  "lock.disable.title": "Turn off automatic locking?",
+  "lock.disable.body":
+    "Your vault will stay unlocked on this device until you lock it yourself or close it. Anyone who uses this device while it is unlocked can see, copy and change everything in your vault. Passkey sign-ins that ask for verification will ask for your master password. This setting applies to this device only.",
+  "lock.disable.confirm": "Turn off locking",
+  "lock.disable.confirmCountdown": "Turn off locking ({seconds})",
+  "lock.disable.cancel": "Keep locking on",
+  "lock.disable.wait": "You can confirm in 5 seconds.",
+  "lock.disable.ready": "You can now turn off locking.",
+  "lock.notice.idle": "Locked after inactivity.",
+  "lock.notice.sleep": "Locked because this device slept or its clock jumped.",
+
   // ---- Vaults (ADR 0081 Part A) ----
   "vaults.personal": "Personal",
   "vaults.all": "All vaults",

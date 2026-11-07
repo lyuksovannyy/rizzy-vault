@@ -11,14 +11,24 @@
 // drops the vault at once, and only then does the clipboard clear start, unawaited
 // (`clipboard.ts`; a clipboard call can wait on a browser prompt).
 //
-// It locks itself after `IDLE_LOCK_MS` without input (`autolock.ts`). When changes are still
-// unsent then, it first tries one sync, bounded by `FINAL_SYNC_MS`, and locks in any case;
+// It locks itself under the device's lock settings (ADR 0110: after N idle minutes, or when the
+// device slept; `autolock.ts`), which Settings changes (`LockSettingsGroup`) and which apply at
+// once. When changes are still unsent then, it first tries one sync, bounded by `FINAL_SYNC_MS`, and locks in any case;
 // changes that still did not reach the server are counted in the lock notice.
 //
 // A sync the server refused `server_revocation_pending` (another device is removing a device,
 // ADR 0091 §2) shows the revocation banner and is retried on the core's schedule; the change
 // stays unsent meanwhile and reads go on (`revocation.ts`).
-import type { DeviceView, ItemType, Notice, VaultAlarm, VaultInfo } from "@rizzy-vault/core";
+import type {
+  DeviceView,
+  ItemType,
+  LockReason,
+  LockSettings,
+  LockSettingsChoice,
+  Notice,
+  VaultAlarm,
+  VaultInfo,
+} from "@rizzy-vault/core";
 import { t } from "@rizzy-vault/i18n";
 import {
   ConfirmDialog,
@@ -43,7 +53,14 @@ import {
 } from "@rizzy-vault/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { watchIdle } from "../autolock.ts";
+import {
+  DEFAULT_LOCK_SETTINGS,
+  type LockWatch,
+  readLockRecord,
+  watchLock,
+  watchLockRecord,
+  writeLockRecord,
+} from "../autolock.ts";
 import { ClipboardGuard, browserClipboard } from "../clipboard.ts";
 import { type CoreClient, codeOf } from "../core-client.ts";
 import { useDismissableMenu } from "../dismissable-menu.ts";
@@ -127,6 +144,10 @@ export interface VaultContext {
   readonly personalVaultId: string | undefined;
   /** The vault completeness check's alarms (INV-102). */
   readonly vaultAlarms: readonly VaultAlarm[];
+  /** This device's lock settings (ADR 0110 §3); `undefined` until the record is read. */
+  readonly lockSettings: LockSettings | undefined;
+  /** Stores and applies new lock settings at once (ADR 0110 §1 point 5). */
+  readonly changeLockSettings: (choice: LockSettingsChoice) => Promise<void>;
 }
 
 /** The vault (module docs). */
@@ -295,8 +316,8 @@ export function VaultView(props: {
     syncRef.current = sync;
   }, [sync]);
 
-  /** The idle lock (module docs): one bounded last sync for unsent changes, then the lock. */
-  const autoLock = useCallback(async () => {
+  /** The automatic lock (module docs): one bounded last sync for unsent changes, then the lock. */
+  const autoLock = useCallback(async (reason: LockReason) => {
     if (lockedRef.current) {
       return;
     }
@@ -317,22 +338,55 @@ export function VaultView(props: {
         clearTimeout(timer);
       }
     }
-    lock(
-      unsent > 0
-        ? `Locked after inactivity. ${unsent} change(s) could not be saved to the server and are lost.`
-        : "Locked after inactivity.",
-    );
+    const why = reason === "sleep" ? t("lock.notice.sleep") : t("lock.notice.idle");
+    lock(unsent > 0 ? `${why} ${unsent} change(s) could not be saved to the server and are lost.` : why);
   }, [client, lock]);
+
+  /** The lock settings (ADR 0110 §3): read once, re-read when another tab writes them. */
+  const [lockSettings, setLockSettings] = useState<LockSettings | undefined>(undefined);
+  const lockSettingsRef = useRef<LockSettings>(DEFAULT_LOCK_SETTINGS);
+  const lockWatchRef = useRef<LockWatch | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    const load = (record: string | null) => {
+      client.call("lockSettings", record).then(
+        (s) => live && setLockSettings(s),
+        // The Worker cannot answer (it crashed): the defaults, never weaker settings.
+        () => live && setLockSettings(DEFAULT_LOCK_SETTINGS),
+      );
+    };
+    load(readLockRecord());
+    const stop = watchLockRecord(load);
+    return () => {
+      live = false;
+      stop();
+    };
+  }, [client]);
+  useEffect(() => {
+    if (lockSettings !== undefined) {
+      lockSettingsRef.current = lockSettings;
+      lockWatchRef.current?.setSettings(lockSettings);
+    }
+  }, [lockSettings]);
+  const changeLockSettings = useCallback(
+    async (choice: LockSettingsChoice) => {
+      writeLockRecord(await client.call("encodeLockSettings", choice));
+      setLockSettings({ ...choice, lockOnRestart: true });
+    },
+    [client],
+  );
 
   useEffect(() => {
     void sync();
     const timer = setInterval(() => void sync(), SYNC_EVERY_MS);
-    const stopIdle = watchIdle(() => void autoLock());
+    const lockWatch = watchLock((reason) => void autoLock(reason), lockSettingsRef.current);
+    lockWatchRef.current = lockWatch;
     const onHide = () => void clipboard.clearNow();
     window.addEventListener("pagehide", onHide);
     return () => {
       clearInterval(timer);
-      stopIdle();
+      lockWatch.stop();
+      lockWatchRef.current = undefined;
       window.removeEventListener("pagehide", onHide);
     };
   }, [sync, autoLock, clipboard]);
@@ -505,6 +559,8 @@ export function VaultView(props: {
     vaults,
     personalVaultId,
     vaultAlarms,
+    lockSettings,
+    changeLockSettings,
   };
 
   /** Chooses a vault in the switcher ("All vaults" is `undefined`) and shows its items. */

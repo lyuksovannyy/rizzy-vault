@@ -1438,6 +1438,79 @@ a.icon-button:focus-visible {
   max-width: none;
 }
 
+/* The Locking group (ADR 0110 §1; packages/ui LockSettingsGroup.tsx). A switch is a
+   button role="switch": a track with a knob, the accent fill when on. With the master switch
+   off the sub-options are dimmed: their text takes the muted colour (an AA pair, so axe's
+   contrast check still passes) and the controls fade, but they stay visible and focusable. */
+.switch-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  margin: var(--space-2) 0;
+}
+
+.switch-label {
+  flex: 0 1 auto;
+}
+
+.switch-row .switch {
+  position: relative;
+  flex: none;
+  width: 2.5rem;
+  height: 1.5rem;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-full);
+  background: var(--color-surface);
+}
+
+.switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: calc(1.5rem - 6px);
+  height: calc(1.5rem - 6px);
+  border-radius: var(--radius-full);
+  background: var(--color-text-muted);
+  transition: transform 120ms ease-out;
+}
+
+.switch-row .switch[aria-checked="true"] {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+}
+
+.switch-row .switch[aria-checked="true"] .switch-knob {
+  background: var(--color-on-accent);
+  transform: translateX(1rem);
+}
+
+.switch-row select {
+  width: auto;
+}
+
+.lock-sub[data-dimmed="true"] .switch-label,
+.lock-sub[data-dimmed="true"] .hint {
+  color: var(--color-text-muted);
+}
+
+.lock-settings [aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.lock-disable-dialog button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switch-knob {
+    transition: none;
+  }
+}
+
 .tag-counts {
   display: flex;
   flex-direction: column;

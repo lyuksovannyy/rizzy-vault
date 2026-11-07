@@ -39,7 +39,8 @@ is not). The web vault's `messageFor(code)` (`apps/web/src/messages.ts`) uses it
 ## Adding a message
 
 1. Add an entry to `src/en.ts`, in the section of the view that shows it. The key is
-   `<area>.<name>` (`login.title`, `totp.prompt`). Reuse a key only when the meaning is the same
+   `<area>.<name>` (`login.title`, `totp.prompt`), or `<area>.<group>.<name>` where an ADR names
+   the keys so (`lock.disable.title`, ADR 0110 §2). Reuse a key only when the meaning is the same
    (`action.cancel`), not merely the words.
 2. `errors.<code>` words one stable error code (ADR 0013 §3 rule 4: errors are codes; the host
    words them). Its `<code>` is the code exactly, and it has no placeholder: no error message

@@ -37,6 +37,15 @@ export {
 } from "./icons.tsx";
 export { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog.tsx";
 export {
+  LockDisableDialog,
+  LockSettingsGroup,
+  type LockSettingsGroupProps,
+  type LockSettingsText,
+  type LockSettingsValue,
+  countdown as lockDisableCountdown,
+  nextCountdownChange as lockDisableNextChange,
+} from "./LockSettingsGroup.tsx";
+export {
   RecoveryNoticeBanner,
   noticeTime,
   recoveryNoticeText,

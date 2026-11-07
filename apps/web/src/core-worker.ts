@@ -38,12 +38,14 @@ import {
   generatePassphraseWithOptions,
   generatePasswordWithOptions,
   generateIdentity,
+  encodeLockSettings,
   generatorLimits,
   identityCountries,
   init,
   login,
   newElementId,
   normalizeEmailDomain,
+  parseLockSettings,
   othersEndedNotice,
   passphraseEntropy,
   passwordEntropy,
@@ -449,6 +451,18 @@ async function run(m: CallMessage): Promise<unknown> {
     passwordEntropy: () => passwordEntropy(a[0] as never),
     passphraseEntropy: () => passphraseEntropy(a[0] as never),
     generatorLimits: () => generatorLimits(),
+    lockSettings: () => parseLockSettings(a[0] === null ? null : str(a[0])),
+    encodeLockSettings: () => {
+      const choice = a[0] as { autoLock?: unknown; idleMinutes?: unknown; lockOnSleep?: unknown } | null;
+      if (choice === null || typeof choice !== "object" || typeof choice.idleMinutes !== "number") {
+        throw new CoreError("invalid_input");
+      }
+      return encodeLockSettings({
+        autoLock: bool(choice.autoLock),
+        idleMinutes: choice.idleMinutes,
+        lockOnSleep: bool(choice.lockOnSleep),
+      });
+    },
     newElementId: () => newElementId(),
     plaintextExportWarning: () => plaintextExportWarning(),
     plaintextExportPhrase: () => plaintextExportPhrase(),
@@ -551,7 +565,16 @@ scope.addEventListener("message", (event) => {
   // synchronous) and may wait on a slow site (the role's budget is 10 s), so it runs beside the
   // queue instead of holding every user action behind it. A lock still aborts it
   // (`bounded.abortAll`), and it refuses to start while locked.
-  if (m.method === "lock" || m.method === "itemIcon" || m.method === "iconsProbe") {
+  // The lock settings calls are pure (Rust's parser and encoder, no session), so a sync waiting
+  // on the network never delays a settings change or the lock timer's settings (ADR 0110 §1
+  // point 5).
+  if (
+    m.method === "lock" ||
+    m.method === "itemIcon" ||
+    m.method === "iconsProbe" ||
+    m.method === "lockSettings" ||
+    m.method === "encodeLockSettings"
+  ) {
     void serve(m);
     return;
   }
