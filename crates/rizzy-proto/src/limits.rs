@@ -193,6 +193,23 @@ pub const ROTATION_STAGE_TTL_MS: u64 = 86_400_000;
 /// [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md
 pub const MAX_SESSIONS_LISTED: usize = 256;
 
+/// Count limit: entries in one `security-events/list` answer ([ADR 0090] §7). A request
+/// `limit` above it is refused, and a longer list in a response is a parse error.
+///
+/// [ADR 0090]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0090-per-account-security-event-log.md
+pub const MAX_SECURITY_EVENTS_LISTED: usize = 100;
+
+/// The `security-events/list` page size when the request names no `limit` ([ADR 0090] §7).
+///
+/// [ADR 0090]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0090-per-account-security-event-log.md
+pub const DEFAULT_SECURITY_EVENTS_LISTED: usize = 50;
+
+/// How long an alert-class entry counts in `AccountView.security_alerts` ([ADR 0090] §7): 72 h,
+/// the default recovery wait, so the alert of a recovery start stays up for at least that wait.
+///
+/// [ADR 0090]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0090-per-account-security-event-log.md
+pub const ALERT_WINDOW_MS: u64 = 259_200_000;
+
 /// Byte limit: a `WebAuthn` credential id. `WebAuthn` Level 3 §5.1 caps `rawId` at 1023 bytes.
 pub const MAX_WEBAUTHN_CREDENTIAL_ID_LEN: usize = 1023;
 

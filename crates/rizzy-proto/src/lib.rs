@@ -112,6 +112,7 @@ pub mod limits;
 pub mod meta;
 pub mod objects;
 pub mod recovery;
+pub mod security_event;
 pub mod session;
 pub mod totp;
 pub mod vault;

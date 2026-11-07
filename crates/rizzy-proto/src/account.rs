@@ -29,6 +29,7 @@ use crate::limits::{MAX_BUNDLES, MAX_DEVICE_GRANTS, MAX_DEVICE_STATEMENTS, MAX_V
 use crate::objects::{
     AccountSettings, AccountStatement, DeviceGrant, IdentitySecretKeys, VaultSelfGrant,
 };
+use crate::security_event::SecurityAlertSummary;
 use crate::wire::{Id, List};
 
 /// The signed account objects and account-level wraps a client verifies (CRYPTO.md §11.2
@@ -110,6 +111,14 @@ pub struct AccountView {
     /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
     #[serde(default)]
     pub wrap_rows_limit: u32,
+    /// Alert-class security events younger than
+    /// [`ALERT_WINDOW_MS`](crate::limits::ALERT_WINDOW_MS) ([ADR 0090] §7), absent when there
+    /// are none and from an older server. Advisory, unsigned and server-set (INV-110): a client
+    /// shows a banner from it and nothing else.
+    ///
+    /// [ADR 0090]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0090-per-account-security-event-log.md
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_alerts: Option<SecurityAlertSummary>,
 }
 
 /// The server's unsigned view of an open revocation window ([ADR 0091] §2): the device whose

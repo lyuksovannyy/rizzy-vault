@@ -155,6 +155,8 @@ pub mod paths {
     pub const SESSIONS_END: &str = "/api/v1/sessions/end";
     /// Ends every other OPAQUE and recovery-only session of the account (ADR 0075 R4).
     pub const SESSIONS_OTHERS_END: &str = "/api/v1/sessions/others/end";
+    /// The account's security event log, newest first (ADR 0090 §7).
+    pub const SECURITY_EVENTS_LIST: &str = "/api/v1/security-events/list";
     /// Vault upload.
     pub const VAULT_UPLOAD: &str = "/api/v1/vault/upload";
     /// Vault Fetch.
@@ -191,7 +193,7 @@ pub mod paths {
     pub const ICONS_PREFIX: &str = "/api/v1/icons/";
 
     /// Every `/api/v1` path, in the order above.
-    pub const ALL: [&str; 45] = [
+    pub const ALL: [&str; 46] = [
         REGISTER_START,
         REGISTER_FINISH,
         LOGIN_START,
@@ -228,6 +230,7 @@ pub mod paths {
         SESSIONS_CURRENT_END,
         SESSIONS_END,
         SESSIONS_OTHERS_END,
+        SECURITY_EVENTS_LIST,
         VAULT_UPLOAD,
         VAULT_FETCH,
         VAULT_HEAL,
@@ -274,7 +277,7 @@ mod tests {
         let mut sorted = paths::ALL.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 45);
+        assert_eq!(sorted.len(), 46);
         for path in paths::ALL {
             assert!(path.starts_with(API_V1_PREFIX), "{path}");
             // Nothing a proxy or a URL library would rewrite, and no query.

@@ -47,6 +47,7 @@ use rizzy_proto::recovery::{
     RecoveryCancelResponse, RecoveryCompleteResponse, RecoveryRequest, RecoveryStartResponse,
     RecoveryVault, RecoveryWrapsRequest, RecoveryWrapsResponse,
 };
+use rizzy_proto::security_event::{SecurityEventListRequest, SecurityEventListResponse};
 use rizzy_proto::session::{EndSessionRequest, SessionListResponse};
 use rizzy_proto::totp::{TotpDisableRequest, TotpEnrolConfirmRequest, TotpEnrolStartResponse};
 use rizzy_proto::vault::{
@@ -82,7 +83,7 @@ fuzz_target!(|data: &[u8]| {
     let Some((&selector, json)) = data.split_first() else {
         return;
     };
-    match selector % 50 {
+    match selector % 52 {
         // Requests.
         0 => check::<RegisterStartRequest>(json),
         1 => check::<RegisterFinishRequest>(json),
@@ -142,6 +143,10 @@ fuzz_target!(|data: &[u8]| {
         // The per-item attachment cleanup (ADR 0093 §1.1): its body and its answer.
         48 => check::<AttachmentItemRequest>(json),
         49 => check::<AttachmentItemResponse>(json),
+        // The security event log (ADR 0090 §7, §14 step 1): the strict request and the
+        // bounded list a client parses; the alert summary is reached through `AccountView`.
+        50 => check::<SecurityEventListRequest>(json),
+        51 => check::<SecurityEventListResponse>(json),
         _ => check::<RecoveryVault>(json),
     }
 });

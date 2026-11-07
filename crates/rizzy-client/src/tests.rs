@@ -262,6 +262,7 @@ impl Server {
             revocation_window: None,
             wrap_rows: 0,
             wrap_rows_limit: 0,
+            security_alerts: None,
         };
         self.capture(serde_json::to_vec(&view));
         view

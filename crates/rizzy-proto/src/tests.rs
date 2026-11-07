@@ -108,6 +108,7 @@ fn account_view() -> AccountView {
         }),
         wrap_rows: 7,
         wrap_rows_limit: 65_536,
+        security_alerts: None,
     }
 }
 

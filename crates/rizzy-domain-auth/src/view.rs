@@ -167,6 +167,7 @@ pub(crate) async fn build<V: VaultPort>(
         revocation_window,
         wrap_rows,
         wrap_rows_limit: u32::try_from(MAX_ACCOUNT_WRAP_ROWS).unwrap_or(u32::MAX),
+        security_alerts: None,
     })
 }
 

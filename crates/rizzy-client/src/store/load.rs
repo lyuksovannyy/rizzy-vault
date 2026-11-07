@@ -316,6 +316,7 @@ fn account_view(rows: &CacheRows) -> Result<AccountView, ClientError> {
         revocation_window: None,
         wrap_rows: 0,
         wrap_rows_limit: 0,
+        security_alerts: None,
     })
 }
 
