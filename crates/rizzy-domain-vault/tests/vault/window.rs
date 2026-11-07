@@ -10,7 +10,6 @@
     reason = "integration tests: a failure fails the test, which CLAUDE.md allows in test code"
 )]
 
-use rizzy_core::attachment::CHUNK_SIZE;
 use rizzy_core::ids::{AttachmentId, DeviceId};
 use rizzy_domain_vault::{HealingError, NewAttachment, RevocationWindow, VaultError};
 use rizzy_proto::vault::{HealingRequest, Record, UploadRequest, UploadResult};
@@ -47,9 +46,9 @@ fn attachment(n: u8) -> NewAttachment {
     }
 }
 
-/// The exact envelope of a 10-byte attachment's only chunk: opaque bytes of its length.
+/// The exact envelope of a 10-byte attachment's only chunk (one chunk, as 10 bytes is below
+/// `CHUNK_SIZE`): opaque bytes of its length.
 fn chunk() -> Vec<u8> {
-    assert!(10 < CHUNK_SIZE);
     vec![0x5a; 10 + 90]
 }
 
