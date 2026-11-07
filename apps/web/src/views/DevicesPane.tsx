@@ -4,11 +4,18 @@
 // itself is an ephemeral device and is not listed. Revocation needs a key rotation, which the
 // web vault does not offer in M1; `rv devices revoke` does. Below it, the account's sessions
 // (`SessionsSection.tsx`, ADR 0075 §9).
+//
+// A device another device is removing shows "Suspended" (ADR 0091 §2, §8 step 7): the server's
+// `suspended_devices` of the last account answer, unsigned, for display only; a verified
+// revocation always shows "Revoked". The web vault (kind 4) cannot revoke, so the pane offers
+// no action for it (CRYPTO.md §11's flow table).
 import type { DeviceView } from "@rizzy-vault/core";
+import { t } from "@rizzy-vault/i18n";
 import { useEffect, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
 import { DEVICE_KINDS as KINDS, DEVICE_LABEL_HEX_LEN } from "../notices.ts";
+import { deviceStateText } from "../revocation.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { SessionsSection } from "./SessionsSection.tsx";
 import { ErrorText } from "./common.tsx";
@@ -58,12 +65,13 @@ export function DevicesPane(props: { readonly ctx: VaultContext }) {
                   <td className="mono">{d.id.slice(0, DEVICE_LABEL_HEX_LEN)}…</td>
                   <td>{KINDS[d.kind] ?? d.kind}</td>
                   <td>{new Date(d.createdAtMs).toLocaleString()}</td>
-                  <td>{d.revoked ? "Revoked" : "Active"}</td>
+                  <td>{deviceStateText(d)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         ))}
+      {devices?.some((d) => d.suspended) === true && <p className="muted">{t("devices.suspendedHint")}</p>}
     </div>
     <div className="panel">
       <SessionsSection ctx={ctx} />

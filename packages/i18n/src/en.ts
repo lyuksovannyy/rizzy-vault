@@ -48,6 +48,8 @@ export const en = {
     "The server was restored from a backup and does not take this login yet. Open rizzy-vault on a device that is already set up for this account (it repairs the server with your master password), then log in again.",
   "errors.server_quota_exceeded":
     "This account has reached its storage limit on this server, so the server did not save the latest change. Ask the server's operator for more space.",
+  "errors.server_revocation_pending":
+    "Another of your devices is removing a device, so the server did not save the latest change. Try again in a few minutes.",
   "errors.attachment_too_large": "That file is larger than 25 MiB, the most an attachment can hold.",
   "errors.attachment_incomplete":
     "The attachment did not download completely or failed its check, so it was not saved. Try again; if it keeps failing, the server may not hold all of it.",
@@ -99,6 +101,17 @@ export const en = {
   "common.unknownError": "Something went wrong ({code}).",
   "action.continue": "Continue",
   "action.cancel": "Cancel",
+
+  // ---- A device removal under way (ADR 0091 §2; apps/web/src/views/VaultView.tsx, DevicesPane.tsx) ----
+  // `revocation.pending` is rizzy-client's REVOCATION_PENDING_MESSAGE word for word (the core's
+  // `revocationPendingNotice`, which the extension shows; apps/web/test/messages.test.ts).
+  "revocation.pending": "Another of your devices is removing a device. Changes are paused for up to 10 minutes.",
+  "revocation.retrying": "Your changes are kept in this session and are sent again automatically.",
+  "devices.stateActive": "Active",
+  "devices.stateRevoked": "Revoked",
+  "devices.stateSuspended": "Suspended",
+  "devices.suspendedHint":
+    "A suspended device is being removed by another of your devices: it can no longer log in or make changes.",
 
   // ---- Login and unlock (apps/web/src/views/LoginView.tsx) ----
   "login.title": "Log in to rizzy-vault",

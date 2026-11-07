@@ -54,6 +54,8 @@ describe("message checks", () => {
       "resolveConflictKeepBoth",
       "takeNotices",
       "restoreLateAsNew",
+      // ADR 0091 §2: the retry of a sync refused `server_revocation_pending`.
+      "revocationRetryAt",
     ]) {
       expect(METHODS).toContain(m);
       expect(isToWorker({ kind: "call", id: 1, method: m, args: [] })).toBe(true);

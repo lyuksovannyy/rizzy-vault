@@ -14,6 +14,10 @@
 // It locks itself after `IDLE_LOCK_MS` without input (`autolock.ts`). When changes are still
 // unsent then, it first tries one sync, bounded by `FINAL_SYNC_MS`, and locks in any case;
 // changes that still did not reach the server are counted in the lock notice.
+//
+// A sync the server refused `server_revocation_pending` (another device is removing a device,
+// ADR 0091 §2) shows the revocation banner and is retried on the core's schedule; the change
+// stays unsent meanwhile and reads go on (`revocation.ts`).
 import type { DeviceView, ItemType, Notice, VaultAlarm, VaultInfo } from "@rizzy-vault/core";
 import { t } from "@rizzy-vault/i18n";
 import {
@@ -32,6 +36,8 @@ import {
   IconLoader,
   IconTrash,
   RecoveryNoticeBanner,
+  RevocationPendingBanner,
+  RevocationRetry,
   TypeIcon,
   isAnyModalOpen,
 } from "@rizzy-vault/ui";
@@ -47,6 +53,7 @@ import { type IdentityMemory, useIdentityMemory } from "../identity-memory.ts";
 import { messageFor } from "../messages.ts";
 import { mergeNotices, noticeKey } from "../notices.ts";
 import type { SessionInfo } from "../protocol.ts";
+import { REVOCATION_PENDING } from "../revocation.ts";
 import { shortcutFor } from "../shortcuts.ts";
 import { CommandPalette, type PaletteNavCommand } from "./CommandPalette.tsx";
 import { GeneratorPane } from "./GeneratorPane.tsx";
@@ -169,6 +176,13 @@ export function VaultView(props: {
   const lockedRef = useRef(false);
   /** The latest session state, for the auto-lock (which runs outside a render). */
   const sessionRef = useRef(props.initialSession);
+  /** ADR 0091 §2 (`revocation.ts`): the retry of a sync the server refused
+   * `server_revocation_pending`, and whether its banner shows. The retry calls the latest
+   * `sync` through `syncRef`. */
+  const [revocationPaused, setRevocationPaused] = useState(false);
+  const revocationRetry = useMemo(() => new RevocationRetry(setRevocationPaused), []);
+  const syncRef = useRef<() => Promise<void>>(async () => undefined);
+  useEffect(() => () => revocationRetry.ended(), [revocationRetry]);
 
   const lock = useCallback(
     (notice?: string) => {
@@ -196,11 +210,29 @@ export function VaultView(props: {
     setSession(next);
   }, []);
 
+  /** A sync was refused `server_revocation_pending`: schedules its retry on the core's schedule,
+   * and refreshes the unsent count the header shows. Returns whether a retry waits. */
+  const retryAfterRevocation = useCallback(async (): Promise<boolean> => {
+    let at: number | undefined;
+    try {
+      at = await client.call("revocationRetryAt", revocationRetry.retriesDone);
+    } catch {
+      at = undefined;
+    }
+    const waiting = !lockedRef.current && revocationRetry.refused(at, Date.now(), () => void syncRef.current());
+    client.call("status").then(
+      (s) => s !== undefined && update(s),
+      () => undefined,
+    );
+    return waiting;
+  }, [client, revocationRetry, update]);
+
   const sync = useCallback(async () => {
     setSyncing(true);
     try {
       update(await client.call("sync"));
       setSyncError(undefined);
+      revocationRetry.ended();
       // Each notice is handed over once per session, so it is held before anything else can
       // fail; the device list only names their devices ("device <id>" without it).
       const fresh = await client.call("takeNotices");
@@ -210,7 +242,8 @@ export function VaultView(props: {
       }
     } catch (e) {
       const code = codeOf(e);
-      setSyncError(code);
+      // While the retry waits the banner says it; once the schedule ends, the error does.
+      setSyncError(code === REVOCATION_PENDING && (await retryAfterRevocation()) ? undefined : code);
       if (code === "locked" || code === "core_crashed") {
         lock();
       }
@@ -218,7 +251,10 @@ export function VaultView(props: {
       setSyncing(false);
       setRevision((r) => r + 1);
     }
-  }, [client, lock, update]);
+  }, [client, lock, update, revocationRetry, retryAfterRevocation]);
+  useEffect(() => {
+    syncRef.current = sync;
+  }, [sync]);
 
   /** The idle lock (module docs): one bounded last sync for unsent changes, then the lock. */
   const autoLock = useCallback(async () => {
@@ -653,6 +689,10 @@ export function VaultView(props: {
           </div>
         </header>
         <ErrorText code={syncError} />
+        {/* ADR 0091 §2: a sync refused while another device removes a device; reads go on. */}
+        {revocationPaused && (
+          <RevocationPendingBanner message={t("revocation.pending")} detail={t("revocation.retrying")} />
+        )}
         {/* ADR 0045: the server's advisory notice, shown as given and read by nothing else
             (INV-70). An honest server sends none to a web session (point 4), so this appears
             only if one arrives anyway; it goes with the first answer without one. */}

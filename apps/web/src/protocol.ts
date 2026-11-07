@@ -203,6 +203,9 @@ export interface CoreApi {
   /** Imports our own CXF passkey export with its file password (ADR 0074 §3). */
   importCxfEncrypted(vaultId: string, file: Uint8Array, password: Uint8Array): ImportReport;
   devices(): DeviceView[];
+  /** After a sync the server refused `server_revocation_pending` (ADR 0091 §2): when to sync
+   * again, Unix milliseconds, with `retriesDone` retries made; `undefined` to stop and report. */
+  revocationRetryAt(retriesDone: number): number | undefined;
   /** The account's live sessions (ADR 0075 R1): the server's word, for display. */
   sessions(): SessionListView;
   /** Ends one other session of the last list (R3); needs a fresh login. */
@@ -330,6 +333,7 @@ export const METHODS: readonly Method[] = [
   "exportCxf",
   "importCxfEncrypted",
   "devices",
+  "revocationRetryAt",
   "sessions",
   "endSession",
   "endOtherSessions",

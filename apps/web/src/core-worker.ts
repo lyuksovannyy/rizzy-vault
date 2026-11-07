@@ -418,6 +418,7 @@ async function run(m: CallMessage): Promise<unknown> {
     exportCxf: () => current().exportCxf(str(a[0]), str(a[1]), bytes(a[2])),
     importCxfEncrypted: () => current().importCxfEncrypted(str(a[0]), bytes(a[1]), bytes(a[2])),
     devices: () => current().devices(),
+    revocationRetryAt: () => current().revocationRetryAt(index(a[0])),
     sessions: () => current().sessions(),
     endSession: () => current().endSession(str(a[0])),
     endOtherSessions: () => current().endOtherSessions(),
