@@ -15,16 +15,18 @@
 //!   groups; one with disabled and user groups; one with unknown tags, preserved through decode
 //!   and re-encode. Each must decode, re-encode to the same hex, and (where built through the
 //!   typed API) the typed value must encode to the hex.
-//! - **Negative** (ADR 0042 §8, one violation each): truncated entry, duplicate tag, oversize
-//!   entry, too many entries, duplicate `group_id`, a one-domain user group, `match_default`
-//!   out of range, and `format_version ≠ 1` (parked:
-//!   `settings_update_required`, not rejected), plus tags out of order, tag `0x0000`/`0xFFFF` and a
-//!   trailing byte.
+//! - **Negative** (ADR 0042 §8, one violation each, with ADR 0097 §1's severities): an
+//!   unreadable record (`settings_unreadable`) for a truncated entry, a duplicate tag, an
+//!   oversize entry, too many entries, tags out of order, tag `0x0000`/`0xFFFF` and a trailing
+//!   byte; a parked one (`settings_update_required`) for `format_version ≠ 1`; an unreadable
+//!   section, the record reading and re-encoding byte for byte, for a duplicate `group_id`, a
+//!   one-domain user group and `match_default` out of range (tag `0x0001`).
 //! - **Website icons**, tag `0x0005` ([ADR 0099] §1; written by an independent Python writer from
 //!   that layout): on (`0x01`), off (`0x00`), and off beside a matching section; negative: an
 //!   empty value, two bytes, `0x02`, `0xFF` and the two bytes "hi" (an unknown tag's value until
-//!   `0x0005` was assigned, so the `unknown-tags` vector moved to tag `0x0006`). A rejected
-//!   record and a parked one read the setting **off**; an absent tag and the absent record read on.
+//!   `0x0005` was assigned, so the `unknown-tags` vector moved to tag `0x0006`), each an
+//!   unreadable section. An unreadable section and a parked record read the setting **off**; an
+//!   absent tag and the absent record read on.
 //!
 //! [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
 
@@ -54,90 +56,101 @@ const POSITIVE: &[(&str, &str)] = &[
     ),
 ];
 
-/// The negative vectors that fit a constant: name, hex, expected error.
-const NEGATIVE: &[(&str, &str, ClientError)] = &[
+/// How a negative vector fails ([ADR 0097] §1, §4): the whole record, or one section only.
+///
+/// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
+#[derive(Clone, Copy, Debug)]
+enum Bad {
+    /// The record is unreadable (`settings_unreadable`) or parked (`settings_update_required`).
+    Record(ClientError),
+    /// The record reads; this recognised tag is an unreadable section, kept verbatim.
+    Section(u16),
+}
+
+/// The negative vectors that fit a constant: name, hex, how it fails.
+const NEGATIVE: &[(&str, &str, Bad)] = &[
     (
         "truncated-entry",
         "0001000100010000000600020000",
-        ClientError::InvalidServerResponse,
+        Bad::Record(ClientError::SettingsUnreadable),
     ),
     (
         "duplicate-tag",
         "000100020002000000016100020000000162",
-        ClientError::InvalidServerResponse,
+        Bad::Record(ClientError::SettingsUnreadable),
     ),
     (
         "tags-out-of-order",
         "00010002000300000000000200000000",
-        ClientError::InvalidServerResponse,
+        Bad::Record(ClientError::SettingsUnreadable),
     ),
     (
         "tag-0000",
         "00010001000000000000",
-        ClientError::InvalidServerResponse,
+        Bad::Record(ClientError::SettingsUnreadable),
     ),
     (
         "tag-ffff",
         "00010001ffff00000000",
-        ClientError::InvalidServerResponse,
+        Bad::Record(ClientError::SettingsUnreadable),
     ),
     (
         "trailing-byte",
         "0001000000",
-        ClientError::InvalidServerResponse,
+        Bad::Record(ClientError::SettingsUnreadable),
     ),
     (
         "website-icons-empty",
         "00010001000500000000",
-        ClientError::InvalidServerResponse,
+        Bad::Section(TAG_WEBSITE_ICONS),
     ),
     (
         "website-icons-two-bytes",
         "000100010005000000020100",
-        ClientError::InvalidServerResponse,
+        Bad::Section(TAG_WEBSITE_ICONS),
     ),
     (
         "website-icons-02",
         "0001000100050000000102",
-        ClientError::InvalidServerResponse,
+        Bad::Section(TAG_WEBSITE_ICONS),
     ),
     (
         "website-icons-ff",
         "00010001000500000001ff",
-        ClientError::InvalidServerResponse,
+        Bad::Section(TAG_WEBSITE_ICONS),
     ),
     (
         "website-icons-former-unknown-value",
         "000100010005000000026869",
-        ClientError::InvalidServerResponse,
+        Bad::Section(TAG_WEBSITE_ICONS),
     ),
     (
         "duplicate-group-id",
         "00010001000100000066000100000002a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a000020000000b6578616d\
          706c652e636f6d0000000b6578616d706c652e6e657400a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0000200\
          00000b6578616d706c652e6f72670000000972697a7a792e64657600",
-        ClientError::InvalidServerResponse,
+        Bad::Section(TAG_MATCHING),
     ),
     (
         "one-domain-group",
         "00010001000100000028000100000001a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a000010000000b6578616d\
          706c652e636f6d00",
-        ClientError::InvalidServerResponse,
+        Bad::Section(TAG_MATCHING),
     ),
     (
         "match-default-0000",
         "00010001000100000006000000000000",
-        ClientError::InvalidServerResponse,
+        Bad::Section(TAG_MATCHING),
     ),
     (
         "match-default-0007",
         "00010001000100000006000700000000",
-        ClientError::InvalidServerResponse,
+        Bad::Section(TAG_MATCHING),
     ),
     (
         "format-version-2",
         "00020000",
-        ClientError::SettingsUpdateRequired,
+        Bad::Record(ClientError::SettingsUpdateRequired),
     ),
 ];
 
@@ -168,7 +181,7 @@ fn the_typed_records_encode_to_the_positive_vectors() {
     // Empty: the absent record, also what `settings_seq = 0` reads as.
     let empty = AccountSettingsRecord::default();
     assert_eq!(empty.encode().unwrap().as_slice(), positive("empty"));
-    assert_eq!(empty.matching(), &MatchingSettings::default());
+    assert_eq!(empty.matching().unwrap(), &MatchingSettings::default());
 
     // Matching only: Host as the default, nothing else.
     let mut only = AccountSettingsRecord::default();
@@ -198,10 +211,13 @@ fn the_typed_records_encode_to_the_positive_vectors() {
     );
     let decoded = AccountSettingsRecord::decode(&positive("matching-groups")).unwrap();
     assert_eq!(decoded, groups);
-    assert_eq!(decoded.matching().match_default(), MatchMode::BaseDomain);
-    assert_eq!(decoded.matching().disabled_global().len(), 2);
     assert_eq!(
-        decoded.matching().user_groups()[0].domains(),
+        decoded.matching().unwrap().match_default(),
+        MatchMode::BaseDomain
+    );
+    assert_eq!(decoded.matching().unwrap().disabled_global().len(), 2);
+    assert_eq!(
+        decoded.matching().unwrap().user_groups()[0].domains(),
         ["example.com", "example.net"]
     );
 }
@@ -239,7 +255,7 @@ fn the_website_icons_vectors_read_as_their_layout_says() {
     assert!(!off.website_icons().is_on());
     let both = AccountSettingsRecord::decode(&positive("matching-and-website-icons-off")).unwrap();
     assert!(!both.website_icons().is_on());
-    assert_eq!(both.matching().match_default(), MatchMode::Host);
+    assert_eq!(both.matching().unwrap().match_default(), MatchMode::Host);
 
     // Typed writes: off is written as 0x00, never as a missing tag; on as 0x01.
     let mut typed = AccountSettingsRecord::default();
@@ -265,8 +281,8 @@ fn the_website_icons_vectors_read_as_their_layout_says() {
     kept.apply(&Edit::Default(MatchMode::Exact)).unwrap();
     assert!(!kept.website_icons().is_on());
 
-    // A record that cannot be read reads off, never the default: a rejected one (a bad 0x0005
-    // value among them) and a parked one.
+    // A setting that cannot be read reads off, never the default: an unreadable 0x0005 section
+    // (ADR 0097 §1 (c)) and a parked record.
     for (name, h, _) in NEGATIVE
         .iter()
         .filter(|(n, _, _)| n.starts_with("website-icons"))
@@ -306,8 +322,11 @@ fn a_content_rule_failure_reads_as_an_inert_group_adr0097() {
         let bytes = hex(h);
         let record =
             AccountSettingsRecord::decode(&bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
-        assert!(record.matching().user_groups().is_empty(), "{name}");
-        assert_eq!(record.matching().inert_groups().len(), 1, "{name}");
+        assert!(
+            record.matching().unwrap().user_groups().is_empty(),
+            "{name}"
+        );
+        assert_eq!(record.matching().unwrap().inert_groups().len(), 1, "{name}");
         assert_eq!(
             record.encode().unwrap().as_slice(),
             bytes.as_slice(),
@@ -319,11 +338,31 @@ fn a_content_rule_failure_reads_as_an_inert_group_adr0097() {
 #[test]
 fn every_negative_vector_fails_with_its_error() {
     for (name, h, expected) in NEGATIVE {
-        assert_eq!(
-            AccountSettingsRecord::decode(&hex(h)).unwrap_err(),
-            *expected,
-            "{name}"
-        );
+        let bytes = hex(h);
+        match *expected {
+            Bad::Record(e) => {
+                assert_eq!(
+                    AccountSettingsRecord::decode(&bytes).unwrap_err(),
+                    e,
+                    "{name}"
+                );
+            }
+            Bad::Section(tag) => {
+                // ADR 0097 §1 (c), §4.4: the record reads, the section is kept byte for byte.
+                let record =
+                    AccountSettingsRecord::decode(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+                assert_eq!(
+                    record.unreadable_sections().collect::<Vec<_>>(),
+                    [tag],
+                    "{name}"
+                );
+                assert_eq!(
+                    record.encode().unwrap().as_slice(),
+                    bytes.as_slice(),
+                    "{name}"
+                );
+            }
+        }
     }
 }
 
@@ -336,7 +375,7 @@ fn an_oversize_entry_and_too_many_entries_are_rejected() {
     oversize.resize(oversize.len() + MAX_SETTINGS_ENTRY_LEN + 1, 0);
     assert_eq!(
         AccountSettingsRecord::decode(&oversize).unwrap_err(),
-        ClientError::InvalidServerResponse
+        ClientError::SettingsUnreadable
     );
     // Exactly MAX_SETTINGS_ENTRY_LEN is fine.
     let mut largest = hex("0001 0001 0006");
@@ -357,7 +396,7 @@ fn an_oversize_entry_and_too_many_entries_are_rejected() {
     }
     assert_eq!(
         AccountSettingsRecord::decode(&many).unwrap_err(),
-        ClientError::InvalidServerResponse
+        ClientError::SettingsUnreadable
     );
     // n = 256 is the bound.
     let mut most = hex("0001");
@@ -392,7 +431,7 @@ fn the_core_envelope_vector_carries_a_real_record() {
     let plaintext = hex(vector["inputs"]["plaintext"].as_str().unwrap());
     let record = AccountSettingsRecord::decode(&plaintext).unwrap();
     assert_eq!(record.encode().unwrap().as_slice(), plaintext);
-    let matching = record.matching();
+    let matching = record.matching().unwrap();
     assert_eq!(matching.match_default(), MatchMode::Host);
     assert_eq!(matching.disabled_global().len(), 2);
     assert_eq!(matching.user_groups().len(), 1);

@@ -320,12 +320,16 @@ pub fn decide_candidates(
 /// compiled-in global list's groups `global` (the session's in-memory result of
 /// [`global_equivalence_groups`], computed once at startup, ADR 0051 §4) minus the account's
 /// disabled groups, plus its user-defined groups. Read `settings` with [`crate::settings::account_settings`] or a
-/// [`crate::settings::SettingsCache`]; a record that does not read fails there, never here, so
-/// no decision is ever made under settings this client could not read (`crate::settings` module
-/// docs).
+/// [`crate::settings::SettingsCache`]. A record whose matching section is unreadable decides
+/// through [`decide_fail_closed`] ([ADR 0097] §4.3); a host whose read itself failed with
+/// [`ClientError::SettingsUnreadable`] or [`ClientError::SettingsUpdateRequired`] calls
+/// [`decide_fail_closed`] directly ([`fails_closed`]). No decision is ever made under settings
+/// this client could not read (`crate::settings` module docs).
 ///
 /// # Errors
 /// As [`decide_candidates`].
+///
+/// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
 pub fn decide_with_settings(
     page_url: &str,
     frame: &FrameContext<'_>,
@@ -333,7 +337,9 @@ pub fn decide_with_settings(
     settings: &AccountSettingsRecord,
     global: &[EquivalenceGroup],
 ) -> Result<Decision, ClientError> {
-    let matching = settings.matching();
+    let Ok(matching) = settings.matching() else {
+        return decide_fail_closed(page_url, frame, item_uris);
+    };
     decide_candidates(
         page_url,
         frame,
@@ -341,6 +347,51 @@ pub fn decide_with_settings(
         item_uris,
         &matching.view(global),
     )
+}
+
+/// The one warning of [`decide_fail_closed`] ([ADR 0097] §4.3). The fill UI links it to
+/// Settings → Website matching.
+///
+/// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
+pub const SETTINGS_UNREADABLE_WARNING: &str = "matching: the account's matching settings are unreadable; site groups are off and URIs on the account default are not offered";
+
+/// Whether a settings read that failed with `e` still decides, through [`decide_fail_closed`]:
+/// an unreadable or parked record ([ADR 0097] §4.3). Every other error (a failed open, a
+/// rotated key, a locked session) fails the matching call.
+///
+/// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
+#[must_use]
+pub const fn fails_closed(e: &ClientError) -> bool {
+    matches!(
+        e,
+        ClientError::SettingsUnreadable | ClientError::SettingsUpdateRequired
+    )
+}
+
+/// [`decide_candidates`] under the fail-closed matching view ([ADR 0097] §4.3), while the
+/// account's matching section, or its whole record, cannot be read: the account default is
+/// *Never* and the equivalence view is empty (no global and no user group, so no group the user
+/// disabled comes back). A URI with its own explicit mode still matches through the plain
+/// registrable-domain gate. Adds [`SETTINGS_UNREADABLE_WARNING`].
+///
+/// # Errors
+/// As [`decide_candidates`].
+///
+/// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
+pub fn decide_fail_closed(
+    page_url: &str,
+    frame: &FrameContext<'_>,
+    item_uris: &[ItemUri<'_>],
+) -> Result<Decision, ClientError> {
+    let mut decision = decide_candidates(
+        page_url,
+        frame,
+        MatchMode::Never,
+        item_uris,
+        &EquivalenceView::empty(),
+    )?;
+    decision.warnings.push(SETTINGS_UNREADABLE_WARNING);
+    Ok(decision)
 }
 
 /// One saved URI of a vault item, owned, as [`vault_item_uris`] collects them: what an

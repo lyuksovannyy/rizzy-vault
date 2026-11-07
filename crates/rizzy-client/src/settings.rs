@@ -29,15 +29,23 @@
 //!   disabled, no user groups).
 //! - **Unknown tags** are kept verbatim and written back unchanged on the next whole-record write;
 //!   they never fail parsing (ADR 0042 §2 "Forward compatibility").
-//! - **Rejected outright**, with the severity of a failed decryption
-//!   ([`ClientError::InvalidServerResponse`]): wrong or truncated lengths, trailing bytes, tags out
-//!   of order or repeated, tag `0x0000`/`0xFFFF`, an entry over the bounds, or any violation
-//!   inside the matching section. `format_version ≠ 1` is parked instead:
-//!   [`ClientError::SettingsUpdateRequired`]. Either way no settings write is built until it is
-//!   resolved (ADR 0042 §2: "a reject blocks further settings writes"), and the matching calls of
-//!   this crate answer the same error rather than guess at settings they cannot read: falling back
-//!   to the defaults could re-enable a global group the account disabled, or widen an account
-//!   default narrower than *Base domain* (INV-38).
+//! - **Unreadable record, parked record, unreadable section** (ADR 0042 §2 as replaced by
+//!   [ADR 0097] §1 and §4). The bytes opened under the account key and matched the signed
+//!   `settings_hash`, so one of the account's own clients wrote them: a problem in them is never
+//!   [`ClientError::InvalidServerResponse`] (which stays for a failed open, a missing envelope
+//!   and a `settings_seq` mismatch). Wrong or truncated outer lengths, trailing bytes, tags out of
+//!   order or repeated, tag `0x0000`/`0xFFFF` or an entry over the bounds make the record
+//!   unreadable ([`ClientError::SettingsUnreadable`]); `format_version ≠ 1` parks it
+//!   ([`ClientError::SettingsUpdateRequired`]). Either way no setting is read and no settings
+//!   write is built. A recognised tag whose value breaks its own layout is an **unreadable
+//!   section**: kept byte for byte and written back unchanged, while every other tag reads and
+//!   writes normally; an edit of it is `settings_unreadable` until [`SettingsEdit::ResetSection`]
+//!   (tags `0x0001` and `0x0004` only, §4.5). While the matching section or the record cannot
+//!   be read, matching uses the fail-closed view of §4.3 ([`crate::matching::decide_fail_closed`]):
+//!   *Never* as the account default and no site group, since any fallback wider than the user's
+//!   own choice could re-enable a global group the account disabled, or widen an account default
+//!   narrower than *Base domain* (INV-38). A user group that fails a PSL- or IDNA-dependent rule
+//!   is not a layout violation: `rizzy-match` keeps it as an inert group (§4.2).
 //!
 //! # Writing (ADR 0042 §5)
 //!
@@ -59,6 +67,7 @@
 //!
 //! [ADR 0042]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0042-account-settings-matching-layout.md
 //! [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
+//! [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
 
 use core::fmt;
 
@@ -127,6 +136,12 @@ pub struct AccountSettingsRecord {
     directory: Option<VaultDirectory>,
     /// Every unrecognised entry, sorted by tag, value verbatim.
     unknown: Vec<(u16, Zeroizing<Vec<u8>>)>,
+    /// Every recognised entry whose value breaks its tag's own layout ([ADR 0097] §1 (c), §4.4):
+    /// sorted by tag, value verbatim, written back unchanged. Its typed field above stays at
+    /// its absent value and is never read while the tag is here.
+    ///
+    /// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
+    unreadable: Vec<(u16, Zeroizing<Vec<u8>>)>,
 }
 
 impl fmt::Debug for AccountSettingsRecord {
@@ -141,37 +156,73 @@ impl fmt::Debug for AccountSettingsRecord {
                 &self.directory.as_ref().map(|d| d.entries().len()),
             )
             .field("unknown_entries", &self.unknown.len())
+            .field(
+                "unreadable_tags",
+                &self
+                    .unreadable
+                    .iter()
+                    .map(|(tag, _)| *tag)
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
 
 impl AccountSettingsRecord {
     /// The matching section (the default when the record has no tag `0x0001`).
-    #[must_use]
-    pub const fn matching(&self) -> &MatchingSettings {
-        &self.matching
+    ///
+    /// # Errors
+    /// [`ClientError::SettingsUnreadable`] while tag `0x0001` is unreadable (ADR 0097 §4.3:
+    /// matching then uses [`crate::matching::decide_fail_closed`], never a default).
+    pub fn matching(&self) -> Result<&MatchingSettings, ClientError> {
+        self.readable(TAG_MATCHING)?;
+        Ok(&self.matching)
     }
 
     /// The identity generator's defaults (tag `0x0004`), if set (ADR 0079 Open question 7).
-    #[must_use]
-    pub const fn identity_defaults(&self) -> Option<&IdentityDefaults> {
-        self.identity_defaults.as_ref()
+    ///
+    /// # Errors
+    /// [`ClientError::SettingsUnreadable`] while tag `0x0004` is unreadable.
+    pub fn identity_defaults(&self) -> Result<Option<&IdentityDefaults>, ClientError> {
+        self.readable(TAG_IDENTITY_DEFAULTS)?;
+        Ok(self.identity_defaults.as_ref())
+    }
+
+    /// Every recognised tag whose section is unreadable, ascending (ADR 0097 §1 (c)). A host
+    /// offers [`SettingsEdit::ResetSection`] for `0x0001` and `0x0004` among them (§4.5).
+    pub fn unreadable_sections(&self) -> impl Iterator<Item = u16> + '_ {
+        self.unreadable.iter().map(|(tag, _)| *tag)
+    }
+
+    /// `Err(SettingsUnreadable)` while section `tag` is unreadable.
+    fn readable(&self, tag: u16) -> Result<(), ClientError> {
+        if self.unreadable.iter().any(|(t, _)| *t == tag) {
+            return Err(ClientError::SettingsUnreadable);
+        }
+        Ok(())
     }
 
     /// The website-icons setting this record holds ([ADR 0099] §1): on for `0x01` and for an
     /// absent tag (the default), off for `0x00`. A record that could not be read has no
-    /// setting at all; [`IconsSetting::from_read`] reads it off.
+    /// setting at all; [`IconsSetting::from_read`] reads it off. An unreadable tag `0x0005`
+    /// reads off too (ADR 0097 §1 (c)).
     ///
     /// [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
     #[must_use]
-    pub const fn website_icons(&self) -> IconsSetting {
-        IconsSetting::of(!matches!(self.website_icons, Some(false)))
+    pub fn website_icons(&self) -> IconsSetting {
+        IconsSetting::of(
+            self.readable(TAG_WEBSITE_ICONS).is_ok() && !matches!(self.website_icons, Some(false)),
+        )
     }
 
     /// The vault directory (tag `0x0002`, ADR 0081 §A2), if the record holds one.
-    #[must_use]
-    pub const fn vault_directory(&self) -> Option<&VaultDirectory> {
-        self.directory.as_ref()
+    ///
+    /// # Errors
+    /// [`ClientError::SettingsUnreadable`] while tag `0x0002` is unreadable (ADR 0097 §4.4: no
+    /// vault change is built on it, and §4.5 offers no reset).
+    pub fn vault_directory(&self) -> Result<Option<&VaultDirectory>, ClientError> {
+        self.readable(TAG_VAULT_DIRECTORY)?;
+        Ok(self.directory.as_ref())
     }
 
     /// This record with `directory` as its vault directory (ADR 0081 §A3, §A5, §A10).
@@ -186,18 +237,26 @@ impl AccountSettingsRecord {
 
     /// Decodes a plaintext (module docs).
     ///
+    /// The bytes already opened under the account key and matched the signed `settings_hash`,
+    /// so a problem in them is never a server failure ([ADR 0097] §1, ADR 0042 §2 as replaced):
+    /// an outer layout violation makes the whole record unreadable; a recognised tag whose value
+    /// breaks that tag's own layout is kept verbatim as an unreadable section, and every other
+    /// tag reads normally.
+    ///
     /// # Errors
-    /// [`ClientError::SettingsUpdateRequired`] for a `format_version` other than 1;
-    /// [`ClientError::InvalidServerResponse`] for every other violation.
+    /// [`ClientError::SettingsUpdateRequired`] for a `format_version` other than 1 (parked);
+    /// [`ClientError::SettingsUnreadable`] for every outer violation (unreadable record).
+    ///
+    /// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
     pub fn decode(plaintext: &[u8]) -> Result<Self, ClientError> {
-        let bad = |_| ClientError::InvalidServerResponse;
+        let bad = |_| ClientError::SettingsUnreadable;
         let mut r = Reader::new(plaintext);
         if r.u16().map_err(bad)? != FORMAT_VERSION {
             return Err(ClientError::SettingsUpdateRequired);
         }
         let n = r.u16().map_err(bad)?;
         if n > MAX_SETTINGS_ENTRIES {
-            return Err(ClientError::InvalidServerResponse);
+            return Err(ClientError::SettingsUnreadable);
         }
         let mut record = Self::default();
         let mut previous: Option<u16> = None;
@@ -205,27 +264,35 @@ impl AccountSettingsRecord {
             let tag = r.u16().map_err(bad)?;
             let value = r.bytes_max(MAX_SETTINGS_ENTRY_LEN).map_err(bad)?;
             if tag == TAG_INVALID || tag == TAG_RESERVED || previous.is_some_and(|p| tag <= p) {
-                return Err(ClientError::InvalidServerResponse);
+                return Err(ClientError::SettingsUnreadable);
             }
             previous = Some(tag);
-            if tag == TAG_MATCHING {
-                record.matching = MatchingSettings::decode(value)
-                    .map_err(|_| ClientError::InvalidServerResponse)?;
-                record.matching_present = true;
-            } else if tag == TAG_VAULT_DIRECTORY {
-                record.directory = Some(VaultDirectory::decode(value)?);
-            } else if tag == TAG_WEBSITE_ICONS {
-                record.website_icons = Some(match value {
-                    [0x00] => false,
-                    [0x01] => true,
-                    _ => return Err(ClientError::InvalidServerResponse),
-                });
-            } else if tag == TAG_IDENTITY_DEFAULTS {
-                record.identity_defaults = Some(
-                    IdentityDefaults::decode(value).ok_or(ClientError::InvalidServerResponse)?,
-                );
-            } else {
-                record.unknown.push((tag, Zeroizing::new(value.to_vec())));
+            let read = match tag {
+                TAG_MATCHING => MatchingSettings::decode(value).ok().map(|m| {
+                    record.matching = m;
+                    record.matching_present = true;
+                }),
+                TAG_VAULT_DIRECTORY => VaultDirectory::decode(value)
+                    .ok()
+                    .map(|d| record.directory = Some(d)),
+                TAG_WEBSITE_ICONS => match value {
+                    [0x00] => Some(false),
+                    [0x01] => Some(true),
+                    _ => None,
+                }
+                .map(|on| record.website_icons = Some(on)),
+                TAG_IDENTITY_DEFAULTS => {
+                    IdentityDefaults::decode(value).map(|d| record.identity_defaults = Some(d))
+                }
+                _ => {
+                    record.unknown.push((tag, Zeroizing::new(value.to_vec())));
+                    Some(())
+                }
+            };
+            if read.is_none() {
+                record
+                    .unreadable
+                    .push((tag, Zeroizing::new(value.to_vec())));
             }
         }
         r.finish().map_err(bad)?;
@@ -247,6 +314,7 @@ impl AccountSettingsRecord {
         let mut entries: Vec<(u16, &[u8])> = self
             .unknown
             .iter()
+            .chain(&self.unreadable)
             .map(|(tag, value)| (*tag, value.as_slice()))
             .collect();
         if let Some(m) = &matching {
@@ -288,16 +356,37 @@ impl AccountSettingsRecord {
         Ok(out)
     }
 
-    /// Applies one resolved edit: to the matching section, or the identity defaults.
+    /// Applies one resolved edit: to the matching section, the identity defaults or the
+    /// website-icons switch. An edit of an unreadable section is refused, and a reset applies
+    /// only to one (ADR 0097 §4.4–§4.5).
     fn apply(&mut self, edit: &Edit) -> Result<(), ClientError> {
+        if let Edit::Reset(tag) = edit {
+            let before = self.unreadable.len();
+            self.unreadable.retain(|(t, _)| t != tag);
+            if self.unreadable.len() == before {
+                // Readable (perhaps repaired by another device before a CAS restart): a reset
+                // never overwrites a readable section (§4.5).
+                return Err(ClientError::InvalidInput);
+            }
+            if *tag == TAG_MATCHING {
+                self.matching = MatchingSettings::default();
+                self.matching_present = true;
+            } else {
+                self.identity_defaults = None;
+            }
+            return Ok(());
+        }
         if let Edit::IdentityDefaults(d) = edit {
+            self.readable(TAG_IDENTITY_DEFAULTS)?;
             self.identity_defaults = Some(d.clone());
             return Ok(());
         }
         if let Edit::WebsiteIcons(on) = edit {
+            self.readable(TAG_WEBSITE_ICONS)?;
             self.website_icons = Some(*on);
             return Ok(());
         }
+        self.readable(TAG_MATCHING)?;
         let m = &mut self.matching;
         match edit {
             Edit::Default(mode) => m.set_match_default(*mode).map_err(edit_error)?,
@@ -318,7 +407,7 @@ impl AccountSettingsRecord {
                     return Err(ClientError::InvalidInput);
                 }
             }
-            Edit::IdentityDefaults(_) | Edit::WebsiteIcons(_) => return Ok(()),
+            Edit::IdentityDefaults(_) | Edit::WebsiteIcons(_) | Edit::Reset(_) => return Ok(()),
         }
         self.matching_present = true;
         Ok(())
@@ -343,8 +432,9 @@ const fn edit_error(e: MatchingSettingsError) -> ClientError {
 /// # Errors
 /// [`ClientError::InvalidInput`] for another account's `unlocked`;
 /// [`ClientError::AccountKeyRotated`] if `unlocked` holds an older account key than the state
-/// names; [`ClientError::InvalidServerResponse`] if the envelope is missing or does not open, or
-/// the record is rejected; [`ClientError::SettingsUpdateRequired`].
+/// names; [`ClientError::InvalidServerResponse`] if the envelope is missing or does not open;
+/// [`ClientError::SettingsUnreadable`] for an unreadable record;
+/// [`ClientError::SettingsUpdateRequired`] for a parked one.
 pub fn account_settings(
     account: &VerifiedAccount,
     unlocked: &UnlockedDevice,
@@ -451,6 +541,14 @@ pub enum SettingsEdit {
     ///
     /// [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
     SetWebsiteIcons(bool),
+    /// Resets an unreadable section ([ADR 0097] §4.5): tag `0x0001` becomes the default section
+    /// (`00 01 00 00 00 00`: *Base domain*, nothing disabled, no user groups); tag `0x0004` is
+    /// removed, so the generator's built-in defaults apply. Allowed only for these two tags and
+    /// only while that section is unreadable; anything else is [`ClientError::InvalidInput`]. A
+    /// host shows ADR 0097 §4.5's confirmation before it submits one.
+    ///
+    /// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
+    ResetSection(u16),
 }
 
 /// A [`SettingsEdit`] with its random parts drawn, so a restart redoes exactly the same edit.
@@ -470,6 +568,8 @@ enum Edit {
     IdentityDefaults(IdentityDefaults),
     /// Set the website-icons switch.
     WebsiteIcons(bool),
+    /// Reset this unreadable section (`0x0001` or `0x0004`).
+    Reset(u16),
 }
 
 impl fmt::Debug for Edit {
@@ -483,6 +583,7 @@ impl fmt::Debug for Edit {
             Self::Enable(_) => "Edit::Enable",
             Self::IdentityDefaults(_) => "Edit::IdentityDefaults",
             Self::WebsiteIcons(_) => "Edit::WebsiteIcons",
+            Self::Reset(_) => "Edit::Reset",
         })
     }
 }
@@ -506,6 +607,10 @@ impl Edit {
             SettingsEdit::EnableGlobalGroup(id) => Self::Enable(id),
             SettingsEdit::SetIdentityDefaults(d) => Self::IdentityDefaults(d),
             SettingsEdit::SetWebsiteIcons(on) => Self::WebsiteIcons(on),
+            SettingsEdit::ResetSection(tag @ (TAG_MATCHING | TAG_IDENTITY_DEFAULTS)) => {
+                Self::Reset(tag)
+            }
+            SettingsEdit::ResetSection(_) => return Err(ClientError::InvalidInput),
         })
     }
 }
@@ -538,9 +643,11 @@ impl fmt::Debug for PendingSettingsChange {
 /// applies `edit`, and builds the commit.
 ///
 /// # Errors
-/// As [`account_settings`] (a rejected or parked record blocks every write);
+/// As [`account_settings`] (an unreadable or parked record blocks every write);
+/// [`ClientError::SettingsUnreadable`] for an edit of an unreadable section (ADR 0097 §4.4);
 /// [`ClientError::InvalidInput`] for an edit that changes nothing (removing a group that is not
-/// there, disabling a disabled group, enabling an enabled one), a typed domain that does not
+/// there, disabling a disabled group, enabling an enabled one, resetting a readable section or a
+/// tag other than `0x0001` and `0x0004`), a typed domain that does not
 /// normalise, or a group of fewer than 2 or more than 64 domains;
 /// [`ClientError::EquivalenceDomainRejected`] for a public suffix or a subdomain;
 /// [`ClientError::SettingsLimitReached`]; [`ClientError::Internal`].
@@ -565,7 +672,8 @@ fn build<R: CryptoRng + ?Sized>(
     record.apply(&edit)?;
     // ADR 0081 §A10: an account without a directory gets one with its next settings write,
     // when the legacy rule names its Personal vault (exactly one self-grant).
-    if record.vault_directory().is_none()
+    // An unreadable directory is never replaced: its bytes go back unchanged (ADR 0097 §4.4).
+    if matches!(record.vault_directory(), Ok(None))
         && let [personal] = account.served_vault_ids().as_slice()
     {
         record.set_vault_directory(VaultDirectory::personal_only(*personal));

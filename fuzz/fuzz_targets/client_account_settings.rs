@@ -8,14 +8,18 @@
 //!
 //! For each input:
 //!
-//! - neither parser panics; the record parser fails only with `invalid_server_response` (a
-//!   rejected record) or `settings_update_required` (`format_version ≠ 1`, parked);
+//! - neither parser panics; the record parser fails only with `settings_unreadable` (an
+//!   unreadable record) or `settings_update_required` (`format_version ≠ 1`, parked), never
+//!   with `invalid_server_response` (ADR 0097 §1, §4.6); a recognised tag that breaks its own
+//!   layout is an unreadable section of a record that parses;
 //! - one value has one encoding: whatever parses encodes back to the input, byte for byte, and
 //!   parses again to the same value (ADR 0042 §8: encode → decode → encode is the identity);
 //! - a parsed record stays within the bounds of ADR 0042 §3–§4: at most 64 user groups, at most
 //!   1,024 disabled ids, every user group with `flag_third_party_hostable = 0x00`;
 //! - every edit the host can make on a parsed record either is refused with a stable error or
 //!   leaves a record that encodes and parses back to itself, with every unknown tag carried;
+//!   inert user groups and unreadable sections survive every edit byte for byte (ADR 0097
+//!   §4.2, §4.4);
 //! - the website-icons switch (tag `0x0005`, ADR 0099 §1) is never an unknown tag, reads off only
 //!   from an explicit one-byte `0x00` entry, and reads off for every record that does not parse.
 //!
@@ -59,12 +63,19 @@ fuzz_target!(|data: &[u8]| {
             assert!(!IconsSetting::from_read(Err(e)).is_on());
             assert!(matches!(
                 e,
-                ClientError::InvalidServerResponse | ClientError::SettingsUpdateRequired
+                ClientError::SettingsUnreadable | ClientError::SettingsUpdateRequired
             ));
             return;
         }
     };
-    assert_bounds(record.matching());
+    let unreadable: Vec<u16> = record.unreadable_sections().collect();
+    match record.matching() {
+        Ok(m) => assert_bounds(m),
+        Err(e) => {
+            assert_eq!(e, ClientError::SettingsUnreadable);
+            assert!(unreadable.contains(&0x0001));
+        }
+    }
     let encoded = record.encode().expect("a parsed record encodes");
     assert_eq!(encoded.as_slice(), data, "one encoding per record");
     let again = AccountSettingsRecord::decode(&encoded).expect("and parses again");
@@ -80,7 +91,12 @@ fuzz_target!(|data: &[u8]| {
 
     // The edits a host makes, on the parsed section (the record applies them the same way).
     let unknown: Vec<u16> = record.unknown_tags().collect();
-    let mut m = record.matching().clone();
+    let Ok(m) = record.matching() else {
+        assert_eq!(again.unreadable_sections().collect::<Vec<_>>(), unreadable);
+        return;
+    };
+    let inert = m.inert_groups().to_vec();
+    let mut m = m.clone();
     let _ = m.set_match_default(MatchMode::Exact);
     let _ = m.disable_global(GroupId::from_bytes([0x5a; 16]));
     let _ = m.enable_global(GroupId::from_bytes([0x5a; 16]));
@@ -91,7 +107,9 @@ fuzz_target!(|data: &[u8]| {
         let _ = m.remove_user_group(first);
     }
     assert_bounds(&m);
+    assert!(m.inert_groups() == inert.as_slice(), "inert groups survive every edit");
     let bytes = m.encode().expect("an edited section encodes");
     assert_eq!(MatchingSettings::decode(&bytes).as_ref(), Ok(&m));
     assert_eq!(again.unknown_tags().collect::<Vec<_>>(), unknown);
+    assert_eq!(again.unreadable_sections().collect::<Vec<_>>(), unreadable);
 });

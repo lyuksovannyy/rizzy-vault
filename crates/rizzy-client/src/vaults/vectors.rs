@@ -241,17 +241,21 @@ fn the_settings_record_carries_the_directory_and_keeps_tag_0x0003() {
     plaintext.extend_from_slice(&[0, 3, 0, 0, 0, 2, 0xc0, 0xde]);
     let record = AccountSettingsRecord::decode(&plaintext).unwrap();
     assert_eq!(
-        record.vault_directory().unwrap(),
+        record.vault_directory().unwrap().unwrap(),
         &VaultDirectory::decode(&dir).unwrap()
     );
     assert_eq!(record.unknown_tags().collect::<Vec<_>>(), vec![3]);
     assert_eq!(record.encode().unwrap().as_slice(), plaintext.as_slice());
-    // A violation inside the tag rejects the whole record, as ADR 0042 §2 does.
+    // A violation inside the tag makes only that section unreadable (ADR 0097 §1 (c)): the
+    // record reads, the directory is `settings_unreadable`, and its bytes go back unchanged.
     let mut broken = plaintext.clone();
     let at = 4 + 2 + 4 + 3 + 16;
     broken[at] = 0;
+    let record = AccountSettingsRecord::decode(&broken).unwrap();
     assert_eq!(
-        AccountSettingsRecord::decode(&broken),
-        Err(ClientError::InvalidServerResponse)
+        record.vault_directory(),
+        Err(ClientError::SettingsUnreadable)
     );
+    assert_eq!(record.unknown_tags().collect::<Vec<_>>(), vec![3]);
+    assert_eq!(record.encode().unwrap().as_slice(), broken.as_slice());
 }

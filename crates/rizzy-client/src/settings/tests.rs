@@ -28,7 +28,7 @@ fn edits_that_change_nothing_are_refused() {
         ClientError::InvalidInput
     );
     record.apply(&Edit::Enable(id)).unwrap();
-    assert!(record.matching().disabled_global().is_empty());
+    assert!(record.matching().unwrap().disabled_global().is_empty());
     // The tag stays present once written, even back at the defaults, so the bytes round-trip.
     assert_eq!(
         record.encode().unwrap().as_slice(),

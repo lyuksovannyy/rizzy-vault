@@ -798,13 +798,13 @@ fn identity_defaults_encode_to_the_open_question_7_layout() {
     }
 
     // Inside a record: decoded as a recognised tag, re-encoded byte for byte, and a violation
-    // inside it rejects the whole record (ADR 0042 §2).
+    // inside it makes only that section unreadable, kept verbatim (ADR 0097 §1 (c)).
     let mut record = vec![0, 1, 0, 1, 0x00, 0x04];
     record.extend_from_slice(&u32::try_from(bytes.len()).unwrap().to_be_bytes());
     record.extend_from_slice(&bytes);
     let decoded = AccountSettingsRecord::decode(&record).unwrap();
     assert_eq!(
-        decoded.identity_defaults(),
+        decoded.identity_defaults().unwrap(),
         IdentityDefaults::decode(&bytes).as_ref()
     );
     assert_eq!(decoded.unknown_tags().count(), 0);
@@ -812,10 +812,12 @@ fn identity_defaults_encode_to_the_open_question_7_layout() {
     let mut broken = record.clone();
     let last = broken.len() - 1;
     broken[last] = b'-';
+    let unreadable = AccountSettingsRecord::decode(&broken).unwrap();
     assert_eq!(
-        AccountSettingsRecord::decode(&broken),
-        Err(crate::ClientError::InvalidServerResponse)
+        unreadable.identity_defaults(),
+        Err(crate::ClientError::SettingsUnreadable)
     );
+    assert_eq!(unreadable.encode().unwrap().as_slice(), broken.as_slice());
 }
 
 // --- the embedded data (ADR 0079 §5, §12 "Data tests") ----------------------------------------

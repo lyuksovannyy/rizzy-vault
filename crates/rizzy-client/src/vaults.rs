@@ -182,14 +182,16 @@ impl VaultCatalog {
     ///
     /// # Errors
     /// As [`account_settings`]: a record this build cannot read fails the call
-    /// ([`ClientError::SettingsUpdateRequired`], [`ClientError::InvalidServerResponse`]).
+    /// ([`ClientError::SettingsUpdateRequired`], [`ClientError::SettingsUnreadable`],
+    /// [`ClientError::InvalidServerResponse`]); so does an unreadable directory section
+    /// ([`ClientError::SettingsUnreadable`], ADR 0097 §1 (c)).
     pub fn of_account(
         account: &VerifiedAccount,
         unlocked: &UnlockedDevice,
     ) -> Result<Self, ClientError> {
         let record = account_settings(account, unlocked)?;
         Ok(Self::check(
-            record.vault_directory(),
+            record.vault_directory()?,
             &account.served_vault_ids(),
         ))
     }
@@ -256,12 +258,14 @@ fn current_directory(
     record: &AccountSettingsRecord,
     account: &VerifiedAccount,
 ) -> Result<VaultDirectory, ClientError> {
+    // An unreadable directory (ADR 0097 §4.4) is `settings_unreadable`: no change built on it.
+    let held = record.vault_directory()?;
     let served = account.served_vault_ids();
-    let catalog = VaultCatalog::check(record.vault_directory(), &served);
+    let catalog = VaultCatalog::check(held, &served);
     if !catalog.alarms().is_empty() {
         return Err(ClientError::VaultSetMismatch);
     }
-    match record.vault_directory() {
+    match held {
         Some(d) => Ok(d.clone()),
         None => catalog
             .personal()

@@ -71,8 +71,8 @@ use rizzy_client::icons::IconsSetting;
 use rizzy_client::items::{Dot, FieldEdit, ItemId, TRASH_RETENTION_MS};
 use rizzy_client::login::WebSession;
 use rizzy_client::matching::{
-    EquivalenceGroup, FrameContext, ItemUri, SavedUri, decide_with_settings,
-    global_equivalence_groups, vault_item_uris,
+    EquivalenceGroup, FrameContext, ItemUri, SavedUri, decide_fail_closed, decide_with_settings,
+    fails_closed, global_equivalence_groups, vault_item_uris,
 };
 use rizzy_client::passkey::{PasskeySigningKey, get_assertion_with};
 use rizzy_client::rizzy_core::ids::{AccountId, AttachmentId};
@@ -1855,13 +1855,15 @@ impl Session {
     ///
     /// # Errors
     /// `locked`; `settings_update_required` for settings a newer rizzy-vault wrote;
-    /// `invalid_server_response` for settings that do not open or parse; `account_key_rotated`.
+    /// `settings_unreadable` for settings, or a matching section, another device wrote
+    /// incorrectly (ADR 0097 §4.6); `invalid_server_response` for settings that do not open;
+    /// `account_key_rotated`.
     #[wasm_bindgen(js_name = matchSettings)]
     pub fn match_settings(&mut self) -> Result<MatchSettingsView, CoreError> {
         let inner = self.inner_mut()?;
         let record = inner.settings.get(&inner.account, &inner.unlocked)?;
         Ok(matching::settings_view(
-            record.matching(),
+            record.matching()?,
             &inner.global_groups,
         ))
     }
@@ -1871,11 +1873,17 @@ impl Session {
     /// settings screen uses it to show what a change does.
     ///
     /// # Errors
-    /// `locked`; as [`Session::match_settings`]; `invalid_input` if `page_url` does not parse.
+    /// `locked`; as [`Session::match_settings`], except that unreadable or parked settings
+    /// decide under the fail-closed view (ADR 0097 §4.3) with its warning; `invalid_input` if
+    /// `page_url` does not parse.
     #[wasm_bindgen(js_name = matchCandidates)]
     pub fn match_candidates(&mut self, page_url: &str) -> Result<MatchDecision, CoreError> {
         let inner = self.inner_mut()?;
-        let record = inner.settings.get(&inner.account, &inner.unlocked)?;
+        let record = match inner.settings.get(&inner.account, &inner.unlocked) {
+            Ok(record) => Some(record),
+            Err(e) if fails_closed(&e) => None,
+            Err(e) => return Err(e.into()),
+        };
         // ADR 0081 §A7: every vault's items; the matcher keys by a stand-in id per URI, mapped
         // back to the item reference (`matching::synthetic_id`, INV-103).
         let mut names = Vec::new();
@@ -1893,7 +1901,12 @@ impl Session {
             is_top_frame: true,
             frame_origin: page_url,
         };
-        let decision = decide_with_settings(page_url, &frame, &uris, record, &inner.global_groups)?;
+        let decision = match record {
+            Some(record) => {
+                decide_with_settings(page_url, &frame, &uris, record, &inner.global_groups)?
+            }
+            None => decide_fail_closed(page_url, &frame, &uris)?,
+        };
         Ok(matching::decision_view_named(decision, &names))
     }
 
@@ -1907,7 +1920,7 @@ impl Session {
         let inner = self.inner_mut()?;
         let record = inner.settings.get(&inner.account, &inner.unlocked)?;
         Ok(record
-            .identity_defaults()
+            .identity_defaults()?
             .cloned()
             .map(IdentityDefaultsView::new))
     }

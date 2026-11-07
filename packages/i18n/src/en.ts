@@ -88,6 +88,8 @@ export const en = {
   "errors.wrong_state": "That step is not possible now.",
   "errors.already_shown": "The Emergency Kit can be shown only once.",
   "errors.core_crashed": "The vault core stopped. Reload the page and log in again.",
+  "errors.settings_unreadable":
+    "The account's settings could not be read; another device may have written them incorrectly. Autofill uses only addresses with their own match rule until they are reset.",
   "errors.settings_update_required":
     "This account's settings were saved by a newer rizzy-vault. Update to read or change them; autofill matching is off until then.",
   "errors.equivalence_domain_rejected":

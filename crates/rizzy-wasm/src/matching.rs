@@ -389,7 +389,9 @@ fn decision_view_with(
 
 /// [`decide_match_candidates`] under an account's own settings (ADR 0042 §6;
 /// `rizzy_client::matching::decide_with_settings`): every URI mode `0x0000` resolves to the
-/// account's match default, and the merged view takes its disabled and user groups.
+/// account's match default, and the merged view takes its disabled and user groups. `None` is
+/// a settings read that fails closed (`rizzy_client::matching::fails_closed`): the fail-closed
+/// view of ADR 0097 §4.3, with its warning.
 ///
 /// # Errors
 /// As [`decide_match_candidates`].
@@ -398,7 +400,7 @@ pub(crate) fn decide_with_account(
     is_top_frame: bool,
     frame_origin: &str,
     uris: &[UriInput],
-    settings: &AccountSettingsRecord,
+    settings: Option<&AccountSettingsRecord>,
     global: &[EquivalenceGroup],
 ) -> Result<MatchDecision, CoreError> {
     let mut owned_ids = Vec::with_capacity(uris.len());
@@ -428,7 +430,12 @@ pub(crate) fn decide_with_account(
         is_top_frame,
         frame_origin,
     };
-    let decision = matching::decide_with_settings(page_url, &frame, &item_uris, settings, global)?;
+    let decision = match settings {
+        Some(settings) => {
+            matching::decide_with_settings(page_url, &frame, &item_uris, settings, global)?
+        }
+        None => matching::decide_fail_closed(page_url, &frame, &item_uris)?,
+    };
     Ok(decision_view_named(decision, &names))
 }
 
@@ -836,7 +843,7 @@ mod tests {
             true,
             "",
             &saved("https://example.com/", 0x0000),
-            &with_group,
+            Some(&with_group),
             &[],
         )
         .unwrap();
@@ -862,7 +869,7 @@ mod tests {
             true,
             "",
             &saved("https://example.com/", 0x0000),
-            &host,
+            Some(&host),
             &[],
         )
         .unwrap();
@@ -873,7 +880,7 @@ mod tests {
             true,
             "",
             &saved("https://example.com/", 0x0001),
-            &host,
+            Some(&host),
             &[],
         )
         .unwrap();
@@ -883,7 +890,7 @@ mod tests {
     #[test]
     fn the_settings_view_lists_groups_and_disabled_ids() {
         let record = AccountSettingsRecord::decode(&unhex(&WITH_GROUP.replace(' ', ""))).unwrap();
-        let view = settings_view(record.matching(), &[]);
+        let view = settings_view(record.matching().unwrap(), &[]);
         assert_eq!(view.match_default(), 0x0001);
         assert_eq!(view.user_groups().len(), 1);
         assert_eq!(view.user_groups()[0].id(), "a0".repeat(16));

@@ -1563,9 +1563,11 @@ impl DeviceSession {
     /// once per `ACCOUNT_SETTINGS` object (`rizzy_client::settings::SettingsCache`).
     ///
     /// # Errors
-    /// `settings_update_required` or `invalid_server_response` for settings this build cannot
-    /// read: no candidate is offered under settings it could not apply; `account_key_rotated`;
-    /// `invalid_input` as the free `decideMatchCandidates`.
+    /// `invalid_server_response` for settings that do not open; `account_key_rotated`;
+    /// `invalid_input` as the free `decideMatchCandidates`. Unreadable or parked settings
+    /// (`settings_unreadable`, `settings_update_required`) never fail the call: it decides under
+    /// the fail-closed view of ADR 0097 §4.3 (default *Never*, no site group) and adds its
+    /// warning, so no candidate is offered under settings this build could not apply.
     #[wasm_bindgen(js_name = decideMatchCandidates)]
     #[expect(
         clippy::needless_pass_by_value,
@@ -1578,7 +1580,11 @@ impl DeviceSession {
         frame_origin: &str,
         uris: Vec<UriInput>,
     ) -> Result<MatchDecision, CoreError> {
-        let settings = self.settings.get(&self.account, &self.unlocked)?;
+        let settings = match self.settings.get(&self.account, &self.unlocked) {
+            Ok(settings) => Some(settings),
+            Err(e) if rizzy_client::matching::fails_closed(&e) => None,
+            Err(e) => return Err(e.into()),
+        };
         matching::decide_with_account(
             page_url,
             is_top_frame,
@@ -1592,12 +1598,14 @@ impl DeviceSession {
     /// The account's matching settings, against this build's global list.
     ///
     /// # Errors
-    /// As [`DeviceSession::decide_match_candidates`].
+    /// `settings_update_required`, `settings_unreadable` (a record or matching section another
+    /// device wrote incorrectly, ADR 0097 §4.6), `invalid_server_response`,
+    /// `account_key_rotated`.
     #[wasm_bindgen(js_name = matchSettings)]
     pub fn match_settings(&mut self) -> Result<MatchSettingsView, CoreError> {
         let settings = self.settings.get(&self.account, &self.unlocked)?;
         Ok(matching::settings_view(
-            settings.matching(),
+            settings.matching()?,
             &self.global_groups,
         ))
     }

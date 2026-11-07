@@ -251,7 +251,7 @@ impl Session {
             served.retain(|v| *v != vault_id);
         }
         let record = inner.settings.get(&inner.account, &inner.unlocked)?;
-        let catalog = VaultCatalog::check(record.vault_directory(), &served);
+        let catalog = VaultCatalog::check(record.vault_directory()?, &served);
         if let Some(created) = created {
             inner.vaults.add_key(created.key, &inner.unlocked)?;
             inner.vaults.set_catalog(catalog);

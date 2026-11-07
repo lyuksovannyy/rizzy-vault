@@ -175,6 +175,15 @@ pub enum ClientError {
     /// unknown `item_schema_version`"). Matching uses no account setting and no settings
     /// write is made until the client is updated.
     SettingsUpdateRequired,
+    /// The account settings, or the one section an operation needs, opened and matched the
+    /// signed `settings_hash` but break their own layout, so another of the account's devices
+    /// wrote them incorrectly ([ADR 0097] §4.6; ADR 0042 §2 as replaced by ADR 0097 §1). Never a
+    /// server failure. Matching uses the fail-closed view (ADR 0097 §4.3), and no write of that
+    /// section is built until it is reset (`SettingsEdit::ResetSection`, where §4.5 allows one).
+    /// Carries no setting value.
+    ///
+    /// [ADR 0097]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0097-website-matching-corrections.md
+    SettingsUnreadable,
     /// A domain of a new user-defined equivalence group is not a registrable domain: a bare
     /// public suffix (`co.uk`, `github.io`) or a subdomain (`www.example.com`) (ADR 0042 §4).
     /// Nothing was written.
@@ -283,6 +292,7 @@ impl ClientError {
             Self::DeviceStateOutdated => "device_state_outdated",
             Self::SetupRetired => "setup_retired",
             Self::SettingsUpdateRequired => "settings_update_required",
+            Self::SettingsUnreadable => "settings_unreadable",
             Self::EquivalenceDomainRejected => "equivalence_domain_rejected",
             Self::SettingsLimitReached => "settings_limit_reached",
             Self::AttachmentTooLarge => "attachment_too_large",
@@ -305,6 +315,10 @@ impl ClientError {
 }
 
 impl fmt::Display for ClientError {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per error variant, kept in one table so every code has one message"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::InvalidInput => "the input is not acceptable",
@@ -375,6 +389,9 @@ impl fmt::Display for ClientError {
             }
             Self::SettingsUpdateRequired => {
                 "the account settings were written by a newer rizzy-vault; update required"
+            }
+            Self::SettingsUnreadable => {
+                "the account's settings could not be read; another device may have written them incorrectly"
             }
             Self::EquivalenceDomainRejected => {
                 "a group domain must be a registrable domain, not a public suffix or a subdomain"
@@ -466,6 +483,7 @@ mod tests {
             ClientError::DeviceStateOutdated,
             ClientError::SetupRetired,
             ClientError::SettingsUpdateRequired,
+            ClientError::SettingsUnreadable,
             ClientError::EquivalenceDomainRejected,
             ClientError::SettingsLimitReached,
             ClientError::AttachmentTooLarge,

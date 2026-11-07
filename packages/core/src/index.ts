@@ -2537,7 +2537,8 @@ export class VaultSession {
   }
 
   /** The account's matching settings (ADR 0037 §6–§7, ADR 0042): `settings_update_required` when a
-   * newer rizzy-vault wrote them, `invalid_server_response` when they do not read. */
+   * newer rizzy-vault wrote them, `settings_unreadable` when another device wrote them (or their
+   * matching section) incorrectly (ADR 0097 §4.6), `invalid_server_response` when they do not open. */
   matchSettings(): MatchSettings {
     const s = this.#s();
     return matchSettingsOf(call(() => s.matchSettings()));
@@ -4255,9 +4256,11 @@ export class DurableSession {
    * Decides which of `itemUris` are autofill candidates for `pageUrl`, requested by `frame`
    * (ADR 0037 §4, §5), under this account's own settings (ADR 0042 §6): a URI whose mode is
    * {@link MatchMode.AccountDefault} uses the account's match default, and the account's
-   * disabled global groups and user-defined groups shape the equivalence view. Settings this
-   * build cannot read fail the call (`settings_update_required`, `invalid_server_response`): no
-   * candidate is offered under settings the core could not apply.
+   * disabled global groups and user-defined groups shape the equivalence view. Settings that do
+   * not open fail the call (`invalid_server_response`). Unreadable or parked settings
+   * (`settings_unreadable`, `settings_update_required`) decide under the fail-closed view of
+   * ADR 0097 §4.3 (account default *Never*, no site group) and add its warning: no candidate is
+   * offered under settings the core could not apply.
    */
   decideMatchCandidates(
     pageUrl: string,
