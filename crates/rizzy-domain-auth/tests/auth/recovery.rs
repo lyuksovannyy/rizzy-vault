@@ -105,12 +105,14 @@ fn recovery_wait_cancel_release_and_commit() {
         )
         .unwrap();
         assert!(state.matches_account_key(&key));
-        // It may be repeated until the commit.
-        env.svc
+        // It may be repeated until the commit; each repeat's session ends the one before
+        // (INV-122), so the commit rides the latest.
+        let again = env
+            .svc
             .recovery_complete(&mut env.rng, "ivy", &token, &source, env.now)
             .await
             .unwrap();
-        let recovery_session = env.bearer(&release.session_token).await;
+        let recovery_session = env.bearer(&again.session_token).await;
 
         // A recovery session commits nothing but a recovery.
         let bare = AccountChange::<Vec<rizzy_proto::objects::VaultSelfGrant>> {
@@ -413,6 +415,128 @@ fn recovery_wraps_takes_the_recovery_session_only() {
                 .recovery_wraps(&device_session, &request, env.now)
                 .await,
             Err(AuthError::FreshSessionRequired)
+        ));
+    });
+}
+
+/// INV-122 (ADR 0108 §1): a `recovery/complete` that issues a recovery-only session ends the
+/// account's earlier one in the same transaction, so a recovery commit still in transit over
+/// the first session answers `Unauthorized` once the second complete was answered, and the
+/// same body over the second session commits. On both storage backends.
+#[test]
+fn a_second_recovery_complete_ends_the_first_recovery_session() {
+    block_on(async {
+        let mut env = Env::on_either_engine(47, |_| {}).await;
+        let mut client = env.signup("uma", "forgotten").await;
+        let token = client.recovery_token();
+        let source = env.source.clone();
+        env.svc
+            .recovery_start("uma", &token, &source, env.now)
+            .await
+            .unwrap();
+        env.tick(WAIT);
+        let first = env
+            .svc
+            .recovery_complete(&mut env.rng, "uma", &token, &source, env.now)
+            .await
+            .unwrap();
+        let s1 = env.bearer(&first.session_token).await;
+        let second = env
+            .svc
+            .recovery_complete(&mut env.rng, "uma", &token, &source, env.now)
+            .await
+            .unwrap();
+        let s2 = env.bearer(&second.session_token).await;
+        // The first session no longer authenticates.
+        assert!(
+            env.svc
+                .authenticate_request(
+                    first.session_token.expose_secret(),
+                    None,
+                    crate::common::request(b"{}"),
+                    env.now
+                )
+                .await
+                .is_err()
+        );
+
+        // One recovery commit body, built as the client of the first session would have.
+        let new_sk = SecretKey::generate(&mut env.rng);
+        let pw_in = PasswordInput::derive_for_new_password("remembered", &new_sk).unwrap();
+        let (reg_state, m1) = client_registration_start(&mut env.rng, &pw_in).unwrap();
+        let (setup_id, m2) = env
+            .svc
+            .reregister_start(&s2, &bytes(m1), env.now)
+            .await
+            .unwrap();
+        let reg = client_registration_finish(
+            &mut env.rng,
+            reg_state,
+            &pw_in,
+            m2.as_slice(),
+            KdfId::DEFAULT,
+        )
+        .unwrap();
+        client.recovery_code = SecretArray::<16>::generate(&mut env.rng);
+        let e_srv = reg
+            .export_key
+            .server_unlock_key(client.account_id)
+            .unwrap()
+            .wrap_account_key(
+                &mut env.rng,
+                &AccountKeyServerWrapCtx {
+                    account_id: client.account_id,
+                    account_key_epoch: 0,
+                    password_epoch: 1,
+                    kdf_id: KdfId::DEFAULT,
+                },
+                &client.account_key,
+            )
+            .unwrap();
+        let e_rec = recovery_wrap(&mut env.rng, &client, 2);
+        let next = client.next_state(|s| {
+            s.password_epoch = 1;
+            s.recovery_epoch = 2;
+        });
+        let change = AccountChange::<Vec<rizzy_proto::objects::VaultSelfGrant>> {
+            account_state: bytes(next.1.clone()),
+            bundle: None,
+            registration_upload: Some(bytes(reg.upload)),
+            setup_id: Some(setup_id),
+            account_key_server_wrap: Some(AccountKeyServerWrap {
+                account_key_epoch: 0,
+                password_epoch: 1,
+                kdf_id: 1,
+                envelope: bytes(e_srv),
+            }),
+            identity_secret_keys: None,
+            recovery: RecoveryUpload::Register(RecoveryRegistration {
+                recovery_wrap: e_rec,
+                recovery_token_hash: Fixed::from_bytes(
+                    RecoveryAuthToken::derive(&client.recovery_code)
+                        .unwrap()
+                        .server_hash(),
+                ),
+            }),
+            account_settings: None,
+            retired_secret_keys: List::empty(),
+            device_certificates: List::empty(),
+            device_revocations: List::empty(),
+            device_grants: List::empty(),
+            vault_rotation: None,
+            vault_create: None,
+            vault_delete: None,
+        };
+        assert!(matches!(
+            env.svc.commit_change(&s1, &change, env.now).await,
+            Err(AuthError::Unauthorized)
+        ));
+        env.svc.commit_change(&s2, &change, env.now).await.unwrap();
+        client.adopt(next);
+        // The commit ended the second session too, as every recovery commit does.
+        assert!(matches!(
+            env.svc.commit_change(&s2, &change, env.now).await,
+            Err(AuthError::Unauthorized)
         ));
     });
 }

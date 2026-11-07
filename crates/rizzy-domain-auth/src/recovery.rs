@@ -354,6 +354,10 @@ impl<V: VaultPort> AuthService<V> {
         }
         let trust = AccountTrust::load(tx.conn(), account).await?;
         let devices = trust.devices(tx.conn()).await?;
+        // INV-122 (ADR 0108 §1): at most one recovery-only session is live per account. A
+        // commit over an earlier one, wherever it is in transit, answers `unauthorized` from
+        // here on: `commit_change` reloads its session under the same account lock.
+        session::end_kind(tx.conn(), account, SessionKind::Recovery).await?;
         let (token, _) = session::create(
             tx.conn(),
             rng,
