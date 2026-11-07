@@ -343,6 +343,9 @@ mod tests {
             // No identity rides along (INV-77).
             r#"{"prefix":"5BAA6","item_id":"AAAAAAAAAAAAAAAAAAAAAA"}"#,
             r#"{"prefix":"5BAA6","account":"x"}"#,
+            // A duplicate member is refused, even with the same value (ADR 0113 §2.4).
+            r#"{"prefix":"5BAA6","prefix":"5BAA6"}"#,
+            r#"{"prefix":"5BAA6","prefix":"00000"}"#,
         ] {
             assert!(
                 serde_json::from_str::<BreachRangeRequest>(bad).is_err(),
@@ -423,11 +426,10 @@ mod tests {
         let line = format!("{HIT}:1\r\n");
         let full = line.repeat(MAX_BREACH_RANGE_ENTRIES);
         assert_eq!(parse_range(&full).unwrap().len(), MAX_BREACH_RANGE_ENTRIES);
+        // 8,193 short lines stay under the byte cap: the entry cap alone refuses them.
         let over = line.repeat(MAX_BREACH_RANGE_ENTRIES + 1);
-        assert!(matches!(
-            parse_range(&over),
-            Err(RangeError::TooManyEntries | RangeError::TooLong)
-        ));
+        assert!(over.len() <= MAX_BREACH_RANGE_LEN);
+        assert_eq!(parse_range(&over), Err(RangeError::TooManyEntries));
         let huge = "A".repeat(MAX_BREACH_RANGE_LEN + 1);
         assert_eq!(parse_range(&huge), Err(RangeError::TooLong));
         assert_eq!(

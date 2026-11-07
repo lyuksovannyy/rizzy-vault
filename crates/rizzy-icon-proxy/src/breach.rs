@@ -458,6 +458,97 @@ mod tests {
         }
     }
 
+    /// ADR 0113 §5.17: the request carries exactly `Host`, `User-Agent`, `Add-Padding` and
+    /// `Connection`, with these values, and nothing else (no `Accept-Encoding` above all).
+    #[tokio::test]
+    async fn the_request_carries_exactly_four_headers() {
+        let dir = TempDir::new();
+        let (service, _, heads, _) = service(ok_response(&format!("{HIT}:1")), &dir).await;
+        service.range(prefix()).await.unwrap();
+        let head = heads.lock().unwrap()[0].clone();
+        let mut lines = head.split("\r\n").filter(|l| !l.is_empty());
+        assert_eq!(lines.next(), Some("GET /range/5BAA6 HTTP/1.1"));
+        let mut headers: Vec<(String, String)> = lines
+            .map(|l| {
+                let (name, value) = l.split_once(':').unwrap();
+                (name.to_ascii_lowercase(), value.trim().to_owned())
+            })
+            .collect();
+        headers.sort();
+        assert_eq!(
+            headers,
+            [
+                ("add-padding", "true"),
+                ("connection", "close"),
+                ("host", "api.pwnedpasswords.com"),
+                ("user-agent", "rizzy-vault"),
+            ]
+            .map(|(n, v)| (n.to_owned(), v.to_owned()))
+        );
+    }
+
+    /// ADR 0113 §5.18: a compressed answer and a declared length past the cap are refused from
+    /// the head, before the body is read: these upstreams send no body and close, so a reader
+    /// would fail with `Http` instead of `Malformed`. Neither is cached.
+    #[tokio::test]
+    async fn encoding_and_length_are_refused_before_the_body_is_read() {
+        let cases = [
+            b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 100\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nContent-Encoding: br\r\nContent-Length: 100\r\n\r\n"
+                .to_vec(),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                MAX_BREACH_RANGE_LEN + 1
+            )
+            .into_bytes(),
+        ];
+        for response in cases {
+            let dir = TempDir::new();
+            let (service, _, _, _) = service(response, &dir).await;
+            assert_eq!(service.range(prefix()).await, Err(BreachError::Malformed));
+            assert!(!dir.0.join("breach-5BAA6.txt").exists());
+        }
+        // The same head with `identity` and a body that is a range passes.
+        let dir = TempDir::new();
+        let body = format!("{HIT}:1");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: IDENTITY\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (service, _, _, _) = service(response.into_bytes(), &dir).await;
+        assert_eq!(service.range(prefix()).await.unwrap().as_str(), body);
+    }
+
+    /// ADR 0113 §5.18: a `301` is a failure, not followed (one connection only), not cached.
+    #[tokio::test]
+    async fn a_permanent_redirect_is_refused_and_not_followed() {
+        let dir = TempDir::new();
+        let (service, local, _, count) = service(
+            b"HTTP/1.1 301 Moved Permanently\r\nLocation: https://example.com/range/5BAA6\r\nContent-Length: 0\r\n\r\n"
+                .to_vec(),
+            &dir,
+        )
+        .await;
+        assert_eq!(service.range(prefix()).await, Err(BreachError::Status));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert_eq!(local.hosts.lock().unwrap().as_slice(), [UPSTREAM_HOST]);
+        assert!(!dir.0.join("breach-5BAA6.txt").exists());
+    }
+
+    /// ADR 0113 §6.20: a cached file over the cap is a miss: the range is fetched again and
+    /// the entry replaced.
+    #[tokio::test]
+    async fn a_cached_file_over_the_cap_is_a_miss() {
+        let dir = TempDir::new();
+        let entry = dir.0.join("breach-5BAA6.txt");
+        std::fs::write(&entry, vec![b'A'; MAX_BREACH_RANGE_LEN + 1]).unwrap();
+        let body = format!("{HIT}:2");
+        let (service, _, _, count) = service(ok_response(&body), &dir).await;
+        assert_eq!(service.range(prefix()).await.unwrap().as_str(), body);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read_to_string(&entry).unwrap(), body);
+    }
+
     #[tokio::test]
     async fn a_silent_upstream_hits_the_budget() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -1214,6 +1214,20 @@ mod tests {
         assert_eq!(on.icon_cache_ttl, Duration::from_secs(60));
         assert_eq!(on.icon_cache_max_bytes, 1_048_576);
         assert!(!from_env(&[(BREACH_CHECK, "off")]).unwrap().breach_check);
+        // The TTL's upper bound is inclusive (ADR 0113 §6.21).
+        let year = from_env(&[(ROLES, "icons"), (ICON_CACHE_TTL_SECS, "31536000")]).unwrap();
+        assert_eq!(year.icon_cache_ttl, Duration::from_secs(31_536_000));
+        // Every role reads the settings, so an invalid value refuses the start of `api` too
+        // (ADR 0113 §6.21), and of the default roles.
+        for roles in [
+            &[(ROLES, "api"), (BREACH_CHECK, "On")][..],
+            &[(BREACH_CHECK, "On")],
+        ] {
+            assert_eq!(
+                from_env(roles).unwrap_err(),
+                ConfigError::Invalid(BREACH_CHECK)
+            );
+        }
 
         assert_eq!(
             from_env(&[(ROLES, "icons"), (DATABASE_URL, "postgres://db/x")]).unwrap_err(),

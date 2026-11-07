@@ -512,6 +512,44 @@ mod tests {
         assert_eq!(body, r#"{"error":"not_found"}"#);
     }
 
+    /// ADR 0113 §1.3: with the breach check off, every method on the path is the role's
+    /// fallback `404 not_found` (a `GET` is not `405`), answered before any rate-limit charge:
+    /// past the burst, one source still gets `404`, never `429`.
+    #[test]
+    fn breach_check_off_is_not_found_for_every_method_and_charges_no_token() {
+        let router = icons_router(Arc::new(Icons::new(None, Vec::new())));
+        let results = block_on(async {
+            let mut out = Vec::new();
+            for _ in 0..=rizzy_icon_proxy::limit::BURST {
+                out.push(
+                    send(
+                        &router,
+                        post(
+                            &format!(r#"{{"prefix":"{PREFIX}"}}"#),
+                            Some("203.0.113.9:1"),
+                            None,
+                        ),
+                    )
+                    .await,
+                );
+                let mut get = axum::http::Request::builder()
+                    .method("GET")
+                    .uri(BREACH_RANGE_ROUTE)
+                    .body(Body::empty())
+                    .unwrap();
+                get.extensions_mut()
+                    .insert(ConnectInfo("203.0.113.9:1".parse::<SocketAddr>().unwrap()));
+                out.push(send(&router, get).await);
+            }
+            out
+        });
+        for (status, headers, body) in results {
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+            assert_eq!(body, r#"{"error":"not_found"}"#);
+            assert!(!headers.contains_key(RETRY_AFTER));
+        }
+    }
+
     #[test]
     fn rate_limited_per_source_before_the_body_is_read() {
         let dir = TempDir::new();
