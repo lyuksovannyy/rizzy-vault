@@ -632,10 +632,8 @@ impl Device {
         self.check_vault_writable(vault_id)?;
         let mut moved = 0;
         if !with_items {
-            let items = user_items(
-                self.vaults.require(vault_id)?,
-                &[ItemLifecycle::Active, ItemLifecycle::Trashed],
-            );
+            // ADR 0093 §3: refused before the first move when any item cannot be moved.
+            let items = vaults::items_to_move_before_delete(self.vaults.require(vault_id)?)?;
             for item in items {
                 let (_, done) = self.move_item(ui, vault_id, item, personal).await?;
                 if !done {

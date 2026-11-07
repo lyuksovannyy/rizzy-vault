@@ -612,6 +612,10 @@ fn copy_as<R: CryptoRng + ?Sized>(
     if source.vault_id() == target.vault_id() {
         return Err(ClientError::InvalidInput);
     }
+    // ADR 0093 §3: an unsupported item is never carried, checked before any write.
+    if is_unsupported_item(source, item) {
+        return Err(ClientError::UnsupportedItem);
+    }
     let created = if target.merge(target_item).is_some() || target.holds_unapplied(target_item) {
         false
     } else {
@@ -659,6 +663,65 @@ fn copy_as<R: CryptoRng + ?Sized>(
     })
 }
 
+/// Whether `item` of `vault` is an unsupported item ([ADR 0093] §3): a live user item whose
+/// type this client does not support as a user type (an unknown or newer id, the retired
+/// `0x0009`, or no valid type at all). The vault-settings item is not a user item and is never
+/// unsupported; an item that is not live is not counted.
+///
+/// [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
+#[must_use]
+pub fn is_unsupported_item(vault: &VaultSync, item: ItemId) -> bool {
+    use rizzy_core::item::types::SupportedType;
+    if !matches!(
+        vault.item_lifecycle(item),
+        ItemLifecycle::Active | ItemLifecycle::Trashed
+    ) {
+        return false;
+    }
+    match vault.item_type(item) {
+        Some(t) if t == ItemType::VAULT_SETTINGS => false,
+        Some(t) => !t.supported().is_some_and(SupportedType::is_user_item),
+        None => true,
+    }
+}
+
+/// How many unsupported items ([`is_unsupported_item`]), Active and Trashed, `vault` holds: the
+/// K that "Delete the vault and its N items" names ([ADR 0093] §3).
+///
+/// [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
+#[must_use]
+pub fn unsupported_item_count(vault: &VaultSync) -> usize {
+    vault
+        .item_ids()
+        .into_iter()
+        .filter(|item| is_unsupported_item(vault, *item))
+        .count()
+}
+
+/// The precheck of "Move its N items to Personal, then delete" ([ADR 0093] §3, ADR 0081 §A5):
+/// every host runs it before the first move, so nothing is moved and nothing deleted when the
+/// vault holds an unsupported item. Returns the user items to move, Active and Trashed.
+///
+/// # Errors
+/// [`ClientError::UnsupportedItem`] when the vault holds at least one unsupported item.
+///
+/// [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
+pub fn items_to_move_before_delete(vault: &VaultSync) -> Result<Vec<ItemId>, ClientError> {
+    if unsupported_item_count(vault) > 0 {
+        return Err(ClientError::UnsupportedItem);
+    }
+    Ok(vault
+        .item_ids()
+        .into_iter()
+        .filter(|item| {
+            matches!(
+                vault.item_lifecycle(*item),
+                ItemLifecycle::Active | ItemLifecycle::Trashed
+            ) && vault.item_type(*item) != Some(ItemType::VAULT_SETTINGS)
+        })
+        .collect())
+}
+
 /// Copies `item` of `source` into `target` (§A6 step 1): a new item with a new id, its key
 /// wrapped under the target's vault key, a create op of this device; field values, element ids,
 /// tags, passkeys, TOTP secrets and history travel, dots and HLCs do not. A trashed source stays
@@ -666,7 +729,9 @@ fn copy_as<R: CryptoRng + ?Sized>(
 ///
 /// # Errors
 /// [`ClientError::InvalidInput`] for the same vault on both sides; [`ClientError::UnknownItem`]
-/// for an item that is not a live user item of `source`; [`ClientError::ExportOversizeItems`];
+/// for an item that is not a live user item of `source`; [`ClientError::UnsupportedItem`] for
+/// an unsupported one ([`is_unsupported_item`], ADR 0093 §3), before any write;
+/// [`ClientError::ExportOversizeItems`];
 /// the errors of the importer path ([`VaultSync::import_item_writes`]).
 pub fn copy_item<R: CryptoRng + ?Sized>(
     rng: &mut R,
@@ -720,7 +785,8 @@ impl PendingMove {
     ///
     /// # Errors
     /// [`ClientError::InvalidInput`] for the same vault on both sides;
-    /// [`ClientError::UnknownItem`] for an item that is not live in `source`.
+    /// [`ClientError::UnknownItem`] for an item that is not live in `source`;
+    /// [`ClientError::UnsupportedItem`] for an unsupported one (ADR 0093 §3).
     pub fn new<R: CryptoRng + ?Sized>(
         rng: &mut R,
         source: &VaultSync,
@@ -736,6 +802,10 @@ impl PendingMove {
         ) || source.item_type(source_item) == Some(ItemType::VAULT_SETTINGS)
         {
             return Err(ClientError::UnknownItem);
+        }
+        // ADR 0093 §3: refused before the host writes the pending-move row or anything else.
+        if is_unsupported_item(source, source_item) {
+            return Err(ClientError::UnsupportedItem);
         }
         Ok(Self {
             source_vault: source.vault_id(),

@@ -2640,6 +2640,10 @@ export class VaultSession {
       if (personal === undefined) {
         throw new CoreError("vault_set_mismatch");
       }
+      // ADR 0093 §3: refused before the first move when any item cannot be moved.
+      if (this.unsupportedItems(vaultId) > 0) {
+        throw new CoreError("unsupported_item");
+      }
       const ids = [...this.items(false), ...this.items(true)]
         .filter((i) => i.vaultId === vaultId)
         .map((i) => i.id);
@@ -2663,6 +2667,15 @@ export class VaultSession {
       request = takeRequest(call(() => s.vaultRetryRequest()));
     }
     await this.sync();
+  }
+
+  /**
+   * How many items of the vault this version cannot copy or move (ADR 0093 §3: an unknown,
+   * newer or retired type), Active and Trashed. "Move its items to Personal, then delete" is
+   * refused while it is above zero; "Delete the vault and its items" names it.
+   */
+  unsupportedItems(vaultId: string): number {
+    return call(() => this.#s().unsupportedItemCount(vaultId));
   }
 
   /** Copies an item into another vault (§A6), attachments included; returns the copy's reference. */

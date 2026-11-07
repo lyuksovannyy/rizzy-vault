@@ -204,6 +204,9 @@ export const en = {
   "vaults.deleteChoice": "What happens to its items",
   "vaults.deleteMove": "Move its {count} items to Personal, then delete",
   "vaults.deleteWithItems": "Delete the vault and its {count} items",
+  "vaults.deleteIncludesUnsupported": "(including {count} unsupported items that this version cannot show in full)",
+  "vaults.moveRefusedUnsupported":
+    "{count} items of this vault cannot be moved (unsupported type). Copy their fields out by hand, update rizzy-vault, or delete the vault with its items.",
   "vaults.deleteConfirm": "Type the vault's name to confirm",
   "vaults.deleteSubmit": "Delete vault",
   "vaults.deleted": "Vault deleted.",

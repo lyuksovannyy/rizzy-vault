@@ -44776,20 +44776,34 @@ pub mod session {
         //! const file = session.attachmentDownloadFinish(id)                    // only if every chunk opened
         //!
         //! send(session.attachmentDeleteRequest(id)); session.removeAttachment(itemId, id, now)
+        //!
+        //! for ref of session.attachmentCleanupsDue():                          // after each sync round
+        //!   do step = session.attachmentCleanupResponse(ref, ...send(session.attachmentCleanupRequest(ref)))
+        //!   while step == "again"                                              // ADR 0093 §1.2
         //! ```
+        //!
+        //! **The cleanup after a Purge** ([ADR 0093] §1). A purge never deletes anything itself:
+        //! `purgeItem` (and `autoPurge`, and a move's purge of its source) writes the item's cleanup row
+        //! in the driver, and the host runs the rows the server's acknowledgement made due at the end of
+        //! each sync round, Purge first, delete second. This host keeps no cache, so a row lives as long
+        //! as the session: a lock before the round runs leaves the files to the next device that
+        //! received the Purge, or to the account's usage.
         //!
         //! Every request is built here and every answer verified here; JavaScript only carries bytes.
         //! The finished file crosses to JavaScript as a byte array, the one copy a download needs; like
         //! a plaintext export, it cannot be wiped once there (ADR 0013 §4 "Honest limit").
         //!
         //! [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
+        //! [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
         use rizzy_client::ClientError;
         use rizzy_client::attachments::{AttachmentInfo, delete_request};
         use rizzy_client::rizzy_core::ids::AttachmentId;
         use rizzy_client::rizzy_proto::attachments::{
-            DownloadChunkResponse, GetAttachmentResponse,
+            AttachmentItemResponse, DownloadChunkResponse,
+            GetAttachmentResponse,
         };
         use rizzy_client::rizzy_proto::http::paths;
+        use rizzy_client::sync::CleanupStep;
         use wasm_bindgen::prelude::wasm_bindgen;
         use super::Session;
         use crate::error::{CoreError, CoreResult};
@@ -47488,6 +47502,465 @@ pub mod session {
                 let id = attachment_id(attachment)?;
                 self.inner_mut()?.downloads.remove(&id);
                 Ok(())
+            }
+            #[doc =
+            " The item references (`vault:item`) whose attachment cleanup can run now (ADR 0093"]
+            #[doc =
+            " §1.2): every cleanup row whose Purge the server has acknowledged. Call once per sync"]
+            #[doc =
+            " round, after the round; it starts the round\'s call count."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`."]
+            pub fn attachment_cleanups_due(&mut self)
+                -> Result<Vec<String>, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The item references (`vault:item`) whose attachment cleanup can run now (ADR 0093"]
+                        #[doc =
+                        " §1.2): every cleanup row whose Purge the server has acknowledged. Call once per sync"]
+                        #[doc =
+                        " round, after the round; it starts the round\'s call count."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[export_name =
+                        "session_attachmentCleanupsDue_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentCleanupsDue(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<Vec<String>,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                let _ret = me.attachment_cleanups_due();
+                                                _ret
+                                            }
+                                        });
+                            <Result<Vec<String>, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The item references (`vault:item`) whose attachment cleanup can run now (ADR 0093"]
+                        #[doc =
+                        " §1.2): every cleanup row whose Purge the server has acknowledged. Call once per sync"]
+                        #[doc =
+                        " round, after the round; it starts the round\'s call count."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentCleanupsDue_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <Result<Vec<String>, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<Vec<String>, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x06R The item references (`vault:item`) whose attachment cleanup can run now (ADR 0093V \xc2\xa71.2): every cleanup row whose Purge the server has acknowledged. Call once per sync: round, after the round; it starts the round's call count.\0\t # Errors\n `locked`.\0\0\0\0\x15attachmentCleanupsDue\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner_mut()?;
+                let mut out = Vec::new();
+                for vault in inner.vaults.all_mut() {
+                    let vault_id = vault.vault_id();
+                    for item in vault.attachment_cleanups_due() {
+                        out.push(items::item_ref(vault_id, item));
+                    }
+                }
+                Ok(out)
+            }
+            #[doc =
+            " The `attachments/delete-item` request of a due cleanup (ADR 0093 §1.1)."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for a malformed reference; `unknown_vault`."]
+            pub fn attachment_cleanup_request(&self, id: &str)
+                -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/delete-item` request of a due cleanup (ADR 0093 §1.1)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for a malformed reference; `unknown_vault`."]
+                        #[export_name =
+                        "session_attachmentCleanupRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentCleanupRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_cleanup_request(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/delete-item` request of a due cleanup (ADR 0093 §1.1)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for a malformed reference; `unknown_vault`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentCleanupRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04I The `attachments/delete-item` request of a due cleanup (ADR 0093 \xc2\xa71.1).\0\t # ErrorsF `locked`; `invalid_input` for a malformed reference; `unknown_vault`.\0\x01\x02id\0\0\0\0\0\x18attachmentCleanupRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner()?;
+                let (vault_id, item) = items::parse_ref(id)?;
+                let body =
+                    inner.vaults.get(vault_id)?.attachment_cleanup_request(item);
+                HttpRequest::post(paths::ATTACHMENTS_DELETE_ITEM, &body,
+                    Some(&inner.token))
+            }
+            #[doc =
+            " Applies the answer to [`Session::attachment_cleanup_request`] (ADR 0093 §1.2): `\"again\"`"]
+            #[doc =
+            " (send the request again now), `\"done\"` or `\"keep\"` (the next sync round retries)."]
+            #[doc = " `status` `0` stands for no answer (a network error)."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `attachment_cleanup_failed` once, for a refusal no retry fixes (the row is dropped; the"]
+            #[doc =
+            " files still count toward the account\'s storage); `invalid_server_response` for a 200"]
+            #[doc =
+            " that does not parse; `locked`; `invalid_input`; `unknown_vault`; `unknown_item` when"]
+            #[doc = " the reference has no cleanup row."]
+            pub fn attachment_cleanup_response(&mut self, id: &str,
+                status: u16, body: &[u8]) -> Result<String, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Applies the answer to [`Session::attachment_cleanup_request`] (ADR 0093 §1.2): `\"again\"`"]
+                        #[doc =
+                        " (send the request again now), `\"done\"` or `\"keep\"` (the next sync round retries)."]
+                        #[doc =
+                        " `status` `0` stands for no answer (a network error)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `attachment_cleanup_failed` once, for a refusal no retry fixes (the row is dropped; the"]
+                        #[doc =
+                        " files still count toward the account\'s storage); `invalid_server_response` for a 200"]
+                        #[doc =
+                        " that does not parse; `locked`; `invalid_input`; `unknown_vault`; `unknown_item` when"]
+                        #[doc = " the reference has no cleanup row."]
+                        #[export_name =
+                        "session_attachmentCleanupResponse_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentCleanupResponse(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg3_1:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg3_2:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg3_3:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg3_4:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<String, CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u16>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <u16 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u16 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                                let arg3 =
+                                                    unsafe {
+                                                        <[u8] as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                                arg3_3, arg3_4))
+                                                    };
+                                                let arg3 = &*arg3;
+                                                let _ret = me.attachment_cleanup_response(arg1, arg2, arg3);
+                                                _ret
+                                            }
+                                        });
+                            <Result<String, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Applies the answer to [`Session::attachment_cleanup_request`] (ADR 0093 §1.2): `\"again\"`"]
+                        #[doc =
+                        " (send the request again now), `\"done\"` or `\"keep\"` (the next sync round retries)."]
+                        #[doc =
+                        " `status` `0` stands for no answer (a network error)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `attachment_cleanup_failed` once, for a refusal no retry fixes (the row is dropped; the"]
+                        #[doc =
+                        " files still count toward the account\'s storage); `invalid_server_response` for a 200"]
+                        #[doc =
+                        " that does not parse; `locked`; `invalid_input`; `unknown_vault`; `unknown_item` when"]
+                        #[doc = " the reference has no cleanup row."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentCleanupResponse_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(3u32);
+                            <&str as WasmDescribe>::describe();
+                            <u16 as WasmDescribe>::describe();
+                            <&[u8] as WasmDescribe>::describe();
+                            <Result<String, CoreError> as WasmDescribe>::describe();
+                            <Result<String, CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\tZ Applies the answer to [`Session::attachment_cleanup_request`] (ADR 0093 \xc2\xa71.2): `\"again\"`R (send the request again now), `\"done\"` or `\"keep\"` (the next sync round retries).5 `status` `0` stands for no answer (a network error).\0\t # ErrorsX `attachment_cleanup_failed` once, for a refusal no retry fixes (the row is dropped; theU files still count toward the account's storage); `invalid_server_response` for a 200U that does not parse; `locked`; `invalid_input`; `unknown_vault`; `unknown_item` when\" the reference has no cleanup row.\0\x03\x02id\0\0\0\x06status\0\0\0\x04body\0\0\0\0\0\x19attachmentCleanupResponse\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let (vault_id, item) = items::parse_ref(id)?;
+                let answer: Option<AttachmentItemResponse> =
+                    if status == 200 && body.len() <= http::MAX_RESPONSE_LEN {
+                        serde_json::from_slice(body).ok()
+                    } else { None };
+                let vault = self.inner_mut()?.vaults.get_mut(vault_id)?;
+                let step =
+                    vault.attachment_cleanup_respond(item, status,
+                            answer.as_ref())?;
+                Ok(match step {
+                            CleanupStep::Done => "done",
+                            CleanupStep::Again => "again",
+                            CleanupStep::Keep => "keep",
+                        }.to_owned())
             }
             #[doc =
             " The `attachments/delete` request. Send it before [`Session::remove_attachment`]; a"]
@@ -60886,6 +61359,279 @@ pub mod session {
                             item_ref(target, *i)).collect())
         }
         #[doc =
+        " The files an export of `vault_id` names but does not include (ADR 0093 §2): `[N, M]`, N"]
+        #[doc =
+        " existing attachments over M items. When N > 0 the export confirmation adds \"N files"]
+        #[doc =
+        " attached to M items are not included in the export. Their names are. Download the files"]
+        #[doc = " separately first.\""]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`; `invalid_input`; `unknown_vault`."]
+        pub fn export_attachments_not_included(&self, vault_id: &str)
+            -> Result<Vec<u32>, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The files an export of `vault_id` names but does not include (ADR 0093 §2): `[N, M]`, N"]
+                    #[doc =
+                    " existing attachments over M items. When N > 0 the export confirmation adds \"N files"]
+                    #[doc =
+                    " attached to M items are not included in the export. Their names are. Download the files"]
+                    #[doc = " separately first.\""]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`; `invalid_input`; `unknown_vault`."]
+                    #[export_name =
+                    "session_exportAttachmentsNotIncluded_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_exportAttachmentsNotIncluded(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Vec<u32>, CoreError>
+                            as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            let _ret = me.export_attachments_not_included(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<Vec<u32>, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The files an export of `vault_id` names but does not include (ADR 0093 §2): `[N, M]`, N"]
+                    #[doc =
+                    " existing attachments over M items. When N > 0 the export confirmation adds \"N files"]
+                    #[doc =
+                    " attached to M items are not included in the export. Their names are. Download the files"]
+                    #[doc = " separately first.\""]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`; `invalid_input`; `unknown_vault`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_exportAttachmentsNotIncluded_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <&str as WasmDescribe>::describe();
+                        <Result<Vec<u32>, CoreError> as WasmDescribe>::describe();
+                        <Result<Vec<u32>, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x07Y The files an export of `vault_id` names but does not include (ADR 0093 \xc2\xa72): `[N, M]`, NT existing attachments over M items. When N > 0 the export confirmation adds \"N filesX attached to M items are not included in the export. Their names are. Download the files\x13 separately first.\"\0\t # Errors, `locked`; `invalid_input`; `unknown_vault`.\0\x01\x08vault_id\0\0\0\0\0\x1cexportAttachmentsNotIncluded\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let target = items::vault_id(vault_id)?;
+            let (files, items) =
+                self.inner()?.vaults.get(target)?.attachments_not_exported();
+            let n = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
+            Ok(<[_]>::into_vec(::alloc::boxed::box_new([n(files), n(items)])))
+        }
+        #[doc =
+        " How many items of `vault_id` this version cannot copy or move (ADR 0093 §3), Active and"]
+        #[doc =
+        " Trashed: \"Move its items to Personal, then delete\" is refused while it is above zero, and"]
+        #[doc = " \"Delete the vault and its items\" names it."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`; `invalid_input`; `unknown_vault`."]
+        pub fn unsupported_item_count(&self, vault_id: &str)
+            -> Result<u32, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " How many items of `vault_id` this version cannot copy or move (ADR 0093 §3), Active and"]
+                    #[doc =
+                    " Trashed: \"Move its items to Personal, then delete\" is refused while it is above zero, and"]
+                    #[doc = " \"Delete the vault and its items\" names it."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`; `invalid_input`; `unknown_vault`."]
+                    #[export_name =
+                    "session_unsupportedItemCount_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_unsupportedItemCount(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<u32, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            let _ret = me.unsupported_item_count(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<u32, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " How many items of `vault_id` this version cannot copy or move (ADR 0093 §3), Active and"]
+                    #[doc =
+                    " Trashed: \"Move its items to Personal, then delete\" is refused while it is above zero, and"]
+                    #[doc = " \"Delete the vault and its items\" names it."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`; `invalid_input`; `unknown_vault`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_unsupportedItemCount_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <&str as WasmDescribe>::describe();
+                        <Result<u32, CoreError> as WasmDescribe>::describe();
+                        <Result<u32, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x06Y How many items of `vault_id` this version cannot copy or move (ADR 0093 \xc2\xa73), Active andZ Trashed: \"Move its items to Personal, then delete\" is refused while it is above zero, and+ \"Delete the vault and its items\" names it.\0\t # Errors, `locked`; `invalid_input`; `unknown_vault`.\0\x01\x08vault_id\0\0\0\0\0\x14unsupportedItemCount\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let target = items::vault_id(vault_id)?;
+            let k =
+                rizzy_client::vaults::unsupported_item_count(self.inner()?.vaults.get(target)?);
+            Ok(u32::try_from(k).unwrap_or(u32::MAX))
+        }
+        #[doc =
         " The warning the host shows before a CSV export, after [`plaintext_export_warning`]: the"]
         #[doc =
         " frozen text with the number of items that would lose data (ADR 0027 §5)."]
@@ -62247,6 +62993,7 @@ pub mod session {
                     history_not_carried: counts.dropped_history,
                     fields_not_carried: counts.dropped_fields,
                     credentials_skipped: counts.skipped_credentials,
+                    attachments_not_carried: done.attachments_not_carried,
                 })
         }
         #[doc =
@@ -62485,6 +63232,7 @@ pub mod session {
                     history_not_carried: done.counts.dropped_history,
                     fields_not_carried: done.counts.dropped_fields,
                     credentials_skipped: done.counts.skipped_credentials,
+                    attachments_not_carried: 0,
                 })
         }
         #[doc =
@@ -62710,6 +63458,7 @@ pub mod session {
                     history_not_carried: done.history_not_carried,
                     fields_not_carried: done.fields_not_carried,
                     credentials_skipped: 0,
+                    attachments_not_carried: done.attachments_not_carried,
                 })
         }
         #[doc =
@@ -69105,6 +69854,10 @@ pub mod session {
         #[doc =
         " not be read (ADR 0074 §1, §3). Zero for the other formats."]
         credentials_skipped: usize,
+        #[doc =
+        " Attachment elements not carried: an import never writes an attachment field (ADR 0093"]
+        #[doc = " §2; an export carries no file)."]
+        attachments_not_carried: usize,
     }
     #[automatically_derived]
     #[doc(hidden)]
@@ -69126,11 +69879,12 @@ pub mod session {
             let names: &'static _ =
                 &["imported", "skipped", "warnings", "collapsed_conflicts",
                             "history_not_carried", "fields_not_carried",
-                            "credentials_skipped"];
+                            "credentials_skipped", "attachments_not_carried"];
             let values: &[&dyn ::core::fmt::Debug] =
                 &[&self.imported, &self.skipped, &self.warnings,
                             &self.collapsed_conflicts, &self.history_not_carried,
-                            &self.fields_not_carried, &&self.credentials_skipped];
+                            &self.fields_not_carried, &self.credentials_skipped,
+                            &&self.attachments_not_carried];
             ::core::fmt::Formatter::debug_struct_fields_finish(f,
                 "ImportReport", names, values)
         }
@@ -69147,6 +69901,7 @@ pub mod session {
                 history_not_carried: ::core::default::Default::default(),
                 fields_not_carried: ::core::default::Default::default(),
                 credentials_skipped: ::core::default::Default::default(),
+                attachments_not_carried: ::core::default::Default::default(),
             }
         }
     }
@@ -69157,11 +69912,12 @@ pub mod session {
         #[inline]
         fn eq(&self, other: &ImportReport) -> bool {
             self.imported == other.imported && self.skipped == other.skipped
-                                && self.warnings == other.warnings &&
-                            self.collapsed_conflicts == other.collapsed_conflicts &&
-                        self.history_not_carried == other.history_not_carried &&
-                    self.fields_not_carried == other.fields_not_carried &&
-                self.credentials_skipped == other.credentials_skipped
+                                    && self.warnings == other.warnings &&
+                                self.collapsed_conflicts == other.collapsed_conflicts &&
+                            self.history_not_carried == other.history_not_carried &&
+                        self.fields_not_carried == other.fields_not_carried &&
+                    self.credentials_skipped == other.credentials_skipped &&
+                self.attachments_not_carried == other.attachments_not_carried
         }
     }
     #[automatically_derived]
@@ -70089,6 +70845,99 @@ pub mod session {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             self.fields_not_carried
+        }
+        #[doc = " Attachments not carried (ADR 0093 §2)."]
+        #[must_use]
+        pub fn attachments_not_carried(&self) -> usize {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Attachments not carried (ADR 0093 §2)."]
+                    #[must_use]
+                    #[export_name =
+                    "importreport_attachmentsNotCarried_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ImportReport_attachmentsNotCarried(me:
+                            <ImportReport as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<usize as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<ImportReport>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<ImportReport>();
+                                            let me =
+                                                unsafe {
+                                                    <ImportReport as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.attachments_not_carried();
+                                            _ret
+                                        }
+                                    });
+                        <usize as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Attachments not carried (ADR 0093 §2)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_importreport_attachmentsNotCarried_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <usize as WasmDescribe>::describe();
+                        <usize as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0cImportReport\x01( Attachments not carried (ADR 0093 \xc2\xa72).\0\0\0\0\x15attachmentsNotCarried\x01\x01\0\0\0\0\x01\0\x02\x15attachmentsNotCarried\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.attachments_not_carried
         }
     }
     #[automatically_derived]
@@ -75915,7 +76764,11 @@ pub mod store {
     //!   §A7) re-keys that table by `(vault_id, item_id)` and adds `pending_move`: this host makes
     //!   no moves between vaults (the extension offers none, only the web vault and `rv` do), so
     //!   it keeps no `pending_move` store either, and its format-4 cache is its format-3 one with
-    //!   the format bumped (`rizzy_client::store::load::migration_writes` at unlock). A vault
+    //!   the format bumped (`rizzy_client::store::load::migration_writes` at unlock). Format 5
+    //!   ([ADR 0093] §1.2) adds `attachment_cleanup`: this host keeps no store for it either, so
+    //!   its format-5 cache is its format-4 one with the format bumped; the rows a received Purge
+    //!   writes live in the driver's memory for the session (the extension runs no cleanup; the
+    //!   web vault, which keeps no cache, runs its rows before it locks). A vault
     //!   deleted elsewhere leaves through `Write::DropVault`, which
     //!   [`rizzy_client::store::rows::CacheRows::apply`] executes on the mirror like any write.
     //!
@@ -75923,6 +76776,7 @@ pub mod store {
     //! [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
     //! [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
     //! [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    //! [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
     use rizzy_client::ClientError;
     use rizzy_client::rizzy_core::encoding::{
         Reader, put_bytes, put_u8, put_u64,

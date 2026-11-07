@@ -130,6 +130,8 @@ export interface CoreApi {
   takeDiscardedChanges(): number;
   /** Purged items whose files the server refused to delete, since the last call (ADR 0093). */
   takeAttachmentCleanupFailures(): number;
+  /** The vault's items this version cannot copy or move (ADR 0093 §3). */
+  unsupportedItems(vaultId: string): number;
   /** Creates an owned vault (§A3); returns its id. */
   createVault(name: string): string;
   /** Renames an owned vault (§A4). */
@@ -307,6 +309,7 @@ export const METHODS: readonly Method[] = [
   "vaultAlarms",
   "takeDiscardedChanges",
   "takeAttachmentCleanupFailures",
+  "unsupportedItems",
   "createVault",
   "renameVault",
   "deleteVault",

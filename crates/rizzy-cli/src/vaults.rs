@@ -300,10 +300,32 @@ pub async fn delete(
         .vaults()
         .require(vault_id)
         .map(|v| user_items(v, &[ItemLifecycle::Active, ItemLifecycle::Trashed]).len())?;
-    if with_items {
+    // ADR 0093 §3: K unsupported items cannot be moved; the move choice is refused before any
+    // item moves, and the delete choice names them.
+    let unsupported = device
+        .vaults()
+        .require(vault_id)
+        .map(rizzy_client::vaults::unsupported_item_count)?;
+    if !with_items && unsupported > 0 {
         env.ui.note(&format!(
-            "Deleting the vault \"{label}\" and its {items} items (the trash included), on \
-             every device. This cannot be undone."
+            "{unsupported} items of this vault cannot be moved (unsupported type). Copy their \
+             fields out by hand, update rizzy-vault, or delete the vault with its items \
+             (--with-items)."
+        ));
+        return Err(CliError::Client(ClientError::UnsupportedItem));
+    }
+    if with_items {
+        let including = if unsupported > 0 {
+            format!(
+                ", including {unsupported} unsupported items that this version cannot show in \
+                 full"
+            )
+        } else {
+            String::new()
+        };
+        env.ui.note(&format!(
+            "Deleting the vault \"{label}\" and its {items} items (the trash included{including}), \
+             on every device. This cannot be undone."
         ));
     } else {
         env.ui.note(&format!(

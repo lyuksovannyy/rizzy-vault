@@ -1307,6 +1307,19 @@ impl Session {
         Ok(vec![n(files), n(items)])
     }
 
+    /// How many items of `vault_id` this version cannot copy or move (ADR 0093 §3), Active and
+    /// Trashed: "Move its items to Personal, then delete" is refused while it is above zero, and
+    /// "Delete the vault and its items" names it.
+    ///
+    /// # Errors
+    /// `locked`; `invalid_input`; `unknown_vault`.
+    #[wasm_bindgen(js_name = unsupportedItemCount)]
+    pub fn unsupported_item_count(&self, vault_id: &str) -> Result<u32, CoreError> {
+        let target = items::vault_id(vault_id)?;
+        let k = rizzy_client::vaults::unsupported_item_count(self.inner()?.vaults.get(target)?);
+        Ok(u32::try_from(k).unwrap_or(u32::MAX))
+    }
+
     /// The warning the host shows before a CSV export, after [`plaintext_export_warning`]: the
     /// frozen text with the number of items that would lose data (ADR 0027 §5).
     ///

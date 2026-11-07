@@ -344,6 +344,7 @@ async function run(m: CallMessage): Promise<unknown> {
     vaultAlarms: () => current().vaultAlarms(),
     takeDiscardedChanges: () => current().takeDiscardedChanges(),
     takeAttachmentCleanupFailures: () => current().takeAttachmentCleanupFailures(),
+    unsupportedItems: () => current().unsupportedItems(str(a[0])),
     createVault: () => current().createVault(str(a[0])),
     renameVault: () => current().renameVault(str(a[0]), str(a[1])),
     deleteVault: () => current().deleteVault(str(a[0]), bool(a[1])),

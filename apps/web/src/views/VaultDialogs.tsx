@@ -203,6 +203,22 @@ export function DeleteVaultDialog(props: {
   const label = vaultLabel(vault);
   const count = vault.itemCount;
   const [choice, setChoice] = useState<"move" | "delete">("move");
+  /** ADR 0093 §3: the vault's items this version cannot move (unsupported type). */
+  const [unsupported, setUnsupported] = useState(0);
+  useEffect(() => {
+    let live = true;
+    ctx.client.call("unsupportedItems", vault.id).then(
+      (k) => {
+        if (live) {
+          setUnsupported(k);
+        }
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [ctx.client, vault.id]);
   const [typed, setTyped] = useState("");
   const [reauth, setReauth] = useState(false);
   const secretKey = useRef<HTMLInputElement>(null);
@@ -292,8 +308,14 @@ export function DeleteVaultDialog(props: {
                   onChange={() => setChoice("delete")}
                 />
                 {t("vaults.deleteWithItems", { count: String(count) })}
+                {unsupported > 0 && ` ${t("vaults.deleteIncludesUnsupported", { count: String(unsupported) })}`}
               </label>
             </fieldset>
+          )}
+          {count > 0 && choice === "move" && unsupported > 0 && (
+            <p className="error" role="alert">
+              {t("vaults.moveRefusedUnsupported", { count: String(unsupported) })}
+            </p>
           )}
           <label htmlFor={typedId}>{t("vaults.deleteConfirm")}</label>
           <input

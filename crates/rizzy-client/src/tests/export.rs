@@ -2225,3 +2225,64 @@ fn attachments_are_named_by_the_export_and_never_written_by_an_import() {
     }
     assert_eq!(b.vault.attachments_not_exported(), (0, 0));
 }
+
+/// ADR 0093 §3 with a retired `0x0009` item injected as an older build wrote it: copy and move
+/// refuse with `unsupported_item` before any write (no pending-move row exists to write: the
+/// move's constructor refuses); "move items to Personal, then delete" refuses with K = 1 and
+/// moves nothing; "delete with items" can name K.
+#[test]
+fn unsupported_items_are_never_copied_or_moved() {
+    use crate::vaults::{
+        PendingMove, copy_item, is_unsupported_item, items_to_move_before_delete,
+        unsupported_item_count,
+    };
+    let mut f = fixture(0x95);
+    let name = k("item.name");
+    let fine = f.create(ItemType::LOGIN, &[(&name, &text("fine"))], T0 + 1);
+    let bank = create_retired_bank_account(&mut f, T0 + 2);
+    assert!(is_unsupported_item(&f.vault, bank));
+    assert!(!is_unsupported_item(&f.vault, fine));
+    assert_eq!(unsupported_item_count(&f.vault), 1);
+    let other_id = crate::rizzy_core::ids::VaultId::from_bytes([0x5a; 16]);
+    let mut other = VaultSync::new(
+        crate::rizzy_core::keys::VaultKey::generate(&mut f.rng, other_id, 0),
+        &f.unlocked,
+        f.vault.next_device_seq(),
+    )
+    .unwrap();
+    let before = f.vault.next_device_seq();
+    assert_eq!(
+        copy_item(&mut f.rng, &f.unlocked, &f.vault, bank, &mut other, T0 + 3).unwrap_err(),
+        ClientError::UnsupportedItem
+    );
+    assert_eq!(
+        PendingMove::new(&mut f.rng, &f.vault, bank, other_id).unwrap_err(),
+        ClientError::UnsupportedItem
+    );
+    assert!(
+        other.item_ids().is_empty(),
+        "nothing was written to the target"
+    );
+    assert_eq!(
+        f.vault.next_device_seq(),
+        before,
+        "nothing was written to the source"
+    );
+    // A supported item still moves.
+    PendingMove::new(&mut f.rng, &f.vault, fine, other_id).unwrap();
+    // Move-all: refused while K > 0, before the first move.
+    assert_eq!(
+        items_to_move_before_delete(&f.vault).unwrap_err(),
+        ClientError::UnsupportedItem
+    );
+    // Trashed counts too; a purged one does not.
+    f.vault
+        .trash_item(&mut f.rng, &f.unlocked, bank, T0 + 4)
+        .unwrap();
+    assert_eq!(unsupported_item_count(&f.vault), 1);
+    f.vault
+        .purge_item(&mut f.rng, &f.unlocked, bank, T0 + 5)
+        .unwrap();
+    assert_eq!(unsupported_item_count(&f.vault), 0);
+    assert_eq!(items_to_move_before_delete(&f.vault).unwrap(), vec![fine]);
+}
