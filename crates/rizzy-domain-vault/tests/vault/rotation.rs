@@ -1129,6 +1129,9 @@ fn a_staged_rotation_equals_the_inline_one() {
             .await
             .unwrap();
         let inline = observe(&env).await;
+        // Release this test's turn on the shared PostgreSQL database (`common::Slot`) before the
+        // loop opens another `Env`, which waits for the same turn.
+        drop(env);
         // (wrap staged, drop staged) for each of the four splits.
         for (wrap_staged, drop_staged) in [(true, true), (true, false), (false, true)] {
             let mut keys = Keys::new(21, 1);
