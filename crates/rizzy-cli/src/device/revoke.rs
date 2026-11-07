@@ -15,7 +15,8 @@
 //!    `devices/suspend` for each chosen device in ascending id order, each H kept. Suspension
 //!    comes before anything slow.
 //! 4. **Secrets.** By default the new Secret Key's Emergency Kit (with a new recovery code
-//!    where recovery is on) is generated, shown and confirmed here. Without a new Secret Key
+//!    where recovery is on) is generated, shown and confirmed here, after a sync (the change
+//!    is built on completely fetched vaults, and rebuilt in step 5). Without a new Secret Key
 //!    the current recovery code is typed instead, where recovery is on (it stays valid).
 //! 5. **Renew, fetch, build.** The login is renewed when it nears the server's 5-minute limit;
 //!    `devices/suspend` again for the first chosen device renews the window, and its H must be
@@ -169,6 +170,9 @@ impl Device {
         let (reauth, logged_in_at, revoke) = self.suspend_chosen(ui, login_name, chosen).await?;
         let first = *revoke.first().ok_or(ClientError::Internal)?;
         let mut token = copy_token(reauth.bearer_token());
+        // The change is built on vaults the device uploaded and fetched completely (ADR 0025
+        // §2 step 1), here already after the suspension; step 5 fetches again up to H.
+        self.sync(ui).await?;
         // Step 4: the new Secret Key under the same master password, its kit shown and
         // confirmed before anything is committed (CRYPTO.md §11 "Secrets before commit").
         let password = Zeroizing::new(self.password.as_str().to_owned());

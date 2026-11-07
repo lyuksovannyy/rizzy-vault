@@ -2060,7 +2060,9 @@ fn a_write_paused_by_another_devices_removal_is_sent_once_it_commits() {
         "{waits:?}"
     );
     r.a.ok(&["sync"], &[PASSWORD], &[]);
-    assert_eq!(r.a.item_names(PASSWORD), ["Before", "From B"]);
+    let mut names = r.a.item_names(PASSWORD);
+    names.sort();
+    assert_eq!(names, ["Before", "From B"]);
     r.assert_removed(1, None);
 }
 
