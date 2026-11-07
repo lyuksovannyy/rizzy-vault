@@ -11,7 +11,7 @@
 //! - [`IndexRow::parse`] never panics; a row that parses has 16-byte ids, UTF-8 columns within
 //!   their caps, and writes back ([`IndexRow::new`]) to the same columns it was read from.
 //! - [`index::reconcile`] against no vault never panics: it deletes every row of a table that
-//!   parses with one row per item, and drops and rebuilds any other table; either way the
+//!   parses with one row per `(vault_id, item_id)` (INV-103), and drops and rebuilds any other table; either way the
 //!   reference executor leaves the table empty.
 //! - [`index::search`] and [`index::recent`] never panic, return at most their limit, and
 //!   only ids of rows that parse.
@@ -129,7 +129,8 @@ fuzz_target!(|data: &[u8]| {
                 assert_eq!(back.item_type, row.item_type);
                 assert_eq!(back.display_name, row.display_name);
                 assert_eq!(back.search_text, row.search_text);
-                all_parse &= parsed_ids.insert(stored.entry.item_id);
+                // One item per `(vault_id, item_id)` (INV-103), not per item id.
+                all_parse &= parsed_ids.insert((stored.entry.vault_id, stored.entry.item_id));
             }
             Err(e) => {
                 assert_eq!(e, rizzy_client::ClientError::CacheCorrupt);
@@ -138,11 +139,11 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    for (_, id) in index::search(&rows, &query, limit)
+    for (vault, id) in index::search(&rows, &query, limit)
         .into_iter()
         .chain(index::recent(&rows, limit))
     {
-        assert!(parsed_ids.contains(id.as_bytes()));
+        assert!(parsed_ids.contains(&(*vault.as_bytes(), *id.as_bytes())));
     }
     assert!(index::search(&rows, &query, limit).len() <= limit);
     assert!(index::recent(&rows, limit).len() <= limit);

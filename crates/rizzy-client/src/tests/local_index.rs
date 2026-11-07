@@ -1010,6 +1010,40 @@ fn raw_row() -> impl Strategy<Value = IndexRow> {
         )
 }
 
+/// The minimal failing input `any_stored_rows_are_parsed_or_rebuilt` shrank to while its
+/// model keyed rows by `item_id` alone: two rows that both parse and share an item id in two
+/// vaults. They name two items (INV-103), so the table is kept: a reconcile against no vault
+/// deletes each row rather than dropping the table, and both rows stay searchable until then.
+#[test]
+fn one_item_id_in_two_vaults_is_two_rows() {
+    let row = |vault: u8| IndexRow {
+        item_id: vec![0; 16],
+        vault_id: {
+            let mut id = vec![0; 16];
+            id[15] = vault;
+            id
+        },
+        last_used_ms: Some(u64::from(vault).to_be_bytes().to_vec()),
+        ..IndexRow::default()
+    };
+    let mut cache = CacheRows {
+        item_index: vec![row(0), row(1)],
+        ..CacheRows::default()
+    };
+    assert!(cache.item_index.iter().all(|r| r.parse().is_ok()));
+    assert_eq!(index::recent(&cache, 5).len(), 2);
+    let writes = index::reconcile(&cache, &mut []);
+    assert_eq!(writes.writes().len(), 2);
+    assert!(
+        writes
+            .writes()
+            .iter()
+            .all(|w| matches!(w, Write::IndexDelete { .. }))
+    );
+    cache.apply(&writes);
+    assert!(cache.item_index.is_empty());
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 512, failure_persistence: None, ..ProptestConfig::default() })]
 
@@ -1037,7 +1071,9 @@ proptest! {
                     prop_assert_eq!(&back.display_name, &row.display_name);
                     prop_assert_eq!(&back.search_text, &row.search_text);
                     prop_assert_eq!(back.item_type, row.item_type);
-                    all_parse &= ids.insert(stored.entry.item_id);
+                    // Rows name items by `(vault_id, item_id)` (INV-103): the same item id
+                    // in two vaults is two items, not a duplicate.
+                    all_parse &= ids.insert((stored.entry.vault_id, stored.entry.item_id));
                 }
                 Err(e) => {
                     prop_assert_eq!(e, ClientError::CacheCorrupt);
@@ -1047,10 +1083,10 @@ proptest! {
         }
         let found = index::search(&cache, &query, limit);
         prop_assert!(found.len() <= limit);
-        prop_assert!(found.iter().all(|(_, id)| ids.contains(id.as_bytes())));
+        prop_assert!(found.iter().all(|(v, id)| ids.contains(&(*v.as_bytes(), *id.as_bytes()))));
         let used = index::recent(&cache, limit);
         prop_assert!(used.len() <= limit);
-        prop_assert!(used.iter().all(|(_, id)| ids.contains(id.as_bytes())));
+        prop_assert!(used.iter().all(|(v, id)| ids.contains(&(*v.as_bytes(), *id.as_bytes()))));
         let writes = index::reconcile(&cache, &mut []);
         if all_parse {
             let deletes = writes
