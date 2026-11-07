@@ -52,7 +52,8 @@ interface WebExtOffscreen {
   closeDocument(): Promise<void>;
 }
 
-/** `chrome.storage.session` (ADR 0013 §3 rule 2; ADR 0036 §2 fallback) and `.local`. */
+/** `chrome.storage.local` (the lock settings, ADR 0110 §3) and `.session`, which the extension
+ * never uses (ADR 0111 §1.5; tests read it to prove it stays empty). */
 interface WebExtStorageArea {
   get(keys?: string | string[] | null): Promise<Record<string, unknown>>;
   set(items: Record<string, unknown>): Promise<void>;

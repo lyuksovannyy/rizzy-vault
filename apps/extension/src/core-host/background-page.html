@@ -1,0 +1,14 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+
+<!-- Firefox's persistent background page (ADR 0111 §2.2, Manifest V2): the long-lived context
+     that holds the core. One module script, background-page.ts. -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>rizzy-vault background</title>
+  </head>
+  <body>
+    <script type="module" src="./background-page.ts"></script>
+  </body>
+</html>

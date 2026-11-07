@@ -1,5 +1,5 @@
 {
-  "manifest_version": 3,
+  "manifest_version": 2,
   "name": "rizzy-vault",
   "version": "0.0.0",
   "description": "Self-hostable, end-to-end encrypted, zero-knowledge password manager.",
@@ -9,13 +9,12 @@
       "strict_min_version": "115.0"
     }
   },
-  "permissions": ["storage", "idle"],
-  "host_permissions": ["http://*/*", "https://*/*"],
+  "permissions": ["storage", "idle", "http://*/*", "https://*/*"],
   "background": {
-    "scripts": ["src/core-host/background-page.js"],
-    "type": "module"
+    "page": "src/core-host/background-page.html",
+    "persistent": true
   },
-  "action": {
+  "browser_action": {
     "default_popup": "src/popup/index.html",
     "default_title": "rizzy-vault"
   },
@@ -37,13 +36,6 @@
       "run_at": "document_start"
     }
   ],
-  "web_accessible_resources": [
-    {
-      "resources": ["src/inline-menu/index.html", "src/passkey-consent/index.html", "src/save-dialog/index.html", "src/content/passkey-page-shim.js"],
-      "matches": ["http://*/*", "https://*/*"]
-    }
-  ],
-  "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; base-uri 'none'"
-  }
+  "web_accessible_resources": ["src/inline-menu/index.html", "src/passkey-consent/index.html", "src/save-dialog/index.html", "src/content/passkey-page-shim.js"],
+  "content_security_policy": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; base-uri 'none'"
 }

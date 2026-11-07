@@ -4,7 +4,7 @@
 // design: the offscreen document holds the decrypted `DurableSession` so a real MV3 service
 // worker — which Chromium is free to suspend after ~30s of inactivity — never has to). A 6-minute
 // idle soak is comfortably past several service-worker suspend/wake cycles, while staying well
-// under `DEFAULT_AUTO_LOCK_MS` (15 minutes, `core-host/lifecycle.ts`): if the session were still
+// under the lock settings' idle time, set to 10 minutes here (ADR 0110 §1): if the session were still
 // unlocked only because the auto-lock timer simply hadn't fired yet, this soak would not tell us
 // that; it tells us the *offscreen document itself* (and the session it holds) survives idling,
 // independent of the service worker's own suspend/resume behaviour. `chrome.offscreen.
@@ -66,6 +66,14 @@ test("the unlocked session and its offscreen document survive a 6-minute idle pe
   const setupPage = await context.newPage();
   const secretKey = await signUp(setupPage, server.origin, "lifetimeuser");
   await setupPage.close();
+  // The lock settings' idle time above the 6-minute wait (ADR 0110 §1; the default 5 minutes
+  // would lock first), so what is measured is the context's survival, not the idle lock.
+  const settingsWorker = context.serviceWorkers()[0] ?? (await context.waitForEvent("serviceworker"));
+  await settingsWorker.evaluate(() =>
+    chrome!.storage!.local.set({
+      "rizzy.lock_settings": '{"v":1,"auto_lock":true,"idle_minutes":10,"lock_on_restart":true,"lock_on_sleep":true}',
+    }),
+  );
 
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${extensionId}/src/popup/index.html`);

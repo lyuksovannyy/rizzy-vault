@@ -239,12 +239,39 @@ popup/options/content-script message landed in a context with nothing listening,
 (`chrome.offscreen.hasDocument()` reported `true` the whole time) but never answered anything.
 Found by the "popup opens and shows the locked state" E2E test once that test actually asserted
 on the error banner (see "The ADR 0036 §2 survival spike" below). Fixed by registering the
-listener as this function's first statement, unconditionally, then feature-detecting `ext.idle`/
-`ext.storage` for everything optional: idle-triggered lock and the `storage.session` fallback
-degrade to "not available in this context" rather than crash, and the timeout-based
-`AutoLockTimer` alone still locks on inactivity either way. A real, reported residual, not a
-design change: ADR 0036 §3's idle-based lock simply has no effect inside a Chromium offscreen
-document specifically, on this evidence.
+listener as this function's first statement, unconditionally. The OS idle state now reaches the
+offscreen document through the service worker, which has `idle` and `storage` (ADR 0111 §3.1,
+next section).
+
+### Lock settings and the idle lock (ADR 0110, ADR 0111)
+
+- **The settings** are the per-device record `rizzy.lock_settings` in `storage.local` (ADR 0110
+  §3): locking on or off, the idle time (1, 2, 5, 10, 15, 30, 60 or 240 minutes, default 5),
+  restart (always on), sleep or screen lock (default on). Rust's `lock_settings` parses and
+  encodes it in the long-lived context; a broken record reads as the defaults. The options page
+  shows the shared Locking group of `packages/ui` with its 5-second turn-off dialog. A saved
+  `rizzy.auto_lock_minutes` is migrated once (the largest listed value not above it, at least 1)
+  and removed.
+- **The lock** (`core-host/lifecycle.ts`, `LockController`): Rust's `LockTimer` is ticked every
+  10 s and locks when no popup or options request came for the idle time, by the monotonic or the
+  wall clock, or on a forward wall-clock gap of 2 minutes or more with the sleep option on. The
+  idle lock therefore comes at N minutes plus up to one tick (10 s), measured in
+  `e2e/lock-settings.spec.ts` as "after one minute plus one tick". The OS idle state locks too:
+  `"idle"` while locking is on, `"locked"` (screen lock) only with the sleep option on. With
+  locking off nothing locks automatically, and no tick or poll runs.
+- **Chromium** (ADR 0111 §3.1): the service worker registers `idle.onStateChanged` at the top
+  level and relays `idle`/`locked` to an existing offscreen document only; it sets the detection
+  interval from the record at each start and on every change, and pushes a changed record. Since
+  whether the event wakes a terminated worker is unknown, the offscreen document also asks the
+  worker for the state every 30 s while unlocked (`idle_status_query`), so the bound holds with
+  the worker stopped. **Firefox** (§3.2): the persistent background page has `browser.idle` and
+  `storage` itself; no relay, no poll.
+- **No unlocked state survives the long-lived context** (ADR 0111 §1): there is no
+  `storage.session` fallback, so a closed, crashed or reloaded offscreen document or background
+  page starts locked (`e2e/storage.spec.ts`, the teardown test).
+- **Manual check** (ADR 0111 §7 step 7, for the release checklist): on Windows, macOS and Linux,
+  in Chromium and Firefox, unlock, then lock the OS screen; on return the extension is locked
+  (within 30 s on Chromium). Not automated: headless Chromium has no screen lock.
 
 ### The offscreen document creation race
 
@@ -278,9 +305,8 @@ document, so the spec asks the service worker itself (`chrome.offscreen.hasDocum
 than scanning Playwright's page list.
 
 **Now measured** (`e2e/lifetime.spec.ts`, Chromium): a real unlocked session, left idle for 6
-minutes (comfortably past several service-worker suspend/wake cycles, and short of
-`DEFAULT_AUTO_LOCK_MS`'s 15-minute default so the result is not just "auto-lock hadn't fired
-yet") — `chrome.offscreen.hasDocument()` still reports `true`, fetched from a *freshly looked
+minutes (comfortably past several service-worker suspend/wake cycles, with the lock settings'
+idle time set to 10 minutes so the result is not just "auto-lock hadn't fired yet") — `chrome.offscreen.hasDocument()` still reports `true`, fetched from a *freshly looked
 up* service worker handle (the worker itself may have been suspended and restarted any number
 of times during the wait), and the popup still shows the unlocked view with no error. **Passed.**
 Still not measured: longer soaks (hours), real memory pressure, and Firefox (its background

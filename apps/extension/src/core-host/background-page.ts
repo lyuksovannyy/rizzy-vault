@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// The Firefox background page's entry point (ADR 0036 §2): "the background page on Firefox
-// (MV3 `background.scripts`, which Firefox keeps non-ephemeral unlike Chromium's event page)."
-// Firefox has no `chrome.offscreen`; its manifest (`manifest.firefox.json`) loads this script
-// directly as the background, so it is both the long-lived core-holding context and the
-// MV3-required background entry — there is no separate message-routing-only service worker on
-// this browser build (there is nothing for one to protect that this page does not already
-// hold correctly: it never exposes key material across a message boundary either).
+// The Firefox background page's entry point (ADR 0036 §2; ADR 0111 §2.2, §2.4): Firefox is
+// Manifest V2 with a **persistent** background page (`background-page.html`, which loads this
+// module), because an MV3 Firefox background is an event page that unloads when idle and would
+// take the unlocked vault with it. A persistent page stays loaded until the extension is unloaded
+// or the browser closes; if it reloads (an extension-process crash), it starts locked (ADR 0111
+// §1.2). Firefox has no `chrome.offscreen`, so this page is both the long-lived core-holding
+// context and the only background context: there is no message-routing service worker on this
+// build. It reads the lock settings from `storage` and receives `browser.idle` itself (§3.2).
 import { installCoreContextListener } from "./listener.ts";
 import { webext } from "../types/runtime-api.ts";
 

@@ -9,13 +9,14 @@
 //!
 //! | Rule | Source |
 //! |---|---|
-//! | `manifest_version` is 3 | ADR 0036 §2 (MV3) |
+//! | `manifest_version` is 3 on Chromium, 2 on Firefox | ADR 0036 §2 (MV3); ADR 0111 §2.2, §2.4 (Firefox MV2, for the persistent background page) |
+//! | Firefox: `background` is exactly the persistent page `src/core-host/background-page.html` | ADR 0111 §2.2 |
 //! | No `externally_connectable` key at all | [INV-40](../../../docs/THREAT_MODEL.md#8-security-invariants); ADR 0036 §4 last bullet ("not even the web vault's own origin") |
 //! | `permissions` is a subset of the allow-list ([`BASE_ALLOWED_PERMISSIONS`], plus [`Browser::extra_permission`]) | INV-40 ("the background treats every ... message as untrusted"; a wider permission set widens what a compromised context could reach) |
-//! | `host_permissions` is exactly [`EXPECTED_HOST_PERMISSIONS`] | ADR 0037 (matching needs every host; never wider, e.g. `<all_urls>`, which also covers `file:`/`ftp:`) |
+//! | `host_permissions` is exactly [`EXPECTED_HOST_PERMISSIONS`]; on Firefox (MV2, no `host_permissions` key) the host entries of `permissions` are exactly those | ADR 0037 (matching needs every host; never wider, e.g. `<all_urls>`, which also covers `file:`/`ftp:`); ADR 0111 §2.2 |
 //! | Every `content_scripts` entry has `all_frames: false`, `matches` of `http`/`https` only, and no `world: "MAIN"` | INV-37 clause 2, INV-40; ADR 0036 §4 |
-//! | `web_accessible_resources` exposes only a subset of [`EXPECTED_WEB_ACCESSIBLE_RESOURCES`], to `http`/`https` only | ADR 0036 §4 ("no `externally_connectable`... not even the web vault"); exposing an unlisted page (e.g. the popup or options page) would let a hostile page navigate or iframe straight into privileged UI |
-//! | `content_security_policy.extension_pages` allows only [`ALLOWED_CSP_SCRIPT_SRC`] in `script-src`, `'self'` or `'none'` in `object-src`, `'none'` in `base-uri` | ADR 0036 (MV3 bans remote code; no inline/eval beyond the one wasm exception) |
+//! | `web_accessible_resources` exposes only a subset of [`EXPECTED_WEB_ACCESSIBLE_RESOURCES`], to `http`/`https` only (Firefox MV2: a plain list of the same paths, no `matches`, the widening ADR 0111 §2.2 accepts) | ADR 0036 §4 ("no `externally_connectable`... not even the web vault"); exposing an unlisted page (e.g. the popup or options page) would let a hostile page navigate or iframe straight into privileged UI |
+//! | `content_security_policy.extension_pages` (Firefox MV2: the `content_security_policy` string) allows only [`ALLOWED_CSP_SCRIPT_SRC`] in `script-src`, `'self'` or `'none'` in `object-src`, `'none'` in `base-uri` | ADR 0036 (MV3 bans remote code; no inline/eval beyond the one wasm exception) |
 //!
 //! Changing an allow-list above is a security review, same framing as `rules.rs`'s own
 //! crate-boundary tables.
@@ -97,6 +98,9 @@ const EXPECTED_WEB_ACCESSIBLE_RESOURCES: &[&str] = &[
 /// `'unsafe-eval'` it happens to contain as a substring, in either direction.
 const ALLOWED_CSP_SCRIPT_SRC: &[&str] = &["'self'", "'wasm-unsafe-eval'"];
 
+/// Firefox's persistent background page, the long-lived context there (ADR 0111 §2.2).
+const FIREFOX_BACKGROUND_PAGE: &str = "src/core-host/background-page.html";
+
 /// A JSON array of strings at `manifest[key]`, or `None` if the key is missing or not an array
 /// of strings.
 fn string_array<'a>(manifest: &'a Value, key: &str) -> Option<Vec<&'a str>> {
@@ -123,11 +127,20 @@ fn same_set(actual: &[&str], expected: &[&str]) -> bool {
         && is_subset_of(expected, actual)
 }
 
-/// `permissions` (module docs table, row 3).
+/// Whether a `permissions` entry is a host pattern (MV2 lists them there, ADR 0111 §2.2).
+fn is_host_pattern(permission: &str) -> bool {
+    permission.contains("://") || permission == "<all_urls>"
+}
+
+/// `permissions` (module docs table, row 3). On Firefox (MV2) the host patterns are checked by
+/// [`check_host_permissions`] instead.
 fn check_permissions(browser: Browser, manifest: &Value) -> Vec<String> {
-    let Some(permissions) = string_array(manifest, "permissions") else {
+    let Some(mut permissions) = string_array(manifest, "permissions") else {
         return vec!["permissions must be an array of strings".to_owned()];
     };
+    if browser == Browser::Firefox {
+        permissions.retain(|p| !is_host_pattern(p));
+    }
     let mut allowed = BASE_ALLOWED_PERMISSIONS.to_vec();
     if let Some(extra) = browser.extra_permission() {
         allowed.push(extra);
@@ -141,10 +154,25 @@ fn check_permissions(browser: Browser, manifest: &Value) -> Vec<String> {
     }
 }
 
-/// `host_permissions` (module docs table, row 4).
-fn check_host_permissions(manifest: &Value) -> Vec<String> {
-    let Some(hosts) = string_array(manifest, "host_permissions") else {
-        return vec!["host_permissions must be an array of strings".to_owned()];
+/// `host_permissions` (module docs table, row 4). Firefox (MV2): no `host_permissions` key, and
+/// the host patterns of `permissions`.
+fn check_host_permissions(browser: Browser, manifest: &Value) -> Vec<String> {
+    let hosts = if browser == Browser::Firefox {
+        if manifest.get("host_permissions").is_some() {
+            return vec!["host_permissions must be absent on Firefox (MV2 lists hosts in permissions, ADR 0111 §2.2)".to_owned()];
+        }
+        let Some(permissions) = string_array(manifest, "permissions") else {
+            return vec!["permissions must be an array of strings".to_owned()];
+        };
+        permissions
+            .into_iter()
+            .filter(|p| is_host_pattern(p))
+            .collect()
+    } else {
+        let Some(hosts) = string_array(manifest, "host_permissions") else {
+            return vec!["host_permissions must be an array of strings".to_owned()];
+        };
+        hosts
     };
     if same_set(&hosts, EXPECTED_HOST_PERMISSIONS) {
         Vec::new()
@@ -198,8 +226,19 @@ fn check_content_scripts(manifest: &Value) -> Vec<String> {
     out
 }
 
-/// `web_accessible_resources` (module docs table, row 6).
-fn check_web_accessible_resources(manifest: &Value) -> Vec<String> {
+/// `web_accessible_resources` (module docs table, row 6). Firefox (MV2): a plain list of paths.
+fn check_web_accessible_resources(browser: Browser, manifest: &Value) -> Vec<String> {
+    if browser == Browser::Firefox {
+        let Some(resources) = string_array(manifest, "web_accessible_resources") else {
+            return vec!["web_accessible_resources must be an array of strings on Firefox (MV2, ADR 0111 §2.2)".to_owned()];
+        };
+        if is_subset_of(&resources, EXPECTED_WEB_ACCESSIBLE_RESOURCES) {
+            return Vec::new();
+        }
+        return vec![format!(
+            "web_accessible_resources {resources:?} is not a subset of {EXPECTED_WEB_ACCESSIBLE_RESOURCES:?} (ADR 0036 §4)"
+        )];
+    }
     let Some(entries) = manifest
         .get("web_accessible_resources")
         .and_then(Value::as_array)
@@ -251,13 +290,17 @@ fn csp_directive<'a>(csp: &'a str, directive: &str) -> Option<Vec<&'a str>> {
     None
 }
 
-/// `content_security_policy.extension_pages` (module docs table, row 7).
-fn check_csp(manifest: &Value) -> Vec<String> {
-    let Some(csp) = manifest
-        .get("content_security_policy")
-        .and_then(|v| v.get("extension_pages"))
-        .and_then(Value::as_str)
-    else {
+/// `content_security_policy.extension_pages` (module docs table, row 7); on Firefox (MV2) the
+/// `content_security_policy` string itself.
+fn check_csp(browser: Browser, manifest: &Value) -> Vec<String> {
+    let csp = manifest.get("content_security_policy");
+    let csp = if browser == Browser::Firefox {
+        csp.and_then(Value::as_str)
+    } else {
+        csp.and_then(|v| v.get("extension_pages"))
+            .and_then(Value::as_str)
+    };
+    let Some(csp) = csp else {
         return vec!["content_security_policy.extension_pages must be a string".to_owned()];
     };
     let mut out = Vec::new();
@@ -291,8 +334,23 @@ fn check_csp(manifest: &Value) -> Vec<String> {
 /// Checks one already-parsed manifest and returns every violation found (module docs table).
 pub(crate) fn check_manifest_security(browser: Browser, manifest: &Value) -> Vec<String> {
     let mut out = Vec::new();
-    if manifest.get("manifest_version").and_then(Value::as_u64) != Some(3) {
-        out.push("manifest_version must be 3 (MV3, ADR 0036 §2)".to_owned());
+    let version = manifest.get("manifest_version").and_then(Value::as_u64);
+    match browser {
+        Browser::Chromium if version != Some(3) => {
+            out.push("manifest_version must be 3 (MV3, ADR 0036 §2)".to_owned());
+        }
+        Browser::Firefox if version != Some(2) => {
+            out.push("manifest_version must be 2 on Firefox (ADR 0111 §2.2, §2.4)".to_owned());
+        }
+        _ => {}
+    }
+    if browser == Browser::Firefox
+        && manifest.get("background")
+            != Some(&serde_json::json!({ "page": FIREFOX_BACKGROUND_PAGE, "persistent": true }))
+    {
+        out.push(format!(
+            "background must be exactly {{\"page\": \"{FIREFOX_BACKGROUND_PAGE}\", \"persistent\": true}} on Firefox (ADR 0111 §2.2)"
+        ));
     }
     if manifest.get("externally_connectable").is_some() {
         out.push(
@@ -301,10 +359,10 @@ pub(crate) fn check_manifest_security(browser: Browser, manifest: &Value) -> Vec
         );
     }
     out.extend(check_permissions(browser, manifest));
-    out.extend(check_host_permissions(manifest));
+    out.extend(check_host_permissions(browser, manifest));
     out.extend(check_content_scripts(manifest));
-    out.extend(check_web_accessible_resources(manifest));
-    out.extend(check_csp(manifest));
+    out.extend(check_web_accessible_resources(browser, manifest));
+    out.extend(check_csp(browser, manifest));
     out
 }
 
@@ -385,8 +443,73 @@ mod tests {
     /// manifest shape.
     fn good_firefox() -> Value {
         let mut m = good_chromium();
-        m["permissions"] = json!(["storage", "idle"]);
+        m["manifest_version"] = json!(2);
+        m["permissions"] = json!(["storage", "idle", "http://*/*", "https://*/*"]);
+        if let Some(o) = m.as_object_mut() {
+            o.remove("host_permissions");
+        }
+        m["background"] =
+            json!({ "page": "src/core-host/background-page.html", "persistent": true });
+        m["web_accessible_resources"] = json!([
+            "src/inline-menu/index.html",
+            "src/passkey-consent/index.html",
+            "src/content/passkey-page-shim.js"
+        ]);
+        m["content_security_policy"] =
+            json!("script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; base-uri 'none'");
         m
+    }
+
+    /// ADR 0111 §2.2's Firefox MV2 shape: each deviation from it fails.
+    #[test]
+    fn firefox_mv2_rules() {
+        type Mutation = (&'static str, fn(&mut Value));
+        let cases: [Mutation; 11] = [
+            ("mv3", |m| m["manifest_version"] = json!(3)),
+            ("event page", |m| {
+                m["background"]["persistent"] = json!(false);
+            }),
+            ("scripts", |m| {
+                m["background"] = json!({ "scripts": ["a.js"] });
+            }),
+            ("other page", |m| {
+                m["background"]["page"] = json!("src/popup/index.html");
+            }),
+            ("host_permissions key", |m| {
+                m["host_permissions"] = json!(["http://*/*", "https://*/*"]);
+            }),
+            ("all_urls", |m| {
+                m["permissions"] = json!(["storage", "idle", "<all_urls>"]);
+            }),
+            ("file host", |m| {
+                m["permissions"] = json!(["storage", "http://*/*", "https://*/*", "file:///*"]);
+            }),
+            ("tabs", |m| {
+                m["permissions"] = json!(["storage", "tabs", "http://*/*", "https://*/*"]);
+            }),
+            ("war popup", |m| {
+                m["web_accessible_resources"] = json!(["src/popup/index.html"]);
+            }),
+            ("csp object", |m| {
+                m["content_security_policy"] = json!("script-src 'self'; object-src 'self'");
+            }),
+            ("csp eval", |m| {
+                m["content_security_policy"] =
+                    json!("script-src 'self' 'unsafe-eval'; object-src 'self'; base-uri 'none'");
+            }),
+        ];
+        for (name, mutate) in cases {
+            let mut m = good_firefox();
+            mutate(&mut m);
+            assert!(
+                !check_manifest_security(Browser::Firefox, &m).is_empty(),
+                "{name}"
+            );
+        }
+        // The Chromium build stays MV3.
+        let mut c = good_chromium();
+        c["manifest_version"] = json!(2);
+        assert!(!check_manifest_security(Browser::Chromium, &c).is_empty());
     }
 
     /// Exercises the hand-written fixtures above (mirrors of the allow-list constants in this
@@ -437,10 +560,12 @@ mod tests {
     #[test]
     fn firefox_is_not_allowed_the_chromium_only_offscreen_permission() {
         let mut m = good_firefox();
-        m["permissions"] = json!(["storage", "idle", "offscreen"]);
+        m["permissions"] = json!(["storage", "idle", "offscreen", "http://*/*", "https://*/*"]);
         assert!(!check_manifest_security(Browser::Firefox, &m).is_empty());
-        // The very same permission set is fine for Chromium.
-        assert!(check_manifest_security(Browser::Chromium, &m).is_empty());
+        // The same permissions are fine for Chromium (hosts in its own host_permissions).
+        let mut c = good_chromium();
+        c["permissions"] = json!(["storage", "idle", "offscreen"]);
+        assert!(check_manifest_security(Browser::Chromium, &c).is_empty());
     }
 
     #[test]

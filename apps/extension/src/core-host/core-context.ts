@@ -69,7 +69,6 @@ import {
   isOfferedCandidate,
 } from "./passkey-ceremony.ts";
 import { base64ToBytes, bytesToBase64 } from "../messaging/bytes.ts";
-import { clearUnlockedSnapshot, hasSessionStorage, restoreUnlockedSnapshot } from "./session-store.ts";
 import type {
   CapturedCustomField,
   FillOnly,
@@ -101,28 +100,16 @@ async function ensureCache(): Promise<ExtensionCache> {
   return cache;
 }
 
-/** Starts the long-lived context: tries the `storage.session` fallback restore (ADR 0036 §2),
- * then starts the auto-lock timer if something was restored. Call once, at module load. */
+/** Starts the long-lived context, always locked (ADR 0111 §1.2): a context that was torn down
+ * (closed, crashed, discarded, reloaded) took every handle with it, and nothing restores them.
+ * No extension storage area ever holds key material (§1.1), so there is nothing to resume from.
+ * Starts the lock controller and reads the lock settings. Call once, at module load. */
 export async function startCoreContext(ext: WebExtNamespace, lockSource: LockSettingsSource): Promise<void> {
   lockController = newLockController(ext, lockSource);
-  void startLockSettings(ext, lockSource);
-  if (!hasSessionStorage(ext)) {
-    // No fallback on this browser build: nothing to restore, stay locked, same as a fresh
-    // start.
-    return;
-  }
-  const snapshot = await restoreUnlockedSnapshot(ext);
-  if (snapshot !== undefined) {
-    // `DurableSession` has no "resume from an opaque snapshot" constructor yet (only
-    // `enrolDevice`/`unlockDurableDevice`, each a real crypto operation): a real restore would
-    // need one (`not_done`, tracked honestly rather than faked). Until it exists, a
-    // present-but-unusable snapshot is treated as stale and cleared, same as before this
-    // change — the fallback plumbing stays ready for the day a real snapshot can go in it.
-    await clearUnlockedSnapshot(ext);
-  }
+  await startLockSettings(ext, lockSource);
 }
 
-async function lock(ext: WebExtNamespace): Promise<void> {
+async function lock(): Promise<void> {
   session?.lock();
   session = undefined;
   lockController?.locked();
@@ -136,9 +123,6 @@ async function lock(ext: WebExtNamespace): Promise<void> {
   passkeyCeremonies.clear();
   iframeInstances.clear();
   offers.clear();
-  if (hasSessionStorage(ext)) {
-    await clearUnlockedSnapshot(ext);
-  }
 }
 
 /**
@@ -170,7 +154,7 @@ function newLockController(ext: WebExtNamespace, lockSource: LockSettingsSource)
       setInterval: (f, ms) => globalThis.setInterval(f, ms),
       clearInterval: (h) => globalThis.clearInterval(h as ReturnType<typeof setInterval>),
       newTimer: (settings, now) => new LockTimer(settings, now),
-      lock: () => void lock(ext),
+      lock: () => void lock(),
       ...(relay
         ? {
             queryIdleStatus: () => ext.runtime.sendMessage({ type: "idle_status_query" } satisfies IdleStatusQuery),
@@ -1043,8 +1027,7 @@ function recoveryNoticeOf(s: DurableSession | undefined): PopupRecoveryNotice | 
 }
 
 /** Handles one popup/options request (ADR 0036 §4: "coarse, one-call-per-action messages").
- * `ext` is used for the `"lock"` branch's `storage.session` clear and the auto-lock timer's
- * start; the account-config read/write (`account-config.ts`) needs no `ext` — it is IndexedDB,
+ * The account-config read/write (`account-config.ts`) needs no `ext` — it is IndexedDB,
  * not `chrome.storage`, precisely so it keeps working inside the Chromium offscreen document. */
 export async function handlePopupRequest(ext: WebExtNamespace, request: PopupRequest): Promise<PopupResponse> {
   lockController?.activity();
@@ -1131,7 +1114,7 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
       }
     }
     case "lock":
-      await lock(ext);
+      await lock();
       return { type: "locked" };
     case "sync": {
       if (session === undefined) {
@@ -1195,7 +1178,7 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
     case "removal_check":
       return removalCheck();
     case "remove_device":
-      return removeDevice(ext);
+      return removeDevice();
     case "revocation_retry":
       // ADR 0091 §2: the popup's retry of a sync refused `server_revocation_pending`, timed by
       // the core's schedule and the session's last account answer (a fresh one: every sync
@@ -1309,14 +1292,14 @@ async function removalCheck(): Promise<PopupResponse> {
  * a new enrolment with a new device id (CRYPTO.md §11.2); the old device is revoked from
  * another device.
  */
-async function removeDevice(ext: WebExtNamespace): Promise<PopupResponse> {
+async function removeDevice(): Promise<PopupResponse> {
   try {
     const store = await ensureCache();
     const refusal = session?.removalRefusal ?? (await cacheRemovalRefusal(store));
     if (refusal !== undefined) {
       return { type: "error", code: refusal };
     }
-    await lock(ext);
+    await lock();
     store.close();
     cache = undefined;
     await deleteCache();

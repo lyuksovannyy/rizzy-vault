@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Threat model INV-63: "in the browser extension, unlocked key material [...] exists only in
-// memory: the service worker, an offscreen document, or `storage.session` [...]. It is never
-// written to `storage.local`, `storage.sync` or IndexedDB, and no storage that content scripts
-// can read holds secrets. Only wrapped device state is persisted." Its verification: a "test
-// that inspects every extension storage area after unlock and after a worker restart".
+// Threat model INV-63 as ADR 0111 §8 point 2 replaces it: "In the browser extension, unlocked key
+// material [...] exists only in memory in the long-lived context of ADR 0036 §2 (the offscreen
+// document on Chromium, the background page on Firefox). [...] It is never written to
+// `storage.local`, `storage.sync`, `storage.session` or IndexedDB." Its verification: a test
+// that inspects every extension storage area after unlock, after a worker restart and after
+// lock (`storage.session` has zero keys each time), and the teardown test below (ADR 0111 §7
+// steps 1 and 2).
 //
 // The story: an account with one login item is created through the web vault; the extension
 // enrols (CRYPTO.md §11.2: login, enrolment, the encrypted cache filled by a Fetch) and is
@@ -21,8 +23,7 @@
 // alignment. The keys themselves (account, vault, item and device keys, `pw_in`, unlock keys)
 // live inside the wasm core, which exposes none of their bytes to JavaScript, so this test
 // cannot name them; `rizzy-client`'s own canary (`crates/rizzy-client/src/tests/canary.rs`)
-// covers what the server sees, and the `storage.session` snapshot is still empty plumbing
-// (`core-host/session-store.ts`).
+// covers what the server sees. The `storage.session` fallback is gone (ADR 0111 §1.4).
 //
 // Positive control: the same search must find the enrolment's login name in IndexedDB (the
 // account config, which `account-config.ts` stores as UTF-8 bytes, so it is found as hex), so a
@@ -193,6 +194,11 @@ async function stopServiceWorker(context: BrowserContext, extensionId: string): 
   await page.close();
 }
 
+/** The keys in `storage.session`: none, ever (ADR 0111 §1.1, §1.5). */
+async function sessionKeys(worker: Worker): Promise<string[]> {
+  return worker.evaluate(async () => Object.keys(await chrome!.storage!.session.get(null)));
+}
+
 /** Opens the popup; unlocks with the password if the session did not survive. */
 async function openUnlocked(context: BrowserContext, extensionId: string): Promise<Page> {
   const popup = await context.newPage();
@@ -240,6 +246,7 @@ test("no storage area holds a secret after unlock and after a worker restart (IN
   await expect(popup.getByRole("button", { name: "Lock" })).toBeVisible({ timeout: 30_000 });
   await popup.close();
   expectNoSecret(await dumpStorage(await currentWorker(context)), secrets, "after unlock");
+  expect(await sessionKeys(await currentWorker(context)), "storage.session after unlock").toEqual([]);
 
   // Stop the service worker, as an MV3 suspension does, then wake it through the popup. A mark
   // set on the old worker's global object proves the woken one is a new instance.
@@ -253,5 +260,48 @@ test("no storage area holds a secret after unlock and after a worker restart (IN
     "the service worker was restarted",
   ).toBeUndefined();
   expectNoSecret(await dumpStorage(await currentWorker(context)), secrets, "after a worker restart");
+  expect(await sessionKeys(await currentWorker(context)), "storage.session after a worker restart").toEqual([]);
+
+  // Lock: still nothing in storage.session (ADR 0111 §1: no fallback exists to clear).
+  await woken.getByRole("button", { name: "Lock" }).click();
+  await expect(woken.getByRole("button", { name: "Unlock" })).toBeVisible({ timeout: 30_000 });
+  expect(await sessionKeys(await currentWorker(context)), "storage.session after lock").toEqual([]);
   await woken.close();
+});
+
+test("closing the offscreen document leaves the extension locked, and unlocking works again (ADR 0111 §1.2)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await context.newPage();
+  const secretKey = await signUp(page, server.origin, "teardownuser");
+  await page.close();
+  const popup = await context.newPage();
+  await popup.goto(`chrome-extension://${extensionId}/src/popup/index.html`);
+  await popup.getByLabel("Server URL").fill(server.origin);
+  await popup.getByLabel("Account (login name)").fill("teardownuser");
+  await popup.getByLabel("Secret Key").fill(secretKey);
+  await popup.getByLabel("Master password").fill(TEST_ACCOUNT_PASSWORD);
+  await popup.getByRole("button", { name: "Set up" }).click();
+  await expect(popup.getByRole("button", { name: "Lock" })).toBeVisible({ timeout: 30_000 });
+  await popup.close();
+
+  // The teardown: from the service worker, as a discard or crash would.
+  await (await currentWorker(context)).evaluate(() => chrome!.offscreen!.closeDocument());
+
+  const after = await context.newPage();
+  await after.goto(`chrome-extension://${extensionId}/src/popup/index.html`);
+  await expect(after.getByRole("button", { name: "Unlock" })).toBeVisible({ timeout: 30_000 });
+  const secrets = [
+    ["the master password", TEST_ACCOUNT_PASSWORD],
+    ["the Secret Key", secretKey],
+    ["the Secret Key without separators", secretKey.replaceAll("-", "")],
+  ] as const;
+  expectNoSecret(await dumpStorage(await currentWorker(context)), secrets, "after the teardown");
+  expect(await sessionKeys(await currentWorker(context))).toEqual([]);
+  await after.getByLabel("Master password").fill(TEST_ACCOUNT_PASSWORD);
+  await after.getByRole("button", { name: "Unlock" }).click();
+  await expect(after.getByRole("button", { name: "Lock" })).toBeVisible({ timeout: 30_000 });
+  await after.close();
 });

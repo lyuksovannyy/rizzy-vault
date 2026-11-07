@@ -129,9 +129,9 @@ export interface InstallCoreContextListenerOptions {
  * (finding (4)/(5)'s underlying cause, deeper than the offscreen-document-creation race
  * `background/service-worker.ts`'s `ensureOffscreenDocument` already guards: the document existed
  * the whole time, but its own message handling never came up). Most conservative reading, per
- * CLAUDE.md: feature-detect `ext.idle`/`ext.storage` and degrade (no idle-triggered lock; no
- * `storage.session` fallback; the options page's auto-lock minutes read as the default) rather
- * than assume either exists, while the core messaging contract above never depends on either. */
+ * CLAUDE.md: never assume `ext.idle`/`ext.storage` exist here. On Chromium the service worker
+ * relays the OS idle state and the lock settings (ADR 0111 §3.1); on Firefox the background page
+ * has both itself (§3.2). The core messaging contract above never depends on either. */
 export function installCoreContextListener(ext: WebExtNamespace, options: InstallCoreContextListenerOptions): void {
   const extensionOrigin = extensionOriginOf(ext);
   const lockSource: LockSettingsSource = options.lockSource ?? (options.acceptContentScripts ? "own_storage" : "service_worker");

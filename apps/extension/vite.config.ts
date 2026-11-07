@@ -50,7 +50,9 @@ export default defineConfig(({ mode }) => {
     input["src/background/service-worker"] = entry("./src/background/service-worker.ts");
     input["src/core-host/offscreen"] = entry("./src/core-host/offscreen.html");
   } else {
-    input["src/core-host/background-page"] = entry("./src/core-host/background-page.ts");
+    // ADR 0111 §2.2: Firefox is Manifest V2 with a persistent background page, which loads the
+    // core host through one module script.
+    input["src/core-host/background-page"] = entry("./src/core-host/background-page.html");
   }
 
   return {
