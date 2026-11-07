@@ -1509,6 +1509,7 @@ All of this lands with the code in M1. None of it is optional.
    - sync-engine decoders: the canonical version vector, dot and HLC ([ADR 0012](adr/0012-sync-engine.md) §2–§3)
    - the OPAQUE message deserialisers on the server side ([§5](#5-opaque-integration)): the registration request, the registration upload, KE1 and KE3, which arrive in unauthenticated API bodies, and the stored password file and `ServerLogin` state as defence in depth
    - the vault directory, `ACCOUNT_SETTINGS` tag `0x0002` (`client_vault_directory`, [ADR 0081](adr/0081-multiple-vaults-personal-and-shared.md) Part A), with the existing settings target extended; in M9, the `vault-membership` statement (`core_vault_membership`) and the contact pins, tag `0x0003` (`client_contacts`)
+   - the per-device vault lock settings record, `rizzy.lock_settings` (`client_lock_settings`, [ADR 0110](adr/0110-passkey-user-verification.md) §3; not secret, but rewritable by anything with access to the browser or app storage): a broken record is the defaults, and the lock timer never locks while locking is off
 
    The client-side OPAQUE messages (KE2 and the registration response) are not fuzzed. Fuzzing them at a useful rate would need a cheap KSF inside `rizzy-core`, even one behind a `cfg`. The owner decided on 2026-09-26 that no weakened KSF path may exist. Property tests cover the client's handling of random and bit-flipped server messages instead.
 

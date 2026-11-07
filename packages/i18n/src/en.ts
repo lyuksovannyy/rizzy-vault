@@ -181,8 +181,7 @@ export const en = {
   // keys are the ADR's own names. ----
   "lock.settings.title": "Locking",
   "lock.settings.autoLock": "Lock the vault automatically",
-  "lock.settings.idleBefore": "Lock after",
-  "lock.settings.idleAfter": "minutes idle",
+  "lock.settings.idle": "Lock after this many minutes idle",
   "lock.settings.restartBrowser": "Lock when the browser restarts",
   "lock.settings.restartBrowserHint": "This browser cannot keep the vault unlocked after a restart.",
   "lock.settings.sleep": "Lock when the computer sleeps or hibernates",

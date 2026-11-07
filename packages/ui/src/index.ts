@@ -43,7 +43,6 @@ export {
   type LockSettingsText,
   type LockSettingsValue,
   countdown as lockDisableCountdown,
-  nextCountdownChange as lockDisableNextChange,
 } from "./LockSettingsGroup.tsx";
 export {
   RecoveryNoticeBanner,

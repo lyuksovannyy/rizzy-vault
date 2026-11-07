@@ -8,7 +8,8 @@
 // chooser's state is audited in `conflict.spec.ts`; the Sessions section with two sessions, its
 // end dialog, its log-in-again form and the login after a session was ended in
 // `sessions.spec.ts`; the breach check's results (item view, generator, Password health with a
-// found item) in `breach.spec.ts`; keyboard-only use of these same screens is `keyboard-nav.spec.ts`. A
+// found item) in `breach.spec.ts`; Settings → Locking on and off, its turn-off dialog and their
+// keyboard walk (ADR 0110) in `lock-settings.spec.ts`; keyboard-only use of these same screens is `keyboard-nav.spec.ts`. A
 // Secure Note rendered from its Markdown (ADR 0062) is audited in every one of those modes too.
 import { expect, test } from "@playwright/test";
 import { createHmac } from "node:crypto";

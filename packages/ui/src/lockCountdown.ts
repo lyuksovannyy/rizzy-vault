@@ -22,14 +22,5 @@ export function countdown(elapsedMs: number, delayMs: number): Countdown {
   return { ready: false, seconds: Math.ceil(remaining / 1000) };
 }
 
-/** Milliseconds until the label next changes (the next whole second of the remaining time), or 0
- * once ready. */
-export function nextCountdownChange(elapsedMs: number, delayMs: number): number {
-  const elapsed = Number.isFinite(elapsedMs) && elapsedMs > 0 ? elapsedMs : 0;
-  const remaining = delayMs - elapsed;
-  if (remaining <= 0) {
-    return 0;
-  }
-  const part = remaining % 1000;
-  return part === 0 ? 1000 : part;
-}
+/** How often the open dialog reads the clock to update its label, in milliseconds. */
+export const COUNTDOWN_POLL_MS = 250;

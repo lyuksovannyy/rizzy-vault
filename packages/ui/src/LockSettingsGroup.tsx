@@ -31,10 +31,10 @@
 import { type KeyboardEvent, type Ref, useEffect, useId, useRef, useState } from "react";
 
 import { trapTab } from "./focusTrap.ts";
-import { countdown, nextCountdownChange } from "./lockCountdown.ts";
+import { COUNTDOWN_POLL_MS, countdown } from "./lockCountdown.ts";
 import { setModalOpen } from "./modalRegistry.ts";
 
-export { countdown, nextCountdownChange } from "./lockCountdown.ts";
+export { COUNTDOWN_POLL_MS, countdown } from "./lockCountdown.ts";
 
 /** The settings the group shows and changes (`lockOnRestart` is always on, §4.1). */
 export interface LockSettingsValue {
@@ -47,9 +47,8 @@ export interface LockSettingsValue {
 export interface LockSettingsText {
   readonly title: string;
   readonly autoLock: string;
-  /** The idle select is labelled "‹idleBefore› ‹value› ‹idleAfter›": "Lock after 5 minutes idle". */
-  readonly idleBefore: string;
-  readonly idleAfter: string;
+  /** The idle select's label; its options are the minutes ("5"). */
+  readonly idle: string;
   readonly restart: string;
   /** §4.1's line: why the restart switch is on and disabled. */
   readonly restartHint: string;
@@ -132,8 +131,6 @@ export function LockSettingsGroup(props: LockSettingsGroupProps) {
   const offHintId = `${id}-off`;
   const restartHintId = `${id}-restart-hint`;
   const sleepHintId = `${id}-sleep-hint`;
-  const idleBeforeId = `${id}-idle-before`;
-  const idleAfterId = `${id}-idle-after`;
   const idleId = `${id}-idle`;
   const [dialogOpen, setDialogOpen] = useState(false);
   const toggleRef = useRef<HTMLButtonElement>(null);
@@ -182,13 +179,12 @@ export function LockSettingsGroup(props: LockSettingsGroupProps) {
           </p>
         )}
         <div className="switch-row">
-          <span id={idleBeforeId} className="switch-label">
-            {text.idleBefore}
-          </span>
+          <label htmlFor={idleId} className="switch-label">
+            {text.idle}
+          </label>
           <select
             id={idleId}
             value={value?.idleMinutes ?? props.idleMinutes[2]}
-            aria-labelledby={`${idleBeforeId} ${idleId} ${idleAfterId}`}
             aria-disabled={subDisabled ? "true" : undefined}
             aria-describedby={offDescribed}
             onMouseDown={(e) => {
@@ -214,9 +210,6 @@ export function LockSettingsGroup(props: LockSettingsGroupProps) {
               </option>
             ))}
           </select>
-          <span id={idleAfterId} className="switch-label">
-            {text.idleAfter}
-          </span>
         </div>
         <Switch
           labelId={`${id}-restart`}
@@ -257,7 +250,9 @@ export function LockSettingsGroup(props: LockSettingsGroupProps) {
   );
 }
 
-/** The turn-off warning dialog (module docs; ADR 0110 §2). Mount it to open it. */
+/** The turn-off warning dialog (module docs; ADR 0110 §2). Mount it to open it. The countdown
+ * polls the monotonic clock every `COUNTDOWN_POLL_MS` and re-renders when the shown second
+ * changes; whether Confirm works is decided by the clock at the click itself. */
 export function LockDisableDialog(props: {
   readonly text: LockSettingsText;
   readonly delayMs: number;
@@ -270,11 +265,10 @@ export function LockDisableDialog(props: {
   const bodyId = `${id}-body`;
   const { text, delayMs, clock } = props;
   const [openedAt] = useState(() => clock());
-  const [elapsed, setElapsed] = useState(0);
+  const [state, setState] = useState(() => countdown(0, delayMs));
   const [announcement, setAnnouncement] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
-  const state = countdown(elapsed, delayMs);
 
   useEffect(() => {
     setModalOpen(true);
@@ -289,9 +283,12 @@ export function LockDisableDialog(props: {
       setAnnouncement(text.disableReady);
       return undefined;
     }
-    const timer = setTimeout(() => setElapsed(clock() - openedAt), nextCountdownChange(elapsed, delayMs));
-    return () => clearTimeout(timer);
-  }, [state.ready, elapsed, delayMs, clock, openedAt, text.disableReady]);
+    const timer = setInterval(() => {
+      const next = countdown(clock() - openedAt, delayMs);
+      setState((current) => (current.ready === next.ready && current.seconds === next.seconds ? current : next));
+    }, COUNTDOWN_POLL_MS);
+    return () => clearInterval(timer);
+  }, [state.ready, delayMs, clock, openedAt, text.disableReady]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key === "Escape") {

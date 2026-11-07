@@ -61,8 +61,7 @@ function AppearanceGroup() {
 const LOCK_TEXT: LockSettingsText = {
   title: t("lock.settings.title"),
   autoLock: t("lock.settings.autoLock"),
-  idleBefore: t("lock.settings.idleBefore"),
-  idleAfter: t("lock.settings.idleAfter"),
+  idle: t("lock.settings.idle"),
   restart: t("lock.settings.restartBrowser"),
   restartHint: t("lock.settings.restartBrowserHint"),
   sleep: t("lock.settings.sleep"),
