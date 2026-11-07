@@ -27,6 +27,44 @@ use rizzy_match::normalize::normalize_domain;
 use rizzy_proto::icons::{IconFetchRequest, IconFetchResponse, IconHost};
 
 use crate::error::ClientError;
+use crate::settings::AccountSettingsRecord;
+
+/// The account's website-icons setting ([ADR 0099] §1), as read from its `ACCOUNT_SETTINGS`
+/// record: tag `0x0005` = `0x01` or an absent tag (or an absent record) reads on, `0x00` reads
+/// off. Made only from a decoded record ([`AccountSettingsRecord::website_icons`]) or from a
+/// read that failed ([`IconsSetting::from_read`], which reads off).
+///
+/// [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IconsSetting {
+    /// Whether the setting reads on.
+    on: bool,
+}
+
+impl IconsSetting {
+    /// The setting with the value `on` (for the record's accessor).
+    pub(crate) const fn of(on: bool) -> Self {
+        Self { on }
+    }
+
+    /// The setting of a settings read ([`crate::settings::SettingsCache::get`] or
+    /// [`crate::settings::account_settings`]): the record's value, or **off** when the record was
+    /// rejected or parked (`settings_update_required`), or its tag `0x0005` could not be read. The
+    /// client never falls back to the default, which is the wider one, when the record it cannot
+    /// read may hold an explicit `0x00` ([ADR 0099] §1 "Reading").
+    ///
+    /// [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
+    #[must_use]
+    pub fn from_read(read: Result<&AccountSettingsRecord, ClientError>) -> Self {
+        read.map_or(Self::of(false), AccountSettingsRecord::website_icons)
+    }
+
+    /// Whether the setting reads on.
+    #[must_use]
+    pub const fn is_on(self) -> bool {
+        self.on
+    }
+}
 
 /// The request for the icon of `website_host` (module docs).
 ///

@@ -15,7 +15,9 @@
 //! - a parsed record stays within the bounds of ADR 0042 §3–§4: at most 64 user groups, at most
 //!   1,024 disabled ids, every user group with `flag_third_party_hostable = 0x00`;
 //! - every edit the host can make on a parsed record either is refused with a stable error or
-//!   leaves a record that encodes and parses back to itself, with every unknown tag carried.
+//!   leaves a record that encodes and parses back to itself, with every unknown tag carried;
+//! - the website-icons switch (tag `0x0005`, ADR 0099 §1) is never an unknown tag, reads off only
+//!   from an explicit one-byte `0x00` entry, and reads off for every record that does not parse.
 //!
 //! ```text
 //! cargo +nightly fuzz run client_account_settings
@@ -26,7 +28,8 @@ use libfuzzer_sys::fuzz_target;
 use rizzy_client::ClientError;
 use rizzy_client::rizzy_match::error::{MAX_DISABLED_GROUPS, MAX_USER_GROUPS};
 use rizzy_client::rizzy_match::{GroupId, MatchMode, MatchingSettings, user_group};
-use rizzy_client::settings::AccountSettingsRecord;
+use rizzy_client::icons::IconsSetting;
+use rizzy_client::settings::{AccountSettingsRecord, TAG_WEBSITE_ICONS};
 
 /// The section's bounds and the user-group rules hold for `m`.
 fn assert_bounds(m: &MatchingSettings) {
@@ -52,6 +55,8 @@ fuzz_target!(|data: &[u8]| {
     let record = match AccountSettingsRecord::decode(data) {
         Ok(record) => record,
         Err(e) => {
+            // A record that cannot be read never falls back to the (wider) default.
+            assert!(!IconsSetting::from_read(Err(e)).is_on());
             assert!(matches!(
                 e,
                 ClientError::InvalidServerResponse | ClientError::SettingsUpdateRequired
@@ -64,6 +69,14 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(encoded.as_slice(), data, "one encoding per record");
     let again = AccountSettingsRecord::decode(&encoded).expect("and parses again");
     assert_eq!(again, record);
+
+    // Website icons: off only from an explicit 0x00 entry; never kept as an unknown tag.
+    assert_eq!(again.website_icons(), record.website_icons());
+    assert!(record.unknown_tags().all(|tag| tag != TAG_WEBSITE_ICONS));
+    if !record.website_icons().is_on() {
+        let off_entry = [0x00, 0x05, 0x00, 0x00, 0x00, 0x01, 0x00];
+        assert!(data.windows(off_entry.len()).any(|w| w == off_entry));
+    }
 
     // The edits a host makes, on the parsed section (the record applies them the same way).
     let unknown: Vec<u16> = record.unknown_tags().collect();

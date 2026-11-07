@@ -20,6 +20,13 @@
 //!   domain, `match_default` out of range, `flag = 1`, and `format_version ≠ 1` (parked:
 //!   `settings_update_required`, not rejected), plus tags out of order, tag `0x0000`/`0xFFFF` and a
 //!   trailing byte.
+//! - **Website icons**, tag `0x0005` ([ADR 0099] §1; written by an independent Python writer from
+//!   that layout): on (`0x01`), off (`0x00`), and off beside a matching section; negative: an
+//!   empty value, two bytes, `0x02`, `0xFF` and the two bytes "hi" (an unknown tag's value until
+//!   `0x0005` was assigned, so the `unknown-tags` vector moved to tag `0x0006`). A rejected
+//!   record and a parked one read the setting **off**; an absent tag and the absent record read on.
+//!
+//! [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
 
 use rizzy_match::{GroupId, MatchMode, user_group};
 
@@ -37,7 +44,13 @@ const POSITIVE: &[(&str, &str)] = &[
     ),
     (
         "unknown-tags",
-        "0001000300010000000600010000000000050000000268697ffe00000000",
+        "0001000300010000000600010000000000060000000268697ffe00000000",
+    ),
+    ("website-icons-on", "0001000100050000000101"),
+    ("website-icons-off", "0001000100050000000100"),
+    (
+        "matching-and-website-icons-off",
+        "0001000200010000000600020000000000050000000100",
     ),
 ];
 
@@ -71,6 +84,31 @@ const NEGATIVE: &[(&str, &str, ClientError)] = &[
     (
         "trailing-byte",
         "0001000000",
+        ClientError::InvalidServerResponse,
+    ),
+    (
+        "website-icons-empty",
+        "00010001000500000000",
+        ClientError::InvalidServerResponse,
+    ),
+    (
+        "website-icons-two-bytes",
+        "000100010005000000020100",
+        ClientError::InvalidServerResponse,
+    ),
+    (
+        "website-icons-02",
+        "0001000100050000000102",
+        ClientError::InvalidServerResponse,
+    ),
+    (
+        "website-icons-ff",
+        "00010001000500000001ff",
+        ClientError::InvalidServerResponse,
+    ),
+    (
+        "website-icons-former-unknown-value",
+        "000100010005000000026869",
         ClientError::InvalidServerResponse,
     ),
     (
@@ -183,12 +221,79 @@ fn the_typed_records_encode_to_the_positive_vectors() {
 #[test]
 fn unknown_tags_are_preserved_through_an_edit() {
     let mut record = AccountSettingsRecord::decode(&positive("unknown-tags")).unwrap();
-    assert_eq!(record.unknown_tags().collect::<Vec<_>>(), [0x0005, 0x7ffe]);
+    assert_eq!(record.unknown_tags().collect::<Vec<_>>(), [0x0006, 0x7ffe]);
     record.apply(&Edit::Default(MatchMode::Exact)).unwrap();
     let mut expected = positive("unknown-tags");
     // Only the match default changes: entry 1's value starts at byte 10.
     expected[11] = 0x04;
     assert_eq!(record.encode().unwrap().as_slice(), expected);
+}
+
+#[test]
+fn the_website_icons_vectors_read_as_their_layout_says() {
+    use crate::icons::IconsSetting;
+
+    // Absent tag, absent record: on (the default, ADR 0099 §1).
+    let empty = AccountSettingsRecord::decode(&positive("empty")).unwrap();
+    assert!(empty.website_icons().is_on());
+    assert!(AccountSettingsRecord::default().website_icons().is_on());
+    assert!(
+        AccountSettingsRecord::decode(&positive("matching-only"))
+            .unwrap()
+            .website_icons()
+            .is_on()
+    );
+
+    let on = AccountSettingsRecord::decode(&positive("website-icons-on")).unwrap();
+    assert!(on.website_icons().is_on());
+    assert_eq!(on.unknown_tags().count(), 0);
+    let off = AccountSettingsRecord::decode(&positive("website-icons-off")).unwrap();
+    assert!(!off.website_icons().is_on());
+    let both = AccountSettingsRecord::decode(&positive("matching-and-website-icons-off")).unwrap();
+    assert!(!both.website_icons().is_on());
+    assert_eq!(both.matching().match_default(), MatchMode::Host);
+
+    // Typed writes: off is written as 0x00, never as a missing tag; on as 0x01.
+    let mut typed = AccountSettingsRecord::default();
+    typed.apply(&Edit::WebsiteIcons(false)).unwrap();
+    assert_eq!(
+        typed.encode().unwrap().as_slice(),
+        positive("website-icons-off")
+    );
+    typed.apply(&Edit::WebsiteIcons(true)).unwrap();
+    assert_eq!(
+        typed.encode().unwrap().as_slice(),
+        positive("website-icons-on")
+    );
+    let mut mixed = AccountSettingsRecord::default();
+    mixed.apply(&Edit::WebsiteIcons(false)).unwrap();
+    mixed.apply(&Edit::Default(MatchMode::Host)).unwrap();
+    assert_eq!(
+        mixed.encode().unwrap().as_slice(),
+        positive("matching-and-website-icons-off")
+    );
+    // An edit elsewhere keeps the explicit off.
+    let mut kept = off.clone();
+    kept.apply(&Edit::Default(MatchMode::Exact)).unwrap();
+    assert!(!kept.website_icons().is_on());
+
+    // A record that cannot be read reads off, never the default: a rejected one (a bad 0x0005
+    // value among them) and a parked one.
+    for (name, h, _) in NEGATIVE
+        .iter()
+        .filter(|(n, _, _)| n.starts_with("website-icons"))
+    {
+        let read = AccountSettingsRecord::decode(&hex(h));
+        assert!(
+            !IconsSetting::from_read(read.as_ref().map_err(|e| *e)).is_on(),
+            "{name}"
+        );
+    }
+    let parked = AccountSettingsRecord::decode(&hex("0002 0000"));
+    assert_eq!(parked, Err(ClientError::SettingsUpdateRequired));
+    assert!(!IconsSetting::from_read(parked.as_ref().map_err(|e| *e)).is_on());
+    assert!(IconsSetting::from_read(Ok(&on)).is_on());
+    assert!(!IconsSetting::from_read(Ok(&off)).is_on());
 }
 
 #[test]
@@ -205,7 +310,7 @@ fn every_negative_vector_fails_with_its_error() {
 #[test]
 fn an_oversize_entry_and_too_many_entries_are_rejected() {
     // One unknown entry of MAX_SETTINGS_ENTRY_LEN + 1 bytes.
-    let mut oversize = hex("0001 0001 0005");
+    let mut oversize = hex("0001 0001 0006");
     let len = u32::try_from(MAX_SETTINGS_ENTRY_LEN + 1).unwrap();
     oversize.extend_from_slice(&len.to_be_bytes());
     oversize.resize(oversize.len() + MAX_SETTINGS_ENTRY_LEN + 1, 0);
@@ -214,7 +319,7 @@ fn an_oversize_entry_and_too_many_entries_are_rejected() {
         ClientError::InvalidServerResponse
     );
     // Exactly MAX_SETTINGS_ENTRY_LEN is fine.
-    let mut largest = hex("0001 0001 0005");
+    let mut largest = hex("0001 0001 0006");
     let len = u32::try_from(MAX_SETTINGS_ENTRY_LEN).unwrap();
     largest.extend_from_slice(&len.to_be_bytes());
     largest.resize(largest.len() + MAX_SETTINGS_ENTRY_LEN, 0);
@@ -222,7 +327,8 @@ fn an_oversize_entry_and_too_many_entries_are_rejected() {
     assert_eq!(record.encode().unwrap().as_slice(), largest);
 
     // n = 257 entries: refused from the count alone. The tags start at 0x0100, clear of the
-    // recognised 0x0001 and 0x0004 (ADR 0079 Open question 7), so every entry is unknown.
+    // recognised 0x0001, 0x0004 (ADR 0079 Open question 7) and 0x0005 (ADR 0099), so every
+    // entry is unknown.
     let mut many = hex("0001");
     many.extend_from_slice(&(MAX_SETTINGS_ENTRIES + 1).to_be_bytes());
     for tag in 0x0100..=(0x0100 + MAX_SETTINGS_ENTRIES) {

@@ -20,7 +20,8 @@
 //!   directory ([`crate::vaults::VaultDirectory`], ADR 0081 §A2); `0x0003` is ADR 0081 Part B's
 //!   contact pins, unknown to this build and kept verbatim like any unknown tag; `0x0004` is the
 //!   identity generator's defaults ([`crate::identity_gen::IdentityDefaults`], ADR 0079 Open
-//!   question 7); every other tag up to
+//!   question 7); `0x0005` is the website-icons switch ([`TAG_WEBSITE_ICONS`], [ADR 0099] §1:
+//!   exactly one byte, `0x00` off, `0x01` on; absent reads on); every other tag up to
 //!   `0xFFFE` is unassigned; `0xFFFF` is reserved and never assigned, so no valid record holds it and it is
 //!   rejected like `0x0000`.
 //! - **Absent object or absent tag.** While `settings_seq = 0` there is no envelope, and a record
@@ -57,6 +58,7 @@
 //! session (CRYPTO.md §11 "Replacing credentials"; `rizzy-domain-auth`'s `commit_change`).
 //!
 //! [ADR 0042]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0042-account-settings-matching-layout.md
+//! [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
 
 use core::fmt;
 
@@ -76,6 +78,7 @@ use zeroize::Zeroizing;
 use crate::account::{AccountPin, VerifiedAccount};
 use crate::device::UnlockedDevice;
 use crate::error::{ClientError, internal};
+use crate::icons::IconsSetting;
 use crate::identity_gen::{IdentityDefaults, TAG_IDENTITY_DEFAULTS};
 use crate::vaults::{TAG_VAULT_DIRECTORY, VaultDirectory};
 use crate::wire::bytes;
@@ -88,6 +91,11 @@ pub const MAX_SETTINGS_ENTRIES: u16 = 256;
 pub const MAX_SETTINGS_ENTRY_LEN: usize = 1_048_576;
 /// The tag of the matching section (ADR 0042 §2 "Tag registry", §3).
 pub const TAG_MATCHING: u16 = 0x0001;
+/// The tag of the website-icons switch ([ADR 0099] §1; ADR 0042 Amendments): one byte, `0x00`
+/// off, `0x01` on.
+///
+/// [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
+pub const TAG_WEBSITE_ICONS: u16 = 0x0005;
 /// Tag `0x0000`: invalid (ADR 0042 §2).
 const TAG_INVALID: u16 = 0x0000;
 /// Tag `0xFFFF`: reserved, never assigned (ADR 0042 §2).
@@ -107,6 +115,11 @@ pub struct AccountSettingsRecord {
     /// The identity generator's defaults, tag `0x0004` (ADR 0079 Open question 7); absent until
     /// first set.
     identity_defaults: Option<IdentityDefaults>,
+    /// The website-icons switch, tag `0x0005` ([ADR 0099] §1): `None` while the tag is absent,
+    /// which reads on; an explicit `Some(false)` is written back as `0x00`, never dropped.
+    ///
+    /// [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
+    website_icons: Option<bool>,
     /// The vault directory, tag `0x0002` ([ADR 0081] §A2); absent until the first vault change
     /// or settings write of a build that knows it (§A10).
     ///
@@ -122,6 +135,7 @@ impl fmt::Debug for AccountSettingsRecord {
             .field("matching", &self.matching)
             .field("matching_present", &self.matching_present)
             .field("identity_defaults", &self.identity_defaults.is_some())
+            .field("website_icons", &self.website_icons)
             .field(
                 "directory_entries",
                 &self.directory.as_ref().map(|d| d.entries().len()),
@@ -144,7 +158,16 @@ impl AccountSettingsRecord {
         self.identity_defaults.as_ref()
     }
 
-    /// The tags of the entries this build does not know, in order.
+    /// The website-icons setting this record holds ([ADR 0099] §1): on for `0x01` and for an
+    /// absent tag (the default), off for `0x00`. A record that could not be read has no
+    /// setting at all; [`IconsSetting::from_read`] reads it off.
+    ///
+    /// [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
+    #[must_use]
+    pub const fn website_icons(&self) -> IconsSetting {
+        IconsSetting::of(!matches!(self.website_icons, Some(false)))
+    }
+
     /// The vault directory (tag `0x0002`, ADR 0081 §A2), if the record holds one.
     #[must_use]
     pub const fn vault_directory(&self) -> Option<&VaultDirectory> {
@@ -191,6 +214,12 @@ impl AccountSettingsRecord {
                 record.matching_present = true;
             } else if tag == TAG_VAULT_DIRECTORY {
                 record.directory = Some(VaultDirectory::decode(value)?);
+            } else if tag == TAG_WEBSITE_ICONS {
+                record.website_icons = Some(match value {
+                    [0x00] => false,
+                    [0x01] => true,
+                    _ => return Err(ClientError::InvalidServerResponse),
+                });
             } else if tag == TAG_IDENTITY_DEFAULTS {
                 record.identity_defaults = Some(
                     IdentityDefaults::decode(value).ok_or(ClientError::InvalidServerResponse)?,
@@ -230,6 +259,9 @@ impl AccountSettingsRecord {
         if let Some(i) = &identity {
             entries.push((TAG_IDENTITY_DEFAULTS, i.as_slice()));
         }
+        if let Some(on) = self.website_icons {
+            entries.push((TAG_WEBSITE_ICONS, if on { &[0x01] } else { &[0x00] }));
+        }
         let directory = self
             .directory
             .as_ref()
@@ -262,6 +294,10 @@ impl AccountSettingsRecord {
             self.identity_defaults = Some(d.clone());
             return Ok(());
         }
+        if let Edit::WebsiteIcons(on) = edit {
+            self.website_icons = Some(*on);
+            return Ok(());
+        }
         let m = &mut self.matching;
         match edit {
             Edit::Default(mode) => m.set_match_default(*mode).map_err(edit_error)?,
@@ -282,7 +318,7 @@ impl AccountSettingsRecord {
                     return Err(ClientError::InvalidInput);
                 }
             }
-            Edit::IdentityDefaults(_) => return Ok(()),
+            Edit::IdentityDefaults(_) | Edit::WebsiteIcons(_) => return Ok(()),
         }
         self.matching_present = true;
         Ok(())
@@ -410,6 +446,11 @@ pub enum SettingsEdit {
     EnableGlobalGroup(GroupId),
     /// Sets the identity generator's defaults, tag `0x0004` (ADR 0079 Open question 7).
     SetIdentityDefaults(IdentityDefaults),
+    /// Turns website icons on (`0x01`) or off (`0x00`), tag `0x0005` ([ADR 0099] §1). The tag is
+    /// always written, never deleted, so an explicit off survives a later change of the default.
+    ///
+    /// [ADR 0099]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0099-website-icons-opt-in.md
+    SetWebsiteIcons(bool),
 }
 
 /// A [`SettingsEdit`] with its random parts drawn, so a restart redoes exactly the same edit.
@@ -427,6 +468,8 @@ enum Edit {
     Enable(GroupId),
     /// Set the identity generator's defaults.
     IdentityDefaults(IdentityDefaults),
+    /// Set the website-icons switch.
+    WebsiteIcons(bool),
 }
 
 impl fmt::Debug for Edit {
@@ -439,6 +482,7 @@ impl fmt::Debug for Edit {
             Self::Disable(_) => "Edit::Disable",
             Self::Enable(_) => "Edit::Enable",
             Self::IdentityDefaults(_) => "Edit::IdentityDefaults",
+            Self::WebsiteIcons(_) => "Edit::WebsiteIcons",
         })
     }
 }
@@ -461,6 +505,7 @@ impl Edit {
             SettingsEdit::DisableGlobalGroup(id) => Self::Disable(id),
             SettingsEdit::EnableGlobalGroup(id) => Self::Enable(id),
             SettingsEdit::SetIdentityDefaults(d) => Self::IdentityDefaults(d),
+            SettingsEdit::SetWebsiteIcons(on) => Self::WebsiteIcons(on),
         })
     }
 }
