@@ -59,6 +59,12 @@ pub enum VaultError {
     ///
     /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
     RevocationPending,
+    /// The write would take the vault past `MAX_ITEM_KEY_WRAPS` wrap-set rows or the account
+    /// past `MAX_ACCOUNT_WRAP_ROWS` ([ADR 0092] §2): the whole request is refused and nothing
+    /// is written. Answered `rotation_limit`.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    RotationLimit,
 }
 
 impl VaultError {
@@ -72,6 +78,7 @@ impl VaultError {
             Self::RecordConflict => ErrorCode::RecordConflict,
             Self::QuotaExceeded => ErrorCode::QuotaExceeded,
             Self::RevocationPending => ErrorCode::RevocationPending,
+            Self::RotationLimit => ErrorCode::RotationLimit,
             Self::Storage(_)
             | Self::Directory(_)
             | Self::NoRestoreGeneration
@@ -97,6 +104,7 @@ impl fmt::Display for VaultError {
             Self::RecordConflict => f.write_str("another record is stored under this id"),
             Self::QuotaExceeded => f.write_str("the attachment exceeds the cap or the quota"),
             Self::RevocationPending => f.write_str("another device's revocation window is open"),
+            Self::RotationLimit => f.write_str("the write would pass a wrap-set row cap"),
         }
     }
 }

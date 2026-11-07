@@ -599,8 +599,8 @@ impl Endpoint {
 
 /// The HTTP status of an error code ([ADR 0028] item 3, with `setup_retired` 409 as ADR 0031 point
 /// 3 adds it, `credentials_stale` 409 as ADR 0032 adds it, `quota_exceeded` 409 as ADR 0048
-/// §5 restates the item with it, and `revocation_pending` 409 as ADR 0091 §6 restates it
-/// again). A code this build does not send
+/// §5 restates the item with it, `revocation_pending` 409 as ADR 0091 §6 restates it again, and
+/// `rotation_limit` 409 as ADR 0092 §3 restates it word for word). A code this build does not send
 /// (`unknown`) maps to `500` like `internal`. Clients branch on the code, never on the status.
 ///
 /// [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
@@ -620,7 +620,8 @@ pub const fn status(code: ErrorCode) -> StatusCode {
         | ErrorCode::SetupRetired
         | ErrorCode::CredentialsStale
         | ErrorCode::QuotaExceeded
-        | ErrorCode::RevocationPending => StatusCode::CONFLICT,
+        | ErrorCode::RevocationPending
+        | ErrorCode::RotationLimit => StatusCode::CONFLICT,
         ErrorCode::ApiVersionGone => StatusCode::GONE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -764,6 +765,7 @@ fn vault_code(endpoint: Endpoint, e: &VaultError) -> ErrorCode {
             | VaultError::RecordConflict
             | VaultError::QuotaExceeded
             | VaultError::RevocationPending
+            | VaultError::RotationLimit
     ) {
         log::error(
             "vault_failure",
@@ -1450,6 +1452,7 @@ mod tests {
             (ErrorCode::CredentialsStale, 409),
             (ErrorCode::QuotaExceeded, 409),
             (ErrorCode::RevocationPending, 409),
+            (ErrorCode::RotationLimit, 409),
             (ErrorCode::ApiVersionGone, 410),
             (ErrorCode::PayloadTooLarge, 413),
             (ErrorCode::RateLimited, 429),

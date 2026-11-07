@@ -55,8 +55,20 @@ use rizzy_sync::compaction::check_healing_request;
 use rizzy_sync::dot::Dot;
 
 use crate::authors::{DeviceDirectory, revocation_gate};
+use crate::caps::{WrapCaps, admit_carried, admit_row};
 use crate::error::{HealingError, VaultError};
 use crate::intake::{WrapRule, verify_op, verify_snapshot};
+
+/// The limits one store session enforces.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Limits {
+    /// The quota plus headroom of an ordinary upload, `None` for a healing request (ADR 0048 §3).
+    /// A request without it is also exempt from the account's wrap-set row cap, never from the
+    /// vault's (ADR 0092 §2 "Healing").
+    pub(crate) byte_limit: Option<u64>,
+    /// The wrap-set row caps (ADR 0092 §2).
+    pub(crate) caps: WrapCaps,
+}
 use crate::keys::heal_self_grant;
 use crate::repo::{self, WrapRow};
 use crate::store::{
@@ -68,8 +80,7 @@ use crate::{VaultDomain, restore_generation, to_sql_time};
 /// Opens the store session of `vault_id` for `account_id` in `tx`: takes the account lock,
 /// refuses `writer` while another device's revocation window is open (ADR 0091 §2), checks the
 /// vault's owner, and reads the vault row, the heads, the certificates and the account's counted
-/// bytes under it. `byte_limit` is the quota plus headroom of an ordinary upload, `None` for a
-/// healing request (ADR 0048 §3).
+/// bytes under it, with the request's [`Limits`].
 pub(crate) async fn open_session<D: DeviceDirectory>(
     tx: &mut WriteTx,
     directory: &D,
@@ -77,7 +88,7 @@ pub(crate) async fn open_session<D: DeviceDirectory>(
     writer: Option<DeviceId>,
     vault_id: VaultId,
     now_ms: u64,
-    byte_limit: Option<u64>,
+    limits: Limits,
 ) -> Result<Session, VaultError> {
     lock_account(tx, account_id.as_bytes()).await?;
     revocation_gate(directory, tx.conn(), account_id, writer, now_ms).await?;
@@ -99,7 +110,10 @@ pub(crate) async fn open_session<D: DeviceDirectory>(
         queued: std::collections::BTreeSet::new(),
         bytes_used,
         bytes_at_open: bytes_used,
-        byte_limit,
+        account_cap: limits.byte_limit.is_some(),
+        byte_limit: limits.byte_limit,
+        caps: limits.caps,
+        wrap_rows: None,
     })
 }
 
@@ -135,6 +149,17 @@ async fn upload_op(
     if session.over_quota(session.op_bytes(&op)) {
         return Ok(Err(Refusal::Quota));
     }
+    if let Err(refusal) = admit_carried(
+        tx,
+        session,
+        op.header.item_id,
+        op.header.vault_key_epoch,
+        op.key_wrap.as_ref(),
+    )
+    .await?
+    {
+        return Ok(Err(refusal));
+    }
     store_op(tx, session, &op).await?;
     Ok(Ok(UploadResult::Stored))
 }
@@ -166,6 +191,17 @@ async fn upload_snapshot(
     }
     if session.over_quota(session.snapshot_bytes(&snapshot)) {
         return Ok(Err(Refusal::Quota));
+    }
+    if let Err(refusal) = admit_carried(
+        tx,
+        session,
+        snapshot.header.item_id,
+        snapshot.header.vault_key_epoch,
+        snapshot.key_wrap.as_ref(),
+    )
+    .await?
+    {
+        return Ok(Err(refusal));
     }
     store_snapshot(tx, session, &snapshot).await?;
     Ok(Ok(UploadResult::Stored))
@@ -213,7 +249,10 @@ impl<D: DeviceDirectory> VaultDomain<D> {
             writer,
             vault_id,
             now_ms,
-            Some(self.quota().limit()),
+            Limits {
+                byte_limit: Some(self.quota().limit()),
+                caps: self.wrap_caps(),
+            },
         )
         .await?;
         let generation = restore_generation(tx.conn()).await?;
@@ -232,6 +271,9 @@ impl<D: DeviceDirectory> VaultDomain<D> {
             };
             results.push(match outcome {
                 Ok(result) => result,
+                // ADR 0092 §2: the whole request is refused and nothing is written; dropping
+                // the transaction rolls back the records stored before this one.
+                Err(Refusal::RotationLimit) => return Err(VaultError::RotationLimit),
                 Err(refusal) => {
                     rejected = true;
                     UploadResult::Rejected {
@@ -286,7 +328,10 @@ impl<D: DeviceDirectory> VaultDomain<D> {
             writer,
             vault_id,
             now_ms,
-            None,
+            Limits {
+                byte_limit: None,
+                caps: self.wrap_caps(),
+            },
         )
         .await?;
         let generation = restore_generation(tx.conn()).await?;
@@ -320,21 +365,8 @@ async fn heal_in(
     session: &mut Session,
     request: &HealingRequest,
 ) -> Result<Result<(), Refusal>, VaultError> {
-    for wrap in &request.item_key_wraps {
-        // ADR 0025 open question 4, decided: healing never fills a row below the vault's
-        // current `vault_key_epoch`. Such a row belongs to a key a rotation superseded (and
-        // whose rows it re-wrapped or deleted); it is left out, not refused, so the rest of
-        // the healer's request still heals.
-        if wrap.vault_key_epoch < session.vault.vault_key_epoch {
-            continue;
-        }
-        let row = WrapRow {
-            item_id: ItemId::from_bytes(wrap.item_id.to_bytes()),
-            item_key_id: wrap.item_key_id.to_bytes(),
-            vault_key_epoch: wrap.vault_key_epoch,
-            envelope: wrap.envelope.as_slice().to_vec(),
-        };
-        repo::put_wrap(tx.conn(), session.vault_id, &row, session.now_sql).await?;
+    if let Err(refusal) = heal_wraps(tx, session, request).await? {
+        return Ok(Err(refusal));
     }
     let mut bodiless: BTreeMap<ItemId, Vec<Dot>> = BTreeMap::new();
     for record in &request.records {
@@ -357,6 +389,17 @@ async fn heal_in(
             return Ok(Err(Refusal::Invalid));
         }
         if let Err(refusal) = chain_check(session, &op) {
+            return Ok(Err(refusal));
+        }
+        if let Err(refusal) = admit_carried(
+            tx,
+            session,
+            op.header.item_id,
+            op.header.vault_key_epoch,
+            op.key_wrap.as_ref(),
+        )
+        .await?
+        {
             return Ok(Err(refusal));
         }
         store_op(tx, session, &op).await?;
@@ -387,6 +430,17 @@ async fn heal_in(
         if !snapshot_allowed(session, &snapshot) {
             return Ok(Err(Refusal::Invalid));
         }
+        if let Err(refusal) = admit_carried(
+            tx,
+            session,
+            snapshot.header.item_id,
+            snapshot.header.vault_key_epoch,
+            snapshot.key_wrap.as_ref(),
+        )
+        .await?
+        {
+            return Ok(Err(refusal));
+        }
         store_snapshot(tx, session, &snapshot).await?;
     }
     for (item_id, dots) in &bodiless {
@@ -394,6 +448,43 @@ async fn heal_in(
         if check_healing_request(&retained, dots).is_err() {
             return Ok(Err(Refusal::Invalid));
         }
+    }
+    Ok(Ok(()))
+}
+
+/// The healing request's wrap-set rows ([`heal_in`]'s first step), each under the vault's cap
+/// only: ADR 0092 §2 "Healing" ([`Session::account_cap`] is false).
+async fn heal_wraps(
+    tx: &mut WriteTx,
+    session: &mut Session,
+    request: &HealingRequest,
+) -> Result<Result<(), Refusal>, VaultError> {
+    for wrap in &request.item_key_wraps {
+        // ADR 0025 open question 4, decided: healing never fills a row below the vault's
+        // current `vault_key_epoch`. Such a row belongs to a key a rotation superseded (and
+        // whose rows it re-wrapped or deleted); it is left out, not refused, so the rest of
+        // the healer's request still heals.
+        if wrap.vault_key_epoch < session.vault.vault_key_epoch {
+            continue;
+        }
+        let row = WrapRow {
+            item_id: ItemId::from_bytes(wrap.item_id.to_bytes()),
+            item_key_id: wrap.item_key_id.to_bytes(),
+            vault_key_epoch: wrap.vault_key_epoch,
+            envelope: wrap.envelope.as_slice().to_vec(),
+        };
+        if let Err(refusal) = admit_row(
+            tx,
+            session,
+            row.item_id,
+            &row.item_key_id,
+            row.vault_key_epoch,
+        )
+        .await?
+        {
+            return Ok(Err(refusal));
+        }
+        repo::put_wrap(tx.conn(), session.vault_id, &row, session.now_sql).await?;
     }
     Ok(Ok(()))
 }

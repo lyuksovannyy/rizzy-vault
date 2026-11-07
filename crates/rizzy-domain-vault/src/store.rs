@@ -20,7 +20,9 @@
 //! 6. for an ordinary upload, the account's storage quota ([`Session::over_quota`], ADR 0048 §3):
 //!    refused when the account's counted bytes plus the record's would pass the quota plus the
 //!    upload limit; never for a healing request;
-//! 7. the insert, with the clamped VV and store sequence for a snapshot, and the item queued for
+//! 7. the wrap-set row caps ([`crate::caps`], ADR 0092 §2), when the record adds a row: refused
+//!    `rotation_limit`, and the whole request with it;
+//! 8. the insert, with the clamped VV and store sequence for a snapshot, and the item queued for
 //!    `worker`. The record's counted bytes advance [`Session::bytes_used`], written to
 //!    `rizzy-storage`'s counter once, at commit ([`Session::settle`]).
 
@@ -33,6 +35,7 @@ use rizzy_sync::compaction::{CertificateExpiry, VaultChains, check_snapshot, cla
 use rizzy_sync::vv::VersionVector;
 
 use crate::authors::{AuthorStatus, Authors};
+use crate::caps::{RowCounts, WrapCaps};
 use crate::error::VaultError;
 use crate::intake::{Signed, VerifiedOp, VerifiedSnapshot};
 use crate::repo::{self, StoredRecord, VaultRow, WrapRow};
@@ -56,6 +59,11 @@ pub(crate) enum Refusal {
     /// The record would push the account's counted bytes past its quota and headroom (ADR 0048
     /// §3).
     Quota,
+    /// The record would add a wrap-set row past a cap of [ADR 0092] §2 ([`crate::caps`]). Ends
+    /// the whole request: nothing of it is written.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    RotationLimit,
 }
 
 impl Refusal {
@@ -68,6 +76,7 @@ impl Refusal {
             Self::Stale => ErrorCode::StaleEpoch,
             Self::Unauthorized => ErrorCode::Unauthorized,
             Self::Quota => ErrorCode::QuotaExceeded,
+            Self::RotationLimit => ErrorCode::RotationLimit,
         }
     }
 }
@@ -99,6 +108,14 @@ pub(crate) struct Session {
     /// The most counted bytes a record may leave the account with: the quota plus its headroom
     /// for an ordinary upload, `None` for a healing request, which is never refused for quota.
     pub(crate) byte_limit: Option<u64>,
+    /// The wrap-set row caps ([`crate::caps`], ADR 0092 §2).
+    pub(crate) caps: WrapCaps,
+    /// Whether check 2 (the account's rows) applies: true for an ordinary upload, false for a
+    /// healing request (ADR 0092 §2 "Healing").
+    pub(crate) account_cap: bool,
+    /// The wrap-set row counts, read when the first row-adding record arrives and advanced by
+    /// every row added since.
+    pub(crate) wrap_rows: Option<RowCounts>,
 }
 
 impl Session {

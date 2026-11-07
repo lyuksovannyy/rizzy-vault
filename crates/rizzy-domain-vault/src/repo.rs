@@ -78,6 +78,10 @@ const WRAP_REPLACE: &str = include_str!("../queries/wrap_replace.sql");
 const WRAP_BY_ENVELOPE: &str = include_str!("../queries/wrap_by_envelope.sql");
 /// See `queries/wraps_after.sql`.
 const WRAPS_AFTER: &str = include_str!("../queries/wraps_after.sql");
+/// See `queries/wrap_count_vault.sql`.
+const WRAP_COUNT_VAULT: &str = include_str!("../queries/wrap_count_vault.sql");
+/// See `queries/wrap_count_account.sql`.
+const WRAP_COUNT_ACCOUNT: &str = include_str!("../queries/wrap_count_account.sql");
 /// See `queries/self_grant_get.sql`.
 const SELF_GRANT_GET: &str = include_str!("../queries/self_grant_get.sql");
 /// See `queries/self_grant_insert.sql`.
@@ -903,6 +907,43 @@ pub(crate) async fn put_wrap(
             Some(_) => Ok(WrapPut::Kept),
         }
     })
+}
+
+/// Whether the wrap-set row `(vault_id, item_id, item_key_id)` is stored.
+pub(crate) async fn wrap_exists(
+    conn: Conn<'_>,
+    vault_id: VaultId,
+    item_id: ItemId,
+    item_key_id: &[u8; 16],
+) -> Result<bool, VaultError> {
+    let stored: Option<i64> = on_engine!(conn, |c| sqlx::query_scalar(WRAP_GET)
+        .bind(&vault_id.as_bytes()[..])
+        .bind(&item_id.as_bytes()[..])
+        .bind(&item_key_id[..])
+        .fetch_optional(&mut *c)
+        .await)?;
+    Ok(stored.is_some())
+}
+
+/// The number of wrap-set rows of `vault_id` (ADR 0092 §2 check 1).
+pub(crate) async fn vault_wrap_rows(conn: Conn<'_>, vault_id: VaultId) -> Result<u64, VaultError> {
+    let rows: i64 = on_engine!(conn, |c| sqlx::query_scalar(WRAP_COUNT_VAULT)
+        .bind(&vault_id.as_bytes()[..])
+        .fetch_one(&mut *c)
+        .await)?;
+    Ok(sql_to_u64(rows, "a counted wrap-set row number")?)
+}
+
+/// The number of wrap-set rows over every vault `account_id` owns (ADR 0092 §1, §2 check 2).
+pub(crate) async fn account_wrap_rows(
+    conn: Conn<'_>,
+    account_id: AccountId,
+) -> Result<u64, VaultError> {
+    let rows: i64 = on_engine!(conn, |c| sqlx::query_scalar(WRAP_COUNT_ACCOUNT)
+        .bind(&account_id.as_bytes()[..])
+        .fetch_one(&mut *c)
+        .await)?;
+    Ok(sql_to_u64(rows, "a counted wrap-set row number")?)
 }
 
 /// The item key id of the wrap-set row holding exactly `envelope`, if the row is still current.

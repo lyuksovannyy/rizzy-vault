@@ -148,8 +148,44 @@ pub const MAX_RETIRED_KEYS: usize = 16;
 pub const MAX_RECORDS: usize = 4096;
 
 /// Count limit (this crate's choice): item-key wrap-set rows in one Fetch page or healing
-/// request (CRYPTO.md §4.2), about one per item.
+/// request (CRYPTO.md §4.2), about one per item. Since [ADR 0092] §1 also the write-time cap on
+/// one vault's stored wrap-set rows: a write that would take a vault past it is refused
+/// `rotation_limit` (§2).
+///
+/// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
 pub const MAX_ITEM_KEY_WRAPS: usize = 65_536;
+
+/// Count limit ([ADR 0092] §1): wrap-set rows over every vault the account owns (shared or not,
+/// the vault-settings item included). A row-adding write that would take the account past it is
+/// refused `rotation_limit` (§2); at or below it the account's rotation fits one
+/// [`DEFAULT_UPLOAD_BODY_LEN`] body (§8 test 2).
+///
+/// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+pub const MAX_ACCOUNT_WRAP_ROWS: usize = 65_536;
+
+/// Count ([ADR 0092] §1, §6): the client's first size warning, 80 % of
+/// [`MAX_ACCOUNT_WRAP_ROWS`] rounded up.
+///
+/// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+pub const ROTATION_WARN_ROWS: usize = 52_429;
+
+/// Count ([ADR 0092] §1, §6): the client's second, not dismissable size warning, 95 % of
+/// [`MAX_ACCOUNT_WRAP_ROWS`] (the §1 table's 62,259, rounded down).
+///
+/// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+pub const ROTATION_URGENT_ROWS: usize = 62_259;
+
+/// Count limit ([ADR 0092] §1, §4, §5): rows (wraps plus drops) in one
+/// `account/rotation/stage` request, and wraps in one `recovery/wraps` page.
+///
+/// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+pub const ROTATION_STAGE_ROWS: usize = 16_384;
+
+/// Duration ([ADR 0092] §1, §4 "Expiry"): a rotation staging's life after its last stage
+/// request, in milliseconds (24 h). The worker deletes an older staging.
+///
+/// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+pub const ROTATION_STAGE_TTL_MS: u64 = 86_400_000;
 
 /// Count limit: sessions in one `sessions/list` answer ([ADR 0075] §3). The server lists at most
 /// this many, newest first, and sets `truncated` when the account has more live sessions.
@@ -373,6 +409,25 @@ mod tests {
         assert!(STATEMENT_FRAME + bundle_body + 2 * SIGNATURE_CONTAINER_LEN <= 1024);
         // DEVICE_SECRET_KEYS is the largest key-wrap plaintext (CRYPTO.md §8.5).
         const { assert!(SYMMETRIC_ENVELOPE_OVERHEAD + 65 <= MAX_KEY_ENVELOPE_LEN) };
+    }
+
+    #[test]
+    fn rotation_limits_match_adr_0092() {
+        // ADR 0092 §8 test 1.
+        assert_eq!(MAX_ITEM_KEY_WRAPS, 65_536);
+        assert_eq!(MAX_ACCOUNT_WRAP_ROWS, 65_536);
+        assert_eq!(ROTATION_STAGE_ROWS, 16_384);
+        assert_eq!(ROTATION_STAGE_TTL_MS, 24 * 60 * 60 * 1000);
+        // §1's table: 52,429 = ⌈0.8 × 65,536⌉ and 62,259. §8 test 1 writes the second as
+        // ⌈0.95 × 65,536⌉, which is 62,260; 62,259 is ⌊0.95 × 65,536⌋. The table value (the
+        // one the warnings use) is pinned; the discrepancy is reported to the owner.
+        assert_eq!(ROTATION_WARN_ROWS, 52_429);
+        assert_eq!(
+            ROTATION_WARN_ROWS,
+            (MAX_ACCOUNT_WRAP_ROWS * 80).div_ceil(100)
+        );
+        assert_eq!(ROTATION_URGENT_ROWS, 62_259);
+        assert_eq!(ROTATION_URGENT_ROWS, MAX_ACCOUNT_WRAP_ROWS * 95 / 100);
     }
 
     #[test]

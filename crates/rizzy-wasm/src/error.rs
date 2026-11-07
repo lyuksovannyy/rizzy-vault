@@ -103,6 +103,7 @@ impl CoreError {
             ErrorCode::CredentialsStale => "server_credentials_stale",
             ErrorCode::QuotaExceeded => "server_quota_exceeded",
             ErrorCode::RevocationPending => "server_revocation_pending",
+            ErrorCode::RotationLimit => "server_rotation_limit",
             ErrorCode::Internal => "server_internal",
             _ => "server_unknown",
         })
@@ -159,6 +160,10 @@ mod tests {
         assert_eq!(
             CoreError::server(ErrorCode::RevocationPending).as_str(),
             "server_revocation_pending"
+        );
+        assert_eq!(
+            CoreError::server(ErrorCode::RotationLimit).as_str(),
+            "server_rotation_limit"
         );
         assert_eq!(
             CoreError::from(ClientError::SetupRetired).as_str(),

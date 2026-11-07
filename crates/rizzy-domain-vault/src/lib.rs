@@ -134,6 +134,7 @@ use rizzy_storage::{Conn, Database};
 
 pub mod attachments;
 pub mod authors;
+pub mod caps;
 pub mod compact;
 pub mod error;
 pub mod fetch;
@@ -151,6 +152,7 @@ pub use authors::{
     AccountKeyState, AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError,
     DuplicateDevice, RevocationWindow,
 };
+pub use caps::WrapCaps;
 pub use compact::{CompactionFailure, CompactionReport, CompactionRun};
 pub use error::{HealingError, VaultError};
 pub use fetch::{FetchOutcome, IntegrityError, PAGE_BYTES, PAGE_MAX_OPS};
@@ -173,6 +175,8 @@ pub struct VaultDomain<D> {
     page_bytes: usize,
     /// The per-account storage quota and its headroom ([`usage`], ADR 0048).
     quota: Quota,
+    /// The wrap-set row caps ([`caps`], ADR 0092 §2).
+    wrap_caps: WrapCaps,
 }
 
 impl<D> fmt::Debug for VaultDomain<D> {
@@ -201,6 +205,7 @@ impl<D: DeviceDirectory> VaultDomain<D> {
                 quota_bytes: rizzy_storage::quota::DEFAULT_QUOTA_BYTES,
                 headroom_bytes: rizzy_proto::limits::DEFAULT_UPLOAD_BODY_LEN as u64,
             },
+            wrap_caps: WrapCaps::STANDARD,
         }
     }
 
@@ -219,6 +224,15 @@ impl<D: DeviceDirectory> VaultDomain<D> {
         self.page_bytes = bytes;
         self
     }
+
+    /// The same domain with `caps` instead of [`WrapCaps::STANDARD`]. For tests only: ADR 0092
+    /// §1 gives the caps no configuration setting, and §8 test 3 sets small caps through this
+    /// constructor parameter.
+    #[must_use]
+    pub const fn with_wrap_caps(mut self, caps: WrapCaps) -> Self {
+        self.wrap_caps = caps;
+        self
+    }
 }
 
 impl<D> VaultDomain<D> {
@@ -235,6 +249,11 @@ impl<D> VaultDomain<D> {
     /// The per-account storage quota and its headroom.
     pub(crate) const fn quota(&self) -> Quota {
         self.quota
+    }
+
+    /// The wrap-set row caps.
+    pub(crate) const fn wrap_caps(&self) -> WrapCaps {
+        self.wrap_caps
     }
 
     /// The certificate source.

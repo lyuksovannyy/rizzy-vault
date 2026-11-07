@@ -19,7 +19,9 @@
 //!   `setup_id` is retired or unknown), `credentials_stale` (ADR 0032 §4: after KE3 verified, the
 //!   account's OPAQUE record lags its signed state), `quota_exceeded` (ADR 0048 §3 and §5: the
 //!   record would push the account's counted bytes past its quota and headroom),
-//!   `revocation_pending` (ADR 0091 §2 and §6: another device's revocation window is open).
+//!   `revocation_pending` (ADR 0091 §2 and §6: another device's revocation window is open),
+//!   `rotation_limit` (ADR 0092 §3: the write would take the account or a vault past the size it
+//!   can still rotate in one request).
 //! - Generic, this crate's: `invalid_request`, `payload_too_large`, `unauthorized`,
 //!   `second_factor_required`, `rate_limited`, `not_found`, `internal`.
 //!
@@ -29,7 +31,8 @@
 //! `record_conflict`, `prev_seq_mismatch`, `setup_retired` (ADR 0031 point 3, which adds it to
 //! item 3's list), `credentials_stale` (ADR 0032, which adds it to item 3's list) and
 //! `quota_exceeded` (ADR 0048 §5, which restates the whole sentence with it) and
-//! `revocation_pending` (ADR 0091 §6, which restates it again) 409;
+//! `revocation_pending` (ADR 0091 §6, which restates it again) and `rotation_limit` (ADR 0092
+//! §0 item 6 and §3, which restates it word for word as ADR 0091 does) 409;
 //! `api_version_gone` 410; `payload_too_large` 413; `rate_limited` 429, with `Retry-After` in
 //! whole seconds; `internal` 500. A method a route does not serve is `405` with
 //! `invalid_request`. **Clients branch on the code, never on the status.**
@@ -108,6 +111,15 @@ pub enum ErrorCode {
     ///
     /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
     RevocationPending,
+    /// The write would take the account or a vault past the size it can still rotate in one
+    /// request ([ADR 0092] §2, §3): a row-adding upload or healing request past
+    /// `MAX_ITEM_KEY_WRAPS` rows in the vault or (healing aside) `MAX_ACCOUNT_WRAP_ROWS` rows in
+    /// the account. The whole request is refused and nothing is written. No detail: the client
+    /// reads the counts from the account answer (§6). Never sent by a rotation or a recovery
+    /// read: size never refuses a rotation (INV-115).
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    RotationLimit,
     /// The server failed. No detail.
     Internal,
     /// A code this build does not know; only ever produced by parsing a newer server's answer.
@@ -154,6 +166,10 @@ mod tests {
             serde_json::to_string(&ErrorResponse::new(ErrorCode::QuotaExceeded)).unwrap(),
             r#"{"error":"quota_exceeded"}"#
         );
+        assert_eq!(
+            serde_json::to_string(&ErrorResponse::new(ErrorCode::RotationLimit)).unwrap(),
+            r#"{"error":"rotation_limit"}"#
+        );
     }
 
     #[test]
@@ -171,6 +187,7 @@ mod tests {
             ErrorCode::CredentialsStale,
             ErrorCode::QuotaExceeded,
             ErrorCode::RevocationPending,
+            ErrorCode::RotationLimit,
         ] {
             let json = serde_json::to_string(&ErrorResponse::new(code)).unwrap();
             assert_eq!(

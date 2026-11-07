@@ -7,6 +7,8 @@
 //! - [`attachments`]: encrypted attachments (ADR 0054 §5–§7): the lifecycle, exact chunk
 //!   lengths, retries and conflicts, the cap and the quota charged at create, another account's
 //!   id answered `not_found`, and the 24 h sweep.
+//! - [`caps`]: the write-time caps on wrap-set rows (ADR 0092 §2): the vault and account caps,
+//!   the whole request refused, row-free writes never refused, and healing.
 //! - [`common`]: the harness: a migrated database with one account, created through
 //!   `rizzy-storage`'s restore (so the `auth_accounts` row is written by `rizzy-storage`, never
 //!   by this domain's SQL); an in-memory [`DeviceDirectory`](rizzy_domain_vault::DeviceDirectory);
@@ -30,6 +32,7 @@
 //!   of the account epoch.
 
 mod attachments;
+mod caps;
 mod common;
 mod compaction;
 mod healing;
