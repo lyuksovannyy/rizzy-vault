@@ -41,6 +41,7 @@
 //! | [`cxf_export_warning`] | the CXF passkey export's own warning (ADR 0074 §2) |
 //! | [`revocation_pending_notice`] (`revocationPendingNotice`), `revocationRetryAt` and the `revocationWindow*` getters of [`Session`] and [`DeviceSession`] | the `revocation_pending` banner and its retry (ADR 0091 §2; [`revocation`]) |
 //! | [`plaintext_export_hold_ms`], [`detect_import_format`] | the hold after the plaintext warning; recognising an import file (owner decision 2026-10-05) |
+//! | [`parse_lock_settings`] (`parseLockSettings`), [`LockSettings`], [`lock_settings_from_legacy_minutes`] (`lockSettingsFromLegacyMinutes`), [`LockTimer`], [`lock_settings_limits`] (`lockSettingsLimits`) | the per-device vault lock settings record, its migration, the bounding rule and the idle and sleep lock timer (ADR 0110 §1–§4, §6 point 1) |
 //! | [`CoreError`] | the one thrown error: a stable code ([`error`]) |
 //!
 //! # Rules of the boundary ([ADR 0013] §3)
@@ -104,6 +105,7 @@ pub mod http;
 pub mod icons;
 pub mod identity;
 pub mod items;
+pub mod lock;
 mod login;
 pub mod matching;
 pub mod passkey;
@@ -128,6 +130,10 @@ pub use generator::{
 pub use http::{HttpRequest, check_meta, expect_no_content, meta_request};
 pub use icons::IconFetch;
 pub use items::{FieldView, HistoryEntryView, ItemDraft, ItemSummary, generate_element_id};
+pub use lock::{
+    LockSettings, LockSettingsLimits, LockTimer, lock_settings_from_legacy_minutes,
+    lock_settings_limits, parse_lock_settings,
+};
 pub use login::LoginFlow;
 pub use matching::{GlobalEquivalence, MatchDecision, decide_match_candidates, normalize_page_url};
 pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
