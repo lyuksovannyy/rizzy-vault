@@ -34,7 +34,9 @@ import {
   type Transport,
   type VaultSession,
   checkServer,
-  createPasskey,
+  DEFAULT_LOCK_SETTINGS,
+  UV_FRESH_MS,
+  UV_REQUIRED,
   decideMatchCandidates,
   PASSKEY_ALG_ES256,
   fetchItemIcon,
@@ -431,8 +433,19 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     // and later signed over without the private key ever leaving the wasm boundary.
     const passkeyOrigin = "https://example.com";
     const passkeyRpId = "example.com";
-    const created = createPasskey(passkeyOrigin, passkeyRpId, new Uint8Array([1, 2, 3, 4]));
+    // ADR 0110 §6: under the default lock settings (on, 5 minutes) a password session is
+    // bounding, so the registration carries UV=1 (flags 0x5D, right after the 32-byte rpIdHash in
+    // the attestation object's authData).
+    const bounding = { userVerification: "required", lockSettings: DEFAULT_LOCK_SETTINGS };
+    const created = first.createPasskey(passkeyOrigin, passkeyRpId, new Uint8Array([1, 2, 3, 4]), bounding);
     expect(created.credentialId).toHaveLength(32);
+    const rpIdHash = createHash("sha256").update(passkeyRpId).digest();
+    const authDataAt = Buffer.from(created.attestationObject).indexOf(rpIdHash);
+    expect(authDataAt).toBeGreaterThan(0);
+    expect(created.attestationObject[authDataAt + 32]).toBe(0x5d);
+    expect(() =>
+      first.createPasskey("https://example.com", "evil.example", new Uint8Array([1]), bounding),
+    ).toThrow(CoreError);
     const passkeyElement = newElementId();
     const passkeyItem = first.createItem(pv(first), "login", [
       { op: "set", key: "item.name", value: "Has a passkey" },
@@ -460,7 +473,20 @@ describe.skipIf(binary === undefined)("against a real server", () => {
       passkeyOrigin,
       passkeyRpId,
       assertionChallenge,
+      bounding,
     );
+    expect(assertion.authenticatorData[32]).toBe(0x1d);
+    // Not bounding (locking off): the web vault keeps no verified_at (§6 point 4), so Required
+    // signs nothing and Preferred signs with UV=0.
+    const off = { autoLock: false, idleMinutes: 5, lockOnSleep: true };
+    const sign = (userVerification: string | undefined) =>
+      second.passkeyAssertion(passkeyItem, passkeyElement, passkeyOrigin, passkeyRpId, assertionChallenge, {
+        userVerification,
+        lockSettings: off,
+      });
+    expect(() => sign("required")).toThrow(expect.objectContaining({ code: UV_REQUIRED }));
+    expect(sign(undefined).authenticatorData[32]).toBe(0x19);
+    expect(sign("discouraged").authenticatorData[32]).toBe(0x19);
     expect(assertion.credentialId).toEqual(created.credentialId);
     const clientDataJson = JSON.parse(new TextDecoder().decode(assertion.clientDataJson)) as {
       type: string;
@@ -741,6 +767,18 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     expect((await store.list("device_state")).length).toBe(1);
     expect(session.accountId).toBe(ownerAccountId);
     expect(session.isAuthenticated()).toBe(false);
+    // ADR 0110 §6 point 4: the enrolment's master-password login sets verified_at, so a Required
+    // request under settings that are not bounding (60 minutes) is fresh now, stale later, and a
+    // clock that went back is stale too.
+    const requiredLoose = {
+      userVerification: "required",
+      lockSettings: { autoLock: true, idleMinutes: 60, lockOnSleep: true },
+    };
+    expect(session.unlockedByMasterPassword).toBe(true);
+    expect(session.passkeyUvDecision(requiredLoose)).toBe("sign_uv");
+    const stale = Date.now() + UV_FRESH_MS + 60_000;
+    expect(session.passkeyUvDecision({ ...requiredLoose, nowMs: stale })).toBe(UV_REQUIRED);
+    expect(session.passkeyUvDecision({ ...requiredLoose, nowMs: 0 })).toBe(UV_REQUIRED);
 
     await session.authenticate();
     expect(session.isAuthenticated()).toBe(true);
@@ -789,6 +827,21 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     });
 
     const reopened = await unlockDurableDevice(transport, store, PASSWORD);
+    // ADR 0110 §7 point 4.3: a re-verification checks the password against this device's own
+    // state and makes the session fresh again; a wrong one changes nothing.
+    const later = Date.now() + UV_FRESH_MS + 60_000;
+    expect(reopened.unlockedByMasterPassword).toBe(true);
+    expect(reopened.passkeyUvDecision({ ...requiredLoose, nowMs: later })).toBe(UV_REQUIRED);
+    expect(() => reopened.reverify("not the password", later)).toThrow(
+      expect.objectContaining({ code: "wrong_password_or_secret_key" }),
+    );
+    expect(reopened.passkeyUvDecision({ ...requiredLoose, nowMs: later })).toBe(UV_REQUIRED);
+    reopened.reverify(PASSWORD, later);
+    expect(reopened.passkeyUvDecision({ ...requiredLoose, nowMs: later })).toBe("sign_uv");
+    expect(reopened.passkeyUvDecision({ ...requiredLoose, nowMs: later + UV_FRESH_MS + 1 })).toBe(UV_REQUIRED);
+    expect(
+      reopened.passkeyUvDecision({ ...requiredLoose, lockSettings: DEFAULT_LOCK_SETTINGS, nowMs: later + UV_FRESH_MS + 1 }),
+    ).toBe("sign_uv");
     expect(reopened.accountId).toBe(ownerAccountId);
     expect(reopened.deviceId).toBe(deviceId);
     expect(reopened.isAuthenticated()).toBe(false);

@@ -24,7 +24,7 @@
 //! | Late-edit and trash notices | [`Session::take_notices`] after a sync; [`Session::restore_late_as_new`] |
 //! | TOTP code | [`Session::totp`] |
 //! | Breach check (ADR 0053) | [`Session::breach_check_item`] → [`BreachCheck`] (also [`BreachCheck::for_password`] for a typed or generated password) |
-//! | Passkey assertion | [`Session::passkey_assertion`] ([`create_passkey`](crate::passkey::create_passkey) is stateless, module docs) |
+//! | Passkey registration and assertion | [`Session::create_passkey`], [`Session::passkey_assertion`] (their `UV` flag: [`crate::passkey`] module docs) |
 //! | Export | [`Session::reauth`] + [`Session::confirm_reauth`], then [`Session::export_encrypted`], or [`Session::plaintext_warning_shown`] + [`Session::export_plaintext`] after the hold |
 //! | Import | [`detect_import_format`], then [`Session::import_file`] or [`Session::import_encrypted`] |
 //! | Devices | [`Session::devices`] |
@@ -74,7 +74,9 @@ use rizzy_client::matching::{
     EquivalenceGroup, FrameContext, ItemUri, SavedUri, decide_fail_closed, decide_with_settings,
     fails_closed, global_equivalence_groups, vault_item_uris,
 };
-use rizzy_client::passkey::{PasskeySigningKey, get_assertion_with};
+use rizzy_client::passkey::{
+    PasskeySigningKey, UserVerified, UvRequirement, UvState, get_assertion_with,
+};
 use rizzy_client::rizzy_core::ids::{AccountId, AttachmentId};
 use rizzy_client::rizzy_core::item::key::ElementId;
 use rizzy_client::rizzy_core::item::schema::{
@@ -110,9 +112,10 @@ use crate::items::{
     self, ConflictValueView, FieldHistoryView, FieldView, HistoryEntryView, ItemDraft, ItemSummary,
     hex, item_ref, parse_id, type_from_name,
 };
+use crate::lock::LockSettings;
 use crate::login::{Credentials, LoginFlow, Purpose};
 use crate::matching::{self, MatchDecision, MatchSettingsView};
-use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
+use crate::passkey::{self, CreatedPasskey, PasskeyAssertion, PasskeyCandidate};
 use crate::revocation;
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
@@ -1069,8 +1072,17 @@ impl Session {
     /// # Errors
     /// As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, the
     /// item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed; otherwise
-    /// whatever `get_assertion` returns (`rp_id_rejected` for INV-64).
+    /// whatever `get_assertion` returns (`rp_id_rejected` for INV-64). `uv_required` as
+    /// [`Session::create_passkey`] says: nothing is signed.
     #[wasm_bindgen(js_name = passkeyAssertion)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one exported ceremony call; wasm-bindgen takes plain arguments, not a struct of them"
+    )]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen hands this exported call ownership of the JS string as Option<String>"
+    )]
     pub fn passkey_assertion(
         &self,
         id: &str,
@@ -1078,6 +1090,9 @@ impl Session {
         origin: &str,
         rp_id: &str,
         challenge: &[u8],
+        user_verification: Option<String>,
+        settings: &LockSettings,
+        now_ms: u64,
     ) -> Result<PasskeyAssertion, CoreError> {
         let (vault, item) = self.inner()?.vaults.item(id)?;
         let bad = || CoreError::from(ClientError::InvalidInput);
@@ -1130,9 +1145,39 @@ impl Session {
             origin,
             rp_id,
             challenge,
-            rizzy_client::passkey::UserVerified::Yes,
+            web_uv_flag(user_verification.as_deref(), *settings, now_ms)?,
         )?;
         Ok(assertion.into())
+    }
+
+    /// Runs a `WebAuthn` registration ceremony for one new ES256 passkey ([`crate::passkey`]
+    /// module docs; ADR 0039 §1, §2, §4). `user_verification` is the page's relayed value,
+    /// `settings` the host's current lock settings and `now_ms` its clock; the `UV` flag is
+    /// decided from them before any key is generated (ADR 0110 §6). This session was unlocked by
+    /// a master-password login but keeps no `verified_at` (ADR 0110 §6 point 4 holds it in the
+    /// extension's long-lived context only), so `UV` is set exactly when the policy is bounding.
+    ///
+    /// # Errors
+    /// `locked`; `uv_required` for a Required request while the policy is not bounding
+    /// (nothing generated); `rp_id_rejected` (INV-64); `invalid_input` for a malformed
+    /// `origin`/`rp_id`.
+    #[wasm_bindgen(js_name = createPasskey)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen hands this exported call ownership of the JS string as Option<String>"
+    )]
+    pub fn create_passkey(
+        &self,
+        origin: &str,
+        rp_id: &str,
+        challenge: &[u8],
+        user_verification: Option<String>,
+        settings: &LockSettings,
+        now_ms: u64,
+    ) -> Result<CreatedPasskey, CoreError> {
+        self.inner()?;
+        let uv = web_uv_flag(user_verification.as_deref(), *settings, now_ms)?;
+        passkey::create_passkey(origin, rp_id, challenge, uv)
     }
 
     /// Every stored passkey's non-secret metadata on item `id` (`passkey/<id>/…`; ADR 0039
@@ -2174,6 +2219,26 @@ impl Session {
         inner.settings_pending = Some(pending);
         Ok(request)
     }
+}
+
+/// The `UV` flag of a web-vault ceremony (ADR 0110 §6): a master-password session without
+/// `verified_at` ([`UvState::master_password_unverified`]), so bounding or nothing.
+///
+/// # Errors
+/// `uv_required`.
+fn web_uv_flag(
+    user_verification: Option<&str>,
+    settings: LockSettings,
+    now_ms: u64,
+) -> Result<UserVerified, CoreError> {
+    UvState::master_password_unverified()
+        .decide(
+            UvRequirement::parse(user_verification),
+            settings.settings(),
+            now_ms,
+        )
+        .user_verified()
+        .map_err(CoreError::from)
 }
 
 /// The account's website-icons setting from the verified account's settings record (ADR 0099

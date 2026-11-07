@@ -6,8 +6,9 @@
 //!
 //! # What crosses, and why
 //!
-//! [`create_passkey`] is the one place in this crate, besides the master password, Secret Key,
-//! export password and Emergency Kit (`lib.rs`'s "Rules of the boundary" rule 1), where key
+//! `createPasskey` ([`crate::device::DeviceSession::create_passkey`],
+//! [`crate::session::Session::create_passkey`]) is the one place in this crate, besides the
+//! master password, Secret Key, export password and Emergency Kit (`lib.rs`'s "Rules of the boundary" rule 1), where key
 //! material crosses to JavaScript: [`CreatedPasskey::private_key`] is the fresh credential's
 //! raw 32-byte scalar. There is no way around it here — the caller (the extension's
 //! background script, or the web vault) must hand that value straight to the existing,
@@ -47,14 +48,59 @@
 //! message, and refusing a cross-origin iframe before calling this far at all, are the
 //! extension's job ([ADR 0039] §2; [ADR 0036] §4), not this crate's.
 //!
+//! # User verification ([ADR 0110] §6, INV-123)
+//!
+//! Both ceremonies are session calls (`createPasskey` and `passkeyAssertion` on
+//! [`crate::device::DeviceSession`] and [`crate::session::Session`]) that take the page's raw
+//! `userVerification` value, the host's current lock settings ([`crate::lock::LockSettings`])
+//! and `now_ms`, and decide the `UV` flag in Rust at signing time
+//! ([`rizzy_client::passkey::UvState::decide`]) from the session's own state: how it was
+//! unlocked and its `verified_at`, which never leave the session. A Required request that is
+//! neither bounding nor fresh fails with `uv_required` before anything is generated or signed.
+//! There is no session-less `createPasskey`: without a session there is nothing to decide from.
+//!
 //! [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md
 //! [ADR 0039]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0039-passkeys-vault-and-extension.md
+//! [ADR 0110]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0110-passkey-user-verification.md
 
-use rizzy_client::passkey::create_credential;
+use rizzy_client::passkey::{
+    UV_FRESH_MS, UserVerified, UvDecision, UvRequirement, create_credential,
+};
 use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::error::CoreError;
 use crate::rng::os_rng;
+
+/// ADR 0110 §5 point 2's mapping of the page's relayed `userVerification` value:
+/// `"required"`, `"discouraged"`, or `"preferred"` for anything else (`"REQUIRED"`, absent,
+/// a non-string the host turned into `undefined`). For display only (the consent label of §7
+/// point 1): the ceremony calls take the raw value and map it themselves.
+#[wasm_bindgen(js_name = parseUvRequirement)]
+#[must_use]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "wasm-bindgen hands this exported call ownership of the JS string as Option<String>"
+)]
+pub fn parse_uv_requirement(value: Option<String>) -> String {
+    UvRequirement::parse(value.as_deref()).as_str().to_owned()
+}
+
+/// [`UV_FRESH_MS`]: how long a master-password verification counts as user verification while
+/// the lock policy is not bounding (ADR 0110 §6 point 2), in milliseconds.
+#[wasm_bindgen(js_name = uvFreshMs)]
+#[must_use]
+pub fn uv_fresh_ms() -> u64 {
+    UV_FRESH_MS
+}
+
+/// The name a [`UvDecision`] crosses as: `"sign_uv"`, `"sign_no_uv"` or `"uv_required"`.
+pub(crate) const fn uv_decision_name(decision: UvDecision) -> &'static str {
+    match decision {
+        UvDecision::Sign { uv: true } => "sign_uv",
+        UvDecision::Sign { uv: false } => "sign_no_uv",
+        UvDecision::UvRequired => "uv_required",
+    }
+}
 
 /// Everything one `navigator.credentials.create()` ceremony resolves with (ADR 0039 §1), as
 /// JavaScript receives it.
@@ -204,23 +250,22 @@ impl From<rizzy_client::passkey::Assertion> for PasskeyAssertion {
 ///
 /// `origin` must be the browser-verified origin (module docs, "What this does not decide");
 /// `rp_id` is the `rpId` the page asked for, already defaulted by the caller to the origin's
-/// host if the page omitted it; `challenge` is the relying party's own randomness.
+/// host if the page omitted it; `challenge` is the relying party's own randomness. `uv` is the
+/// session's ADR 0110 §6 decision, taken just before this call: this is not exported, so the
+/// only ways in are the sessions' `createPasskey` calls
+/// ([`crate::device::DeviceSession::create_passkey`],
+/// [`crate::session::Session::create_passkey`]), which decide first (module docs, "User
+/// verification").
 ///
 /// # Errors
 /// `rp_id_rejected` (INV-64), `invalid_input` for a malformed `origin`/`rp_id`.
-#[wasm_bindgen(js_name = createPasskey)]
-pub fn create_passkey(
+pub(crate) fn create_passkey(
     origin: &str,
     rp_id: &str,
     challenge: &[u8],
+    uv: UserVerified,
 ) -> Result<CreatedPasskey, CoreError> {
-    let created = create_credential(
-        &mut os_rng(),
-        origin,
-        rp_id,
-        challenge,
-        rizzy_client::passkey::UserVerified::Yes,
-    )?;
+    let created = create_credential(&mut os_rng(), origin, rp_id, challenge, uv)?;
     Ok(CreatedPasskey {
         private_key: created.signing_key.to_bytes().expose_secret().to_vec(),
         credential_id: created.credential_id,
@@ -311,7 +356,13 @@ mod tests {
 
     #[test]
     fn creates_a_passkey_for_a_valid_origin_and_rp_id() {
-        let created = create_passkey("https://example.com", "example.com", b"chal").unwrap();
+        let created = create_passkey(
+            "https://example.com",
+            "example.com",
+            b"chal",
+            UserVerified::Yes,
+        )
+        .unwrap();
         assert_eq!(created.private_key().len(), 32);
         assert_eq!(created.credential_id().len(), 32);
         assert!(!created.public_key_cose().is_empty());
@@ -319,15 +370,63 @@ mod tests {
         assert!(!created.attestation_object().is_empty());
     }
 
+    /// The registration's flags byte follows the session's decision (ADR 0110 §6): `0x5D` with
+    /// `UV`, `0x59` without. The flags sit after the 32-byte `rpIdHash` of `authData`, which
+    /// the `"none"` attestation object carries verbatim.
+    #[test]
+    fn the_registration_flags_follow_the_uv_decision() {
+        for (uv, flags) in [(UserVerified::Yes, 0x5D_u8), (UserVerified::No, 0x59)] {
+            let created =
+                create_passkey("https://example.com", "example.com", b"chal", uv).unwrap();
+            let rp_id_hash = rizzy_client::rizzy_core::passkey::rp_id_hash("example.com");
+            let object = created.attestation_object();
+            let at = object
+                .windows(32)
+                .position(|w| w == rp_id_hash.as_slice())
+                .unwrap();
+            assert_eq!(object.get(at + 32), Some(&flags));
+        }
+    }
+
+    #[test]
+    fn the_requirement_and_decision_names_are_stable() {
+        assert_eq!(parse_uv_requirement(Some("required".into())), "required");
+        assert_eq!(
+            parse_uv_requirement(Some("discouraged".into())),
+            "discouraged"
+        );
+        assert_eq!(parse_uv_requirement(Some("REQUIRED".into())), "preferred");
+        assert_eq!(parse_uv_requirement(None), "preferred");
+        assert_eq!(uv_fresh_ms(), 300_000);
+        assert_eq!(uv_decision_name(UvDecision::Sign { uv: true }), "sign_uv");
+        assert_eq!(
+            uv_decision_name(UvDecision::Sign { uv: false }),
+            "sign_no_uv"
+        );
+        assert_eq!(uv_decision_name(UvDecision::UvRequired), "uv_required");
+    }
+
     #[test]
     fn refuses_an_rp_id_that_fails_inv_64() {
-        let error = create_passkey("https://evil.example", "bank.com", b"chal").unwrap_err();
+        let error = create_passkey(
+            "https://evil.example",
+            "bank.com",
+            b"chal",
+            UserVerified::Yes,
+        )
+        .unwrap_err();
         assert_eq!(error.as_str(), "rp_id_rejected");
     }
 
     #[test]
     fn debug_never_prints_the_private_key() {
-        let created = create_passkey("https://example.com", "example.com", b"chal").unwrap();
+        let created = create_passkey(
+            "https://example.com",
+            "example.com",
+            b"chal",
+            UserVerified::Yes,
+        )
+        .unwrap();
         let printed = format!("{created:?}");
         assert!(!printed.contains(&format!("{:?}", created.private_key())));
         assert!(printed.contains("REDACTED"));

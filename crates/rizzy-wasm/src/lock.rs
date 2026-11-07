@@ -93,6 +93,13 @@ impl LockSettings {
     }
 }
 
+impl LockSettings {
+    /// The `rizzy-client` settings, for the passkey ceremonies' `UV` decision (ADR 0110 §6).
+    pub(crate) const fn settings(&self) -> &Settings {
+        &self.inner
+    }
+}
+
 /// Reads the stored record; `null`/`undefined` or a broken record is the defaults (ADR 0110 §3
 /// point 3).
 #[wasm_bindgen(js_name = parseLockSettings)]

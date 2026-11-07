@@ -36,7 +36,7 @@
 //! | [`HttpRequest`], [`meta_request`], [`check_meta`] ([`ServerMeta`]), [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
 //! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], [`Generated`] | the generator, every option ([`generator`]) |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
-//! | [`create_passkey`] (`createPasskey`), [`CreatedPasskey`], [`Session::passkey_assertion`] (`passkeyAssertion`), [`PasskeyAssertion`] | `WebAuthn` passkey registration and assertion ([`passkey`]; ADR 0039) |
+//! | [`Session::create_passkey`] and [`DeviceSession::create_passkey`] (`createPasskey`), [`CreatedPasskey`], [`Session::passkey_assertion`] and [`DeviceSession::passkey_assertion`] (`passkeyAssertion`), [`PasskeyAssertion`], [`DeviceSession::reverify`] (`reverify`), [`parse_uv_requirement`] (`parseUvRequirement`), [`uv_fresh_ms`] (`uvFreshMs`) | `WebAuthn` passkey registration and assertion, their `UV` flag under the lock settings ([`passkey`]; ADR 0039, ADR 0110 §6–§7) |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
 //! | [`cxf_export_warning`] | the CXF passkey export's own warning (ADR 0074 §2) |
 //! | [`revocation_pending_notice`] (`revocationPendingNotice`), `revocationRetryAt` and the `revocationWindow*` getters of [`Session`] and [`DeviceSession`] | the `revocation_pending` banner and its retry (ADR 0091 §2; [`revocation`]) |
@@ -53,7 +53,7 @@
 //!   after a re-authentication, the warning and its hold ([`Session::export_plaintext`]). The OPAQUE session's bearer
 //!   token goes out in the `Authorization` value of each request (it is the transport's
 //!   credential, ADR 0028 item 4, not a key of rule 1). A freshly generated passkey's private
-//!   key goes out once, from [`create_passkey`], for the caller to encrypt straight into the
+//!   key goes out once, from the sessions' `createPasskey` ([`DeviceSession::create_passkey`]), for the caller to encrypt straight into the
 //!   new item ([`passkey`]'s module docs) — the same shape as a freshly generated password
 //!   crossing out so the host can save it; a *stored* passkey's private key never crosses at
 //!   all ([`Session::passkey_assertion`] reads and uses it internally, like
@@ -136,7 +136,7 @@ pub use lock::{
 };
 pub use login::LoginFlow;
 pub use matching::{GlobalEquivalence, MatchDecision, decide_match_candidates, normalize_page_url};
-pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
+pub use passkey::{CreatedPasskey, PasskeyAssertion, parse_uv_requirement, uv_fresh_ms};
 pub use revocation::revocation_pending_notice;
 pub use session::{
     AttachmentView, CxfExport, DeviceView, EncryptedExport, ImportReport, Notice, Session,

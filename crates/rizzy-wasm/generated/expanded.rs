@@ -37,7 +37,7 @@
 //! | [`HttpRequest`], [`meta_request`], [`check_meta`] ([`ServerMeta`]), [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
 //! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], [`Generated`] | the generator, every option ([`generator`]) |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
-//! | [`create_passkey`] (`createPasskey`), [`CreatedPasskey`], [`Session::passkey_assertion`] (`passkeyAssertion`), [`PasskeyAssertion`] | `WebAuthn` passkey registration and assertion ([`passkey`]; ADR 0039) |
+//! | [`Session::create_passkey`] and [`DeviceSession::create_passkey`] (`createPasskey`), [`CreatedPasskey`], [`Session::passkey_assertion`] and [`DeviceSession::passkey_assertion`] (`passkeyAssertion`), [`PasskeyAssertion`], [`DeviceSession::reverify`] (`reverify`), [`parse_uv_requirement`] (`parseUvRequirement`), [`uv_fresh_ms`] (`uvFreshMs`) | `WebAuthn` passkey registration and assertion, their `UV` flag under the lock settings ([`passkey`]; ADR 0039, ADR 0110 §6–§7) |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
 //! | [`cxf_export_warning`] | the CXF passkey export's own warning (ADR 0074 §2) |
 //! | [`revocation_pending_notice`] (`revocationPendingNotice`), `revocationRetryAt` and the `revocationWindow*` getters of [`Session`] and [`DeviceSession`] | the `revocation_pending` banner and its retry (ADR 0091 §2; [`revocation`]) |
@@ -54,7 +54,7 @@
 //!   after a re-authentication, the warning and its hold ([`Session::export_plaintext`]). The OPAQUE session's bearer
 //!   token goes out in the `Authorization` value of each request (it is the transport's
 //!   credential, ADR 0028 item 4, not a key of rule 1). A freshly generated passkey's private
-//!   key goes out once, from [`create_passkey`], for the caller to encrypt straight into the
+//!   key goes out once, from the sessions' `createPasskey` ([`DeviceSession::create_passkey`]), for the caller to encrypt straight into the
 //!   new item ([`passkey`]'s module docs) — the same shape as a freshly generated password
 //!   crossing out so the host can save it; a *stored* passkey's private key never crosses at
 //!   all ([`Session::passkey_assertion`] reads and uses it internally, like
@@ -5597,6 +5597,7 @@ pub mod device {
     use rizzy_client::device::{DeviceState, UnlockedDevice};
     use rizzy_client::icons::IconsSetting;
     use rizzy_client::items::{FieldEdit, ItemId, TRASH_RETENTION_MS};
+    use rizzy_client::lock_settings::UnlockedBy;
     use rizzy_client::login::{
         Enrolled, LoggedIn, LoginAwaitingSession, LoginInput, LoginStarted,
         start_login,
@@ -5604,7 +5605,10 @@ pub mod device {
     use rizzy_client::matching::{
         EquivalenceGroup, startup_equivalence_groups,
     };
-    use rizzy_client::passkey::{PasskeySigningKey, get_assertion_with};
+    use rizzy_client::passkey::{
+        PasskeySigningKey, UserVerified, UvRequirement, UvState,
+        get_assertion_with, reverify,
+    };
     use rizzy_client::rizzy_core::item::key::ElementId;
     use rizzy_client::rizzy_core::item::schema::{
         ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY,
@@ -5641,8 +5645,11 @@ pub mod device {
     use crate::items::{
         self, FieldView, ItemDraft, ItemSummary, hex, item_ref, type_from_name,
     };
+    use crate::lock::LockSettings;
     use crate::matching::{self, MatchDecision, MatchSettingsView, UriInput};
-    use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
+    use crate::passkey::{
+        self, CreatedPasskey, PasskeyAssertion, PasskeyCandidate,
+    };
     use crate::removal::UnsentUpload;
     use crate::revocation;
     use crate::rng::{Rng, os_rng};
@@ -5715,6 +5722,11 @@ pub mod device {
         starts: u8,
         #[doc = " The RNG."]
         rng: Rng,
+        #[doc =
+        " When `login/finish` accepted the master password (the host\'s `now_ms` of that answer):"]
+        #[doc =
+        " the enrolment\'s master-password verification, ADR 0110 §6 point 4."]
+        logged_in_at: Option<u64>,
     }
     #[automatically_derived]
     impl wasm_bindgen::__rt::marker::SupportsConstructor for EnrolFlow { }
@@ -6218,6 +6230,7 @@ pub mod device {
                     pending: None,
                     starts: 0,
                     rng: os_rng(),
+                    logged_in_at: None,
                 };
             flow.restart()?;
             Ok(flow)
@@ -6840,8 +6853,12 @@ pub mod device {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             match self.stage {
-                FlowStage::Done(enrolled) =>
-                    EnrolResult::new(*enrolled).map_err(CoreError::from),
+                FlowStage::Done(enrolled) => {
+                    let uv =
+                        self.logged_in_at.map_or_else(UvState::other,
+                            UvState::master_password);
+                    EnrolResult::new(*enrolled, uv).map_err(CoreError::from)
+                }
                 _ => Err(CoreError::new(WRONG_STATE)),
             }
         }
@@ -6935,6 +6952,7 @@ pub mod device {
                     }
                     let answer: LoginFinishResponse = http::json(status, body)?;
                     let logged_in: LoggedIn = awaiting.complete(answer)?;
+                    self.logged_in_at = Some(now_ms);
                     let token = copy_token(logged_in.bearer_token());
                     let (pending_enrol, request) =
                         logged_in.enrol(&mut self.rng, DeviceKind::Extension,
@@ -7280,7 +7298,7 @@ pub mod device {
         /// [`ClientError::Internal`] if the device-state record, the first changeset, or a vault's
         /// self-grant does not encode; [`ClientError::InvalidServerResponse`] if the account answer
         /// carries no vault key.
-        fn new(enrolled: Enrolled) -> Result<Self, ClientError> {
+        fn new(enrolled: Enrolled, uv: UvState) -> Result<Self, ClientError> {
             let record = enrolled.device.record(RecordStage::Committed)?;
             let mut changeset = store::create_writes(&record)?;
             changeset.append(store::account_writes(&enrolled.account));
@@ -7298,7 +7316,7 @@ pub mod device {
                     cache_rows,
                     session: Some(DeviceSession::from_parts(enrolled.device,
                             enrolled.unlocked, account, authors, vaults, rows, floors,
-                            Changeset::new(), Alarms::default())),
+                            Changeset::new(), Alarms::default(), uv)),
                 })
         }
     }
@@ -7592,6 +7610,13 @@ pub mod device {
         floors: Floors,
         #[doc = " Device authentication."]
         auth: AuthStage,
+        #[doc =
+        " How this session was unlocked and its `verified_at`, for the passkey `UV` decision (ADR"]
+        #[doc =
+        " 0110 §6 point 4): in memory only, set by the master-password unlock or enrolment login"]
+        #[doc =
+        " and by [`DeviceSession::reverify`]; dropped with the session."]
+        uv: UvState,
         #[doc = " The outstanding auth request."]
         pending: Option<HttpRequest>,
         #[doc =
@@ -7922,6 +7947,17 @@ pub mod device {
         global_groups
     }
     impl DeviceSession {
+        /// The `UV` flag for one ceremony, decided at signing time from this session's state (ADR
+        /// 0110 §6): how it was unlocked, `verified_at`, the host's current `settings` and `now_ms`.
+        ///
+        /// # Errors
+        /// `uv_required`: do not sign.
+        fn uv_flag(&self, user_verification: Option<&str>,
+            settings: LockSettings, now_ms: u64) -> CoreResult<UserVerified> {
+            let requirement = UvRequirement::parse(user_verification);
+            self.uv.decide(requirement, settings.settings(),
+                        now_ms).user_verified().map_err(CoreError::from)
+        }
         /// Wraps an already-unlocked device (used by [`EnrolResult::new`] and
         /// [`DeviceSession::unlock`]).
         #[expect(clippy::too_many_arguments, reason =
@@ -7929,7 +7965,7 @@ pub mod device {
         fn from_parts(device: DeviceState, unlocked: UnlockedDevice,
             account: VerifiedAccount, authors: Authors, vaults: VaultSet,
             cache: CacheRows, floors: Floors, mut start_writes: Changeset,
-            alarms: Alarms) -> Self {
+            alarms: Alarms, uv: UvState) -> Self {
             let global_groups =
                 start_global_groups(&floors, &mut start_writes);
             Self {
@@ -7941,6 +7977,7 @@ pub mod device {
                 cache,
                 floors,
                 auth: AuthStage::Idle,
+                uv,
                 pending: None,
                 sync: SyncDriver::default(),
                 rng: os_rng(),
@@ -8199,7 +8236,7 @@ pub mod device {
             if alarms.is_raised() { vaults.set_alarmed(true); }
             Ok(Self::from_parts(loaded.device, unlocked, loaded.account,
                     loaded.authors, vaults, stored, loaded.floors, migration,
-                    alarms))
+                    alarms, UvState::master_password(now_ms)))
         }
         #[doc = " The account, hex."]
         #[must_use]
@@ -13510,9 +13547,7 @@ pub mod device {
         #[doc =
         " item `id`, ADR 0039 §1, §2; [`crate::passkey`] module docs — the extension\'s own"]
         #[doc =
-        " durable-device path there: this crate\'s other passkey call, [`crate::passkey::create_passkey`],"]
-        #[doc =
-        " needs no session at all). The stored private key is read and used here, never"]
+        " durable-device path there; [`DeviceSession::create_passkey`] is the registration). The stored private key is read and used here, never"]
         #[doc =
         " returned: only the resulting [`PasskeyAssertion`] crosses to JavaScript, the same"]
         #[doc =
@@ -13547,10 +13582,30 @@ pub mod device {
         " (gap 35(b) in the M2 gap audit; [`crate::passkey`] module docs)."]
         #[doc = ""]
         #[doc =
+        " `user_verification` is the page\'s relayed `userVerification` value (absent or anything"]
+        #[doc =
+        " unknown is Preferred), `settings` the host\'s current lock settings and `now_ms` its clock:"]
+        #[doc =
+        " the `UV` flag is decided from them and this session\'s own state just before signing (ADR"]
+        #[doc =
+        " 0110 §6, [`crate::passkey`] module docs, \"User verification\")."]
+        #[doc = ""]
+        #[doc =
+        " `uv_required` (ADR 0110 §6) when the request is Required, the policy is not bounding and"]
+        #[doc =
+        " no master-password verification is fresh: nothing is signed; [`DeviceSession::reverify`]"]
+        #[doc = " then this call again."]
+        #[doc = ""]
+        #[doc =
         " [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md"]
+        #[expect(clippy::too_many_arguments, reason =
+        "one exported ceremony call; wasm-bindgen takes plain arguments, not a struct of them")]
+        #[expect(clippy::needless_pass_by_value, reason =
+        "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
         pub fn passkey_assertion(&self, id: &str, passkey_id: &str,
-            origin: &str, rp_id: &str, challenge: &[u8])
-            -> Result<PasskeyAssertion, CoreError> {
+            origin: &str, rp_id: &str, challenge: &[u8],
+            user_verification: Option<String>, settings: &LockSettings,
+            now_ms: u64) -> Result<PasskeyAssertion, CoreError> {
             #[automatically_derived]
             const _: () =
                 {
@@ -13559,9 +13614,7 @@ pub mod device {
                     #[doc =
                     " item `id`, ADR 0039 §1, §2; [`crate::passkey`] module docs — the extension\'s own"]
                     #[doc =
-                    " durable-device path there: this crate\'s other passkey call, [`crate::passkey::create_passkey`],"]
-                    #[doc =
-                    " needs no session at all). The stored private key is read and used here, never"]
+                    " durable-device path there; [`DeviceSession::create_passkey`] is the registration). The stored private key is read and used here, never"]
                     #[doc =
                     " returned: only the resulting [`PasskeyAssertion`] crosses to JavaScript, the same"]
                     #[doc =
@@ -13596,7 +13649,26 @@ pub mod device {
                     " (gap 35(b) in the M2 gap audit; [`crate::passkey`] module docs)."]
                     #[doc = ""]
                     #[doc =
+                    " `user_verification` is the page\'s relayed `userVerification` value (absent or anything"]
+                    #[doc =
+                    " unknown is Preferred), `settings` the host\'s current lock settings and `now_ms` its clock:"]
+                    #[doc =
+                    " the `UV` flag is decided from them and this session\'s own state just before signing (ADR"]
+                    #[doc =
+                    " 0110 §6, [`crate::passkey`] module docs, \"User verification\")."]
+                    #[doc = ""]
+                    #[doc =
+                    " `uv_required` (ADR 0110 §6) when the request is Required, the policy is not bounding and"]
+                    #[doc =
+                    " no master-password verification is fresh: nothing is signed; [`DeviceSession::reverify`]"]
+                    #[doc = " then this call again."]
+                    #[doc = ""]
+                    #[doc =
                     " [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md"]
+                    #[allow(clippy::too_many_arguments, reason =
+                    "one exported ceremony call; wasm-bindgen takes plain arguments, not a struct of them")]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
                     #[export_name =
                     "devicesession_passkeyAssertion_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_passkeyAssertion(me:
@@ -13661,6 +13733,46 @@ pub mod device {
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg5_4:
                             <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg6_1:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg6_2:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg6_3:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg6_4:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg7_1:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg7_2:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg7_3:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg7_4:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg8_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg8_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg8_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg8_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
                             wasm_bindgen::convert::WasmRet<<Result<PasskeyAssertion,
@@ -13727,8 +13839,37 @@ pub mod device {
                                                             arg5_3, arg5_4))
                                                 };
                                             let arg5 = &*arg5;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Option<String>>();
+                                            let arg6 =
+                                                unsafe {
+                                                    <Option<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg6_1, arg6_2,
+                                                            arg6_3, arg6_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<LockSettings>();
+                                            let arg7 =
+                                                unsafe {
+                                                    <LockSettings as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<LockSettings
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg7_1, arg7_2,
+                                                            arg7_3, arg7_4))
+                                                };
+                                            let arg7 = &*arg7;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg8 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg8_1, arg8_2,
+                                                            arg8_3, arg8_4))
+                                                };
                                             let _ret =
-                                                me.passkey_assertion(arg1, arg2, arg3, arg4, arg5);
+                                                me.passkey_assertion(arg1, arg2, arg3, arg4, arg5, arg6,
+                                                    arg7, arg8);
                                             _ret
                                         }
                                     });
@@ -13744,9 +13885,7 @@ pub mod device {
                     #[doc =
                     " item `id`, ADR 0039 §1, §2; [`crate::passkey`] module docs — the extension\'s own"]
                     #[doc =
-                    " durable-device path there: this crate\'s other passkey call, [`crate::passkey::create_passkey`],"]
-                    #[doc =
-                    " needs no session at all). The stored private key is read and used here, never"]
+                    " durable-device path there; [`DeviceSession::create_passkey`] is the registration). The stored private key is read and used here, never"]
                     #[doc =
                     " returned: only the resulting [`PasskeyAssertion`] crosses to JavaScript, the same"]
                     #[doc =
@@ -13781,7 +13920,26 @@ pub mod device {
                     " (gap 35(b) in the M2 gap audit; [`crate::passkey`] module docs)."]
                     #[doc = ""]
                     #[doc =
+                    " `user_verification` is the page\'s relayed `userVerification` value (absent or anything"]
+                    #[doc =
+                    " unknown is Preferred), `settings` the host\'s current lock settings and `now_ms` its clock:"]
+                    #[doc =
+                    " the `UV` flag is decided from them and this session\'s own state just before signing (ADR"]
+                    #[doc =
+                    " 0110 §6, [`crate::passkey`] module docs, \"User verification\")."]
+                    #[doc = ""]
+                    #[doc =
+                    " `uv_required` (ADR 0110 §6) when the request is Required, the policy is not bounding and"]
+                    #[doc =
+                    " no master-password verification is fresh: nothing is signed; [`DeviceSession::reverify`]"]
+                    #[doc = " then this call again."]
+                    #[doc = ""]
+                    #[doc =
                     " [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md"]
+                    #[allow(clippy::too_many_arguments, reason =
+                    "one exported ceremony call; wasm-bindgen takes plain arguments, not a struct of them")]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_devicesession_passkeyAssertion_e09cc0eb35f8b583() {
@@ -13789,12 +13947,15 @@ pub mod device {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(5u32);
+                        inform(8u32);
                         <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <&[u8] as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                        <&LockSettings as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
                         <Result<PasskeyAssertion, CoreError> as
                                 WasmDescribe>::describe();
                         <Result<PasskeyAssertion, CoreError> as
@@ -13809,7 +13970,7 @@ pub mod device {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\rDeviceSession\x18V Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/\xe2\x80\xa6` onU item `id`, ADR 0039 \xc2\xa71, \xc2\xa72; [`crate::passkey`] module docs \xe2\x80\x94 the extension's own` durable-device path there: this crate's other passkey call, [`crate::passkey::create_passkey`],N needs no session at all). The stored private key is read and used here, neverR returned: only the resulting [`PasskeyAssertion`] crosses to JavaScript, the sameS pattern [`DeviceSession::reveal_field`] uses for a different concealed field (text? there; this one is never text-revealable at all, module docs).\0Y `origin` must be the browser-verified origin \xe2\x80\x94 the extension's background script readsI it from the browser's own sender information, never from the interceptedY `navigator.credentials.get()` call's relayed payload ([ADR 0036] \xc2\xa74; [`crate::passkey`]S module docs, \"What this does not decide\"); `rp_id` is the page's requested `rpId`,K already defaulted by the caller to `origin`'s host if the page omitted it.\0\t # ErrorsU As [`DeviceSession::item`]; `invalid_input` when `passkey_id` is not a valid elementl id, the item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed;J otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64).\0X This call does **not** check `passkey_id` against the page's `allowCredentials` \xe2\x80\x94 theT extension's background filters [`DeviceSession::passkey_candidates`]'s result firstA (gap 35(b) in the M2 gap audit; [`crate::passkey`] module docs).\0\x82\x01 [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md\0\x05\x02id\0\0\0\npasskey_id\0\0\0\x06origin\0\0\0\x05rp_id\0\0\0\tchallenge\0\0\0\0\0\x10passkeyAssertion\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\rDeviceSession V Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/\xe2\x80\xa6` onU item `id`, ADR 0039 \xc2\xa71, \xc2\xa72; [`crate::passkey`] module docs \xe2\x80\x94 the extension's own\x87\x01 durable-device path there; [`DeviceSession::create_passkey`] is the registration). The stored private key is read and used here, neverR returned: only the resulting [`PasskeyAssertion`] crosses to JavaScript, the sameS pattern [`DeviceSession::reveal_field`] uses for a different concealed field (text? there; this one is never text-revealable at all, module docs).\0Y `origin` must be the browser-verified origin \xe2\x80\x94 the extension's background script readsI it from the browser's own sender information, never from the interceptedY `navigator.credentials.get()` call's relayed payload ([ADR 0036] \xc2\xa74; [`crate::passkey`]S module docs, \"What this does not decide\"); `rp_id` is the page's requested `rpId`,K already defaulted by the caller to `origin`'s host if the page omitted it.\0\t # ErrorsU As [`DeviceSession::item`]; `invalid_input` when `passkey_id` is not a valid elementl id, the item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed;J otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64).\0X This call does **not** check `passkey_id` against the page's `allowCredentials` \xe2\x80\x94 theT extension's background filters [`DeviceSession::passkey_candidates`]'s result firstA (gap 35(b) in the M2 gap audit; [`crate::passkey`] module docs).\0W `user_verification` is the page's relayed `userVerification` value (absent or anything[ unknown is Preferred), `settings` the host's current lock settings and `now_ms` its clock:Y the `UV` flag is decided from them and this session's own state just before signing (ADR@ 0110 \xc2\xa76, [`crate::passkey`] module docs, \"User verification\").\0Z `uv_required` (ADR 0110 \xc2\xa76) when the request is Required, the policy is not bounding andY no master-password verification is fresh: nothing is signed; [`DeviceSession::reverify`]\x16 then this call again.\0\x82\x01 [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md\0\x08\x02id\0\0\0\npasskey_id\0\0\0\x06origin\0\0\0\x05rp_id\0\0\0\tchallenge\0\0\0\x11user_verification\0\0\0\x08settings\0\0\0\x06now_ms\0\0\0\0\0\x10passkeyAssertion\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -13872,8 +14033,757 @@ pub mod device {
                 };
             let assertion =
                 get_assertion_with(&signing_key, &credential_id, &user_handle,
-                        origin, rp_id, challenge)?;
+                        origin, rp_id, challenge,
+                        self.uv_flag(user_verification.as_deref(), *settings,
+                                now_ms)?)?;
             Ok(assertion.into())
+        }
+        #[doc =
+        " Runs a `WebAuthn` registration ceremony for one new ES256 passkey"]
+        #[doc =
+        " ([`crate::passkey`] module docs; ADR 0039 §1, §2, §4), its `UV` flag decided from this"]
+        #[doc =
+        " session\'s state as for [`DeviceSession::passkey_assertion`] (ADR 0110 §6 point 5),"]
+        #[doc =
+        " before any key is generated. No vault is touched: the caller saves the result through"]
+        #[doc = " the item-write calls, as before."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `uv_required` (nothing generated); `rp_id_rejected` (INV-64); `invalid_input` for a"]
+        #[doc = " malformed `origin`/`rp_id`."]
+        #[expect(clippy::needless_pass_by_value, reason =
+        "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
+        pub fn create_passkey(&self, origin: &str, rp_id: &str,
+            challenge: &[u8], user_verification: Option<String>,
+            settings: &LockSettings, now_ms: u64)
+            -> Result<CreatedPasskey, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Runs a `WebAuthn` registration ceremony for one new ES256 passkey"]
+                    #[doc =
+                    " ([`crate::passkey`] module docs; ADR 0039 §1, §2, §4), its `UV` flag decided from this"]
+                    #[doc =
+                    " session\'s state as for [`DeviceSession::passkey_assertion`] (ADR 0110 §6 point 5),"]
+                    #[doc =
+                    " before any key is generated. No vault is touched: the caller saves the result through"]
+                    #[doc = " the item-write calls, as before."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `uv_required` (nothing generated); `rp_id_rejected` (INV-64); `invalid_input` for a"]
+                    #[doc = " malformed `origin`/`rp_id`."]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
+                    #[export_name =
+                    "devicesession_createPasskey_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_createPasskey(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg5_1:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg5_2:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg5_3:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg5_4:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg6_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg6_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg6_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg6_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<CreatedPasskey,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let arg3 = &*arg3;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Option<String>>();
+                                            let arg4 =
+                                                unsafe {
+                                                    <Option<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<LockSettings>();
+                                            let arg5 =
+                                                unsafe {
+                                                    <LockSettings as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<LockSettings
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg5_1, arg5_2,
+                                                            arg5_3, arg5_4))
+                                                };
+                                            let arg5 = &*arg5;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg6 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg6_1, arg6_2,
+                                                            arg6_3, arg6_4))
+                                                };
+                                            let _ret =
+                                                me.create_passkey(arg1, arg2, arg3, arg4, arg5, arg6);
+                                            _ret
+                                        }
+                                    });
+                        <Result<CreatedPasskey, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Runs a `WebAuthn` registration ceremony for one new ES256 passkey"]
+                    #[doc =
+                    " ([`crate::passkey`] module docs; ADR 0039 §1, §2, §4), its `UV` flag decided from this"]
+                    #[doc =
+                    " session\'s state as for [`DeviceSession::passkey_assertion`] (ADR 0110 §6 point 5),"]
+                    #[doc =
+                    " before any key is generated. No vault is touched: the caller saves the result through"]
+                    #[doc = " the item-write calls, as before."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `uv_required` (nothing generated); `rp_id_rejected` (INV-64); `invalid_input` for a"]
+                    #[doc = " malformed `origin`/`rp_id`."]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_createPasskey_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(6u32);
+                        <&str as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <&[u8] as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                        <&LockSettings as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
+                        <Result<CreatedPasskey, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<CreatedPasskey, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\tB Runs a `WebAuthn` registration ceremony for one new ES256 passkeyZ ([`crate::passkey`] module docs; ADR 0039 \xc2\xa71, \xc2\xa72, \xc2\xa74), its `UV` flag decided from thisT session's state as for [`DeviceSession::passkey_assertion`] (ADR 0110 \xc2\xa76 point 5),V before any key is generated. No vault is touched: the caller saves the result through! the item-write calls, as before.\0\t # ErrorsT `uv_required` (nothing generated); `rp_id_rejected` (INV-64); `invalid_input` for a\x1c malformed `origin`/`rp_id`.\0\x06\x06origin\0\0\0\x05rp_id\0\0\0\tchallenge\0\0\0\x11user_verification\0\0\0\x08settings\0\0\0\x06now_ms\0\0\0\0\0\rcreatePasskey\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let uv =
+                self.uv_flag(user_verification.as_deref(), *settings,
+                        now_ms)?;
+            passkey::create_passkey(origin, rp_id, challenge, uv)
+        }
+        #[doc =
+        " What a ceremony with `user_verification` would get under `settings` at `now_ms`, without"]
+        #[doc =
+        " signing anything: `\"sign_uv\"`, `\"sign_no_uv\"` or `\"uv_required\"`. Advisory only (the"]
+        #[doc =
+        " consent label of ADR 0110 §7 point 1); the ceremony calls decide again at signing time."]
+        #[must_use]
+        #[expect(clippy::needless_pass_by_value, reason =
+        "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
+        pub fn passkey_uv_decision(&self, user_verification: Option<String>,
+            settings: &LockSettings, now_ms: u64) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " What a ceremony with `user_verification` would get under `settings` at `now_ms`, without"]
+                    #[doc =
+                    " signing anything: `\"sign_uv\"`, `\"sign_no_uv\"` or `\"uv_required\"`. Advisory only (the"]
+                    #[doc =
+                    " consent label of ADR 0110 §7 point 1); the ceremony calls decide again at signing time."]
+                    #[must_use]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
+                    #[export_name =
+                    "devicesession_passkeyUvDecision_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_passkeyUvDecision(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Option<String>>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <Option<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<LockSettings>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <LockSettings as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<LockSettings
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let _ret = me.passkey_uv_decision(arg1, arg2, arg3);
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " What a ceremony with `user_verification` would get under `settings` at `now_ms`, without"]
+                    #[doc =
+                    " signing anything: `\"sign_uv\"`, `\"sign_no_uv\"` or `\"uv_required\"`. Advisory only (the"]
+                    #[doc =
+                    " consent label of ADR 0110 §7 point 1); the ceremony calls decide again at signing time."]
+                    #[must_use]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_passkeyUvDecision_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(3u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <&LockSettings as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x03Y What a ceremony with `user_verification` would get under `settings` at `now_ms`, withoutU signing anything: `\"sign_uv\"`, `\"sign_no_uv\"` or `\"uv_required\"`. Advisory only (theY consent label of ADR 0110 \xc2\xa77 point 1); the ceremony calls decide again at signing time.\0\x03\x11user_verification\0\0\0\x08settings\0\0\0\x06now_ms\0\0\0\0\0\x11passkeyUvDecision\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let requirement =
+                UvRequirement::parse(user_verification.as_deref());
+            passkey::uv_decision_name(self.uv.decide(requirement,
+                        settings.settings(), now_ms)).to_owned()
+        }
+        #[doc =
+        " Whether this session was unlocked with the master password (the local unlock or the"]
+        #[doc =
+        " enrolment login), the input of [`LockSettings`]\'s `isBounding` (ADR 0110 §6 point 1)."]
+        #[must_use]
+        pub fn unlocked_by_master_password(&self) -> bool {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Whether this session was unlocked with the master password (the local unlock or the"]
+                    #[doc =
+                    " enrolment login), the input of [`LockSettings`]\'s `isBounding` (ADR 0110 §6 point 1)."]
+                    #[must_use]
+                    #[export_name =
+                    "devicesession_unlockedByMasterPassword_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_unlockedByMasterPassword(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<bool as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<DeviceSession>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.unlocked_by_master_password();
+                                            _ret
+                                        }
+                                    });
+                        <bool as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Whether this session was unlocked with the master password (the local unlock or the"]
+                    #[doc =
+                    " enrolment login), the input of [`LockSettings`]\'s `isBounding` (ADR 0110 §6 point 1)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_unlockedByMasterPassword_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <bool as WasmDescribe>::describe();
+                        <bool as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x02T Whether this session was unlocked with the master password (the local unlock or theW enrolment login), the input of [`LockSettings`]'s `isBounding` (ADR 0110 \xc2\xa76 point 1).\0\0\0\0\x18unlockedByMasterPassword\x01\x01\0\0\0\0\x01\0\x02\x18unlockedByMasterPassword\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+
+            #[allow(non_exhaustive_omitted_patterns)]
+            match self.uv.unlocked_by() {
+                UnlockedBy::MasterPassword => true,
+                _ => false,
+            }
+        }
+        #[doc =
+        " The re-verification of ADR 0110 §7 point 4.3: checks `password` (UTF-8 bytes, zeroed when"]
+        #[doc =
+        " the call returns) by running the local unlock once more against the device state this"]
+        #[doc =
+        " session was unlocked from, drops the keys it opened, and on success sets this session\'s"]
+        #[doc =
+        " `verified_at` to `now_ms`. Nothing else of the session changes; it is never written"]
+        #[doc = " anywhere."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `wrong_password_or_secret_key` for a wrong password (the session is unchanged);"]
+        #[doc =
+        " `invalid_input` for a password that is not UTF-8 or too long."]
+        pub fn reverify(&mut self, password: &mut [u8], now_ms: u64)
+            -> Result<(), CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The re-verification of ADR 0110 §7 point 4.3: checks `password` (UTF-8 bytes, zeroed when"]
+                    #[doc =
+                    " the call returns) by running the local unlock once more against the device state this"]
+                    #[doc =
+                    " session was unlocked from, drops the keys it opened, and on success sets this session\'s"]
+                    #[doc =
+                    " `verified_at` to `now_ms`. Nothing else of the session changes; it is never written"]
+                    #[doc = " anywhere."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `wrong_password_or_secret_key` for a wrong password (the session is unchanged);"]
+                    #[doc =
+                    " `invalid_input` for a password that is not UTF-8 or too long."]
+                    #[export_name = "devicesession_reverify_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_reverify(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let mut me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let mut arg1 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &mut *arg1;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let _ret = me.reverify(arg1, arg2);
+                                            _ret
+                                        }
+                                    });
+                        <Result<(), CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The re-verification of ADR 0110 §7 point 4.3: checks `password` (UTF-8 bytes, zeroed when"]
+                    #[doc =
+                    " the call returns) by running the local unlock once more against the device state this"]
+                    #[doc =
+                    " session was unlocked from, drops the keys it opened, and on success sets this session\'s"]
+                    #[doc =
+                    " `verified_at` to `now_ms`. Nothing else of the session changes; it is never written"]
+                    #[doc = " anywhere."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `wrong_password_or_secret_key` for a wrong password (the session is unchanged);"]
+                    #[doc =
+                    " `invalid_input` for a password that is not UTF-8 or too long."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_reverify_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(2u32);
+                        <&mut [u8] as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\t[ The re-verification of ADR 0110 \xc2\xa77 point 4.3: checks `password` (UTF-8 bytes, zeroed whenV the call returns) by running the local unlock once more against the device state thisX session was unlocked from, drops the keys it opened, and on success sets this session'sT `verified_at` to `now_ms`. Nothing else of the session changes; it is never written\n anywhere.\0\t # ErrorsP `wrong_password_or_secret_key` for a wrong password (the session is unchanged);> `invalid_input` for a password that is not UTF-8 or too long.\0\x02\x08password\0\0\0\x06now_ms\0\0\0\0\0\x08reverify\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let password = take_secret(password)?;
+            reverify(&mut self.uv, &self.device, password.as_str(),
+                    now_ms).map_err(CoreError::from)
         }
         #[doc =
         " Every stored passkey\'s non-secret metadata on item `id` (`passkey/<id>/…`; ADR 0039"]
@@ -36231,6 +37141,10 @@ pub mod lock {
             static _GENERATED: [u8; _LEN] =
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
+    impl LockSettings {
+        /// The `rizzy-client` settings, for the passkey ceremonies' `UV` decision (ADR 0110 §6).
+        pub(crate) const fn settings(&self) -> &Settings { &self.inner }
+    }
     #[allow(dead_code)]
     #[doc =
     " Reads the stored record; `null`/`undefined` or a broken record is the defaults (ADR 0110 §3"]
@@ -46990,8 +47904,9 @@ pub mod passkey {
     //!
     //! # What crosses, and why
     //!
-    //! [`create_passkey`] is the one place in this crate, besides the master password, Secret Key,
-    //! export password and Emergency Kit (`lib.rs`'s "Rules of the boundary" rule 1), where key
+    //! `createPasskey` ([`crate::device::DeviceSession::create_passkey`],
+    //! [`crate::session::Session::create_passkey`]) is the one place in this crate, besides the
+    //! master password, Secret Key, export password and Emergency Kit (`lib.rs`'s "Rules of the boundary" rule 1), where key
     //! material crosses to JavaScript: [`CreatedPasskey::private_key`] is the fresh credential's
     //! raw 32-byte scalar. There is no way around it here — the caller (the extension's
     //! background script, or the web vault) must hand that value straight to the existing,
@@ -47031,12 +47946,242 @@ pub mod passkey {
     //! message, and refusing a cross-origin iframe before calling this far at all, are the
     //! extension's job ([ADR 0039] §2; [ADR 0036] §4), not this crate's.
     //!
+    //! # User verification ([ADR 0110] §6, INV-123)
+    //!
+    //! Both ceremonies are session calls (`createPasskey` and `passkeyAssertion` on
+    //! [`crate::device::DeviceSession`] and [`crate::session::Session`]) that take the page's raw
+    //! `userVerification` value, the host's current lock settings ([`crate::lock::LockSettings`])
+    //! and `now_ms`, and decide the `UV` flag in Rust at signing time
+    //! ([`rizzy_client::passkey::UvState::decide`]) from the session's own state: how it was
+    //! unlocked and its `verified_at`, which never leave the session. A Required request that is
+    //! neither bounding nor fresh fails with `uv_required` before anything is generated or signed.
+    //! There is no session-less `createPasskey`: without a session there is nothing to decide from.
+    //!
     //! [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md
     //! [ADR 0039]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0039-passkeys-vault-and-extension.md
-    use rizzy_client::passkey::create_credential;
+    //! [ADR 0110]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0110-passkey-user-verification.md
+    use rizzy_client::passkey::{
+        UV_FRESH_MS, UserVerified, UvDecision, UvRequirement,
+        create_credential,
+    };
     use wasm_bindgen::prelude::wasm_bindgen;
     use crate::error::CoreError;
     use crate::rng::os_rng;
+    #[allow(dead_code)]
+    #[doc =
+    " ADR 0110 §5 point 2\'s mapping of the page\'s relayed `userVerification` value:"]
+    #[doc =
+    " `\"required\"`, `\"discouraged\"`, or `\"preferred\"` for anything else (`\"REQUIRED\"`, absent,"]
+    #[doc =
+    " a non-string the host turned into `undefined`). For display only (the consent label of §7"]
+    #[doc =
+    " point 1): the ceremony calls take the raw value and map it themselves."]
+    #[must_use]
+    #[expect(clippy::needless_pass_by_value, reason =
+    "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
+    pub fn parse_uv_requirement(value: Option<String>) -> String {
+        UvRequirement::parse(value.as_deref()).as_str().to_owned()
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " ADR 0110 §5 point 2\'s mapping of the page\'s relayed `userVerification` value:"]
+            #[doc =
+            " `\"required\"`, `\"discouraged\"`, or `\"preferred\"` for anything else (`\"REQUIRED\"`, absent,"]
+            #[doc =
+            " a non-string the host turned into `undefined`). For display only (the consent label of §7"]
+            #[doc =
+            " point 1): the ceremony calls take the raw value and map it themselves."]
+            #[must_use]
+            #[allow(clippy::needless_pass_by_value, reason =
+            "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
+            #[export_name = "parseUvRequirement_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_parseUvRequirement(arg0_1:
+                    <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                    as wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg0_2:
+                    <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                    as wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg0_3:
+                    <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                    as wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg0_4:
+                    <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                    as wasm_bindgen::convert::WasmAbi>::Prim4)
+                ->
+                    wasm_bindgen::convert::WasmRet<<String as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            {
+                                {
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<Option<String>>();
+                                    let arg0 =
+                                        unsafe {
+                                            <Option<String> as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<String>
+                                                        as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg0_1, arg0_2,
+                                                    arg0_3, arg0_4))
+                                        };
+                                    let _ret = parse_uv_requirement(arg0);
+                                    _ret
+                                }
+                            });
+                <String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " ADR 0110 §5 point 2\'s mapping of the page\'s relayed `userVerification` value:"]
+            #[doc =
+            " `\"required\"`, `\"discouraged\"`, or `\"preferred\"` for anything else (`\"REQUIRED\"`, absent,"]
+            #[doc =
+            " a non-string the host turned into `undefined`). For display only (the consent label of §7"]
+            #[doc =
+            " point 1): the ceremony calls take the raw value and map it themselves."]
+            #[must_use]
+            #[allow(clippy::needless_pass_by_value, reason =
+            "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_parseUvRequirement_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(1u32);
+                <Option<String> as WasmDescribe>::describe();
+                <String as WasmDescribe>::describe();
+                <String as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x04O ADR 0110 \xc2\xa75 point 2's mapping of the page's relayed `userVerification` value:Y `\"required\"`, `\"discouraged\"`, or `\"preferred\"` for anything else (`\"REQUIRED\"`, absent,[ a non-string the host turned into `undefined`). For display only (the consent label of \xc2\xa77G point 1): the ceremony calls take the raw value and map it themselves.\0\x01\x05value\0\0\0\0\0\x12parseUvRequirement\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[allow(dead_code)]
+    #[doc =
+    " [`UV_FRESH_MS`]: how long a master-password verification counts as user verification while"]
+    #[doc =
+    " the lock policy is not bounding (ADR 0110 §6 point 2), in milliseconds."]
+    #[must_use]
+    pub fn uv_fresh_ms() -> u64 { UV_FRESH_MS }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " [`UV_FRESH_MS`]: how long a master-password verification counts as user verification while"]
+            #[doc =
+            " the lock policy is not bounding (ADR 0110 §6 point 2), in milliseconds."]
+            #[must_use]
+            #[export_name = "uvFreshMs_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_uvFreshMs()
+                ->
+                    wasm_bindgen::convert::WasmRet<<u64 as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            { { let _ret = uv_fresh_ms(); _ret } });
+                <u64 as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " [`UV_FRESH_MS`]: how long a master-password verification counts as user verification while"]
+            #[doc =
+            " the lock policy is not bounding (ADR 0110 §6 point 2), in milliseconds."]
+            #[must_use]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_uvFreshMs_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(0u32);
+                <u64 as WasmDescribe>::describe();
+                <u64 as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x02[ [`UV_FRESH_MS`]: how long a master-password verification counts as user verification whileI the lock policy is not bounding (ADR 0110 \xc2\xa76 point 2), in milliseconds.\0\0\0\0\tuvFreshMs\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    /// The name a [`UvDecision`] crosses as: `"sign_uv"`, `"sign_no_uv"` or `"uv_required"`.
+    pub(crate) const fn uv_decision_name(decision: UvDecision)
+        -> &'static str {
+        match decision {
+            UvDecision::Sign { uv: true } => "sign_uv",
+            UvDecision::Sign { uv: false } => "sign_no_uv",
+            UvDecision::UvRequired => "uv_required",
+        }
+    }
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
     #[doc =
@@ -48697,33 +49842,28 @@ pub mod passkey {
             }
         }
     }
-    #[allow(dead_code)]
-    #[doc =
-    " Runs a `WebAuthn` registration ceremony for one new ES256 passkey (ADR 0039 §1, §2, §4;"]
-    #[doc =
-    " module docs): checks INV-64, generates a fresh key from this crate\'s CSPRNG (`os_rng`, a"]
-    #[doc =
-    " `pub(crate)` item not linkable from here), and assembles every byte structure the page\'s"]
-    #[doc =
-    " `create()` promise resolves with. No vault is touched; the caller persists"]
-    #[doc =
-    " [`CreatedPasskey::private_key`] and the other stored fields through the existing item-write"]
-    #[doc = " call."]
-    #[doc = ""]
-    #[doc =
-    " `origin` must be the browser-verified origin (module docs, \"What this does not decide\");"]
-    #[doc =
-    " `rp_id` is the `rpId` the page asked for, already defaulted by the caller to the origin\'s"]
-    #[doc =
-    " host if the page omitted it; `challenge` is the relying party\'s own randomness."]
-    #[doc = ""]
-    #[doc = " # Errors"]
-    #[doc =
-    " `rp_id_rejected` (INV-64), `invalid_input` for a malformed `origin`/`rp_id`."]
-    pub fn create_passkey(origin: &str, rp_id: &str, challenge: &[u8])
-        -> Result<CreatedPasskey, CoreError> {
+    /// Runs a `WebAuthn` registration ceremony for one new ES256 passkey (ADR 0039 §1, §2, §4;
+    /// module docs): checks INV-64, generates a fresh key from this crate's CSPRNG (`os_rng`, a
+    /// `pub(crate)` item not linkable from here), and assembles every byte structure the page's
+    /// `create()` promise resolves with. No vault is touched; the caller persists
+    /// [`CreatedPasskey::private_key`] and the other stored fields through the existing item-write
+    /// call.
+    ///
+    /// `origin` must be the browser-verified origin (module docs, "What this does not decide");
+    /// `rp_id` is the `rpId` the page asked for, already defaulted by the caller to the origin's
+    /// host if the page omitted it; `challenge` is the relying party's own randomness. `uv` is the
+    /// session's ADR 0110 §6 decision, taken just before this call: this is not exported, so the
+    /// only ways in are the sessions' `createPasskey` calls
+    /// ([`crate::device::DeviceSession::create_passkey`],
+    /// [`crate::session::Session::create_passkey`]), which decide first (module docs, "User
+    /// verification").
+    ///
+    /// # Errors
+    /// `rp_id_rejected` (INV-64), `invalid_input` for a malformed `origin`/`rp_id`.
+    pub(crate) fn create_passkey(origin: &str, rp_id: &str, challenge: &[u8],
+        uv: UserVerified) -> Result<CreatedPasskey, CoreError> {
         let created =
-            create_credential(&mut os_rng(), origin, rp_id, challenge)?;
+            create_credential(&mut os_rng(), origin, rp_id, challenge, uv)?;
         Ok(CreatedPasskey {
                 private_key: created.signing_key.to_bytes().expose_secret().to_vec(),
                 credential_id: created.credential_id,
@@ -48732,188 +49872,6 @@ pub mod passkey {
                 attestation_object: created.attestation_object,
             })
     }
-    #[automatically_derived]
-    const _: () =
-        {
-            #[doc =
-            " Runs a `WebAuthn` registration ceremony for one new ES256 passkey (ADR 0039 §1, §2, §4;"]
-            #[doc =
-            " module docs): checks INV-64, generates a fresh key from this crate\'s CSPRNG (`os_rng`, a"]
-            #[doc =
-            " `pub(crate)` item not linkable from here), and assembles every byte structure the page\'s"]
-            #[doc =
-            " `create()` promise resolves with. No vault is touched; the caller persists"]
-            #[doc =
-            " [`CreatedPasskey::private_key`] and the other stored fields through the existing item-write"]
-            #[doc = " call."]
-            #[doc = ""]
-            #[doc =
-            " `origin` must be the browser-verified origin (module docs, \"What this does not decide\");"]
-            #[doc =
-            " `rp_id` is the `rpId` the page asked for, already defaulted by the caller to the origin\'s"]
-            #[doc =
-            " host if the page omitted it; `challenge` is the relying party\'s own randomness."]
-            #[doc = ""]
-            #[doc = " # Errors"]
-            #[doc =
-            " `rp_id_rejected` (INV-64), `invalid_input` for a malformed `origin`/`rp_id`."]
-            #[export_name = "createPasskey_e09cc0eb35f8b583"]
-            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_createPasskey(arg0_1:
-                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim1,
-                arg0_2:
-                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim2,
-                arg0_3:
-                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim3,
-                arg0_4:
-                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim4,
-                arg1_1:
-                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim1,
-                arg1_2:
-                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim2,
-                arg1_3:
-                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim3,
-                arg1_4:
-                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim4,
-                arg2_1:
-                    <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim1,
-                arg2_2:
-                    <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim2,
-                arg2_3:
-                    <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim3,
-                arg2_4:
-                    <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim4)
-                ->
-                    wasm_bindgen::convert::WasmRet<<Result<CreatedPasskey,
-                    CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
-                const _: () = {};
-                let _ret =
-                    wasm_bindgen::__rt::maybe_catch_unwind(||
-                            {
-                                {
-                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
-                                    let arg0 =
-                                        unsafe {
-                                            <str as
-                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
-                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                                                        wasm_bindgen::convert::WasmAbi>::join(arg0_1, arg0_2,
-                                                    arg0_3, arg0_4))
-                                        };
-                                    let arg0 = &*arg0;
-                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
-                                    let arg1 =
-                                        unsafe {
-                                            <str as
-                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
-                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                                                        wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
-                                                    arg1_3, arg1_4))
-                                        };
-                                    let arg1 = &*arg1;
-                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
-                                    let arg2 =
-                                        unsafe {
-                                            <[u8] as
-                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
-                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                                                        wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
-                                                    arg2_3, arg2_4))
-                                        };
-                                    let arg2 = &*arg2;
-                                    let _ret = create_passkey(arg0, arg1, arg2);
-                                    _ret
-                                }
-                            });
-                <Result<CreatedPasskey, CoreError> as
-                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
-            }
-        };
-    #[automatically_derived]
-    const _: () =
-        {
-            #[doc =
-            " Runs a `WebAuthn` registration ceremony for one new ES256 passkey (ADR 0039 §1, §2, §4;"]
-            #[doc =
-            " module docs): checks INV-64, generates a fresh key from this crate\'s CSPRNG (`os_rng`, a"]
-            #[doc =
-            " `pub(crate)` item not linkable from here), and assembles every byte structure the page\'s"]
-            #[doc =
-            " `create()` promise resolves with. No vault is touched; the caller persists"]
-            #[doc =
-            " [`CreatedPasskey::private_key`] and the other stored fields through the existing item-write"]
-            #[doc = " call."]
-            #[doc = ""]
-            #[doc =
-            " `origin` must be the browser-verified origin (module docs, \"What this does not decide\");"]
-            #[doc =
-            " `rp_id` is the `rpId` the page asked for, already defaulted by the caller to the origin\'s"]
-            #[doc =
-            " host if the page omitted it; `challenge` is the relying party\'s own randomness."]
-            #[doc = ""]
-            #[doc = " # Errors"]
-            #[doc =
-            " `rp_id_rejected` (INV-64), `invalid_input` for a malformed `origin`/`rp_id`."]
-            #[no_mangle]
-            #[doc(hidden)]
-            pub extern "C-unwind" fn __wbindgen_describe_createPasskey_e09cc0eb35f8b583() {
-                use wasm_bindgen::describe::*;
-                wasm_bindgen::__rt::link_mem_intrinsics();
-                inform(FUNCTION);
-                inform(0);
-                inform(3u32);
-                <&str as WasmDescribe>::describe();
-                <&str as WasmDescribe>::describe();
-                <&[u8] as WasmDescribe>::describe();
-                <Result<CreatedPasskey, CoreError> as
-                        WasmDescribe>::describe();
-                <Result<CreatedPasskey, CoreError> as
-                        WasmDescribe>::describe();
-            }
-        };
-    #[automatically_derived]
-    const _: () =
-        {
-            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
-            static _INCLUDED_FILES: &[&str] = &[];
-            const _ENCODED_BYTES: &[u8] =
-                {
-                    const _CHUNK_SLICES: [&[u8]; 1usize] =
-                        [b"\x01\0\r[ Runs a `WebAuthn` registration ceremony for one new ES256 passkey (ADR 0039 \xc2\xa71, \xc2\xa72, \xc2\xa74;Y module docs): checks INV-64, generates a fresh key from this crate's CSPRNG (`os_rng`, aY `pub(crate)` item not linkable from here), and assembles every byte structure the page'sK `create()` promise resolves with. No vault is touched; the caller persists\\ [`CreatedPasskey::private_key`] and the other stored fields through the existing item-write\x06 call.\0Y `origin` must be the browser-verified origin (module docs, \"What this does not decide\");Z `rp_id` is the `rpId` the page asked for, already defaulted by the caller to the origin'sP host if the page omitted it; `challenge` is the relying party's own randomness.\0\t # ErrorsM `rp_id_rejected` (INV-64), `invalid_input` for a malformed `origin`/`rp_id`.\0\x03\x06origin\0\0\0\x05rp_id\0\0\0\tchallenge\0\0\0\0\0\rcreatePasskey\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
-                    #[allow(long_running_const_eval)]
-                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
-                    #[allow(long_running_const_eval)]
-                    const _CHUNKS: [u8; _CHUNK_LEN] =
-                        flat_byte_slices(_CHUNK_SLICES);
-                    const _LEN_BYTES: [u8; 4] =
-                        (_CHUNK_LEN as u32).to_le_bytes();
-                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
-                    #[allow(long_running_const_eval)]
-                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
-                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
-                    &_ENCODED_BYTES
-                };
-            const _PREFIX_JSON_BYTES: &[u8] =
-                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
-            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
-            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
-            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
-            #[link_section = "__wasm_bindgen_unstable"]
-            #[allow(long_running_const_eval)]
-            static _GENERATED: [u8; _LEN] =
-                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
-        };
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
     #[doc =
@@ -50270,7 +51228,7 @@ pub mod session {
     //! | Late-edit and trash notices | [`Session::take_notices`] after a sync; [`Session::restore_late_as_new`] |
     //! | TOTP code | [`Session::totp`] |
     //! | Breach check (ADR 0053) | [`Session::breach_check_item`] → [`BreachCheck`] (also [`BreachCheck::for_password`] for a typed or generated password) |
-    //! | Passkey assertion | [`Session::passkey_assertion`] ([`create_passkey`](crate::passkey::create_passkey) is stateless, module docs) |
+    //! | Passkey registration and assertion | [`Session::create_passkey`], [`Session::passkey_assertion`] (their `UV` flag: [`crate::passkey`] module docs) |
     //! | Export | [`Session::reauth`] + [`Session::confirm_reauth`], then [`Session::export_encrypted`], or [`Session::plaintext_warning_shown`] + [`Session::export_plaintext`] after the hold |
     //! | Import | [`detect_import_format`], then [`Session::import_file`] or [`Session::import_encrypted`] |
     //! | Devices | [`Session::devices`] |
@@ -50320,7 +51278,10 @@ pub mod session {
         decide_with_settings, fails_closed, global_equivalence_groups,
         vault_item_uris,
     };
-    use rizzy_client::passkey::{PasskeySigningKey, get_assertion_with};
+    use rizzy_client::passkey::{
+        PasskeySigningKey, UserVerified, UvRequirement, UvState,
+        get_assertion_with,
+    };
     use rizzy_client::rizzy_core::ids::{AccountId, AttachmentId};
     use rizzy_client::rizzy_core::item::key::ElementId;
     use rizzy_client::rizzy_core::item::schema::{
@@ -50361,9 +51322,12 @@ pub mod session {
         HistoryEntryView, ItemDraft, ItemSummary, hex, item_ref, parse_id,
         type_from_name,
     };
+    use crate::lock::LockSettings;
     use crate::login::{Credentials, LoginFlow, Purpose};
     use crate::matching::{self, MatchDecision, MatchSettingsView};
-    use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
+    use crate::passkey::{
+        self, CreatedPasskey, PasskeyAssertion, PasskeyCandidate,
+    };
     use crate::revocation;
     use crate::rng::{Rng, os_rng};
     use crate::secret::take_secret;
@@ -65755,10 +66719,16 @@ pub mod session {
         #[doc =
         " item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed; otherwise"]
         #[doc =
-        " whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
+        " whatever `get_assertion` returns (`rp_id_rejected` for INV-64). `uv_required` as"]
+        #[doc = " [`Session::create_passkey`] says: nothing is signed."]
+        #[expect(clippy::too_many_arguments, reason =
+        "one exported ceremony call; wasm-bindgen takes plain arguments, not a struct of them")]
+        #[expect(clippy::needless_pass_by_value, reason =
+        "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
         pub fn passkey_assertion(&self, id: &str, passkey_id: &str,
-            origin: &str, rp_id: &str, challenge: &[u8])
-            -> Result<PasskeyAssertion, CoreError> {
+            origin: &str, rp_id: &str, challenge: &[u8],
+            user_verification: Option<String>, settings: &LockSettings,
+            now_ms: u64) -> Result<PasskeyAssertion, CoreError> {
             #[automatically_derived]
             const _: () =
                 {
@@ -65795,7 +66765,13 @@ pub mod session {
                     #[doc =
                     " item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed; otherwise"]
                     #[doc =
-                    " whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
+                    " whatever `get_assertion` returns (`rp_id_rejected` for INV-64). `uv_required` as"]
+                    #[doc =
+                    " [`Session::create_passkey`] says: nothing is signed."]
+                    #[allow(clippy::too_many_arguments, reason =
+                    "one exported ceremony call; wasm-bindgen takes plain arguments, not a struct of them")]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
                     #[export_name = "session_passkeyAssertion_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_passkeyAssertion(me:
                             <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
@@ -65858,6 +66834,46 @@ pub mod session {
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg5_4:
                             <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg6_1:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg6_2:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg6_3:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg6_4:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg7_1:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg7_2:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg7_3:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg7_4:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg8_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg8_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg8_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg8_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
                             wasm_bindgen::convert::WasmRet<<Result<PasskeyAssertion,
@@ -65924,8 +66940,37 @@ pub mod session {
                                                             arg5_3, arg5_4))
                                                 };
                                             let arg5 = &*arg5;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Option<String>>();
+                                            let arg6 =
+                                                unsafe {
+                                                    <Option<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg6_1, arg6_2,
+                                                            arg6_3, arg6_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<LockSettings>();
+                                            let arg7 =
+                                                unsafe {
+                                                    <LockSettings as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<LockSettings
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg7_1, arg7_2,
+                                                            arg7_3, arg7_4))
+                                                };
+                                            let arg7 = &*arg7;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg8 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg8_1, arg8_2,
+                                                            arg8_3, arg8_4))
+                                                };
                                             let _ret =
-                                                me.passkey_assertion(arg1, arg2, arg3, arg4, arg5);
+                                                me.passkey_assertion(arg1, arg2, arg3, arg4, arg5, arg6,
+                                                    arg7, arg8);
                                             _ret
                                         }
                                     });
@@ -65969,7 +67014,13 @@ pub mod session {
                     #[doc =
                     " item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed; otherwise"]
                     #[doc =
-                    " whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
+                    " whatever `get_assertion` returns (`rp_id_rejected` for INV-64). `uv_required` as"]
+                    #[doc =
+                    " [`Session::create_passkey`] says: nothing is signed."]
+                    #[allow(clippy::too_many_arguments, reason =
+                    "one exported ceremony call; wasm-bindgen takes plain arguments, not a struct of them")]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_session_passkeyAssertion_e09cc0eb35f8b583() {
@@ -65977,12 +67028,15 @@ pub mod session {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(5u32);
+                        inform(8u32);
                         <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <&[u8] as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                        <&LockSettings as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
                         <Result<PasskeyAssertion, CoreError> as
                                 WasmDescribe>::describe();
                         <Result<PasskeyAssertion, CoreError> as
@@ -65997,7 +67051,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x14V Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/\xe2\x80\xa6` onY item `id`, ADR 0039 \xc2\xa71, \xc2\xa72; [`crate::passkey`] module docs). The stored private key isW read and used here, never returned: only the resulting [`PasskeyAssertion`] crosses toU JavaScript, the same pattern [`Session::totp`] uses for a different concealed field.X [`PasskeyAssertion::user_handle`] is read back the same way `credential_id` already was! (gap 35(a) in the M2 gap audit).\0- `origin` must be the browser-verified originU ([`rizzy_client::passkey`]'s `verify_rp_id` scope-boundary docs \xe2\x80\x94 this call cannotX establish that itself, [`crate::passkey`] module docs); `rp_id` is the page's requestedS `rpId`, already defaulted by the caller to `origin`'s host if the page omitted it.\0Y This call does **not** check `passkey_id` against the page's `allowCredentials` \xe2\x80\x94 that; is the caller's job, done *before* this call, by filteringV [`Session::passkey_candidates`]'s result (gap 35(b); [`crate::passkey`] module docs).\0\t # ErrorsW As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, then item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed; otherwise@ whatever `get_assertion` returns (`rp_id_rejected` for INV-64).\0\x05\x02id\0\0\0\npasskey_id\0\0\0\x06origin\0\0\0\x05rp_id\0\0\0\tchallenge\0\0\0\0\0\x10passkeyAssertion\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x15V Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/\xe2\x80\xa6` onY item `id`, ADR 0039 \xc2\xa71, \xc2\xa72; [`crate::passkey`] module docs). The stored private key isW read and used here, never returned: only the resulting [`PasskeyAssertion`] crosses toU JavaScript, the same pattern [`Session::totp`] uses for a different concealed field.X [`PasskeyAssertion::user_handle`] is read back the same way `credential_id` already was! (gap 35(a) in the M2 gap audit).\0- `origin` must be the browser-verified originU ([`rizzy_client::passkey`]'s `verify_rp_id` scope-boundary docs \xe2\x80\x94 this call cannotX establish that itself, [`crate::passkey`] module docs); `rp_id` is the page's requestedS `rpId`, already defaulted by the caller to `origin`'s host if the page omitted it.\0Y This call does **not** check `passkey_id` against the page's `allowCredentials` \xe2\x80\x94 that; is the caller's job, done *before* this call, by filteringV [`Session::passkey_candidates`]'s result (gap 35(b); [`crate::passkey`] module docs).\0\t # ErrorsW As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, then item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed; otherwiseQ whatever `get_assertion` returns (`rp_id_rejected` for INV-64). `uv_required` as5 [`Session::create_passkey`] says: nothing is signed.\0\x08\x02id\0\0\0\npasskey_id\0\0\0\x06origin\0\0\0\x05rp_id\0\0\0\tchallenge\0\0\0\x11user_verification\0\0\0\x08settings\0\0\0\x06now_ms\0\0\0\0\0\x10passkeyAssertion\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -66060,8 +67114,303 @@ pub mod session {
                 };
             let assertion =
                 get_assertion_with(&signing_key, &credential_id, &user_handle,
-                        origin, rp_id, challenge)?;
+                        origin, rp_id, challenge,
+                        web_uv_flag(user_verification.as_deref(), *settings,
+                                now_ms)?)?;
             Ok(assertion.into())
+        }
+        #[doc =
+        " Runs a `WebAuthn` registration ceremony for one new ES256 passkey ([`crate::passkey`]"]
+        #[doc =
+        " module docs; ADR 0039 §1, §2, §4). `user_verification` is the page\'s relayed value,"]
+        #[doc =
+        " `settings` the host\'s current lock settings and `now_ms` its clock; the `UV` flag is"]
+        #[doc =
+        " decided from them before any key is generated (ADR 0110 §6). This session was unlocked by"]
+        #[doc =
+        " a master-password login but keeps no `verified_at` (ADR 0110 §6 point 4 holds it in the"]
+        #[doc =
+        " extension\'s long-lived context only), so `UV` is set exactly when the policy is bounding."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `locked`; `uv_required` for a Required request while the policy is not bounding"]
+        #[doc =
+        " (nothing generated); `rp_id_rejected` (INV-64); `invalid_input` for a malformed"]
+        #[doc = " `origin`/`rp_id`."]
+        #[expect(clippy::needless_pass_by_value, reason =
+        "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
+        pub fn create_passkey(&self, origin: &str, rp_id: &str,
+            challenge: &[u8], user_verification: Option<String>,
+            settings: &LockSettings, now_ms: u64)
+            -> Result<CreatedPasskey, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Runs a `WebAuthn` registration ceremony for one new ES256 passkey ([`crate::passkey`]"]
+                    #[doc =
+                    " module docs; ADR 0039 §1, §2, §4). `user_verification` is the page\'s relayed value,"]
+                    #[doc =
+                    " `settings` the host\'s current lock settings and `now_ms` its clock; the `UV` flag is"]
+                    #[doc =
+                    " decided from them before any key is generated (ADR 0110 §6). This session was unlocked by"]
+                    #[doc =
+                    " a master-password login but keeps no `verified_at` (ADR 0110 §6 point 4 holds it in the"]
+                    #[doc =
+                    " extension\'s long-lived context only), so `UV` is set exactly when the policy is bounding."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `uv_required` for a Required request while the policy is not bounding"]
+                    #[doc =
+                    " (nothing generated); `rp_id_rejected` (INV-64); `invalid_input` for a malformed"]
+                    #[doc = " `origin`/`rp_id`."]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
+                    #[export_name = "session_createPasskey_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_createPasskey(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg5_1:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg5_2:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg5_3:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg5_4:
+                            <<LockSettings as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg6_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg6_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg6_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg6_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<CreatedPasskey,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let arg3 = &*arg3;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Option<String>>();
+                                            let arg4 =
+                                                unsafe {
+                                                    <Option<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<LockSettings>();
+                                            let arg5 =
+                                                unsafe {
+                                                    <LockSettings as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<LockSettings
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg5_1, arg5_2,
+                                                            arg5_3, arg5_4))
+                                                };
+                                            let arg5 = &*arg5;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg6 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg6_1, arg6_2,
+                                                            arg6_3, arg6_4))
+                                                };
+                                            let _ret =
+                                                me.create_passkey(arg1, arg2, arg3, arg4, arg5, arg6);
+                                            _ret
+                                        }
+                                    });
+                        <Result<CreatedPasskey, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Runs a `WebAuthn` registration ceremony for one new ES256 passkey ([`crate::passkey`]"]
+                    #[doc =
+                    " module docs; ADR 0039 §1, §2, §4). `user_verification` is the page\'s relayed value,"]
+                    #[doc =
+                    " `settings` the host\'s current lock settings and `now_ms` its clock; the `UV` flag is"]
+                    #[doc =
+                    " decided from them before any key is generated (ADR 0110 §6). This session was unlocked by"]
+                    #[doc =
+                    " a master-password login but keeps no `verified_at` (ADR 0110 §6 point 4 holds it in the"]
+                    #[doc =
+                    " extension\'s long-lived context only), so `UV` is set exactly when the policy is bounding."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `uv_required` for a Required request while the policy is not bounding"]
+                    #[doc =
+                    " (nothing generated); `rp_id_rejected` (INV-64); `invalid_input` for a malformed"]
+                    #[doc = " `origin`/`rp_id`."]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS string as Option<String>")]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_createPasskey_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(6u32);
+                        <&str as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <&[u8] as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                        <&LockSettings as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
+                        <Result<CreatedPasskey, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<CreatedPasskey, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x0bV Runs a `WebAuthn` registration ceremony for one new ES256 passkey ([`crate::passkey`]W module docs; ADR 0039 \xc2\xa71, \xc2\xa72, \xc2\xa74). `user_verification` is the page's relayed value,U `settings` the host's current lock settings and `now_ms` its clock; the `UV` flag is[ decided from them before any key is generated (ADR 0110 \xc2\xa76). This session was unlocked byY a master-password login but keeps no `verified_at` (ADR 0110 \xc2\xa76 point 4 holds it in theZ extension's long-lived context only), so `UV` is set exactly when the policy is bounding.\0\t # ErrorsP `locked`; `uv_required` for a Required request while the policy is not boundingP (nothing generated); `rp_id_rejected` (INV-64); `invalid_input` for a malformed\x12 `origin`/`rp_id`.\0\x06\x06origin\0\0\0\x05rp_id\0\0\0\tchallenge\0\0\0\x11user_verification\0\0\0\x08settings\0\0\0\x06now_ms\0\0\0\0\0\rcreatePasskey\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.inner()?;
+            let uv =
+                web_uv_flag(user_verification.as_deref(), *settings, now_ms)?;
+            passkey::create_passkey(origin, rp_id, challenge, uv)
         }
         #[doc =
         " Every stored passkey\'s non-secret metadata on item `id` (`passkey/<id>/…`; ADR 0039"]
@@ -73300,6 +74649,17 @@ pub mod session {
             inner.settings_pending = Some(pending);
             Ok(request)
         }
+    }
+    /// The `UV` flag of a web-vault ceremony (ADR 0110 §6): a master-password session without
+    /// `verified_at` ([`UvState::master_password_unverified`]), so bounding or nothing.
+    ///
+    /// # Errors
+    /// `uv_required`.
+    fn web_uv_flag(user_verification: Option<&str>, settings: LockSettings,
+        now_ms: u64) -> Result<UserVerified, CoreError> {
+        UvState::master_password_unverified().decide(UvRequirement::parse(user_verification),
+                    settings.settings(),
+                    now_ms).user_verified().map_err(CoreError::from)
     }
     /// The account's website-icons setting from the verified account's settings record (ADR 0099
     /// §1): off when the record cannot be read.
@@ -87461,7 +88821,9 @@ pub use matching::{
     GlobalEquivalence, MatchDecision, decide_match_candidates,
     normalize_page_url,
 };
-pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
+pub use passkey::{
+    CreatedPasskey, PasskeyAssertion, parse_uv_requirement, uv_fresh_ms,
+};
 pub use revocation::revocation_pending_notice;
 pub use session::{
     AttachmentView, CxfExport, DeviceView, EncryptedExport, ImportReport,

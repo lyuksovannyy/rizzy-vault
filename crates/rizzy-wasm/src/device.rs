@@ -64,11 +64,14 @@ use rizzy_client::account::VerifiedAccount;
 use rizzy_client::device::{DeviceState, UnlockedDevice};
 use rizzy_client::icons::IconsSetting;
 use rizzy_client::items::{FieldEdit, ItemId, TRASH_RETENTION_MS};
+use rizzy_client::lock_settings::UnlockedBy;
 use rizzy_client::login::{
     Enrolled, LoggedIn, LoginAwaitingSession, LoginInput, LoginStarted, start_login,
 };
 use rizzy_client::matching::{EquivalenceGroup, startup_equivalence_groups};
-use rizzy_client::passkey::{PasskeySigningKey, get_assertion_with};
+use rizzy_client::passkey::{
+    PasskeySigningKey, UserVerified, UvRequirement, UvState, get_assertion_with, reverify,
+};
 use rizzy_client::rizzy_core::item::key::ElementId;
 use rizzy_client::rizzy_core::item::schema::{
     ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY, ATTR_RP_ID, ATTR_USER_HANDLE,
@@ -100,8 +103,9 @@ use crate::error::{CoreError, CoreResult, SECURITY_KEY_REQUIRED, WRONG_STATE};
 use crate::http::{self, HttpRequest};
 use crate::icons::{IconFetch, IconsState};
 use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, item_ref, type_from_name};
+use crate::lock::LockSettings;
 use crate::matching::{self, MatchDecision, MatchSettingsView, UriInput};
-use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
+use crate::passkey::{self, CreatedPasskey, PasskeyAssertion, PasskeyCandidate};
 use crate::removal::UnsentUpload;
 use crate::revocation;
 use crate::rng::{Rng, os_rng};
@@ -170,6 +174,9 @@ pub struct EnrolFlow {
     starts: u8,
     /// The RNG.
     rng: Rng,
+    /// When `login/finish` accepted the master password (the host's `now_ms` of that answer):
+    /// the enrolment's master-password verification, ADR 0110 §6 point 4.
+    logged_in_at: Option<u64>,
 }
 
 impl fmt::Debug for EnrolFlow {
@@ -215,6 +222,7 @@ impl EnrolFlow {
             pending: None,
             starts: 0,
             rng: os_rng(),
+            logged_in_at: None,
         };
         flow.restart()?;
         Ok(flow)
@@ -290,7 +298,14 @@ impl EnrolFlow {
     /// `wrong_state` unless the state is `"done"`.
     pub fn finish(self) -> Result<EnrolResult, CoreError> {
         match self.stage {
-            FlowStage::Done(enrolled) => EnrolResult::new(*enrolled).map_err(CoreError::from),
+            FlowStage::Done(enrolled) => {
+                // ADR 0110 §6 point 4: the master-password OPAQUE login of this enrolment sets
+                // `verified_at`. `Done` is only reached after `login/finish` set it.
+                let uv = self
+                    .logged_in_at
+                    .map_or_else(UvState::other, UvState::master_password);
+                EnrolResult::new(*enrolled, uv).map_err(CoreError::from)
+            }
             _ => Err(CoreError::new(WRONG_STATE)),
         }
     }
@@ -348,6 +363,7 @@ impl EnrolFlow {
                 }
                 let answer: LoginFinishResponse = http::json(status, body)?;
                 let logged_in: LoggedIn = awaiting.complete(answer)?;
+                self.logged_in_at = Some(now_ms);
                 let token = copy_token(logged_in.bearer_token());
                 let (pending_enrol, request) =
                     logged_in.enrol(&mut self.rng, DeviceKind::Extension, now_ms)?;
@@ -425,7 +441,7 @@ impl EnrolResult {
     /// [`ClientError::Internal`] if the device-state record, the first changeset, or a vault's
     /// self-grant does not encode; [`ClientError::InvalidServerResponse`] if the account answer
     /// carries no vault key.
-    fn new(enrolled: Enrolled) -> Result<Self, ClientError> {
+    fn new(enrolled: Enrolled, uv: UvState) -> Result<Self, ClientError> {
         let record = enrolled.device.record(RecordStage::Committed)?;
         let mut changeset = store::create_writes(&record)?;
         changeset.append(store::account_writes(&enrolled.account));
@@ -455,6 +471,7 @@ impl EnrolResult {
                 floors,
                 Changeset::new(),
                 Alarms::default(),
+                uv,
             )),
         })
     }
@@ -526,6 +543,10 @@ pub struct DeviceSession {
     floors: Floors,
     /// Device authentication.
     auth: AuthStage,
+    /// How this session was unlocked and its `verified_at`, for the passkey `UV` decision (ADR
+    /// 0110 §6 point 4): in memory only, set by the master-password unlock or enrolment login
+    /// and by [`DeviceSession::reverify`]; dropped with the session.
+    uv: UvState,
     /// The outstanding auth request.
     pending: Option<HttpRequest>,
     /// The sync step driver (`crate::sync`'s module docs); the same one
@@ -577,6 +598,24 @@ fn start_global_groups(floors: &Floors, start_writes: &mut Changeset) -> Vec<Equ
 }
 
 impl DeviceSession {
+    /// The `UV` flag for one ceremony, decided at signing time from this session's state (ADR
+    /// 0110 §6): how it was unlocked, `verified_at`, the host's current `settings` and `now_ms`.
+    ///
+    /// # Errors
+    /// `uv_required`: do not sign.
+    fn uv_flag(
+        &self,
+        user_verification: Option<&str>,
+        settings: LockSettings,
+        now_ms: u64,
+    ) -> CoreResult<UserVerified> {
+        let requirement = UvRequirement::parse(user_verification);
+        self.uv
+            .decide(requirement, settings.settings(), now_ms)
+            .user_verified()
+            .map_err(CoreError::from)
+    }
+
     /// Wraps an already-unlocked device (used by [`EnrolResult::new`] and
     /// [`DeviceSession::unlock`]).
     #[expect(
@@ -593,6 +632,7 @@ impl DeviceSession {
         floors: Floors,
         mut start_writes: Changeset,
         alarms: Alarms,
+        uv: UvState,
     ) -> Self {
         let global_groups = start_global_groups(&floors, &mut start_writes);
         Self {
@@ -604,6 +644,7 @@ impl DeviceSession {
             cache,
             floors,
             auth: AuthStage::Idle,
+            uv,
             pending: None,
             sync: SyncDriver::default(),
             rng: os_rng(),
@@ -721,6 +762,8 @@ impl DeviceSession {
             loaded.floors,
             migration,
             alarms,
+            // ADR 0110 §6 point 4: the local unlock with the master password sets `verified_at`.
+            UvState::master_password(now_ms),
         ))
     }
 
@@ -1302,8 +1345,7 @@ impl DeviceSession {
 
     /// Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/…` on
     /// item `id`, ADR 0039 §1, §2; [`crate::passkey`] module docs — the extension's own
-    /// durable-device path there: this crate's other passkey call, [`crate::passkey::create_passkey`],
-    /// needs no session at all). The stored private key is read and used here, never
+    /// durable-device path there; [`DeviceSession::create_passkey`] is the registration). The stored private key is read and used here, never
     /// returned: only the resulting [`PasskeyAssertion`] crosses to JavaScript, the same
     /// pattern [`DeviceSession::reveal_field`] uses for a different concealed field (text
     /// there; this one is never text-revealable at all, module docs).
@@ -1323,8 +1365,25 @@ impl DeviceSession {
     /// extension's background filters [`DeviceSession::passkey_candidates`]'s result first
     /// (gap 35(b) in the M2 gap audit; [`crate::passkey`] module docs).
     ///
+    /// `user_verification` is the page's relayed `userVerification` value (absent or anything
+    /// unknown is Preferred), `settings` the host's current lock settings and `now_ms` its clock:
+    /// the `UV` flag is decided from them and this session's own state just before signing (ADR
+    /// 0110 §6, [`crate::passkey`] module docs, "User verification").
+    ///
+    /// `uv_required` (ADR 0110 §6) when the request is Required, the policy is not bounding and
+    /// no master-password verification is fresh: nothing is signed; [`DeviceSession::reverify`]
+    /// then this call again.
+    ///
     /// [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md
     #[wasm_bindgen(js_name = passkeyAssertion)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one exported ceremony call; wasm-bindgen takes plain arguments, not a struct of them"
+    )]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen hands this exported call ownership of the JS string as Option<String>"
+    )]
     pub fn passkey_assertion(
         &self,
         id: &str,
@@ -1332,6 +1391,9 @@ impl DeviceSession {
         origin: &str,
         rp_id: &str,
         challenge: &[u8],
+        user_verification: Option<String>,
+        settings: &LockSettings,
+        now_ms: u64,
     ) -> Result<PasskeyAssertion, CoreError> {
         let (vault, item) = self.vaults.item(id)?;
         let bad = || CoreError::from(ClientError::InvalidInput);
@@ -1384,9 +1446,78 @@ impl DeviceSession {
             origin,
             rp_id,
             challenge,
-            rizzy_client::passkey::UserVerified::Yes,
+            self.uv_flag(user_verification.as_deref(), *settings, now_ms)?,
         )?;
         Ok(assertion.into())
+    }
+
+    /// Runs a `WebAuthn` registration ceremony for one new ES256 passkey
+    /// ([`crate::passkey`] module docs; ADR 0039 §1, §2, §4), its `UV` flag decided from this
+    /// session's state as for [`DeviceSession::passkey_assertion`] (ADR 0110 §6 point 5),
+    /// before any key is generated. No vault is touched: the caller saves the result through
+    /// the item-write calls, as before.
+    ///
+    /// # Errors
+    /// `uv_required` (nothing generated); `rp_id_rejected` (INV-64); `invalid_input` for a
+    /// malformed `origin`/`rp_id`.
+    #[wasm_bindgen(js_name = createPasskey)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen hands this exported call ownership of the JS string as Option<String>"
+    )]
+    pub fn create_passkey(
+        &self,
+        origin: &str,
+        rp_id: &str,
+        challenge: &[u8],
+        user_verification: Option<String>,
+        settings: &LockSettings,
+        now_ms: u64,
+    ) -> Result<CreatedPasskey, CoreError> {
+        let uv = self.uv_flag(user_verification.as_deref(), *settings, now_ms)?;
+        passkey::create_passkey(origin, rp_id, challenge, uv)
+    }
+
+    /// What a ceremony with `user_verification` would get under `settings` at `now_ms`, without
+    /// signing anything: `"sign_uv"`, `"sign_no_uv"` or `"uv_required"`. Advisory only (the
+    /// consent label of ADR 0110 §7 point 1); the ceremony calls decide again at signing time.
+    #[wasm_bindgen(js_name = passkeyUvDecision)]
+    #[must_use]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen hands this exported call ownership of the JS string as Option<String>"
+    )]
+    pub fn passkey_uv_decision(
+        &self,
+        user_verification: Option<String>,
+        settings: &LockSettings,
+        now_ms: u64,
+    ) -> String {
+        let requirement = UvRequirement::parse(user_verification.as_deref());
+        passkey::uv_decision_name(self.uv.decide(requirement, settings.settings(), now_ms))
+            .to_owned()
+    }
+
+    /// Whether this session was unlocked with the master password (the local unlock or the
+    /// enrolment login), the input of [`LockSettings`]'s `isBounding` (ADR 0110 §6 point 1).
+    #[wasm_bindgen(getter, js_name = unlockedByMasterPassword)]
+    #[must_use]
+    pub fn unlocked_by_master_password(&self) -> bool {
+        matches!(self.uv.unlocked_by(), UnlockedBy::MasterPassword)
+    }
+
+    /// The re-verification of ADR 0110 §7 point 4.3: checks `password` (UTF-8 bytes, zeroed when
+    /// the call returns) by running the local unlock once more against the device state this
+    /// session was unlocked from, drops the keys it opened, and on success sets this session's
+    /// `verified_at` to `now_ms`. Nothing else of the session changes; it is never written
+    /// anywhere.
+    ///
+    /// # Errors
+    /// `wrong_password_or_secret_key` for a wrong password (the session is unchanged);
+    /// `invalid_input` for a password that is not UTF-8 or too long.
+    pub fn reverify(&mut self, password: &mut [u8], now_ms: u64) -> Result<(), CoreError> {
+        let password = take_secret(password)?;
+        reverify(&mut self.uv, &self.device, password.as_str(), now_ms).map_err(CoreError::from)
     }
 
     /// Every stored passkey's non-secret metadata on item `id` (`passkey/<id>/…`; ADR 0039

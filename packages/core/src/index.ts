@@ -49,7 +49,8 @@ import initWasm, {
   checkMeta,
   coreVersion,
   cacheStoreNames as wasmCacheStoreNames,
-  createPasskey as wasmCreatePasskey,
+  parseUvRequirement as wasmParseUvRequirement,
+  uvFreshMs as wasmUvFreshMs,
   decideMatchCandidates as wasmDecideMatchCandidates,
   cxfExportWarning as wasmCxfExportWarning,
   detectImportFormat as wasmDetectImportFormat,
@@ -1164,31 +1165,92 @@ export interface PasskeyCandidateResult {
 }
 
 /**
- * Runs a `WebAuthn` registration ceremony for one new ES256 passkey (ADR 0039 §1, §2, §4):
- * checks INV-64, generates a fresh key, and assembles every byte structure the page's
- * `create()` promise resolves with. No session needed — a pure, stateless call
- * (`crates/rizzy-wasm/src/passkey.rs`'s own module docs) — so it works before enrolment/unlock
- * too, though the result is only useful once there is a session to {@link CreatedPasskey}
- * write it through.
- *
- * `origin` must be the browser-verified origin, never a page-supplied value: the extension's
- * background takes it from the browser's own sender information (ADR 0039 §2), never from an
- * intercepted call's relayed payload.
- *
- * Throws a {@link CoreError} with code `rp_id_rejected` (INV-64) or `invalid_input`.
+ * The code a passkey ceremony throws when the relying party requires user verification, the lock
+ * policy is not bounding and no master-password verification is fresh (ADR 0110 §6): nothing was
+ * generated or signed. The extension asks for the master password in the toolbar popup (§7),
+ * calls {@link DurableSession.reverify}, then the ceremony again.
  */
-export function createPasskey(origin: string, rpId: string, challenge: Uint8Array): CreatedPasskey {
+export const UV_REQUIRED = "uv_required";
+
+/** The relying party's `userVerification` requirement as the extension maps it (ADR 0110 §5). */
+export type UvRequirement = "required" | "preferred" | "discouraged";
+
+/** What a ceremony would get (ADR 0110 §6's table): sign with `UV=1`, sign with `UV=0`, or
+ * {@link UV_REQUIRED}. */
+export type PasskeyUvDecision = "sign_uv" | "sign_no_uv" | "uv_required";
+
+/**
+ * What a passkey ceremony needs for its `UV` decision, made in Rust at signing time (ADR 0110 §6
+ * point 5) from these and the session's own state (how it was unlocked, `verified_at`; neither
+ * leaves the session).
+ */
+export interface PasskeyUvInput {
+  /**
+   * The page's `userVerification` value exactly as the page shim relayed it (§5 point 1:
+   * `publicKey.authenticatorSelection.userVerification` for `create`, `publicKey.userVerification`
+   * for `get`), or `undefined` when none was relayed. Rust maps it (§5 point 2): only
+   * `"required"` and `"discouraged"` count; anything else is `"preferred"`.
+   */
+  readonly userVerification: string | undefined;
+  /** The current lock settings, as the host holds them at this moment (§3's parsed record). */
+  readonly lockSettings: LockSettingsChoice;
+  /** The host clock in milliseconds since the Unix epoch; defaults to the session's clock. */
+  readonly nowMs?: number;
+}
+
+/** `UV_FRESH_MS` (ADR 0110 §6 point 2): how long a master-password verification counts as user
+ * verification while the lock policy is not bounding. A test checks it against {@link uvFreshMs}. */
+export const UV_FRESH_MS = 300_000;
+
+/** `UV_FRESH_MS` as Rust has it. */
+export function uvFreshMs(): number {
   ensureReady();
-  return mapOne(
-    call(() => wasmCreatePasskey(origin, rpId, challenge)),
-    (c) => ({
-      privateKey: c.privateKey,
-      credentialId: c.credentialId,
-      publicKeyCose: c.publicKeyCose,
-      clientDataJson: c.clientDataJson,
-      attestationObject: c.attestationObject,
-    }),
-  );
+  return Number(wasmUvFreshMs());
+}
+
+/**
+ * ADR 0110 §5 point 2's mapping, for display (the consent label of §7 point 1): `"required"` and
+ * `"discouraged"` exactly; anything else, a non-string or `"REQUIRED"` included, is
+ * `"preferred"`. The ceremony calls take the raw value ({@link PasskeyUvInput}) and map it
+ * themselves.
+ */
+export function parseUvRequirement(value: unknown): UvRequirement {
+  ensureReady();
+  return wasmParseUvRequirement(typeof value === "string" ? value : undefined) as UvRequirement;
+}
+
+/** Runs `f` over the arguments a Rust ceremony call takes for its `UV` decision. */
+function withUv<T>(
+  uv: PasskeyUvInput,
+  clock: Clock,
+  f: (userVerification: string | undefined, settings: WasmLockSettings, nowMs: bigint) => T,
+): T {
+  const userVerification = typeof uv.userVerification === "string" ? uv.userVerification : undefined;
+  const ms = uv.nowMs ?? clock();
+  if (!Number.isFinite(ms) || ms < 0) {
+    throw new CoreError("invalid_input");
+  }
+  const now = BigInt(Math.trunc(ms));
+  return withLockSettings(uv.lockSettings, (s) => f(userVerification, s, now));
+}
+
+/** Maps a generated `CreatedPasskey` and frees it — shared by {@link VaultSession.createPasskey}
+ * and {@link DurableSession.createPasskey}. */
+function mapCreatedPasskey(created: {
+  readonly privateKey: Uint8Array;
+  readonly credentialId: Uint8Array;
+  readonly publicKeyCose: Uint8Array;
+  readonly clientDataJson: Uint8Array;
+  readonly attestationObject: Uint8Array;
+  free(): void;
+}): CreatedPasskey {
+  return mapOne(created, (c) => ({
+    privateKey: c.privateKey,
+    credentialId: c.credentialId,
+    publicKeyCose: c.publicKeyCose,
+    clientDataJson: c.clientDataJson,
+    attestationObject: c.attestationObject,
+  }));
 }
 
 /** Maps a generated {@link WasmPasskeyAssertion} and frees it — shared by
@@ -2156,9 +2218,41 @@ export class VaultSession {
   /**
    * Signs a WebAuthn assertion with a passkey already stored on this item (ADR 0039 §2). The
    * private key never leaves the wasm boundary; only the signed assertion comes back.
+   *
+   * `uv` decides the `UV` flag (ADR 0110 §6). This web-vault session keeps no `verified_at`
+   * (§6 point 4 keeps it in the extension's long-lived context), so `UV` is set exactly when the
+   * lock policy is bounding; a Required request otherwise throws {@link UV_REQUIRED}.
    */
-  passkeyAssertion(id: string, passkeyId: string, origin: string, rpId: string, challenge: Uint8Array): PasskeyAssertionResult {
-    return mapPasskeyAssertion(call(() => this.#s().passkeyAssertion(id, passkeyId, origin, rpId, challenge)));
+  passkeyAssertion(
+    id: string,
+    passkeyId: string,
+    origin: string,
+    rpId: string,
+    challenge: Uint8Array,
+    uv: PasskeyUvInput,
+  ): PasskeyAssertionResult {
+    return mapPasskeyAssertion(
+      withUv(uv, this.#clock, (requirement, settings, now) =>
+        call(() => this.#s().passkeyAssertion(id, passkeyId, origin, rpId, challenge, requirement, settings, now)),
+      ),
+    );
+  }
+
+  /**
+   * Runs a `WebAuthn` registration ceremony for one new ES256 passkey (ADR 0039 §1, §2, §4):
+   * checks INV-64, generates a fresh key, and assembles every byte structure the page's
+   * `create()` promise resolves with; the caller saves it with `createItem`/`editItem`.
+   * `origin` must be the browser-verified origin, never a page-supplied value (ADR 0039 §2).
+   * `uv` decides the `UV` flag as for {@link passkeyAssertion}, before any key is generated.
+   *
+   * Throws a {@link CoreError}: {@link UV_REQUIRED}, `rp_id_rejected` (INV-64), `invalid_input`.
+   */
+  createPasskey(origin: string, rpId: string, challenge: Uint8Array, uv: PasskeyUvInput): CreatedPasskey {
+    return mapCreatedPasskey(
+      withUv(uv, this.#clock, (requirement, settings, now) =>
+        call(() => this.#s().createPasskey(origin, rpId, challenge, requirement, settings, now)),
+      ),
+    );
   }
 
   /**
@@ -4140,9 +4234,77 @@ export class DurableSession {
   /**
    * Signs a WebAuthn assertion with a passkey already stored on this item (ADR 0039 §2). The
    * private key never leaves the wasm boundary; only the signed assertion comes back.
+   *
+   * `uv` decides the `UV` flag in Rust at signing time (ADR 0110 §6): `UV=1` while the lock
+   * policy is bounding (this session unlocked by master password, locking on, at most 5 idle
+   * minutes) or a master-password verification is fresh ({@link UV_FRESH_MS}); otherwise a
+   * Required request throws {@link UV_REQUIRED} and signs nothing, and any other is signed with
+   * `UV=0`.
    */
-  passkeyAssertion(id: string, passkeyId: string, origin: string, rpId: string, challenge: Uint8Array): PasskeyAssertionResult {
-    return mapPasskeyAssertion(call(() => this.#inner.passkeyAssertion(id, passkeyId, origin, rpId, challenge)));
+  passkeyAssertion(
+    id: string,
+    passkeyId: string,
+    origin: string,
+    rpId: string,
+    challenge: Uint8Array,
+    uv: PasskeyUvInput,
+  ): PasskeyAssertionResult {
+    return mapPasskeyAssertion(
+      withUv(uv, this.#clock, (requirement, settings, now) =>
+        call(() => this.#inner.passkeyAssertion(id, passkeyId, origin, rpId, challenge, requirement, settings, now)),
+      ),
+    );
+  }
+
+  /**
+   * Runs a `WebAuthn` registration ceremony for one new ES256 passkey (ADR 0039 §1, §2, §4):
+   * checks INV-64, generates a fresh key, and assembles every byte structure the page's
+   * `create()` promise resolves with; the caller saves it with `createItem`/`editItem`.
+   * `origin` must be the browser-verified origin, never a page-supplied value (ADR 0039 §2).
+   * `uv` decides the `UV` flag as for {@link passkeyAssertion}, before any key is generated.
+   *
+   * Throws a {@link CoreError}: {@link UV_REQUIRED}, `rp_id_rejected` (INV-64), `invalid_input`.
+   */
+  createPasskey(origin: string, rpId: string, challenge: Uint8Array, uv: PasskeyUvInput): CreatedPasskey {
+    return mapCreatedPasskey(
+      withUv(uv, this.#clock, (requirement, settings, now) =>
+        call(() => this.#inner.createPasskey(origin, rpId, challenge, requirement, settings, now)),
+      ),
+    );
+  }
+
+  /**
+   * What a ceremony with `uv` would get now, signing nothing (ADR 0110 §6's table). Advisory
+   * only, for the consent label of §7 point 1: the ceremony calls decide again when they sign.
+   */
+  passkeyUvDecision(uv: PasskeyUvInput): PasskeyUvDecision {
+    return withUv(uv, this.#clock, (requirement, settings, now) =>
+      call(() => this.#inner.passkeyUvDecision(requirement, settings, now) as PasskeyUvDecision),
+    );
+  }
+
+  /** Whether this session was unlocked with the master password ({@link unlockDurableDevice} or
+   * {@link enrolDevice}), the second input of {@link isLockPolicyBounding}. */
+  get unlockedByMasterPassword(): boolean {
+    return call(() => this.#inner.unlockedByMasterPassword);
+  }
+
+  /**
+   * The re-verification of ADR 0110 §7 point 4.3: checks `password` with the same local unlock
+   * this session's unlock ran, against the device state it was unlocked from, drops the keys it
+   * opened, and on success marks this session verified at `nowMs` (default: the session's
+   * clock). Nothing else changes; the time is never stored outside the session. A string
+   * password is encoded and its bytes zeroed; a `Uint8Array` is zeroed after the call.
+   *
+   * Throws a {@link CoreError}: `wrong_password_or_secret_key` (nothing changed),
+   * `invalid_input`.
+   */
+  reverify(password: SecretInput, nowMs?: number): void {
+    const ms = nowMs ?? this.#clock();
+    if (!Number.isFinite(ms) || ms < 0) {
+      throw new CoreError("invalid_input");
+    }
+    withSecrets([password], (b) => call(() => this.#inner.reverify(at(b, 0), BigInt(Math.trunc(ms)))));
   }
 
   /**
