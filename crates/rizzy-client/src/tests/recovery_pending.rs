@@ -341,6 +341,70 @@ fn recovery_pending_lifecycle() {
     );
 }
 
+/// A stored recovery commit: the fields the parser requires, and `recovery` when given.
+fn commit_body(recovery: Option<[u8; 32]>) -> rizzy_proto::change::CommitChangeRequest {
+    use rizzy_proto::auth::RecoveryRegistration;
+    use rizzy_proto::change::CommitChangeRequest;
+    use rizzy_proto::objects::AccountKeyRecoveryWrap;
+    use rizzy_proto::wire::{Bytes, Fixed, List};
+    CommitChangeRequest {
+        account_state: Bytes::from_slice(&[1; 40]).unwrap(),
+        registration_upload: None,
+        setup_id: Some(1),
+        account_key_server_wrap: None,
+        recovery: recovery.map(|hash| RecoveryRegistration {
+            recovery_wrap: AccountKeyRecoveryWrap {
+                account_key_epoch: 0,
+                recovery_epoch: 2,
+                envelope: Bytes::from_slice(&envelope(7)).unwrap(),
+            },
+            recovery_token_hash: Fixed::from_bytes(hash),
+        }),
+        account_settings: None,
+        device_certificates: List::empty(),
+        device_revocations: List::empty(),
+        bundle: None,
+        identity_secret_keys: None,
+        retired_secret_keys: List::empty(),
+        device_grants: List::empty(),
+        recovery_rewrap: None,
+        vault_rotation: None,
+        vault_create: None,
+        vault_delete: None,
+    }
+}
+
+/// ADR 0108 §2 steps 2–3: `H_rec′` is read from the stored commit, and the code of the
+/// attempt's own kit matches it locally while any other code does not; a commit without a
+/// recovery registration is `CacheCorrupt`. Survives the JSON round trip the host does.
+#[test]
+fn stored_recovery_token_hash_reads_the_commit_and_checks_the_kit_code() {
+    use rizzy_core::secret_key::RecoveryCode;
+
+    use crate::recovery::{RecoveryInput, start_recovery, stored_recovery_token_hash};
+    let mut rng = ChaCha20Rng::seed_from_u64(108);
+    let kit = RecoveryCode::generate(&mut rng);
+    let other = RecoveryCode::generate(&mut rng);
+    let hash = kit.auth_token().unwrap().server_hash();
+    let body = serde_json::to_vec(&commit_body(Some(hash))).unwrap();
+    let parsed = serde_json::from_slice(&body).unwrap();
+    assert_eq!(stored_recovery_token_hash(&parsed).unwrap(), hash);
+    let typed = |code: &RecoveryCode| {
+        start_recovery(&RecoveryInput {
+            server_origin: "https://vault.example",
+            login_name: "ivy",
+            recovery_code: &code.to_formatted(),
+        })
+        .unwrap()
+    };
+    assert!(typed(&kit).matches_token_hash(&hash).unwrap());
+    assert!(!typed(&other).matches_token_hash(&hash).unwrap());
+    assert_eq!(
+        stored_recovery_token_hash(&commit_body(None)).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 

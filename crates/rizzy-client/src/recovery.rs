@@ -83,8 +83,8 @@ use rizzy_core::envelope::purpose::{
 use rizzy_core::ids::{AccountId, DeviceId, VaultId};
 use rizzy_core::kdf::KdfId;
 use rizzy_core::keys::{
-    AccountKey, DeviceKeys, GrantSigner, VaultKey, device_set_hash, seal_account_key_device_grant,
-    settings_hash,
+    AccountKey, DeviceKeys, GrantSigner, RecoveryAuthToken, VaultKey, device_set_hash,
+    seal_account_key_device_grant, settings_hash,
 };
 use rizzy_core::normalize::{LoginName, ServerOrigin};
 use rizzy_core::opaque::{
@@ -173,6 +173,26 @@ pub fn start_recovery(input: &RecoveryInput<'_>) -> Result<RecoveryStarted, Clie
     })
 }
 
+/// `H_rec′` of a stage-3 record ([ADR 0108] §2 step 2): the `recovery.recovery_token_hash` of
+/// the recovery commit stored as `pending_commit`, so `rv recovery abandon` can check the
+/// recovery code of the unfinished attempt's Emergency Kit locally
+/// ([`RecoveryStarted::matches_token_hash`]) before it sends anything. JSON decoding is the
+/// host's, as for every wire body: the host parses the stored bytes as a
+/// [`CommitChangeRequest`] and answers [`ClientError::CacheCorrupt`] when they do not parse
+/// (`rv`: `recover::stored_hash`).
+///
+/// # Errors
+/// [`ClientError::CacheCorrupt`] for a commit without a recovery registration.
+///
+/// [ADR 0108]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0108-interrupted-recovery-exit.md
+pub fn stored_recovery_token_hash(request: &CommitChangeRequest) -> Result<[u8; 32], ClientError> {
+    request
+        .recovery
+        .as_ref()
+        .map(|recovery| recovery.recovery_token_hash.to_bytes())
+        .ok_or(ClientError::CacheCorrupt)
+}
+
 /// One vault of a recovery: its key, and the heads and wrap set `recovery/complete` served.
 struct RecoveredVault {
     /// The vault key, opened from the verified self-grant.
@@ -212,6 +232,19 @@ impl RecoveryStarted {
                 .map_err(|_| ClientError::InvalidInput)?,
             recovery_auth_token: SecretFixed::new(Zeroizing::new(*token.expose_secret())),
         })
+    }
+
+    /// Whether the typed code's `recovery_auth_token` hashes to `stored_hash` (an `H_rec`, for
+    /// example [`stored_recovery_token_hash`]), compared in constant time. Nothing is sent.
+    ///
+    /// # Errors
+    /// [`ClientError::Internal`].
+    pub fn matches_token_hash(&self, stored_hash: &[u8; 32]) -> Result<bool, ClientError> {
+        let token = self.code.auth_token().map_err(internal)?;
+        Ok(RecoveryAuthToken::matches_server_hash(
+            token.expose_secret(),
+            stored_hash,
+        ))
     }
 
     /// Step 4: opens `E_rec` and verifies the whole answer (module docs).
