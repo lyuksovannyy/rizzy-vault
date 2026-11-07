@@ -50,6 +50,7 @@
 //! | [`directory`] | ADR 0012 §7 "Upload"; ADR 0016 R4; ADR 0032 §3 | [`directory::device_authors`]: the verified certificates `rizzy-server` hands the vault domain; [`directory::signed_account_key`]: the held state's account key, for the self-grant lag rule |
 //! | [`types`] | ADR 0016 §3 notes, R4 | The `rizzy-core` and `rizzy-proto` items this API is written in, re-exported one by one for `rizzy-server` |
 //! | [`error`] | ADR 0002 point 3 | [`AuthError`] and its API code |
+//! | [`revocation`] | ADR 0091 §2; CRYPTO.md §11.8 step 0 | The revocation window: [`revocation::gate`] in every write of ADR 0091 §2's left column, opened and renewed by suspension, closed by the revocation commit, a recovery commit or the last unsuspend; [`revocation::stored_window`] for the vault domain's port |
 //! | `signup` | CRYPTO.md §11.1, §5.9 | [`AuthService::register_start`], [`AuthService::register_finish`] |
 //! | `login` | CRYPTO.md §5.9–§5.11, §11.2, §11.15; INV-7, INV-59 | [`AuthService::login_start`], [`AuthService::login_finish`] |
 //! | `device` | CRYPTO.md §5.10, §10.1, §11.2 step 7, §11.4, §11.8 step 0; ADR 0012 §6, §7 | Device authentication, request signing, enrolment, web certificates, grants, suspension |
