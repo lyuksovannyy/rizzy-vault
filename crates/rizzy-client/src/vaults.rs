@@ -616,10 +616,11 @@ fn copy_as<R: CryptoRng + ?Sized>(
         false
     } else {
         let copy = source.copy_of(item, rng)?;
+        // The importer drops the `attachment/…` fields (ADR 0093 §2); the files come again
+        // under new ids, below.
         let writes: Vec<ImportWrite<'_>> = copy
             .writes
             .iter()
-            .filter(|(_, key, _)| !key.as_str().starts_with("attachment/"))
             .map(|(source, key, value)| ImportWrite {
                 source: *source,
                 key,

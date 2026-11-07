@@ -108,6 +108,7 @@
 mod cleanup;
 mod heal;
 
+pub(crate) use cleanup::is_attachment_key;
 pub use cleanup::{CleanupStep, MAX_CALLS_PER_ROUND};
 
 pub use heal::HealingOutcome;

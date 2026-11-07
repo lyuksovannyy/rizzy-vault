@@ -368,6 +368,11 @@ pub struct PayloadImport {
     /// Registers of imported items left out because the new item may not write them (module
     /// docs, "A write the new item may not make").
     pub fields_not_carried: usize,
+    /// Attachment elements of imported items that were not carried: the fields of every
+    /// existing `attachment/<id>` element, dropped ([ADR 0093] §2; an export carries no file).
+    ///
+    /// [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
+    pub attachments_not_carried: usize,
 }
 
 /// The encoded live snapshot of a merge's state, or `None` when the state cannot be encoded
@@ -693,8 +698,10 @@ impl VaultSync {
                 item.trashed,
                 now_ms,
             ) {
-                Ok(id) => {
+                Ok((id, attachments)) => {
                     report.imported.push(id);
+                    report.attachments_not_carried =
+                        report.attachments_not_carried.saturating_add(attachments);
                     report.collapsed_fields =
                         report.collapsed_fields.saturating_add(item.collapsed);
                     report.history_not_carried =

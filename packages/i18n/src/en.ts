@@ -39,6 +39,10 @@ export const en = {
   "errors.unknown_vault": "That vault is not available on this device.",
   "errors.personal_vault_protected": "The Personal vault cannot be renamed or deleted.",
   "errors.vault_limit_reached": "This account already holds the most vaults allowed.",
+  "errors.unsupported_item":
+    "This item's type is not supported by this version, so it cannot be copied or moved. Update rizzy-vault, or copy its fields out by hand.",
+  "errors.attachment_cleanup_failed":
+    "Files of a deleted item could not be removed from the server and still count toward your storage.",
   "errors.vault_set_mismatch":
     "The server's vaults do not match this account's vault list. Do not trust this server; vault changes are paused.",
   "errors.server_setup_retired":
@@ -153,6 +157,8 @@ export const en = {
   "securityKey.unavailable": "This browser cannot use security keys here.",
 
   // ---- Passkey export and import, CXF (apps/web/src/views/TransferPane.tsx; ADR 0074) ----
+  "transfer.attachmentsNotIncluded":
+    "{files} files attached to {items} items are not included in the export. Their names are. Download the files separately first.",
   "transfer.cxfTitle": "Passkey export (CXF)",
   "transfer.cxfIntro":
     "Every passkey of your active logins, as a standard FIDO Credential Exchange Format (CXF) document inside a file encrypted under a password for that file. Only passkeys, nothing else.",

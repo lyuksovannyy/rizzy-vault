@@ -519,6 +519,38 @@ function CxfExport(props: {
 }
 
 /** Export: the re-authentication, then the encrypted, plaintext and passkey exports. */
+/** ADR 0093 §2: the line every export confirmation adds when the vault holds attachments. */
+function AttachmentsNotIncluded(props: { readonly ctx: VaultContext; readonly vaultId: string }) {
+  const { ctx, vaultId } = props;
+  const [counts, setCounts] = useState<{ files: number; items: number } | undefined>();
+  useEffect(() => {
+    let live = true;
+    ctx.client.call("exportAttachmentsNotIncluded", vaultId).then(
+      (c) => {
+        if (live) {
+          setCounts(c);
+        }
+      },
+      () => {
+        if (live) {
+          setCounts(undefined);
+        }
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [ctx.client, vaultId]);
+  if (counts === undefined || counts.files === 0) {
+    return null;
+  }
+  return (
+    <p className="notice" role="note">
+      {t("transfer.attachmentsNotIncluded", { files: String(counts.files), items: String(counts.items) })}
+    </p>
+  );
+}
+
 function Export(props: { readonly ctx: VaultContext }) {
   const { ctx } = props;
   const [authed, setAuthed] = useState(false);
@@ -566,6 +598,7 @@ function Export(props: { readonly ctx: VaultContext }) {
                 </option>
               ))}
             </select>
+            <AttachmentsNotIncluded ctx={props.ctx} vaultId={vaultId} />
             <EncryptedExport ctx={props.ctx} vaultId={vaultId} onDone={done} />
             <hr />
             <PlaintextExport ctx={props.ctx} vaultId={vaultId} onDone={done} />
@@ -708,6 +741,7 @@ export function ImportForm(props: {
         <p className="notice" data-testid="import-report">
           Imported {report.imported}, skipped {report.skipped}, warnings {report.warnings}
           {report.fieldsNotCarried > 0 ? `, fields not carried ${report.fieldsNotCarried}` : ""}
+          {report.attachmentsNotCarried > 0 ? `, attachments not carried ${report.attachmentsNotCarried}` : ""}
           {report.historyNotCarried > 0 ? `, history entries not carried ${report.historyNotCarried}` : ""}
           {report.collapsedConflicts > 0 ? `, conflicts collapsed ${report.collapsedConflicts}` : ""}.
           {report.credentialsSkipped > 0

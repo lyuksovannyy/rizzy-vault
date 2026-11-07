@@ -1513,14 +1513,27 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     expect(a.attachments(item)).toEqual([]);
     await expect(a.downloadAttachment(item, id)).rejects.toMatchObject({ code: "unknown_item" });
 
-    // Deleting an item for good: its attachments go from the server first; a repeat is quiet.
+    // Deleting an item for good (ADR 0093 §1.2): the Purge goes first, and the sync round that
+    // uploads it deletes the item's files, so the account's usage comes back down in that round.
     const second = await a.addAttachment(item, "second.txt", "text/plain", new Uint8Array([1, 2, 3]));
     a.trashItem(item);
     expect(a.attachments(item).map((x) => x.id)).toEqual([second]);
-    await a.deleteAttachmentsOf(item);
-    await a.deleteAttachmentsOf(item);
+    await a.sync();
+    const usage = async () => {
+      const probe = await web();
+      await probe.sync();
+      const used = probe.storageUsage?.bytesUsed;
+      probe.lock();
+      return used;
+    };
+    const withFile = await usage();
+    expect(withFile).toBeDefined();
     a.purgeItem(item);
     await a.sync();
+    expect(a.takeAttachmentCleanupFailures()).toBe(0);
+    const after = await usage();
+    // The file's counted bytes (3 plaintext bytes + 90 per chunk + its 122-byte wrap) are gone.
+    expect((withFile ?? 0) - (after ?? 0)).toBeGreaterThanOrEqual(3 + 90 + 122);
     a.lock();
     b.lock();
   });

@@ -343,6 +343,7 @@ async function run(m: CallMessage): Promise<unknown> {
     personalVaultId: () => current().personalVaultId,
     vaultAlarms: () => current().vaultAlarms(),
     takeDiscardedChanges: () => current().takeDiscardedChanges(),
+    takeAttachmentCleanupFailures: () => current().takeAttachmentCleanupFailures(),
     createVault: () => current().createVault(str(a[0])),
     renameVault: () => current().renameVault(str(a[0]), str(a[1])),
     deleteVault: () => current().deleteVault(str(a[0]), bool(a[1])),
@@ -351,12 +352,9 @@ async function run(m: CallMessage): Promise<unknown> {
     editItem: () => current().editItem(str(a[0]), a[1] as never),
     trashItem: () => current().trashItem(str(a[0])),
     restoreItem: () => current().restoreItem(str(a[0])),
-    // ADR 0054 §7: the item's attachments go from the server first, or they would stay behind.
-    purgeItem: async () => {
-      const s = current();
-      await s.deleteAttachmentsOf(str(a[0]));
-      s.purgeItem(str(a[0]));
-    },
+    // ADR 0093 §1.2: Purge first; the next sync deletes the item's files once the server holds
+    // the Purge (deleting them first could lose files another device restores meanwhile).
+    purgeItem: () => current().purgeItem(str(a[0])),
     // Dates only; one value per reveal (ADR 0013 §3 rule 3): the history is never sent whole.
     passwordHistory: () => current().passwordHistory(str(a[0])),
     revealPasswordHistory: () =>
@@ -396,6 +394,7 @@ async function run(m: CallMessage): Promise<unknown> {
     },
     exportEncrypted: () => current().exportEncrypted(str(a[0]), bytes(a[1])),
     exportBlockers: () => current().exportBlockers(str(a[0])),
+    exportAttachmentsNotIncluded: () => current().exportAttachmentsNotIncluded(str(a[0])),
     csvExportWarning: () => current().csvExportWarning(str(a[0])),
     reauthenticate: () => current().reauthenticate(bytes(a[0]), bytes(a[1]), prompts(m.id)),
     reauthFresh: () => current().reauthFresh(),

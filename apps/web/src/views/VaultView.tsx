@@ -149,6 +149,8 @@ export function VaultView(props: {
   const [vaultAlarms, setVaultAlarms] = useState<readonly VaultAlarm[]>([]);
   /** Unsent changes discarded with vaults deleted elsewhere (reported once, §A5). */
   const [discarded, setDiscarded] = useState(0);
+  /** Whether a purged item's files could not be removed from the server (ADR 0093 §1.2). */
+  const [cleanupFailed, setCleanupFailed] = useState(false);
   /** Narrow screens: the sidebar is a slide-over, closed by default (item 1, module docs). */
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -350,11 +352,12 @@ export function VaultView(props: {
     let live = true;
     void (async () => {
       try {
-        const [list, personal, alarms, lost] = await Promise.all([
+        const [list, personal, alarms, lost, cleanupFailures] = await Promise.all([
           client.call("vaults"),
           client.call("personalVaultId"),
           client.call("vaultAlarms"),
           client.call("takeDiscardedChanges"),
+          client.call("takeAttachmentCleanupFailures"),
         ]);
         if (!live) {
           return;
@@ -364,6 +367,9 @@ export function VaultView(props: {
         setVaultAlarms(alarms);
         if (lost > 0) {
           setDiscarded((n) => n + lost);
+        }
+        if (cleanupFailures > 0) {
+          setCleanupFailed(true);
         }
         // A vault deleted (here or elsewhere) is no longer a filter.
         setVaultFilter((current) => (current !== undefined && !list.some((v) => v.id === current) ? undefined : current));
@@ -746,6 +752,14 @@ export function VaultView(props: {
           />
         )}
         <VaultAlarms alarms={vaultAlarms} />
+        {cleanupFailed && (
+          <p className="status" role="status">
+            {t("errors.attachment_cleanup_failed")}{" "}
+            <button type="button" className="secondary small" onClick={() => setCleanupFailed(false)}>
+              {t("vaults.dismiss")}
+            </button>
+          </p>
+        )}
         {discarded > 0 && (
           <p className="status" role="status">
             {t("vaults.discarded", { count: String(discarded) })}{" "}

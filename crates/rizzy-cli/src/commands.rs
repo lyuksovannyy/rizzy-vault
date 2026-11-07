@@ -1287,6 +1287,14 @@ async fn export(
         .reauthenticate_for_export(env.ui, login_name, &mut gate)
         .await?;
     let vault = device.vaults().require(source)?;
+    // ADR 0093 §2: the export keeps the files' names and carries no file.
+    let (files, items) = vault.attachments_not_exported();
+    if files > 0 {
+        env.ui.note(&format!(
+            "{files} files attached to {items} items are not included in the export. Their \
+             names are. Download the files separately first."
+        ));
+    }
     match format {
         ExportFormat::Encrypted => {
             let password = new_export_password(env.ui)?;
@@ -1472,6 +1480,15 @@ fn import_as(
     })
 }
 
+/// The import report's "attachments not carried" line (ADR 0093 §2), when there were any.
+fn note_attachments_not_carried(ui: &mut dyn Ui, count: usize) {
+    if count > 0 {
+        ui.note(&format!(
+            "{count} attachments not carried: an import never brings files, only fields."
+        ));
+    }
+}
+
 /// `import`: every `rizzy-import` format, and our own encrypted export, recognised from the
 /// file unless `--format` names it (owner decision 2026-10-05).
 async fn import(
@@ -1502,6 +1519,7 @@ async fn import(
                 parsed.warnings.len()
             ));
             note_counts(env.ui, &parsed.counts);
+            note_attachments_not_carried(env.ui, done.attachments_not_carried);
         }
         ImportAs::CxfEncrypted => {
             let password = env
@@ -1538,6 +1556,7 @@ async fn import(
                 done.history_not_carried,
                 done.fields_not_carried
             ));
+            note_attachments_not_carried(env.ui, done.attachments_not_carried);
         }
     }
     sync_after_write(&mut device, env.ui).await

@@ -128,6 +128,8 @@ export interface CoreApi {
   vaultAlarms(): VaultAlarm[];
   /** Unsent changes discarded with vaults deleted elsewhere, since the last call. */
   takeDiscardedChanges(): number;
+  /** Purged items whose files the server refused to delete, since the last call (ADR 0093). */
+  takeAttachmentCleanupFailures(): number;
   /** Creates an owned vault (§A3); returns its id. */
   createVault(name: string): string;
   /** Renames an owned vault (§A4). */
@@ -195,6 +197,8 @@ export interface CoreApi {
   websiteIcons(): boolean;
   exportEncrypted(vaultId: string, password: Uint8Array): EncryptedExport;
   exportBlockers(vaultId: string): string[];
+  /** Files an export names but does not include (ADR 0093 §2). */
+  exportAttachmentsNotIncluded(vaultId: string): { files: number; items: number };
   csvExportWarning(vaultId: string): string;
   reauthenticate(secretKey: Uint8Array, password: Uint8Array): void;
   reauthFresh(): boolean;
@@ -302,6 +306,7 @@ export const METHODS: readonly Method[] = [
   "personalVaultId",
   "vaultAlarms",
   "takeDiscardedChanges",
+  "takeAttachmentCleanupFailures",
   "createVault",
   "renameVault",
   "deleteVault",
@@ -330,6 +335,7 @@ export const METHODS: readonly Method[] = [
   "websiteIcons",
   "exportEncrypted",
   "exportBlockers",
+  "exportAttachmentsNotIncluded",
   "csvExportWarning",
   "reauthenticate",
   "reauthFresh",

@@ -1292,6 +1292,21 @@ impl Session {
             .collect())
     }
 
+    /// The files an export of `vault_id` names but does not include (ADR 0093 §2): `[N, M]`, N
+    /// existing attachments over M items. When N > 0 the export confirmation adds "N files
+    /// attached to M items are not included in the export. Their names are. Download the files
+    /// separately first."
+    ///
+    /// # Errors
+    /// `locked`; `invalid_input`; `unknown_vault`.
+    #[wasm_bindgen(js_name = exportAttachmentsNotIncluded)]
+    pub fn export_attachments_not_included(&self, vault_id: &str) -> Result<Vec<u32>, CoreError> {
+        let target = items::vault_id(vault_id)?;
+        let (files, items) = self.inner()?.vaults.get(target)?.attachments_not_exported();
+        let n = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
+        Ok(vec![n(files), n(items)])
+    }
+
     /// The warning the host shows before a CSV export, after [`plaintext_export_warning`]: the
     /// frozen text with the number of items that would lose data (ADR 0027 §5).
     ///
@@ -1480,6 +1495,7 @@ impl Session {
             history_not_carried: counts.dropped_history,
             fields_not_carried: counts.dropped_fields,
             credentials_skipped: counts.skipped_credentials,
+            attachments_not_carried: done.attachments_not_carried,
         })
     }
 
@@ -1523,6 +1539,8 @@ impl Session {
             history_not_carried: done.counts.dropped_history,
             fields_not_carried: done.counts.dropped_fields,
             credentials_skipped: done.counts.skipped_credentials,
+            // A CXF passkey import writes no attachment field.
+            attachments_not_carried: 0,
         })
     }
 
@@ -1564,6 +1582,7 @@ impl Session {
             history_not_carried: done.history_not_carried,
             fields_not_carried: done.fields_not_carried,
             credentials_skipped: 0,
+            attachments_not_carried: done.attachments_not_carried,
         })
     }
 
@@ -2338,6 +2357,9 @@ pub struct ImportReport {
     /// CXF credentials not imported: of another type than a passkey, or a passkey that could
     /// not be read (ADR 0074 §1, §3). Zero for the other formats.
     credentials_skipped: usize,
+    /// Attachment elements not carried: an import never writes an attachment field (ADR 0093
+    /// §2; an export carries no file).
+    attachments_not_carried: usize,
 }
 
 #[wasm_bindgen]
@@ -2389,6 +2411,13 @@ impl ImportReport {
     #[must_use]
     pub fn fields_not_carried(&self) -> usize {
         self.fields_not_carried
+    }
+
+    /// Attachments not carried (ADR 0093 §2).
+    #[wasm_bindgen(getter, js_name = attachmentsNotCarried)]
+    #[must_use]
+    pub fn attachments_not_carried(&self) -> usize {
+        self.attachments_not_carried
     }
 }
 

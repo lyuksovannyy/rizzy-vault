@@ -140,6 +140,9 @@ pub struct ItemsImported {
     /// The file positions ([`ImportedItem::entry`]) of the items this vault refused
     /// ([`ClientError::InvalidEdit`]); nothing of them was written.
     pub skipped: Vec<usize>,
+    /// Attachment elements of the imported items that were not carried (ADR 0093 §2): a
+    /// foreign file never names an attachment this device uploaded, so every one is dropped.
+    pub attachments_not_carried: usize,
 }
 
 /// One password history entry (ADR 0012 §5 "Password history is the history of
@@ -277,6 +280,39 @@ fn split_ops<'a>(sorted: &[(WriteSource, &'a str, &'a [u8])]) -> Vec<Vec<RawWrit
     ops
 }
 
+/// Whether `key` is under the `attachment/` prefix (ADR 0054 §4), which no import writes
+/// (ADR 0093 §2).
+pub(crate) fn is_attachment_key(key: &str) -> bool {
+    crate::sync::is_attachment_key(key)
+}
+
+/// The distinct `attachment/<id>` elements of `writes` that exist by ADR 0018 §6 (some
+/// content attribute holds a non-empty value): what an import drops and counts as "attachments
+/// not carried" (ADR 0093 §2).
+pub(crate) fn attachments_not_carried(writes: &[ImportWrite<'_>]) -> usize {
+    use rizzy_core::item::order::element_exists;
+    use rizzy_core::item::schema::LIST_ATTACHMENT;
+
+    let mut elements: Vec<&str> = writes
+        .iter()
+        .map(|w| w.key.as_key())
+        .filter(|k| k.list() == Some(LIST_ATTACHMENT))
+        .filter_map(|k| k.element())
+        .collect();
+    elements.sort_unstable();
+    elements.dedup();
+    elements
+        .into_iter()
+        .filter(|element| {
+            element_exists(writes.iter().filter_map(|w| {
+                let key = w.key.as_key();
+                (key.list() == Some(LIST_ATTACHMENT) && key.element() == Some(*element))
+                    .then(|| (key.attribute(), w.value.expose_secret()))
+            }))
+        })
+        .count()
+}
+
 /// The checks every imported item passes before its first op (module docs, "Import"), on the
 /// writes of the whole item, `item.type` among them: sorts `writes` by key, then refuses a
 /// type that is not a supported user item type, a key written twice, a write the schema
@@ -389,12 +425,19 @@ impl VaultSync {
             })
             .collect();
         self.import_item_writes(rng, unlocked, item_type, &writes, false, now_ms)
+            .map(|(item, _)| item)
     }
 
     /// Creates a new item from imported writes: the one import path (module docs, "Import").
     /// `writes` may hold `item.type`, which must then name `item_type`; if they do not, it is
-    /// written. The writes are split over consecutive ops when one op does not hold them, and
-    /// a `trashed` item is trashed in one more op. Returns the new item's id.
+    /// written. Every write under the `attachment/` prefix is dropped first ([ADR 0093] §2: no
+    /// import writes a reference to an attachment this device did not upload under that item).
+    /// The writes are split over consecutive ops when one op does not hold them, and a
+    /// `trashed` item is trashed in one more op. Returns the new item's id and the number of
+    /// distinct attachment elements dropped that existed (ADR 0018 §6), for the import report's
+    /// "attachments not carried".
+    ///
+    /// [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
     ///
     /// # Errors
     /// Before anything is written: [`ClientError::ReadOnly`]; [`ClientError::InvalidInput`] if
@@ -410,7 +453,7 @@ impl VaultSync {
         writes: &[ImportWrite<'_>],
         trashed: bool,
         now_ms: u64,
-    ) -> Result<ItemId, ClientError> {
+    ) -> Result<(ItemId, usize), ClientError> {
         let item = ItemId::generate(rng);
         self.import_item_writes_as(rng, unlocked, item, item_type, writes, trashed, now_ms)
     }
@@ -436,14 +479,16 @@ impl VaultSync {
         writes: &[ImportWrite<'_>],
         trashed: bool,
         now_ms: u64,
-    ) -> Result<ItemId, ClientError> {
+    ) -> Result<(ItemId, usize), ClientError> {
         self.check_writable(unlocked)?;
         if self.merge(item).is_some() || self.holds_unapplied(item) {
             return Err(ClientError::InvalidInput);
         }
         let type_value = Value::enumeration(item_type.id());
+        let not_carried = attachments_not_carried(writes);
         let mut all: Vec<(WriteSource, &str, &[u8])> = writes
             .iter()
+            .filter(|w| !is_attachment_key(w.key.as_str()))
             .map(|w| (w.source, w.key.as_str(), w.value.expose_secret()))
             .collect();
         if !all.iter().any(|w| w.1 == ITEM_TYPE) {
@@ -478,7 +523,7 @@ impl VaultSync {
             )
             .map_err(|_| ClientError::Internal)?;
         }
-        Ok(item)
+        Ok((item, not_carried))
     }
 
     /// Writes the items of an import file (`rizzy_import::import`) into this vault, each as a
@@ -519,7 +564,11 @@ impl VaultSync {
                 item.trashed(),
                 now_ms,
             ) {
-                Ok(id) => out.imported.push(id),
+                Ok((id, attachments)) => {
+                    out.imported.push(id);
+                    out.attachments_not_carried =
+                        out.attachments_not_carried.saturating_add(attachments);
+                }
                 Err(ClientError::InvalidEdit) => out.skipped.push(item.entry()),
                 Err(e) => return Err(e),
             }

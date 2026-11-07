@@ -165,6 +165,32 @@ impl VaultSync {
             .collect()
     }
 
+    /// The attachments an export of this vault names but does not carry ([ADR 0093] §2): the
+    /// number of existing attachment elements (ADR 0018 §6) over every live (Active or Trashed)
+    /// item, and the number of items that hold at least one. The export confirmation says "N
+    /// files attached to M items are not included in the export" when `N > 0`.
+    ///
+    /// [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
+    #[must_use]
+    pub fn attachments_not_exported(&self) -> (usize, usize) {
+        use rizzy_sync::merge::ItemLifecycle;
+        let (mut files, mut items) = (0usize, 0usize);
+        for item in self.item_ids() {
+            if !matches!(
+                self.item_lifecycle(item),
+                ItemLifecycle::Active | ItemLifecycle::Trashed
+            ) {
+                continue;
+            }
+            let n = self.list_elements(item, LIST_ATTACHMENT).len();
+            if n > 0 {
+                files = files.saturating_add(n);
+                items = items.saturating_add(1);
+            }
+        }
+        (files, items)
+    }
+
     /// Adds `data` to `item` as an encrypted attachment (ADR 0054 §1–§4, §7).
     ///
     /// Writes the item op with the attachment's fields first (module docs), then wraps a fresh

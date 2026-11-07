@@ -322,6 +322,23 @@ pub(crate) async fn send_stages(
 /// How many times [`send_stages`] resends a stage request whose answer was lost.
 const STAGE_RESENDS: u32 = 2;
 
+/// The answer to `attachments/delete-item` as the status class ADR 0093 §1.2's table reads:
+/// `rv`'s transport hands back the error code, not the HTTP status, so the code stands for it.
+/// No answer (network, TLS) is `0`; a 200 whose body did not parse is `(200, None)`.
+fn cleanup_status<R>(answer: &Result<R, CliError>) -> (u16, Option<&R>) {
+    match answer {
+        Ok(body) => (200, Some(body)),
+        Err(CliError::Server(ErrorCode::NotFound)) => (404, None),
+        Err(CliError::Server(ErrorCode::Unauthorized)) => (401, None),
+        Err(CliError::Server(ErrorCode::RateLimited) | CliError::RateLimited(_)) => (429, None),
+        // A code this build does not know may be a newer server's transient answer: kept.
+        Err(CliError::Server(ErrorCode::Internal | ErrorCode::Unknown)) => (500, None),
+        Err(CliError::Server(_)) => (400, None),
+        Err(CliError::BadAnswer) => (200, None),
+        Err(_) => (0, None),
+    }
+}
+
 /// A copy of a bearer token, for a request sent while its owner is borrowed or consumed.
 pub(crate) fn copy_token(token: &SessionToken) -> SessionToken {
     SessionToken::new(Zeroizing::new(*token.expose_secret()))
@@ -1678,6 +1695,7 @@ impl Device {
         self.upload(ui).await?;
         self.resume_moves(ui).await?;
         self.fetch().await?;
+        self.attachment_cleanups(ui).await?;
         self.report_cutoff_gaps(ui);
         for vault_id in self.vaults.too_new_ids() {
             ui.note(&format!(
@@ -1740,6 +1758,48 @@ impl Device {
             return Err(e.into());
         }
         self.check_writable()
+    }
+
+    /// The cleanup step at the end of a sync round (ADR 0093 §1.2 "Running a row"): for every
+    /// open vault, every `attachment_cleanup` row whose Purge the server has acknowledged is sent
+    /// to `attachments/delete-item` and its answer applied
+    /// ([`VaultSync::attachment_cleanup_respond`]); the row changes are committed. A failed
+    /// cleanup is never a sync error: a refusal no retry fixes is reported once as a note, every
+    /// other failure keeps the row for the next round.
+    ///
+    /// # Errors
+    /// [`Device::flush`]'s only: a failure to persist the row changes.
+    async fn attachment_cleanups(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
+        use rizzy_client::rizzy_proto::attachments::AttachmentItemResponse;
+        use rizzy_client::sync::CleanupStep;
+
+        for vault_id in self.vaults.open_ids() {
+            let due = self.vaults.require_mut(vault_id)?.attachment_cleanups_due();
+            for item in due {
+                loop {
+                    let request = self
+                        .vaults
+                        .require_mut(vault_id)?
+                        .attachment_cleanup_request(item);
+                    let answer: Result<AttachmentItemResponse, CliError> =
+                        self.call(paths::ATTACHMENTS_DELETE_ITEM, &request).await;
+                    let (status, body) = cleanup_status(&answer);
+                    let step = self
+                        .vaults
+                        .require_mut(vault_id)?
+                        .attachment_cleanup_respond(item, status, body);
+                    match step {
+                        Ok(CleanupStep::Again) => {}
+                        Err(e @ ClientError::AttachmentCleanupFailed) => {
+                            ui.note(&e.to_string());
+                            break;
+                        }
+                        Ok(CleanupStep::Done | CleanupStep::Keep) | Err(_) => break,
+                    }
+                }
+            }
+        }
+        self.flush().await
     }
 
     /// A re-authentication over this device's session (CRYPTO.md §11.6 step 1, §11.8 step 0).

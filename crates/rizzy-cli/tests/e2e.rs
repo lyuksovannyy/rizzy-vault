@@ -5829,6 +5829,28 @@ mod web_client {
             }
             download.finish().unwrap().to_vec()
         }
+
+        /// Whether the server still holds the attachment `attachment` (`attachments/get` answers
+        /// its wrap, not `not_found`).
+        pub(super) async fn holds(&mut self, attachment: [u8; 16]) -> bool {
+            use rizzy_cli::error::CliError;
+            use rizzy_client::rizzy_proto::error::ErrorCode;
+            let request =
+                rizzy_client::attachments::delete_request(AttachmentId::from_bytes(attachment));
+            let answer: Result<GetAttachmentResponse, CliError> = self
+                .http
+                .post(
+                    paths::ATTACHMENTS_GET,
+                    &request,
+                    Auth::Bearer(&self.web.session_token),
+                )
+                .await;
+            match answer {
+                Ok(_) => true,
+                Err(CliError::Server(ErrorCode::NotFound)) => false,
+                Err(e) => panic!("attachments/get: {e:?}"),
+            }
+        }
     }
 }
 
@@ -5865,6 +5887,28 @@ fn files() -> [(&'static str, &'static str, Vec<u8>); 2] {
             b"the attachment's own bytes".to_vec(),
         ),
     ]
+}
+
+/// ADR 0093 §1.2, INV-113 (a): the purged original's files are deleted by the mover's next sync
+/// round, once the server holds the Purge (written by the move's `PendingMove::finish`); the
+/// moved copy's files stay.
+fn originals_deleted_after_sync(
+    a: &Rv,
+    web: &mut web_client::WebClient,
+    originals: &[web_client::Listed],
+    work: &str,
+    moved: &str,
+) {
+    a.ok(&["sync"], &[]);
+    for original in originals {
+        assert!(
+            !a.runtime.block_on(web.holds(original.id)),
+            "the purged original's attachment is gone from the server"
+        );
+    }
+    for carried in web.attachments(work, moved) {
+        assert!(a.runtime.block_on(web.holds(carried.id)));
+    }
 }
 
 /// ADR 0081 §A6 step 1 with attachments: `item copy` and `item move` download each attachment,
@@ -5917,6 +5961,7 @@ fn moves_and_copies_carry_attachments_under_the_target_vault() {
         web.purged(&personal, &item),
         "the original is purged once the copy is stored"
     );
+    originals_deleted_after_sync(&a, &mut web, &originals, &work, &moved);
     for target in [&copy, &moved] {
         let carried = web.attachments(&work, target);
         assert_eq!(

@@ -14,19 +14,34 @@
 //! const file = session.attachmentDownloadFinish(id)                    // only if every chunk opened
 //!
 //! send(session.attachmentDeleteRequest(id)); session.removeAttachment(itemId, id, now)
+//!
+//! for ref of session.attachmentCleanupsDue():                          // after each sync round
+//!   do step = session.attachmentCleanupResponse(ref, ...send(session.attachmentCleanupRequest(ref)))
+//!   while step == "again"                                              // ADR 0093 §1.2
 //! ```
+//!
+//! **The cleanup after a Purge** ([ADR 0093] §1). A purge never deletes anything itself:
+//! `purgeItem` (and `autoPurge`, and a move's purge of its source) writes the item's cleanup row
+//! in the driver, and the host runs the rows the server's acknowledgement made due at the end of
+//! each sync round, Purge first, delete second. This host keeps no cache, so a row lives as long
+//! as the session: a lock before the round runs leaves the files to the next device that
+//! received the Purge, or to the account's usage.
 //!
 //! Every request is built here and every answer verified here; JavaScript only carries bytes.
 //! The finished file crosses to JavaScript as a byte array, the one copy a download needs; like
 //! a plaintext export, it cannot be wiped once there (ADR 0013 §4 "Honest limit").
 //!
 //! [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
+//! [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
 
 use rizzy_client::ClientError;
 use rizzy_client::attachments::{AttachmentInfo, delete_request};
 use rizzy_client::rizzy_core::ids::AttachmentId;
-use rizzy_client::rizzy_proto::attachments::{DownloadChunkResponse, GetAttachmentResponse};
+use rizzy_client::rizzy_proto::attachments::{
+    AttachmentItemResponse, DownloadChunkResponse, GetAttachmentResponse,
+};
 use rizzy_client::rizzy_proto::http::paths;
+use rizzy_client::sync::CleanupStep;
 use wasm_bindgen::prelude::wasm_bindgen;
 
 use super::Session;
@@ -371,6 +386,70 @@ impl Session {
         let id = attachment_id(attachment)?;
         self.inner_mut()?.downloads.remove(&id);
         Ok(())
+    }
+
+    /// The item references (`vault:item`) whose attachment cleanup can run now (ADR 0093
+    /// §1.2): every cleanup row whose Purge the server has acknowledged. Call once per sync
+    /// round, after the round; it starts the round's call count.
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(js_name = attachmentCleanupsDue)]
+    pub fn attachment_cleanups_due(&mut self) -> Result<Vec<String>, CoreError> {
+        let inner = self.inner_mut()?;
+        let mut out = Vec::new();
+        for vault in inner.vaults.all_mut() {
+            let vault_id = vault.vault_id();
+            for item in vault.attachment_cleanups_due() {
+                out.push(items::item_ref(vault_id, item));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The `attachments/delete-item` request of a due cleanup (ADR 0093 §1.1).
+    ///
+    /// # Errors
+    /// `locked`; `invalid_input` for a malformed reference; `unknown_vault`.
+    #[wasm_bindgen(js_name = attachmentCleanupRequest)]
+    pub fn attachment_cleanup_request(&self, id: &str) -> Result<HttpRequest, CoreError> {
+        let inner = self.inner()?;
+        let (vault_id, item) = items::parse_ref(id)?;
+        let body = inner.vaults.get(vault_id)?.attachment_cleanup_request(item);
+        HttpRequest::post(paths::ATTACHMENTS_DELETE_ITEM, &body, Some(&inner.token))
+    }
+
+    /// Applies the answer to [`Session::attachment_cleanup_request`] (ADR 0093 §1.2): `"again"`
+    /// (send the request again now), `"done"` or `"keep"` (the next sync round retries).
+    /// `status` `0` stands for no answer (a network error).
+    ///
+    /// # Errors
+    /// `attachment_cleanup_failed` once, for a refusal no retry fixes (the row is dropped; the
+    /// files still count toward the account's storage); `invalid_server_response` for a 200
+    /// that does not parse; `locked`; `invalid_input`; `unknown_vault`; `unknown_item` when
+    /// the reference has no cleanup row.
+    #[wasm_bindgen(js_name = attachmentCleanupResponse)]
+    pub fn attachment_cleanup_response(
+        &mut self,
+        id: &str,
+        status: u16,
+        body: &[u8],
+    ) -> Result<String, CoreError> {
+        let (vault_id, item) = items::parse_ref(id)?;
+        let answer: Option<AttachmentItemResponse> =
+            if status == 200 && body.len() <= http::MAX_RESPONSE_LEN {
+                serde_json::from_slice(body).ok()
+            } else {
+                None
+            };
+        let vault = self.inner_mut()?.vaults.get_mut(vault_id)?;
+        let step = vault.attachment_cleanup_respond(item, status, answer.as_ref())?;
+        Ok(match step {
+            CleanupStep::Done => "done",
+            CleanupStep::Again => "again",
+            CleanupStep::Keep => "keep",
+        }
+        .to_owned())
     }
 
     /// The `attachments/delete` request. Send it before [`Session::remove_attachment`]; a

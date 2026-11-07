@@ -937,7 +937,8 @@ fn import_splits_an_item_over_consecutive_ops_and_keeps_the_limits() {
             true,
             T0 + 5,
         )
-        .unwrap();
+        .unwrap()
+        .0;
     // Three `Active` ops and the `Trashed` one.
     assert_eq!(f.vault.next_device_seq(), 5);
     assert_eq!(f.vault.item_lifecycle(item), ItemLifecycle::Trashed);
@@ -978,7 +979,8 @@ fn import_splits_an_item_over_consecutive_ops_and_keeps_the_limits() {
             false,
             T0 + 6,
         )
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(f.vault.next_device_seq(), before + 3);
     assert_eq!(f.vault.field_keys(fat).len(), 41);
     assert!(!f.vault.merge(fat).unwrap().is_oversize());
@@ -1503,6 +1505,7 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
             // `share/<id>/secret`; `uri/<id>/match` now carries (ADR 0037, Accepted, M2), and
             // a key of another item type skips its item instead (ADR 0055 owner answer 4).
             fields_not_carried: 1,
+            attachments_not_carried: 0,
         }
     );
     assert_eq!(report.imported.len(), 3);
@@ -2166,4 +2169,59 @@ fn cxf_document_round_trips_arbitrary_passkeys() {
             },
         )
         .unwrap();
+}
+
+/// ADR 0093 §2 and INV-113 (c): an export keeps the attachment fields (an inventory) and the
+/// export notice counts them; an import writes none of them and reports how many it dropped;
+/// a copy drops them through the same importer and re-adds the files under new ids.
+#[test]
+fn attachments_are_named_by_the_export_and_never_written_by_an_import() {
+    let mut a = fixture(0x93);
+    let name = k("item.name");
+    let item = a.create(ItemType::LOGIN, &[(&name, &text("With files"))], T0 + 1);
+    let plain = a.create(ItemType::LOGIN, &[(&name, &text("No files"))], T0 + 2);
+    for n in ["a.txt", "b.txt"] {
+        a.vault
+            .add_attachment(
+                &mut a.rng,
+                &a.unlocked,
+                item,
+                n,
+                "text/plain",
+                b"data",
+                T0 + 3,
+            )
+            .unwrap();
+    }
+    assert_eq!(a.vault.attachments(item).len(), 2);
+    assert!(a.vault.attachments(plain).is_empty());
+    // The export notice: 2 files on 1 item.
+    assert_eq!(a.vault.attachments_not_exported(), (2, 1));
+    let export = a
+        .vault
+        .export_encrypted(&mut a.rng, test_auth().0, "export pw", T0 + 100)
+        .unwrap();
+    // Both items are in the payload, the attachment fields with them (ADR 0027 §1 unchanged:
+    // the import below finds and counts them).
+    let payload = read_export(&export.file, "export pw").unwrap();
+    assert_eq!(parse_payload(payload.expose_secret()).unwrap().len(), 2);
+
+    let mut b = fixture(0x94);
+    let report = b
+        .vault
+        .import_encrypted(&mut b.rng, &b.unlocked, &export.file, "export pw", T0 + 200)
+        .unwrap();
+    assert_eq!(report.imported.len(), 2);
+    assert_eq!(report.attachments_not_carried, 2);
+    for imported in &report.imported {
+        assert!(b.vault.attachments(*imported).is_empty());
+        assert!(
+            b.vault
+                .field_keys(*imported)
+                .iter()
+                .all(|key| !key.as_str().starts_with("attachment/")),
+            "no import writes an attachment field"
+        );
+    }
+    assert_eq!(b.vault.attachments_not_exported(), (0, 0));
 }

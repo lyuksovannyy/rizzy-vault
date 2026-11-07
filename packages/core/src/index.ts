@@ -951,6 +951,8 @@ export interface ImportReport {
   readonly fieldsNotCarried: number;
   /** CXF credentials not imported: another type than a passkey, or an unreadable passkey. */
   readonly credentialsSkipped: number;
+  /** Attachments not carried: an import never writes a file reference (ADR 0093 §2). */
+  readonly attachmentsNotCarried: number;
 }
 
 /** The import formats of other products, and our own plaintext JSON. */
@@ -1762,6 +1764,12 @@ export class VaultSession {
    * (gap 00; ADR 0012 §5, ADR 0018 §9, §11): a pass over every trashed item whose retention
    * period has elapsed, run only here, after a successful sync, while unlocked — never by the
    * server (ADR 0022).
+   *
+   * Last, it runs the attachment cleanups the round made due (ADR 0093 §1.2): for each item
+   * purged here (or purged elsewhere while this session held it live with files) whose Purge
+   * the server has acknowledged, `attachments/delete-item` until nothing is left. Purge first,
+   * delete second; a failed cleanup never fails the sync (see
+   * {@link VaultSession.takeAttachmentCleanupFailures}).
    */
   async sync(): Promise<void> {
     const s = this.#s();
@@ -1787,6 +1795,56 @@ export class VaultSession {
       call(() => s.syncRespond(answer.status, answer.body, this.#now()));
     }
     call(() => this.#s().autoPurge(this.#now()));
+    await this.#attachmentCleanups(s);
+  }
+
+  /** Cleanups whose server refusal no retry fixes, since the last take (ADR 0093 §1.2). */
+  #cleanupFailures = 0;
+
+  /**
+   * One cleanup round (ADR 0093 §1.2 "Running a row"). Transport failures, `5xx`, `429` and
+   * `401` keep the row for the next sync; a refusal no retry fixes drops it and is counted once.
+   */
+  async #attachmentCleanups(s: Session): Promise<void> {
+    for (const ref of call(() => s.attachmentCleanupsDue())) {
+      for (;;) {
+        let status = 0;
+        let body = new Uint8Array();
+        try {
+          const answer = await this.#transport(takeRequest(call(() => s.attachmentCleanupRequest(ref))));
+          status = answer.status;
+          body = answer.body;
+        } catch {
+          // No answer: status 0 keeps the row.
+        }
+        if (this.#session !== s) {
+          return;
+        }
+        let step: string;
+        try {
+          step = call(() => s.attachmentCleanupResponse(ref, status, body));
+        } catch (e) {
+          if (e instanceof CoreError && e.code === "attachment_cleanup_failed") {
+            this.#cleanupFailures += 1;
+          }
+          break;
+        }
+        if (step !== "again") {
+          break;
+        }
+      }
+    }
+  }
+
+  /**
+   * How many purged items' files the server refused to delete for good since the last call
+   * (ADR 0093 §1.2): show "Files of a deleted item could not be removed from the server and
+   * still count toward your storage." once when it is above zero. Names no value (INV-48).
+   */
+  takeAttachmentCleanupFailures(): number {
+    const n = this.#cleanupFailures;
+    this.#cleanupFailures = 0;
+    return n;
   }
 
   /** The active items, or the trashed ones. */
@@ -1881,7 +1939,10 @@ export class VaultSession {
     call(() => this.#s().restoreItem(id, this.#now()));
   }
 
-  /** Purges a trashed item for good. */
+  /**
+   * Purges a trashed item for good. Its files are deleted from the server by the next
+   * {@link VaultSession.sync}, once the server holds the Purge (ADR 0093 §1.2), never before.
+   */
   purgeItem(id: string): void {
     call(() => this.#s().purgeItem(id, this.#now()));
   }
@@ -2117,6 +2178,17 @@ export class VaultSession {
     return call(() => this.#s().exportBlockers(vaultId));
   }
 
+  /**
+   * The files an export of the vault names but does not include (ADR 0093 §2): `files`
+   * attachments over `items` items. When `files` is above zero the export confirmation says
+   * "N files attached to M items are not included in the export. Their names are. Download the
+   * files separately first."
+   */
+  exportAttachmentsNotIncluded(vaultId: string): { files: number; items: number } {
+    const [files, items] = call(() => this.#s().exportAttachmentsNotIncluded(vaultId));
+    return { files: files ?? 0, items: items ?? 0 };
+  }
+
   /** The warning to add before a CSV export. */
   csvExportWarning(vaultId: string): string {
     return call(() => this.#s().csvExportWarning(vaultId));
@@ -2323,26 +2395,6 @@ export class VaultSession {
     }
     call(() => s.removeAttachment(itemId, attachmentId, this.#now()));
     await this.sync();
-  }
-
-  /**
-   * Deletes every attachment an item names from the server (`attachments/delete`; a
-   * `server_not_found` answer counts as deleted), leaving the item's fields as they are. For an
-   * item about to be deleted for good: the server cannot tell which attachments an item names
-   * (ADR 0054 §7), so without this they would stay and keep counting against the quota.
-   */
-  async deleteAttachmentsOf(itemId: string): Promise<void> {
-    const s = this.#s();
-    for (const a of this.attachments(itemId)) {
-      const answer = await this.#transport(takeRequest(call(() => s.attachmentDeleteRequest(a.id))));
-      try {
-        call(() => expectNoContent(answer.status, answer.body));
-      } catch (e) {
-        if (!(e instanceof CoreError) || e.code !== "server_not_found") {
-          throw e;
-        }
-      }
-    }
   }
 
   /**
@@ -2689,6 +2741,7 @@ function report(r: {
   historyNotCarried: number;
   fieldsNotCarried: number;
   credentialsSkipped: number;
+  attachmentsNotCarried: number;
 }): ImportReport {
   return {
     imported: r.imported,
@@ -2698,6 +2751,7 @@ function report(r: {
     historyNotCarried: r.historyNotCarried,
     fieldsNotCarried: r.fieldsNotCarried,
     credentialsSkipped: r.credentialsSkipped,
+    attachmentsNotCarried: r.attachmentsNotCarried,
   };
 }
 
