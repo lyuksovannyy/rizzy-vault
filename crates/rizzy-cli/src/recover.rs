@@ -580,7 +580,7 @@ async fn resume(
         Ok(()) => {
             env.ui
                 .note("The server had applied the recovery. Finishing it on this computer…");
-            return finish_resumed(env, lock, db, record, account, password).await;
+            return Box::pin(finish_resumed(env, lock, db, record, account, password)).await;
         }
         Err(CliError::Server(ErrorCode::Unauthorized)) => {}
         Err(e) => {
@@ -656,7 +656,7 @@ async fn resume(
     )
     .await;
     match sent {
-        Ok(()) => finish_resumed(env, lock, db, record, account, password).await,
+        Ok(()) => Box::pin(finish_resumed(env, lock, db, record, account, password)).await,
         // `state_conflict`, `unauthorized` or any other refusal: not applied, and step 3
         // proved no commit of this attempt is live, so abandoning cannot discard a live kit.
         Err(refused) if refused.refuses_commit() => {

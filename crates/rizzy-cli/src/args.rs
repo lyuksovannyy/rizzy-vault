@@ -54,7 +54,8 @@ USAGE:
     rv export --out <file> --name <login> [--format encrypted|json|csv|cxf] [--vault <vault>]
     rv import --in <file> [--format <format>] [--vault <vault>]
     rv device list
-    rv device revoke <device> --name <login> [--standard]
+    rv device revoke <device>... --name <login> [--keep-secret-key | --standard]
+    rv device unsuspend <device>... --name <login>
     rv device forget
     rv session list
     rv session end <session> | end --others
@@ -89,6 +90,17 @@ included, to Personal, or with --with-items deletes them with the vault. `sessio
 device's session is ended by suspending or revoking the device (`device revoke`). `session end
 --others` ends every other one of those; devices stay logged in. rv ends its own session when
 a command exits.
+`device revoke` removes one or more devices: it suspends them at once (the server refuses
+them from then on), then commits their revocation with a key rotation. The default is for a
+lost or stolen device: a full rotation that also changes the Secret Key in the same commit,
+with a new Emergency Kit (and a new recovery code where recovery is on) printed and confirmed
+before anything is committed; the master password stays. --keep-secret-key keeps the Secret
+Key (only if nobody can learn your master password). --standard is for a device you wiped
+and handed over: a standard rotation, Secret Key kept. While a removal runs, your other
+devices' changes are paused for up to 10 minutes and sent once it is done. A removal that was
+interrupted is named by every command that goes online: run `device revoke` again to finish
+it, or `device unsuspend` to cancel it. `device list` marks devices enrolled in the last 30
+days, and suspended ones.
 <custom field> is --custom <label>=<text>, --custom-secret <label> (a hidden field; its value
 is asked for) or --custom-bool <label>=true|false. <id> is a URI's or custom field's element
 id as `item show` prints it in the field's key (uri/<id>/value), or a unique prefix of one.
@@ -489,14 +501,25 @@ pub enum Command {
     },
     /// `device list`.
     DeviceList,
-    /// `device revoke`.
+    /// `device revoke` (ADR 0091 §3).
     DeviceRevoke {
-        /// The device.
-        device: String,
+        /// The devices, one or more.
+        devices: Vec<String>,
         /// `--name`: the login name, for the re-authentication.
         name: String,
-        /// `--standard`: a standard rotation instead of the full one.
+        /// `--standard`: "wiped and handed over", a standard rotation that keeps the Secret
+        /// Key, instead of the "lost or stolen" full one.
         standard: bool,
+        /// `--keep-secret-key`: "lost or stolen" without the new Secret Key ("only if nobody
+        /// can learn your master password").
+        keep_secret_key: bool,
+    },
+    /// `device unsuspend`: cancels a removal left half done (ADR 0091 §3 step 8).
+    DeviceUnsuspend {
+        /// The devices, one or more.
+        devices: Vec<String>,
+        /// `--name`: the login name, for the re-authentication.
+        name: String,
     },
     /// `device forget`.
     DeviceForget,
@@ -1272,23 +1295,39 @@ fn device(args: &mut Args) -> Result<Command, CliError> {
     match args.next().as_deref() {
         Some("list") => Ok(Command::DeviceList),
         Some("forget") => Ok(Command::DeviceForget),
-        Some("revoke") => {
-            let device = args.positional("the device")?;
-            let (mut name, mut standard) = (None, false);
+        Some(verb @ ("revoke" | "unsuspend")) => {
+            let mut devices = vec![args.positional("the device")?];
+            let (mut name, mut standard, mut keep_secret_key) = (None, false, false);
             while let Some(option) = args.next() {
                 match option.as_str() {
                     "--name" => name = Some(args.value("--name")?),
-                    "--standard" => standard = true,
+                    "--standard" if verb == "revoke" => standard = true,
+                    "--keep-secret-key" if verb == "revoke" => keep_secret_key = true,
+                    other if !other.starts_with('-') && !other.is_empty() => {
+                        devices.push(other.to_owned());
+                    }
                     other => return Err(unknown(other)),
                 }
             }
+            let name = required(name, "--name")?;
+            if verb == "unsuspend" {
+                return Ok(Command::DeviceUnsuspend { devices, name });
+            }
+            if standard && keep_secret_key {
+                // A wiped device keeps the Secret Key anyway: the two say one thing twice, or
+                // two different reasons.
+                return Err(usage(
+                    "--standard already keeps the Secret Key; pass one of the two",
+                ));
+            }
             Ok(Command::DeviceRevoke {
-                device,
-                name: required(name, "--name")?,
+                devices,
+                name,
                 standard,
+                keep_secret_key,
             })
         }
-        _ => Err(usage("device needs list, revoke or forget")),
+        _ => Err(usage("device needs list, revoke, unsuspend or forget")),
     }
 }
 
@@ -1596,12 +1635,51 @@ mod tests {
         assert_eq!(
             command("device revoke ab --name alice"),
             Command::DeviceRevoke {
-                device: "ab".to_owned(),
+                devices: vec!["ab".to_owned()],
                 name: "alice".to_owned(),
-                standard: false
+                standard: false,
+                keep_secret_key: false
             }
         );
         assert_eq!(command("recovery cancel"), Command::RecoveryCancel);
+    }
+
+    /// ADR 0091 §3: several devices, the two reasons and the Secret Key opt-out, and the
+    /// cancellation.
+    #[test]
+    fn device_revoke_and_unsuspend_parse() {
+        assert_eq!(
+            command("device revoke ab cd --name alice --keep-secret-key"),
+            Command::DeviceRevoke {
+                devices: vec!["ab".to_owned(), "cd".to_owned()],
+                name: "alice".to_owned(),
+                standard: false,
+                keep_secret_key: true
+            }
+        );
+        assert_eq!(
+            command("device revoke ab --standard --name alice"),
+            Command::DeviceRevoke {
+                devices: vec!["ab".to_owned()],
+                name: "alice".to_owned(),
+                standard: true,
+                keep_secret_key: false
+            }
+        );
+        assert!(parsed("device revoke ab --name alice --standard --keep-secret-key").is_err());
+        assert!(parsed("device revoke --name alice").is_err());
+        assert_eq!(
+            command("device unsuspend ab cd --name alice"),
+            Command::DeviceUnsuspend {
+                devices: vec!["ab".to_owned(), "cd".to_owned()],
+                name: "alice".to_owned()
+            }
+        );
+        assert!(parsed("device unsuspend ab --name alice --standard").is_err());
+    }
+
+    #[test]
+    fn more_commands_parse() {
         let with_account = parsed("sync --account 00ff").unwrap();
         assert_eq!(with_account.account.as_deref(), Some("00ff"));
         assert_eq!(with_account.command, Command::Sync);

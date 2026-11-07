@@ -194,11 +194,30 @@ rv import --in vault.rizzy --vault Work                  # into Work instead of 
 
 ```sh
 rv device list
-rv device revoke 9c41 --name alice     # a lost or stolen device: revokes it and rotates every key
-rv device revoke 9c41 --name alice --standard   # a device you wiped yourself
+rv device revoke 9c41 --name alice     # a lost or stolen device: new Secret Key, every key rotated
+rv device revoke 9c41 77d0 --name alice         # several devices in one go
+rv device revoke 9c41 --name alice --keep-secret-key   # lost, but nobody can learn your password
+rv device revoke 9c41 --name alice --standard   # a device you wiped and handed over
+rv device unsuspend 9c41 --name alice  # cancels a removal that was interrupted
 rv rotate --name alice                 # --full also replaces the identity keys
 rv device forget                       # removes this computer's copy of the account
 ```
+
+`device list` shows each device's enrolment time, marks with `recent` a device enrolled in the last 30 days (so that a device someone else added with your credentials stands out), and marks with `suspended` a device whose removal was started and not finished.
+
+`device revoke` removes one or more devices ([ADR 0091](adr/0091-revoked-device-rotation-race.md)). It first settles anything an earlier command left unfinished, then logs in again with your master password and suspends each device at once: from then on the server refuses it. Then it commits the revocations together with a key rotation, in one request:
+
+- **Lost or stolen** (the default): a full rotation (new account, vault and identity keys) that also **changes your Secret Key** in the same commit. Whoever holds the device and learns your master password still cannot log in, because the device never held the new Secret Key. The master password stays. Before anything is committed, `rv` prints the new Emergency Kit (with a new recovery code when recovery is on) and asks you to type the last four characters of its Secret Key. Your other devices ask for the new Secret Key the next time they go online, and show a new safety number to compare.
+- `--keep-secret-key`: the same full rotation, but the Secret Key stays. Only choose it if nobody can learn your master password. It asks for your current recovery code, which stays valid.
+- `--standard`: for a device you wiped and handed over yourself. A standard rotation; the Secret Key and the identity keys stay. It asks for your current recovery code.
+
+Revocation protects future data only: what a device already holds stays readable to whoever holds it.
+
+While a removal runs, the server pauses every change from your other devices for up to 10 minutes, so that nothing moves under the rotation. A command that hits the pause says "Another of your devices is removing a device. Changes are paused for up to 10 minutes.", waits and sends the same change again every 15 seconds; reading goes on. Once the removal is committed the pause ends at once. If the pause outlasts the window, the command fails with `revocation_pending` and nothing was changed: run it again.
+
+If `device revoke` is interrupted after it saved the commit, the next `rv` command settles it like an interrupted Secret Key change (it asks for the login name and the master password): the Emergency Kit it printed is the valid one. If it is interrupted before that, nothing is saved but the devices stay suspended (they can do nothing). Every command that goes online then names each such device with the two ways out: `rv device revoke <device> --name <login>` finishes removing it (with a new kit; one printed by the interrupted run is void), and `rv device unsuspend <device> --name <login>` cancels the removal, after which the device syncs again.
+
+A device that was removed is refused by the server; `rv` says so, and `rv device forget` deletes its local data. If it still held an unsent rotation or credential change, it logs in once with your master password to check, deletes that change without sending it when the account shows the device removed, and stops syncing.
 
 `device forget` first uploads the edits the server has not acknowledged, if it can verify them, and tells you what was lost if it cannot. It asks you to type a confirmation. It does not revoke the device: do that from another device with `rv device revoke`.
 

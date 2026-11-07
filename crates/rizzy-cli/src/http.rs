@@ -58,8 +58,10 @@
 //! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
 //! [ADR 0030]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0030-client-tls-rv.md
 
+use std::io::Write as _;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use http_body_util::{BodyExt as _, Full, LengthLimitError, Limited};
@@ -70,15 +72,18 @@ use hyper::header::{
 use hyper::{Method, Request, StatusCode};
 use hyper_util::rt::TokioIo;
 use rizzy_client::device::UnlockedDevice;
+use rizzy_client::revocation::{REVOCATION_PENDING_MESSAGE, next_revocation_retry};
+use rizzy_client::rizzy_proto::account::{AccountStateQuery, RevocationWindowNotice};
 use rizzy_client::rizzy_proto::auth::RequestSignature;
 use rizzy_client::rizzy_proto::error::{ErrorCode, ErrorResponse};
 use rizzy_client::rizzy_proto::http::{
-    BEARER_SCHEME, REQUEST_COUNTER_HEADER, REQUEST_SIGNATURE_HEADER,
+    BEARER_SCHEME, REQUEST_COUNTER_HEADER, REQUEST_SIGNATURE_HEADER, paths,
 };
 use rizzy_client::rizzy_proto::limits::MAX_UPLOAD_BODY_LEN;
 use rizzy_client::rizzy_proto::meta::CLIENT_HEADER;
 use rizzy_client::rizzy_proto::wire::SessionToken;
 use rizzy_client::session::DeviceSession;
+use rizzy_core::ids::DeviceId;
 use rizzy_core::normalize::{Scheme, ServerOrigin};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
@@ -90,6 +95,7 @@ use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
 
 use crate::error::CliError;
+use crate::sys::now_ms;
 use crate::tls::{Trust, failure_of};
 
 /// The most bytes of a response body this client reads: the largest body `v1` sizes anything
@@ -124,6 +130,89 @@ pub enum Auth<'a> {
     Presigned(&'a SessionToken, &'a RequestSignature),
 }
 
+impl Auth<'_> {
+    /// The same authentication, borrowed again for one more request.
+    fn reborrow(&mut self) -> Auth<'_> {
+        match self {
+            Auth::None => Auth::None,
+            Auth::Bearer(token) => Auth::Bearer(token),
+            Auth::Device(session, unlocked) => Auth::Device(session, unlocked),
+            Auth::Presigned(token, signature) => Auth::Presigned(token, signature),
+        }
+    }
+}
+
+/// What a request refused `revocation_pending` waits through ([ADR 0091] §2 "What clients
+/// see"): the waits between its retries and the one note "Changes are paused". The default,
+/// the terminal's, sleeps on the runtime's clock and writes the note to standard error; a host
+/// may supply its own ([`Pauses::with`]), as the tests do so that a retry does not take real
+/// minutes. The retry rule and its bounds are the same either way ([`Http::with_pauses`]).
+///
+/// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+#[derive(Clone, Default)]
+pub struct Pauses(Option<Arc<dyn Pause>>);
+
+impl std::fmt::Debug for Pauses {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Pauses(host)"
+        } else {
+            "Pauses(terminal)"
+        })
+    }
+}
+
+/// A host's own waits and note, for [`Pauses::with`].
+pub trait Pause: Send + Sync {
+    /// Shows `text` to the user.
+    fn note(&self, text: &str);
+    /// Waits about `duration` before the retry (or not at all).
+    fn wait(&self, duration: Duration);
+}
+
+impl Pauses {
+    /// The waits and the note of `pause` instead of the terminal's.
+    #[must_use]
+    pub fn with(pause: Arc<dyn Pause>) -> Self {
+        Self(Some(pause))
+    }
+
+    /// Shows `text`.
+    fn note(&self, text: &str) {
+        match &self.0 {
+            Some(pause) => pause.note(text),
+            None => {
+                let _ = writeln!(std::io::stderr().lock(), "{text}");
+            }
+        }
+    }
+
+    /// Waits `duration`.
+    async fn wait(&self, duration: Duration) {
+        match &self.0 {
+            Some(pause) => pause.wait(duration),
+            None => tokio::time::sleep(duration).await,
+        }
+    }
+}
+
+/// The one field of an `account/state` answer the retry reads. A response type: the other
+/// fields are ignored, and nothing is verified, since the window only times the retry (ADR 0091
+/// §2: "used only for display and retry timing").
+#[derive(serde::Deserialize)]
+struct WindowProbe {
+    /// The open revocation window, if the server reports one.
+    #[serde(default)]
+    revocation_window: Option<RevocationWindowNotice>,
+}
+
+/// The query of that probe: known sequence numbers above any real one, so that the answer
+/// carries no bundle and no settings.
+const PROBE_QUERY: AccountStateQuery = AccountStateQuery {
+    known_bundle_seq: 0xFFFF_FFFF,
+    known_settings_seq: 0xFFFF_FFFF,
+};
+
 /// A response: the status and the collected body.
 #[derive(Debug)]
 struct Reply {
@@ -149,6 +238,10 @@ pub struct Http {
     /// For an `https://` origin, the TLS configuration and the name the certificate must
     /// carry; `None` for loopback `http://`.
     tls: Option<(Arc<ClientConfig>, ServerName<'static>)>,
+    /// The waits and the note of a `revocation_pending` retry ([`Pauses`]).
+    pauses: Pauses,
+    /// Whether this transport, or a clone of it, already showed the pause note.
+    paused: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for Http {
@@ -213,7 +306,17 @@ impl Http {
             authority: HeaderValue::from_str(authority).map_err(|_| bad())?,
             origin,
             tls,
+            pauses: Pauses::default(),
+            paused: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// This transport with the waits and the note of `pauses` for a `revocation_pending`
+    /// retry (the command's, [`crate::device::Env::pauses`]).
+    #[must_use]
+    pub fn with_pauses(mut self, pauses: Pauses) -> Self {
+        self.pauses = pauses;
+        self
     }
 
     /// The canonical origin this transport dials.
@@ -314,12 +417,100 @@ impl Http {
         serde_json::from_slice(&reply.body).map_err(|_| CliError::BadAnswer)
     }
 
-    /// Builds, signs and sends one request, and collects the answer up to `max_body` bytes.
+    /// Sends one request ([`Http::send_once`]), and again while the server refuses it
+    /// `revocation_pending` ([ADR 0091] §2 "What clients see"): the same request (signed again
+    /// with a fresh counter over a device session, ADR 0028 item 5) after
+    /// `REVOCATION_RETRY_MS`, then every `REVOCATION_RETRY_MS`, until the window's
+    /// `expires_at_ms` plus the grace, read from a fresh `account/state` over the same
+    /// session before each wait, and at most `MAX_REVOCATION_RETRIES` times
+    /// (`rizzy_client::revocation::next_revocation_retry`). The pause note is shown once. The
+    /// last refusal is the answer when the retries end, or when the window cannot be read.
+    ///
+    /// Every write of the CLI goes through here, so no call site retries on its own. Reads are
+    /// never refused, and a request without a session (no `account/state` to read) is not
+    /// retried.
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
     async fn send(
         &self,
         method: Method,
         path: &'static str,
         body: Vec<u8>,
+        mut auth: Auth<'_>,
+        max_body: usize,
+    ) -> Result<Reply, CliError> {
+        let body = Bytes::from(body);
+        let mut retries = 0;
+        loop {
+            let reply = self
+                .send_once(
+                    method.clone(),
+                    path,
+                    body.clone(),
+                    auth.reborrow(),
+                    max_body,
+                )
+                .await?;
+            if path == paths::ACCOUNT_STATE
+                || !matches!(
+                    error_of(&reply),
+                    CliError::Server(ErrorCode::RevocationPending)
+                )
+            {
+                return Ok(reply);
+            }
+            let Ok(window) = self.revocation_window(auth.reborrow()).await else {
+                return Ok(reply);
+            };
+            let now = now_ms();
+            let Some(at) = next_revocation_retry(retries, now, window) else {
+                return Ok(reply);
+            };
+            if !self.paused.swap(true, Ordering::Relaxed) {
+                self.pauses.note(REVOCATION_PENDING_MESSAGE);
+            }
+            self.pauses
+                .wait(Duration::from_millis(at.saturating_sub(now)))
+                .await;
+            retries += 1;
+        }
+    }
+
+    /// The open revocation window as a fresh `account/state` over `auth` reports it (advisory,
+    /// for the retry's timing only). A request without a session cannot ask.
+    async fn revocation_window(&self, auth: Auth<'_>) -> Result<Option<(DeviceId, u64)>, CliError> {
+        if matches!(auth, Auth::None | Auth::Presigned(..)) {
+            return Err(CliError::BadAnswer);
+        }
+        let body = serde_json::to_vec(&PROBE_QUERY).map_err(|_| CliError::BadAnswer)?;
+        let reply = self
+            .send_once(
+                Method::POST,
+                paths::ACCOUNT_STATE,
+                Bytes::from(body),
+                auth,
+                MAX_RESPONSE_LEN,
+            )
+            .await?;
+        if reply.status != StatusCode::OK {
+            return Err(error_of(&reply));
+        }
+        let probe: WindowProbe =
+            serde_json::from_slice(&reply.body).map_err(|_| CliError::BadAnswer)?;
+        Ok(probe.revocation_window.map(|w| {
+            (
+                DeviceId::from_bytes(w.revoker_device_id.to_bytes()),
+                w.expires_at_ms,
+            )
+        }))
+    }
+
+    /// Builds, signs and sends one request, and collects the answer up to `max_body` bytes.
+    async fn send_once(
+        &self,
+        method: Method,
+        path: &'static str,
+        body: Bytes,
         auth: Auth<'_>,
         max_body: usize,
     ) -> Result<Reply, CliError> {
@@ -354,7 +545,7 @@ impl Http {
         let deadline = REQUEST_TIMEOUT
             + Duration::from_secs(u64::try_from(body.len() / (64 * 1024)).unwrap_or(u64::MAX));
         let request = request
-            .body(Full::new(Bytes::from(body)))
+            .body(Full::new(body))
             .map_err(|_| CliError::Network)?;
         let exchange = async {
             let tcp = tokio::time::timeout(

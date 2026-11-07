@@ -72,6 +72,7 @@ use rizzy_client::rizzy_proto::change::{CommitChangeRequest, ReregisterStartResp
 use rizzy_client::rizzy_proto::http::paths;
 use rizzy_client::rizzy_proto::totp::TotpEnrolStartResponse;
 use rizzy_client::rizzy_proto::wire::SessionToken;
+use rizzy_client::rotation::RevokeDevice;
 use rizzy_client::store::record::{DeviceRecord, Stage};
 use rizzy_client::two_factor::{TotpEnrolment, disable_request};
 use rizzy_client::unlock::verify_unlock;
@@ -114,15 +115,15 @@ fn new_password(ui: &mut dyn Ui) -> Result<Zeroizing<String>, CliError> {
 /// How long after the change's login the device logs in once more before the commit: the
 /// server takes it only within `FRESH_SESSION_MS` (5 minutes, `rizzy-domain-auth`) of a login,
 /// and a minute is left for the rotation and the commit's way.
-const RELOGIN_AFTER: Duration = Duration::from_secs(4 * 60);
+pub(super) const RELOGIN_AFTER: Duration = Duration::from_secs(4 * 60);
 
 /// What a change's new Emergency Kit carried, for what the user is told about the old one.
 #[derive(Clone, Copy, Debug)]
-struct ShownKit {
+pub(super) struct ShownKit {
     /// The kit carries a new recovery code.
-    new_recovery_code: bool,
+    pub(super) new_recovery_code: bool,
     /// Recovery is on and the kit carries no new code: the old kit's code stays the valid one.
-    old_recovery_code_kept: bool,
+    pub(super) old_recovery_code_kept: bool,
 }
 
 /// What a finished credential change did, for the final message of `rv`.
@@ -137,7 +138,7 @@ pub struct CredentialOutcome {
 
 /// Tells the user that a change ended without the server holding it: whatever new kit it
 /// showed is void, and the previous credentials and Emergency Kit stay the valid ones.
-fn change_not_made(ui: &mut dyn Ui, shown: Option<ShownKit>) {
+pub(super) fn change_not_made(ui: &mut dyn Ui, shown: Option<ShownKit>) {
     ui.note(match shown {
         Some(ShownKit {
             new_recovery_code: true,
@@ -167,7 +168,7 @@ fn change_not_made(ui: &mut dyn Ui, shown: Option<ShownKit>) {
 /// no new recovery code while recovery is on leaves the old kit's code the only valid one
 /// (CRYPTO.md §11.5 step 4: a new code only "when the default rotation issues one"), so the
 /// header does not tell the user to drop the old kit.
-fn show_kit(
+pub(super) fn show_kit(
     ui: &mut dyn Ui,
     pending: &mut PendingCredentialChange,
     recovery_on: bool,
@@ -297,7 +298,9 @@ impl Device {
                 }
             }
         }
-        let flight = self.commit_credentials(ui, pending, token, shown).await?;
+        let flight = self
+            .commit_credentials(ui, pending, token, shown, None)
+            .await?;
         // The server holds the new credential: this run goes on with it.
         self.password = password;
         let dropped_items = Box::pin(self.finish_rotation(ui, flight)).await?;
@@ -310,13 +313,15 @@ impl Device {
     /// Writes the pending record and the commit body, and sends the commit
     /// ([`Device::send_rotation`]). When it fails, the user is told what holds: a change whose
     /// outcome is unknown stays saved, and one that never reached the server or was refused
-    /// for good is dropped, with any kit it showed void.
-    async fn commit_credentials(
+    /// for good is dropped, with any kit it showed void. `renew` is a revocation's renewing
+    /// suspend ([`RotationInFlight::renew`]).
+    pub(super) async fn commit_credentials(
         &mut self,
         ui: &mut dyn Ui,
         mut pending: PendingCredentialChange,
         token: SessionToken,
         shown: Option<ShownKit>,
+        renew: Option<RevokeDevice>,
     ) -> Result<RotationInFlight, CliError> {
         let pending_record =
             match pending.pending_record(&mut self.rng, &self.state, &self.unlocked) {
@@ -333,8 +338,9 @@ impl Device {
         let mut flight = RotationInFlight {
             pending: Flight::Credential(Box::new(pending)),
             token,
+            renew,
         };
-        if let Err(e) = self.send_rotation(&mut flight).await {
+        if let Err(e) = self.send_rotation(ui, &mut flight).await {
             if !matches!(e, CliError::Alarm(_)) {
                 // The stored body is there exactly while a commit is persisted and not
                 // settled; without it, the change never reached the server or was refused for

@@ -872,6 +872,7 @@ impl Rv {
                     }),
                     ui: &mut script,
                     sign_outs: SignOuts::default(),
+                    pauses: rizzy_cli::http::Pauses::default(),
                 };
                 self.runtime.block_on(run(invocation, &mut env))
             }
@@ -1484,7 +1485,14 @@ fn rv_end_to_end() {
     outcome.unwrap();
     assert_eq!(c.items().len(), 7);
     let (outcome, revoked) = a.try_run(
-        &["device", "revoke", &b_device, "--name", "alice"],
+        &[
+            "device",
+            "revoke",
+            &b_device,
+            "--name",
+            "alice",
+            "--keep-secret-key",
+        ],
         &[PASSWORD, &recovery_code],
         &[],
         &[],
@@ -1569,6 +1577,7 @@ fn rv_end_to_end() {
             trust: rizzy_cli::tls::Trust::default(),
             ui: &mut script,
             sign_outs: SignOuts::default(),
+            pauses: rizzy_cli::http::Pauses::default(),
         };
         let held = a
             .runtime
@@ -1601,6 +1610,7 @@ fn open_device(rv: &Rv, script: &mut Script) -> rizzy_cli::device::Device {
         trust: rizzy_cli::tls::Trust::default(),
         ui: script,
         sign_outs: SignOuts::default(),
+        pauses: rizzy_cli::http::Pauses::default(),
     };
     rv.runtime
         .block_on(rizzy_cli::device::Device::open(&mut env))
@@ -1636,6 +1646,7 @@ fn interrupted_commits_are_settled_by_the_next_run() {
             trust: rizzy_cli::tls::Trust::default(),
             ui: &mut script,
             sign_outs: SignOuts::default(),
+            pauses: rizzy_cli::http::Pauses::default(),
         };
         let prepared = a
             .runtime
@@ -1687,7 +1698,7 @@ fn interrupted_commits_are_settled_by_the_next_run() {
         let mut device = open_device(&a, &mut script);
         let flight = a
             .runtime
-            .block_on(device.begin_rotation(&mut script, "alice", RotationLevel::Standard, None))
+            .block_on(device.begin_rotation(&mut script, "alice", RotationLevel::Standard))
             .unwrap();
         a.runtime
             .block_on(device.persist_rotation(&flight))
@@ -1714,10 +1725,10 @@ fn interrupted_commits_are_settled_by_the_next_run() {
         let mut device = open_device(&a, &mut script);
         let mut flight = a
             .runtime
-            .block_on(device.begin_rotation(&mut script, "alice", RotationLevel::Standard, None))
+            .block_on(device.begin_rotation(&mut script, "alice", RotationLevel::Standard))
             .unwrap();
         a.runtime
-            .block_on(device.send_rotation(&mut flight))
+            .block_on(device.send_rotation(&mut script, &mut flight))
             .unwrap();
     }
     let (outcome, settled) = a.try_run(&["sync"], &[PASSWORD], &[], &[]);
@@ -1737,7 +1748,7 @@ fn interrupted_commits_are_settled_by_the_next_run() {
         let mut device = open_device(&a, &mut script);
         let flight = a
             .runtime
-            .block_on(device.begin_rotation(&mut script, "alice", RotationLevel::Standard, None))
+            .block_on(device.begin_rotation(&mut script, "alice", RotationLevel::Standard))
             .unwrap();
         a.runtime
             .block_on(device.persist_rotation(&flight))
@@ -1792,6 +1803,7 @@ fn an_interrupted_signup_is_registered_again_after_its_setup_was_retired() {
             trust: rizzy_cli::tls::Trust::default(),
             ui: &mut script,
             sign_outs: SignOuts::default(),
+            pauses: rizzy_cli::http::Pauses::default(),
         };
         let prepared = a
             .runtime
@@ -4096,7 +4108,14 @@ fn canary_secrets_never_reach_the_server_in_any_form() {
         .unwrap()
         .to_owned();
     let (outcome, revoked) = a.try_run(
-        &["device", "revoke", &b_device, "--name", "alice"],
+        &[
+            "device",
+            "revoke",
+            &b_device,
+            "--name",
+            "alice",
+            "--keep-secret-key",
+        ],
         &[PASSWORD, &recovery_code],
         &[],
         &[],

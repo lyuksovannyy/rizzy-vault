@@ -12,6 +12,7 @@ use std::fmt;
 use std::io;
 
 use rizzy_client::ClientError;
+use rizzy_client::revocation::REVOCATION_PENDING_MESSAGE;
 use rizzy_client::rizzy_import::ImportError;
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::store::rows::Alarm;
@@ -151,9 +152,14 @@ impl CliError {
     ///   cannot read, possibly after the transaction committed;
     /// - [`CliError::RateLimited`]: not applied, but the same bytes are good later, so the
     ///   saved state is kept and sent again rather than thrown away.
+    /// - `revocation_pending` ([ADR 0091] §2): as a rate limit. Another device's revocation
+    ///   window froze the account; nothing was applied, and the same bytes are good once it
+    ///   closes, so the saved state is kept.
     /// - `setup_retired` (ADR 0031 point 8): not applied, and the saved state is kept: the
     ///   registration is rerun once ([`CliError::restarts_registration`]), and a second refusal
     ///   leaves the change saved for the next run.
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
     #[must_use]
     pub const fn refuses_commit(&self) -> bool {
         matches!(
@@ -229,6 +235,13 @@ impl fmt::Display for CliError {
             // this device and is sent again by the next `rv sync`.
             Self::Server(ErrorCode::QuotaExceeded) => f.write_str(
                 "the server refused: quota_exceeded (this account has reached its storage limit on the server; the change stays on this device, unsent, until the operator raises RIZZY_ACCOUNT_QUOTA_BYTES)",
+            ),
+            // ADR 0091 §2: another device's revocation window is open. The request was retried
+            // until the window's end and is not applied; the same request is good later.
+            Self::Server(ErrorCode::RevocationPending) => write!(
+                f,
+                "the server refused: revocation_pending ({REVOCATION_PENDING_MESSAGE} Nothing was \
+                 changed; run the command again once the other device has finished)"
             ),
             Self::Server(code) => write!(f, "the server refused: {}", code_name(*code)),
             Self::RateLimited(Some(seconds)) => write!(
@@ -367,5 +380,11 @@ mod tests {
         let quota = CliError::Server(ErrorCode::QuotaExceeded).to_string();
         assert!(quota.contains("quota_exceeded") && quota.contains("RIZZY_ACCOUNT_QUOTA_BYTES"));
         assert!(!CliError::Server(ErrorCode::QuotaExceeded).refuses_commit());
+        // ADR 0091 §2: not applied, and the same bytes are good once the window closes: kept,
+        // like a rate limit, and the message is the pause message.
+        let paused = CliError::Server(ErrorCode::RevocationPending);
+        assert!(!paused.refuses_commit() && !paused.outcome_unknown());
+        let text = paused.to_string();
+        assert!(text.contains("revocation_pending") && text.contains(REVOCATION_PENDING_MESSAGE));
     }
 }

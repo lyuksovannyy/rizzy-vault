@@ -77,6 +77,37 @@ pub trait Ui {
     /// Holds the user for `duration` (the plaintext-export hold) and returns how long it held,
     /// never less than `duration` for the terminal.
     fn hold(&mut self, duration: Duration) -> Duration;
+
+    /// A point of a multi-step flow at which a test may end the flow as a crash of the process
+    /// would ([`Checkpoint`]; the crash injection of [ADR 0091] §7 test 5): the flow
+    /// returns the error at once, and nothing it would do afterwards (no cleanup) runs. The
+    /// terminal never stops a flow.
+    ///
+    /// # Errors
+    /// Whatever the host returns to stop the flow there.
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+    fn checkpoint(&mut self, point: Checkpoint) -> Result<(), CliError> {
+        let _ = point;
+        Ok(())
+    }
+}
+
+/// The points of [`Ui::checkpoint`], in the order of a device revocation (ADR 0091 §3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Checkpoint {
+    /// Every chosen device is suspended (step 3); no Emergency Kit is shown yet.
+    Suspended,
+    /// The new Emergency Kit is shown and confirmed (step 4); the pending record is not
+    /// written yet.
+    KitConfirmed,
+    /// The pending record and the exact commit are written (step 6); the commit is not sent
+    /// yet. Every rotation passes here.
+    Persisted,
+    /// The server acknowledged the commit; the device state is not finalised yet. Every
+    /// rotation passes here.
+    Acknowledged,
 }
 
 /// The terminal (module docs).

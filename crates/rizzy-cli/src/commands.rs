@@ -65,6 +65,7 @@ use rizzy_client::identity_gen::{
 };
 use rizzy_client::items::{Dot, FieldEdit, FieldKey, ItemId, ItemLifecycle, ItemType, Value};
 use rizzy_client::lists::split_order_ops;
+use rizzy_client::revocation::RECENT_ENROLMENT_MS;
 use rizzy_client::rizzy_import::{self, Format};
 use rizzy_client::rotation::RotationLevel;
 use rizzy_client::sessions::{
@@ -95,7 +96,7 @@ use crate::args::{
     ImportFormat, Invocation, USAGE,
 };
 use crate::db::Db;
-use crate::device::{CredentialChange, Device, Env, pick_account};
+use crate::device::{CredentialChange, Device, Env, Removal, pick_account};
 use crate::enrol;
 use crate::error::{CliError, alarm_text};
 use crate::paths::{AccountLock, cache_path, hex, read_limited, unhex, write_new_file};
@@ -276,10 +277,23 @@ async fn run_command(invocation: Invocation, env: &mut Env<'_>) -> Result<(), Cl
         } => Box::pin(vaults::delete(env, &vault, &name, with_items)).await,
         Command::DeviceList => Box::pin(device_list(env)).await,
         Command::DeviceRevoke {
-            device,
+            devices,
             name,
             standard,
-        } => Box::pin(device_revoke(env, &device, &name, standard)).await,
+            keep_secret_key,
+        } => {
+            Box::pin(device_revoke(
+                env,
+                &devices,
+                &name,
+                standard,
+                keep_secret_key,
+            ))
+            .await
+        }
+        Command::DeviceUnsuspend { devices, name } => {
+            Box::pin(device_unsuspend(env, &devices, &name)).await
+        }
         Command::DeviceForget => device_forget(env).await,
         Command::SessionList => Box::pin(session_list(env)).await,
         Command::SessionEnd(prefix) => Box::pin(session_end(env, Some(&prefix))).await,
@@ -291,7 +305,7 @@ async fn run_command(invocation: Invocation, env: &mut Env<'_>) -> Result<(), Cl
             } else {
                 RotationLevel::Standard
             };
-            let dropped = Box::pin(device.rotate(env.ui, &name, level, None)).await?;
+            let dropped = Box::pin(device.rotate(env.ui, &name, level)).await?;
             report_rotation(env.ui, dropped);
             Ok(())
         }
@@ -1649,7 +1663,9 @@ const fn kind_name(kind: DeviceKind) -> &'static str {
 }
 
 /// `device list`: the signed device set, from the server when it is reachable, else as last
-/// verified.
+/// verified. Each device shows its enrolment time; one enrolled in the last 30 days is marked
+/// `recent` (ADR 0091 §3 step 2: a device a thief enrolled can be picked as well), and one the
+/// server reports suspended and not yet removed is marked `suspended`.
 async fn device_list(env: &mut Env<'_>) -> Result<(), CliError> {
     let mut device = Device::open(env).await?;
     match device.online(env.ui).await {
@@ -1660,6 +1676,7 @@ async fn device_list(env: &mut Env<'_>) -> Result<(), CliError> {
         Err(e) => return Err(e),
     }
     let own = device.state().device_id();
+    let now = now_ms();
     let (certificates, revocations) = device.devices();
     for entry in certificates {
         let certificate = &entry.certificate;
@@ -1669,13 +1686,20 @@ async fn device_list(env: &mut Env<'_>) -> Result<(), CliError> {
         let revoked = revocations
             .iter()
             .any(|r| r.revocation.device_id == certificate.device_id);
-        let note = match (certificate.device_id == own, revoked) {
-            (_, true) => "  revoked",
-            (true, false) => "  this device",
-            (false, false) => "",
+        let suspended = device.suspended_devices().contains(&certificate.device_id);
+        let recent = if now.saturating_sub(certificate.created_at_ms) < RECENT_ENROLMENT_MS {
+            "  recent"
+        } else {
+            ""
+        };
+        let note = match (certificate.device_id == own, revoked, suspended) {
+            (_, true, _) => "  revoked",
+            (true, false, _) => "  this device",
+            (false, false, true) => "  suspended",
+            (false, false, false) => "",
         };
         env.ui.print(&format!(
-            "{}  {:<16}  enrolled {}{note}",
+            "{}  {:<16}  enrolled {}{recent}{note}",
             hex(certificate.device_id.as_bytes()),
             kind_name(certificate.device_kind),
             certificate.created_at_ms / 1000,
@@ -1684,55 +1708,150 @@ async fn device_list(env: &mut Env<'_>) -> Result<(), CliError> {
     Ok(())
 }
 
-/// `device revoke` (CRYPTO.md §11.8): suspension, then the revocation and a rotation in one
-/// commit. Full by default (a lost or stolen device); `--standard` for one wiped and handed on.
-async fn device_revoke(
-    env: &mut Env<'_>,
-    device_text: &str,
-    login_name: &str,
-    standard: bool,
-) -> Result<(), CliError> {
-    let mut device = Device::open(env).await?;
-    device.online(env.ui).await?;
-    let wanted = device_text.to_ascii_lowercase();
+/// The device of the account named by `text` (a hex id or a unique prefix, module docs) that
+/// is in the device set, not revoked, and not this device.
+fn other_device(device: &Device, text: &str) -> Result<DeviceId, CliError> {
+    let wanted = text.to_ascii_lowercase();
     if wanted.is_empty() || !wanted.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(CliError::BadInput(
             "a device is named by its hex id or a prefix of it",
         ));
     }
-    let own = device.state().device_id();
-    let target: DeviceId = {
-        let (certificates, revocations) = device.devices();
-        let mut matches = certificates.iter().filter(|c| {
-            c.certificate.in_device_set()
-                && hex(c.certificate.device_id.as_bytes()).starts_with(&wanted)
-                && !revocations
-                    .iter()
-                    .any(|r| r.revocation.device_id == c.certificate.device_id)
-        });
-        match (matches.next(), matches.next()) {
-            (Some(one), None) => one.certificate.device_id,
-            (None, _) => return Err(CliError::BadInput("no such device, or already revoked")),
-            _ => return Err(CliError::BadInput("several devices start with that id")),
-        }
+    let (certificates, revocations) = device.devices();
+    let mut matches = certificates.iter().filter(|c| {
+        c.certificate.in_device_set()
+            && hex(c.certificate.device_id.as_bytes()).starts_with(&wanted)
+            && !revocations
+                .iter()
+                .any(|r| r.revocation.device_id == c.certificate.device_id)
+    });
+    let target = match (matches.next(), matches.next()) {
+        (Some(one), None) => one.certificate.device_id,
+        (None, _) => return Err(CliError::BadInput("no such device, or already revoked")),
+        _ => return Err(CliError::BadInput("several devices start with that id")),
     };
-    if target == own {
+    if target == device.state().device_id() {
         return Err(CliError::BadInput(
             "this is the device you are using; revoke it from another device, or run `rv device forget`",
+        ));
+    }
+    Ok(target)
+}
+
+/// `device revoke` (ADR 0091 §3; CRYPTO.md §11.8): the chosen devices suspended at once, then
+/// their revocations in one rotation commit. "Lost or stolen" by default: a full rotation with a
+/// new Secret Key and Emergency Kit; `--keep-secret-key` keeps the Secret Key; `--standard`
+/// ("wiped and handed over") is a standard rotation that keeps it.
+async fn device_revoke(
+    env: &mut Env<'_>,
+    devices: &[String],
+    login_name: &str,
+    standard: bool,
+    keep_secret_key: bool,
+) -> Result<(), CliError> {
+    let mut device = Device::open(env).await?;
+    device.online(env.ui).await?;
+    let targets = devices
+        .iter()
+        .map(|text| other_device(&device, text))
+        .collect::<Result<Vec<_>, _>>()?;
+    // §3 step 2: what is removed, with its enrolment time; a recent one is marked.
+    let now = now_ms();
+    for target in &targets {
+        let (certificates, _) = device.devices();
+        let enrolled = certificates
+            .iter()
+            .find(|c| c.certificate.device_id == *target)
+            .map_or(0, |c| c.certificate.created_at_ms);
+        let recent = if now.saturating_sub(enrolled) < RECENT_ENROLMENT_MS {
+            " (enrolled in the last 30 days)"
+        } else {
+            ""
+        };
+        env.ui.note(&format!(
+            "Removing {}, enrolled {}{recent}.",
+            device_label(&device, *target),
+            recover::utc_text(enrolled)
         ));
     }
     env.ui.note(
         "Revocation protects future data only: what the device already holds stays readable \
          to whoever holds it.",
     );
-    let level = if standard {
-        RotationLevel::Standard
-    } else {
-        RotationLevel::Full
+    let removal = match (standard, keep_secret_key) {
+        (true, _) => Removal::Wiped,
+        (false, true) => Removal::LostKeepSecretKey,
+        (false, false) => Removal::Lost,
     };
-    let dropped = Box::pin(device.rotate(env.ui, login_name, level, Some(target))).await?;
-    env.ui.note("The device was revoked.");
-    report_rotation(env.ui, dropped);
+    if removal == Removal::Lost {
+        env.ui.note(
+            "The Secret Key is changed with the removal, so that whoever holds the device and \
+             learns your master password still cannot log in; your master password stays. A \
+             new Emergency Kit follows. (--keep-secret-key keeps the Secret Key: only if nobody \
+             can learn your master password.)",
+        );
+    }
+    let outcome = match Box::pin(device.revoke_devices(env.ui, login_name, &targets, removal)).await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            if !device.has_pending() && !matches!(e, CliError::Alarm(_)) {
+                env.ui.note(
+                    "Devices suspended before this failed stay suspended (the server refuses \
+                     them) until their removal is finished or cancelled: run this command \
+                     again to finish it, or `rv device unsuspend <device> --name <login>` to \
+                     cancel it.",
+                );
+            }
+            return Err(e);
+        }
+    };
+    env.ui.note(if targets.len() == 1 {
+        "The device was revoked."
+    } else {
+        "The devices were revoked."
+    });
+    match removal {
+        Removal::Lost if outcome.old_recovery_code_kept => env.ui.note(
+            "The Secret Key was changed: the Secret Key of your earlier Emergency Kit no longer \
+             works, but its recovery code stays valid and is the only copy. Keep it with the new \
+             kit.",
+        ),
+        Removal::Lost => env
+            .ui
+            .note("The Secret Key was changed; only the new Emergency Kit works from now on."),
+        Removal::LostKeepSecretKey | Removal::Wiped => {}
+    }
+    if removal != Removal::Wiped {
+        env.ui.note(
+            "The account key, the vault keys and the identity keys were rotated. Every other \
+             device shows a new safety number the next time it goes online: compare it before \
+             you accept it.",
+        );
+    }
+    report_rotation(env.ui, outcome.dropped_items);
+    Ok(())
+}
+
+/// `device unsuspend` (ADR 0091 §3 step 8, "Cancel"): cancels the removal of devices that
+/// were suspended and never revoked; they can sync again.
+async fn device_unsuspend(
+    env: &mut Env<'_>,
+    devices: &[String],
+    login_name: &str,
+) -> Result<(), CliError> {
+    let mut device = Device::open(env).await?;
+    device.online(env.ui).await?;
+    let targets = devices
+        .iter()
+        .map(|text| other_device(&device, text))
+        .collect::<Result<Vec<_>, _>>()?;
+    Box::pin(device.unsuspend_devices(env.ui, login_name, &targets)).await?;
+    env.ui.note(if targets.len() == 1 {
+        "The removal was cancelled: the device is no longer suspended."
+    } else {
+        "The removal was cancelled: the devices are no longer suspended."
+    });
     Ok(())
 }
 

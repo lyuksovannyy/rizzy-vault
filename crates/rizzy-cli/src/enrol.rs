@@ -312,7 +312,7 @@ impl PreparedSignup {
 /// [`CliError::AlreadyEnrolled`] before anything is enrolled; the flow's and the transport's
 /// errors.
 pub async fn login(env: &mut Env<'_>, server: &str, login_name: &str) -> Result<Device, CliError> {
-    let http = Http::new(server, &env.trust)?;
+    let http = Http::new(server, &env.trust)?.with_pauses(env.pauses.clone());
     check_server(&http).await?;
     let secret_key = env.ui.secret("Secret Key (RV1-…)")?;
     let password = env.ui.secret("Master password")?;

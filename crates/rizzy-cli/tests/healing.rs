@@ -635,6 +635,7 @@ impl Rv {
                     trust: rizzy_cli::tls::Trust::default(),
                     ui: &mut script,
                     sign_outs: SignOuts::default(),
+                    pauses: rizzy_cli::http::Pauses::default(),
                 };
                 self.runtime.block_on(run(invocation, &mut env))
             }
@@ -932,7 +933,14 @@ fn a_revocation_with_a_full_rotation_after_the_backup_is_healed() {
     let backup = server.backup("before.rvbackup");
 
     let revoked = a.ok(
-        &["device", "revoke", &c_device, "--name", "alice"],
+        &[
+            "device",
+            "revoke",
+            &c_device,
+            "--name",
+            "alice",
+            "--keep-secret-key",
+        ],
         &[PASSWORD, &code],
     );
     assert!(revoked.noted("revoked"), "{:?}", revoked.notes);

@@ -6,7 +6,10 @@
 //! run, server-side 2FA (§5.10, §11.15), and a recovery with the Emergency Kit completed
 //! through the binaries on a server with a zero waiting period (§11.9), also when it is
 //! interrupted after its pre-commit write or loses its answer and the next run settles the
-//! recovery-pending record (ADR 0046 §3, §5; threat model INV-71).
+//! recovery-pending record (ADR 0046 §3, §5; threat model INV-71). Device removal (ADR 0091
+//! §3): one or several devices, the three reasons, a crash at each point of §7 test 5, a write
+//! from another device paused by the window and sent once it closes, a removal finished or
+//! cancelled after a crash, and a removed device that drops its pending commit unsent.
 //!
 //! The harness is `tests/e2e.rs`'s, cut down: the built `rizzy-vault` binary on a loopback
 //! port with a temporary `SQLite` database (ADR 0016 §3 forbids a dependency on
@@ -33,8 +36,9 @@ use rizzy_cli::CliError;
 use rizzy_cli::args::parse;
 use rizzy_cli::commands::run;
 use rizzy_cli::device::{Env, SignOuts};
-use rizzy_cli::ui::Ui;
+use rizzy_cli::ui::{Checkpoint, Ui};
 use rizzy_client::ClientError;
+use rizzy_client::revocation::REVOCATION_PENDING_MESSAGE;
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
 use rizzy_client::store::load;
@@ -521,9 +525,21 @@ struct Script {
     out: Vec<String>,
     /// Standard error.
     notes: Vec<String>,
+    /// Where the flow "crashes" (ADR 0091 §7 test 5): [`Ui::checkpoint`] fails there.
+    crash_at: Option<Checkpoint>,
 }
 
+/// The error a scripted crash returns.
+const CRASHED: &str = "crash injected by the test";
+
 impl Ui for Script {
+    fn checkpoint(&mut self, point: Checkpoint) -> Result<(), CliError> {
+        if self.crash_at == Some(point) {
+            return Err(CliError::Refused(CRASHED.to_owned()));
+        }
+        Ok(())
+    }
+
     fn secret(&mut self, prompt: &str) -> Result<Zeroizing<String>, CliError> {
         let one_time = prompt.starts_with("Two-factor code")
             || prompt.contains("code from your authenticator app");
@@ -596,6 +612,34 @@ struct Rv {
     dir: PathBuf,
     /// The runtime commands run on.
     runtime: tokio::runtime::Runtime,
+    /// The pauses of a `revocation_pending` retry: no real wait, the note recorded.
+    pause: Arc<TestPause>,
+}
+
+/// [`rizzy_cli::http::Pause`] for the tests: a retry waits for nothing (or for the hook of
+/// its first wait), and the pause note is recorded.
+#[derive(Default)]
+struct TestPause {
+    /// The notes shown.
+    notes: Mutex<Vec<String>>,
+    /// The waits asked for.
+    waits: Mutex<Vec<Duration>>,
+    /// Run (once) at the first wait.
+    on_first_wait: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl rizzy_cli::http::Pause for TestPause {
+    fn note(&self, text: &str) {
+        self.notes.lock().unwrap().push(text.to_owned());
+    }
+
+    fn wait(&self, duration: Duration) {
+        self.waits.lock().unwrap().push(duration);
+        let hook = self.on_first_wait.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
 }
 
 impl Rv {
@@ -606,7 +650,13 @@ impl Rv {
                 .enable_all()
                 .build()
                 .unwrap(),
+            pause: Arc::new(TestPause::default()),
         }
+    }
+
+    /// How many times a request of this device was refused `revocation_pending` and waited.
+    fn paused(&self) -> usize {
+        self.pause.waits.lock().unwrap().len()
     }
 
     /// Runs one command with scripted answers and, for code prompts, `authenticator`.
@@ -618,12 +668,39 @@ impl Rv {
         authenticator: Option<Authenticator>,
     ) -> (Result<(), CliError>, Script) {
         let own = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect();
-        let mut script = Script {
-            secrets: own(secrets),
-            lines: own(lines),
-            authenticator,
-            ..Script::default()
-        };
+        self.run_script(
+            args,
+            Script {
+                secrets: own(secrets),
+                lines: own(lines),
+                authenticator,
+                ..Script::default()
+            },
+        )
+    }
+
+    /// Runs one command that "crashes" at `point` (when it gets there).
+    fn run_crashing(
+        &self,
+        args: &[&str],
+        secrets: &[&str],
+        lines: &[&str],
+        point: Checkpoint,
+    ) -> (Result<(), CliError>, Script) {
+        let own = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect();
+        self.run_script(
+            args,
+            Script {
+                secrets: own(secrets),
+                lines: own(lines),
+                crash_at: Some(point),
+                ..Script::default()
+            },
+        )
+    }
+
+    /// Runs one command with `script` as the user.
+    fn run_script(&self, args: &[&str], mut script: Script) -> (Result<(), CliError>, Script) {
         let outcome = match parse(args.iter().map(OsString::from).collect()) {
             Ok(invocation) => {
                 let mut env = Env {
@@ -632,6 +709,7 @@ impl Rv {
                     trust: rizzy_cli::tls::Trust::default(),
                     ui: &mut script,
                     sign_outs: SignOuts::default(),
+                    pauses: rizzy_cli::http::Pauses::with(self.pause.clone()),
                 };
                 self.runtime.block_on(run(invocation, &mut env))
             }
@@ -1364,6 +1442,7 @@ fn recovery_until_the_commit(
             trust: rizzy_cli::tls::Trust::default(),
             ui: &mut script,
             sign_outs: SignOuts::default(),
+            pauses: rizzy_cli::http::Pauses::default(),
         };
         rv.runtime
             .block_on(rizzy_cli::recover::prepare(&mut env, origin, "alice", true))
@@ -1633,4 +1712,440 @@ fn a_landed_recovery_whose_device_was_revoked_is_finalised_not_abandoned() {
     let cache = cache_state(&r).unwrap();
     assert_eq!(cache.stage, Stage::Committed);
     assert!(cache.pending_commit.is_none());
+}
+
+// ADR 0091: removing devices.
+
+/// This device's id in hex, as `device list` prints it.
+fn own_device(rv: &Rv, password: &str) -> String {
+    let listed = rv.ok(&["device", "list"], &[password], &[]);
+    listed
+        .out
+        .iter()
+        .find(|l| l.contains("this device"))
+        .and_then(|l| l.split_whitespace().next())
+        .unwrap()
+        .to_owned()
+}
+
+/// `rv device revoke <devices> --name alice` with `extra` options.
+fn revoke_args<'a>(devices: &[&'a str], extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec!["device", "revoke"];
+    args.extend_from_slice(devices);
+    args.extend_from_slice(&["--name", "alice"]);
+    args.extend_from_slice(extra);
+    args
+}
+
+/// Whether `outcome` is the scripted crash.
+fn crashed(outcome: &Result<(), CliError>) -> bool {
+    matches!(outcome, Err(CliError::Refused(text)) if text == CRASHED)
+}
+
+/// An account on a server behind a [`Proxy`], with device A and `others` more devices.
+struct Removal {
+    /// The proxy (and the server behind it).
+    proxy: Proxy,
+    /// The server.
+    _server: Server,
+    /// The origin `rv` dials.
+    origin: String,
+    /// The revoking device.
+    a: Rv,
+    /// The other devices, with their ids.
+    others: Vec<(Rv, String)>,
+    /// The Secret Key at signup.
+    secret_key: String,
+    /// The recovery code at signup.
+    recovery_code: String,
+    /// The tag of the test, for new devices' directories.
+    tag: &'static str,
+}
+
+impl Removal {
+    fn start(tag: &'static str, others: usize) -> Self {
+        let (proxy, server) = Proxy::start(&[]);
+        let origin = server.origin();
+        let a = Rv::new(&format!("{tag}-a"));
+        let (secret_key, recovery_code) = sign_up(&a, &origin, "alice");
+        create_note(&a, PASSWORD, "Before");
+        let others = (0..others)
+            .map(|i| {
+                let rv = Rv::new(&format!("{tag}-d{i}"));
+                let (outcome, login) = log_in(&rv, &origin, &secret_key, PASSWORD);
+                outcome.unwrap_or_else(|e| panic!("login: {e:?} {:?}", login.notes));
+                let id = own_device(&rv, PASSWORD);
+                (rv, id)
+            })
+            .collect();
+        Self {
+            proxy,
+            _server: server,
+            origin,
+            a,
+            others,
+            secret_key,
+            recovery_code,
+            tag,
+        }
+    }
+
+    /// The id of other device `i`.
+    fn id(&self, i: usize) -> &str {
+        &self.others[i].1
+    }
+
+    /// A new device that logs in with `secret_key`; its outcome and how often it was paused.
+    fn new_login(&self, secret_key: &str) -> (Result<(), CliError>, usize) {
+        let rv = Rv::new(&format!("{}-new", self.tag));
+        let (outcome, _) = log_in(&rv, &self.origin, secret_key, PASSWORD);
+        (outcome, rv.paused())
+    }
+
+    /// ADR 0091 §7 test 5's end state, after the removal of the first `removed` other devices
+    /// with the new Secret Key `new_secret_key` (`None`: the Secret Key was kept): each is
+    /// listed once, revoked, and refused by the server; A holds no pending record; the new
+    /// Secret Key logs in and the old one does not; and no revocation window is left open, so
+    /// a new device enrols at once, never paused.
+    fn assert_removed(&self, removed: usize, new_secret_key: Option<&str>) {
+        let cache = cache_state(&self.a).unwrap();
+        assert!(cache.pending_commit.is_none() && cache.stage == Stage::Committed);
+        let listed = self.a.ok(&["device", "list"], &[PASSWORD], &[]);
+        for (rv, id) in &self.others[..removed] {
+            let lines: Vec<&String> = listed.out.iter().filter(|l| l.starts_with(id)).collect();
+            assert_eq!(lines.len(), 1, "{:?}", listed.out);
+            assert!(lines[0].ends_with("revoked"), "{:?}", listed.out);
+            let (outcome, refused) = rv.try_run(&["sync"], &[PASSWORD], &[]);
+            assert!(
+                matches!(outcome, Err(CliError::Server(ErrorCode::Unauthorized))),
+                "{outcome:?}"
+            );
+            assert!(refused.noted("rv device forget"), "{:?}", refused.notes);
+        }
+        let current = new_secret_key.unwrap_or(&self.secret_key);
+        let (outcome, paused) = self.new_login(current);
+        outcome.unwrap_or_else(|e| panic!("login with the current Secret Key: {e:?}"));
+        assert_eq!(paused, 0, "a revocation window was still open");
+        if new_secret_key.is_some() {
+            let (outcome, _) = self.new_login(&self.secret_key);
+            assert!(wrong_credentials(&outcome), "{outcome:?}");
+        }
+        // Nothing is left half removed.
+        let synced = self.a.ok(&["sync"], &[PASSWORD], &[]);
+        assert!(!synced.noted("not finished"), "{:?}", synced.notes);
+        assert!(self.a.item_names(PASSWORD).contains(&"Before".to_owned()));
+    }
+}
+
+/// ADR 0091 §3, the default: two devices removed in one commit, with a new Secret Key and kit
+/// (and a new recovery code: recovery is on); the list showed each with its enrolment time,
+/// marked recent.
+#[test]
+fn two_devices_are_removed_at_once_with_a_new_secret_key() {
+    let r = Removal::start("two", 3);
+    let listed = r.a.ok(&["device", "list"], &[PASSWORD], &[]);
+    assert!(
+        listed.out.iter().filter(|l| l.contains("recent")).count() == 4,
+        "{:?}",
+        listed.out
+    );
+    let removed =
+        r.a.ok(&revoke_args(&[r.id(1), r.id(0)], &[]), &[PASSWORD], &[]);
+    assert_eq!(kits(&removed), 1);
+    let new_secret_key = removed.printed("Secret Key:");
+    let new_recovery_code = removed.printed("Recovery code:");
+    assert!(new_secret_key != r.secret_key && new_recovery_code != r.recovery_code);
+    for text in [
+        "enrolled in the last 30 days",
+        "The devices were revoked",
+        "only the new Emergency Kit works",
+        "the identity keys were rotated",
+    ] {
+        assert!(removed.noted(text), "{text}: {:?}", removed.notes);
+    }
+    // The revocation is one commit.
+    assert_eq!(r.proxy.bodies(paths::ACCOUNT_COMMIT).len(), 1);
+    r.assert_removed(2, Some(&new_secret_key));
+    // The third device stays: it follows the change (the new identity confirmed, the new
+    // Secret Key typed from the kit) and reads the account.
+    let (third, _) = &r.others[2];
+    let (outcome, followed) = third.try_run(
+        &["sync"],
+        &[PASSWORD, PASSWORD, &new_secret_key],
+        &["CONFIRM", "alice"],
+    );
+    outcome.unwrap_or_else(|e| panic!("follow: {e:?} {:?}", followed.notes));
+    assert_eq!(third.item_names(PASSWORD), ["Before"]);
+}
+
+/// `--keep-secret-key` (a full rotation, the Secret Key kept) and `--standard` (wiped and
+/// handed over: a standard rotation, the Secret Key kept). Both ask for the recovery code,
+/// which stays valid.
+#[test]
+fn a_removal_can_keep_the_secret_key_or_be_standard() {
+    let r = Removal::start("keep", 2);
+    let kept = r.a.ok(
+        &revoke_args(&[r.id(0)], &["--keep-secret-key"]),
+        &[PASSWORD, &r.recovery_code],
+        &[],
+    );
+    assert_eq!(kits(&kept), 0);
+    assert!(kept.noted("The device was revoked"), "{:?}", kept.notes);
+    assert!(
+        kept.noted("the identity keys were rotated"),
+        "{:?}",
+        kept.notes
+    );
+    assert!(!kept.noted("Secret Key was changed"), "{:?}", kept.notes);
+    r.assert_removed(1, None);
+    let standard = r.a.ok(
+        &revoke_args(&[r.id(1)], &["--standard"]),
+        &[PASSWORD, &r.recovery_code],
+        &[],
+    );
+    assert_eq!(kits(&standard), 0);
+    assert!(
+        standard.noted("The device was revoked"),
+        "{:?}",
+        standard.notes
+    );
+    assert!(!standard.noted("identity keys"), "{:?}", standard.notes);
+    r.assert_removed(2, None);
+    // The two options do not combine.
+    let (outcome, _) = r.a.try_run(
+        &revoke_args(&[r.id(1)], &["--standard", "--keep-secret-key"]),
+        &[],
+        &[],
+    );
+    assert!(matches!(outcome, Err(CliError::Usage(_))), "{outcome:?}");
+}
+
+/// ADR 0091 §7 test 5, the first two points: a crash after the suspension and before the kit,
+/// and after the kit and before the pending record. Nothing is saved: the next command names
+/// the half-done removal with "Finish removing" and "Cancel"; running `device revoke` again
+/// finishes it, with a new kit (the one shown before the crash is void).
+#[test]
+fn a_removal_that_crashed_before_its_pending_record_is_finished() {
+    for (i, point) in [Checkpoint::Suspended, Checkpoint::KitConfirmed]
+        .into_iter()
+        .enumerate()
+    {
+        let r = Removal::start(if i == 0 { "crash1" } else { "crash2" }, 1);
+        let (outcome, crash) =
+            r.a.run_crashing(&revoke_args(&[r.id(0)], &[]), &[PASSWORD], &[], point);
+        assert!(crashed(&outcome), "{point:?}: {outcome:?}");
+        assert_eq!(kits(&crash), usize::from(point == Checkpoint::KitConfirmed));
+        assert!(cache_state(&r.a).unwrap().pending_commit.is_none());
+        assert!(r.proxy.bodies(paths::ACCOUNT_COMMIT).is_empty());
+        // The device is suspended already: the server refuses it.
+        let (outcome, _) = r.others[0].0.try_run(&["sync"], &[PASSWORD], &[]);
+        assert!(
+            matches!(outcome, Err(CliError::Server(ErrorCode::Unauthorized))),
+            "{outcome:?}"
+        );
+        // The restart: "Finish removing" and "Cancel".
+        let restarted = r.a.ok(&["sync"], &[PASSWORD], &[]);
+        for text in [
+            format!("rv device revoke {}", r.id(0)),
+            format!("rv device unsuspend {}", r.id(0)),
+        ] {
+            assert!(restarted.noted(&text), "{text}: {:?}", restarted.notes);
+        }
+        let finished = r.a.ok(&revoke_args(&[r.id(0)], &[]), &[PASSWORD], &[]);
+        let new_secret_key = finished.printed("Secret Key:");
+        r.assert_removed(1, Some(&new_secret_key));
+        if point == Checkpoint::KitConfirmed {
+            let (outcome, _) = r.new_login(&crash.printed("Secret Key:"));
+            assert!(wrong_credentials(&outcome), "{outcome:?}");
+        }
+    }
+}
+
+/// ADR 0091 §7 test 5, the last three points: a crash after the pending record is written and
+/// before sending; the answer lost after the server applied it; a crash after the answer and
+/// before finalising. The next run settles the pending record (asking for the login name and
+/// the master password of the change, which is the same), resending it only in the first case,
+/// and the kit shown before the crash is the one that works.
+#[test]
+fn a_removal_that_crashed_after_its_pending_record_is_settled() {
+    for (i, point) in [
+        Some(Checkpoint::Persisted),
+        None,
+        Some(Checkpoint::Acknowledged),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let r = Removal::start(["crash3", "crash4", "crash5"][i], 1);
+        let args = revoke_args(&[r.id(0)], &[]);
+        let (outcome, crash) = if let Some(point) = point {
+            r.a.run_crashing(&args, &[PASSWORD], &[], point)
+        } else {
+            r.proxy.arm(paths::ACCOUNT_COMMIT, Fault::AnswerLost);
+            let run = r.a.try_run(&args, &[PASSWORD], &[]);
+            assert!(r.proxy.fired());
+            assert!(matches!(run.0, Err(CliError::BadAnswer)), "{:?}", run.0);
+            run
+        };
+        if point.is_some() {
+            assert!(crashed(&outcome), "{point:?}: {outcome:?}");
+        }
+        let new_secret_key = crash.printed("Secret Key:");
+        assert!(
+            cache_state(&r.a).unwrap().pending_commit.is_some(),
+            "{point:?}"
+        );
+        let sent = r.proxy.bodies(paths::ACCOUNT_COMMIT).len();
+        assert_eq!(sent, usize::from(point != Some(Checkpoint::Persisted)));
+        let settled = r.a.ok(&["sync"], &[PASSWORD, PASSWORD], &["alice"]);
+        assert!(settled.noted("interrupted"), "{:?}", settled.notes);
+        // Resent only when it had never left.
+        assert_eq!(r.proxy.bodies(paths::ACCOUNT_COMMIT).len(), 1, "{point:?}");
+        r.assert_removed(1, Some(&new_secret_key));
+    }
+}
+
+/// ADR 0091 §2: while A's window is open, B's upload is refused `revocation_pending`; B shows
+/// the pause note once, waits, and sends the same upload again after A's revocation committed.
+#[test]
+fn a_write_paused_by_another_devices_removal_is_sent_once_it_commits() {
+    let r = Removal::start("paused", 2);
+    let (b, _) = &r.others[1];
+    let args = revoke_args(&[r.id(0)], &["--standard"]);
+    // A's removal stops after the suspension: its window is open.
+    let (outcome, _) = r.a.run_crashing(
+        &args,
+        &[PASSWORD, &r.recovery_code],
+        &[],
+        Checkpoint::Suspended,
+    );
+    assert!(crashed(&outcome), "{outcome:?}");
+    let (refused_tx, refused_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    *b.pause.on_first_wait.lock().unwrap() = Some(Box::new(move || {
+        refused_tx.send(()).unwrap();
+        go_rx.recv().unwrap();
+    }));
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            b.try_run(
+                &[
+                    "item",
+                    "create",
+                    "--type",
+                    "note",
+                    "--field",
+                    "item.name=From B",
+                ],
+                &[PASSWORD],
+                &[],
+            )
+        });
+        refused_rx
+            .recv_timeout(Duration::from_secs(300))
+            .expect("B's write was never refused revocation_pending");
+        // A finishes the removal while B waits; its commit closes the window.
+        r.a.ok(&args, &[PASSWORD, &r.recovery_code], &[]);
+        go_tx.send(()).unwrap();
+        let (outcome, wrote) = writer.join().unwrap();
+        outcome.unwrap_or_else(|e| panic!("B: {e:?} {:?}", wrote.notes));
+    });
+    assert_eq!(
+        *b.pause.notes.lock().unwrap(),
+        [REVOCATION_PENDING_MESSAGE.to_owned()]
+    );
+    let waits = b.pause.waits.lock().unwrap().clone();
+    assert!(
+        !waits.is_empty() && waits.iter().all(|w| *w <= Duration::from_secs(15)),
+        "{waits:?}"
+    );
+    r.a.ok(&["sync"], &[PASSWORD], &[]);
+    assert_eq!(r.a.item_names(PASSWORD), ["Before", "From B"]);
+    r.assert_removed(1, None);
+}
+
+/// ADR 0091 §3 step 8, "Cancel": a removal left after the suspension is cancelled with
+/// `device unsuspend`; the device syncs again, the window is closed and nothing is named
+/// half done any more.
+#[test]
+fn a_half_done_removal_is_cancelled() {
+    let r = Removal::start("cancel", 1);
+    let (d, d_id) = &r.others[0];
+    let (outcome, _) = r.a.run_crashing(
+        &revoke_args(&[d_id], &[]),
+        &[PASSWORD],
+        &[],
+        Checkpoint::Suspended,
+    );
+    assert!(crashed(&outcome), "{outcome:?}");
+    let (outcome, _) = d.try_run(&["sync"], &[PASSWORD], &[]);
+    assert!(
+        matches!(outcome, Err(CliError::Server(ErrorCode::Unauthorized))),
+        "{outcome:?}"
+    );
+    let listed = r.a.ok(&["device", "list"], &[PASSWORD], &[]);
+    assert!(
+        listed
+            .out
+            .iter()
+            .any(|l| l.starts_with(d_id.as_str()) && l.ends_with("suspended")),
+        "{:?}",
+        listed.out
+    );
+    let cancelled = r.a.ok(
+        &["device", "unsuspend", d_id, "--name", "alice"],
+        &[PASSWORD],
+        &[],
+    );
+    assert!(cancelled.noted("cancelled"), "{:?}", cancelled.notes);
+    d.ok(&["sync"], &[PASSWORD], &[]);
+    let (outcome, paused) = r.new_login(&r.secret_key);
+    outcome.unwrap();
+    assert_eq!(paused, 0);
+    let synced = r.a.ok(&["sync"], &[PASSWORD], &[]);
+    assert!(!synced.noted("not finished"), "{:?}", synced.notes);
+}
+
+/// ADR 0091 §3 "A revoked device with a pending commit": D saved a rotation and died before
+/// sending it; A removes D (keeping the Secret Key, so D's credentials still log in). D's
+/// next run is refused at device authentication, logs in over OPAQUE, finds its own
+/// revocation in the verified answer and deletes the pending record without sending it.
+#[test]
+fn a_removed_device_drops_its_pending_commit_unsent() {
+    let r = Removal::start("own", 1);
+    let (d, d_id) = &r.others[0];
+    let (outcome, _) = d.run_crashing(
+        &["rotate", "--name", "alice"],
+        &[PASSWORD, &r.recovery_code],
+        &[],
+        Checkpoint::Persisted,
+    );
+    assert!(crashed(&outcome), "{outcome:?}");
+    assert!(cache_state(d).unwrap().pending_commit.is_some());
+    r.a.ok(
+        &revoke_args(&[d_id], &["--keep-secret-key"]),
+        &[PASSWORD, &r.recovery_code],
+        &[],
+    );
+    let commits = r.proxy.bodies(paths::ACCOUNT_COMMIT).len();
+    let (outcome, dropped) = d.try_run(&["sync"], &[PASSWORD], &["alice", "CONFIRM"]);
+    assert!(
+        matches!(outcome, Err(CliError::Server(ErrorCode::Unauthorized))),
+        "{outcome:?}"
+    );
+    assert!(
+        dropped.noted("deleted without being sent"),
+        "{:?}",
+        dropped.notes
+    );
+    assert!(dropped.noted("rv device forget"), "{:?}", dropped.notes);
+    assert!(cache_state(d).unwrap().pending_commit.is_none());
+    assert_eq!(r.proxy.bodies(paths::ACCOUNT_COMMIT).len(), commits);
+    // From then on the device is refused and asks nothing.
+    let (outcome, again) = d.try_run(&["sync"], &[PASSWORD], &[]);
+    assert!(
+        matches!(outcome, Err(CliError::Server(ErrorCode::Unauthorized))),
+        "{outcome:?}"
+    );
+    assert!(again.noted("rv device forget"), "{:?}", again.notes);
 }

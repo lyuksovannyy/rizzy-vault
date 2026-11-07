@@ -126,6 +126,7 @@ use rizzy_client::healing::{self, HeldAccount};
 use rizzy_client::items::{ItemId, TRASH_RETENTION_MS};
 use rizzy_client::login::{LoggedIn, LoginInput, start_login};
 use rizzy_client::reregister::start_device_reregistration;
+use rizzy_client::revocation::check_renewed_head;
 use rizzy_client::rizzy_proto::account::{AccountStateQuery, AccountView, DeviceGrantsResponse};
 use rizzy_client::rizzy_proto::auth::{
     DeviceAuthFinishResponse, DeviceAuthStartResponse, LoginFinishResponse, LoginStartResponse,
@@ -135,8 +136,7 @@ use rizzy_client::rizzy_proto::auth::{
     RegisterFinishRequest, RegisterStartResponse, RequestSignature,
 };
 use rizzy_client::rizzy_proto::change::{
-    CommitChangeRequest, DeviceSuspensionRequest, ReregisterStartRequest, ReregisterStartResponse,
-    SuspendDeviceResponse,
+    CommitChangeRequest, ReregisterStartRequest, ReregisterStartResponse,
 };
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
@@ -166,7 +166,7 @@ use rizzy_client::unlock::{
 };
 use rizzy_client::vaults::{PendingMove, VaultCatalog};
 use rizzy_client::webauthn::{self, SecondFactor};
-use rizzy_core::ids::{DeviceId, VaultId};
+use rizzy_core::ids::VaultId;
 use rizzy_core::keys::AccountFingerprint;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -177,11 +177,13 @@ use crate::error::CliError;
 use crate::http::{Auth, Http};
 use crate::paths::{AccountLock, cache_path, check_data_dir, enrolled_accounts, hex};
 use crate::sys::{OsRng, now_ms, os_rng};
-use crate::ui::Ui;
+use crate::ui::{Checkpoint, Ui};
 
 mod credentials;
+mod revoke;
 mod vaults;
 pub use credentials::{CredentialChange, CredentialOutcome};
+pub use revoke::Removal;
 pub(crate) use vaults::catalog_of;
 pub use vaults::{Shown, VaultSet, user_items};
 
@@ -199,6 +201,9 @@ pub struct Env<'a> {
     /// The sign-outs of this run's device sessions, sent when the command is over
     /// ([`SignOuts`]).
     pub sign_outs: SignOuts,
+    /// How a request refused `revocation_pending` waits before its retries
+    /// ([`crate::http::Pauses`]; the terminal's by default).
+    pub pauses: crate::http::Pauses,
 }
 
 /// How long the sign-out of one session may take at exit (best effort, ADR 0075 owner answer
@@ -560,7 +565,8 @@ impl Device {
         // `keystore_capable = false`: `rv` never holds a keystore unlock secret (ADR 0019 §1.4,
         // INV-62), so a record with `E_ks` is refused as corrupt (ADR 0057 §2, INV-81).
         let mut record = load::open(&rows, false)?;
-        let http = Http::new(record.server_origin().as_str(), &env.trust)?;
+        let http =
+            Http::new(record.server_origin().as_str(), &env.trust)?.with_pauses(env.pauses.clone());
         if record.stage() == Stage::RecoveryPending {
             // ADR 0046 §1, §3: a recovery whose commit is unsettled does not unlock; only
             // `rv recovery complete` settles it, before any new kit is made (INV-71).
@@ -757,6 +763,12 @@ impl Device {
     #[must_use]
     pub const fn recovery_notice(&self) -> Option<RecoveryNotice> {
         self.recovery_notice
+    }
+
+    /// Whether a pending commit (a rotation or a credential change) is saved and not settled.
+    #[must_use]
+    pub const fn has_pending(&self) -> bool {
+        self.pending_commit.is_some()
     }
 
     /// The alarms raised.
@@ -1092,7 +1104,24 @@ impl Device {
             return Err(CliError::Alarm(*alarm));
         }
         if self.session.is_none() {
-            self.authenticate().await?;
+            match self.authenticate().await {
+                Ok(()) => {}
+                // ADR 0091 §3 "A revoked device with a pending commit".
+                Err(refused @ CliError::Server(ErrorCode::Unauthorized))
+                    if self.record.has_pending() =>
+                {
+                    return Err(Box::pin(self.refused_with_pending(ui, refused)).await);
+                }
+                Err(refused @ CliError::Server(ErrorCode::Unauthorized)) => {
+                    ui.note(
+                        "The server refused this device. If it was suspended or removed on \
+                         another device, it no longer syncs; `rv device forget` deletes its \
+                         local data.",
+                    );
+                    return Err(refused);
+                }
+                Err(e) => return Err(e),
+            }
         }
         if self.reconciled {
             ui.note(
@@ -1123,6 +1152,8 @@ impl Device {
         if let Some(notice) = self.recovery_notice {
             ui.note(&crate::recover::notice_warning(notice, now_ms()));
         }
+        // ADR 0091 §3 step 8: a removal left half done is named with its two ways out.
+        self.removal_notes(ui);
         Ok(())
     }
 
@@ -2068,8 +2099,8 @@ impl Device {
         }
     }
 
-    /// A key rotation (CRYPTO.md §11.6), with the revocation of `revoke` when given (§11.8):
-    /// [`Device::begin_rotation`], [`Device::send_rotation`], [`Device::finish_rotation`].
+    /// A key rotation (CRYPTO.md §11.6): [`Device::begin_rotation`], [`Device::send_rotation`],
+    /// [`Device::finish_rotation`]. A revocation is [`Device::revoke_devices`].
     /// Returns how many items the rotation left unreadable (wrap rows it could not open).
     ///
     /// # Errors
@@ -2080,27 +2111,31 @@ impl Device {
         ui: &mut dyn Ui,
         login_name: &str,
         level: RotationLevel,
-        revoke: Option<DeviceId>,
     ) -> Result<usize, CliError> {
-        let mut flight = Box::pin(self.begin_rotation(ui, login_name, level, revoke)).await?;
-        if let Err(e) = self.send_rotation(&mut flight).await {
-            // The stored body is there exactly while a commit is persisted and not settled.
-            if self.pending_commit.is_some() && !matches!(e, CliError::Alarm(_)) {
-                ui.note(
-                    "The rotation is not finished, and whether the server applied it may be \
-                     unknown. It stays saved on this device, and the next rv command that goes \
-                     online settles it: it finishes the rotation if the server has it, and \
-                     sends it again if not.",
-                );
-            }
+        let mut flight = Box::pin(self.begin_rotation(ui, login_name, level)).await?;
+        if let Err(e) = self.send_rotation(ui, &mut flight).await {
+            Self::rotation_unfinished(ui, self.pending_commit.is_some(), &e);
             return Err(e);
         }
+        ui.checkpoint(Checkpoint::Acknowledged)?;
         Box::pin(self.finish_rotation(ui, flight)).await
     }
 
+    /// Tells the user that a rotation whose commit failed with `e` stays saved, when
+    /// `saved` (the stored body is there exactly while a commit is persisted and not settled).
+    fn rotation_unfinished(ui: &mut dyn Ui, saved: bool, e: &CliError) {
+        if saved && !matches!(e, CliError::Alarm(_)) {
+            ui.note(
+                "The rotation is not finished, and whether the server applied it may be \
+                 unknown. It stays saved on this device, and the next rv command that goes \
+                 online settles it: it finishes the rotation if the server has it, and \
+                 sends it again if not.",
+            );
+        }
+    }
+
     /// The first part of a rotation: the sync, the re-authentication over this device's
-    /// session, the suspension of `revoke` (§11.8 step 0, after which the revoker fetches up
-    /// to H), and the rotation built on the synced vault. Nothing is written or committed yet.
+    /// session, and the rotation built on the synced vault. Nothing is written or committed yet.
     ///
     /// # Errors
     /// The flows' and the transport's errors.
@@ -2109,7 +2144,6 @@ impl Device {
         ui: &mut dyn Ui,
         login_name: &str,
         level: RotationLevel,
-        revoke: Option<DeviceId>,
     ) -> Result<RotationInFlight, CliError> {
         self.sync(ui).await?;
         let recovery_code = if self.state.pin().state().recovery_enabled {
@@ -2121,31 +2155,9 @@ impl Device {
         };
         let reauth = self.reauth(ui, login_name).await?;
         let token = copy_token(reauth.bearer_token());
-        let revoke = match revoke {
-            None => None,
-            Some(device_id) => {
-                // §11.8 step 0: from here on the server refuses the device and returns H.
-                let answer: SuspendDeviceResponse = self
-                    .http
-                    .post(
-                        paths::DEVICES_SUSPEND,
-                        &DeviceSuspensionRequest {
-                            device_id: Id::from_bytes(device_id.to_bytes()),
-                        },
-                        Auth::Bearer(&token),
-                    )
-                    .await?;
-                // §11.8 step 1: "The revoker fetches up to H".
-                self.fetch().await?;
-                Some(RevokeDevice {
-                    device_id,
-                    last_accepted_device_seq: answer.last_accepted_device_seq,
-                })
-            }
-        };
         let options = RotationOptions {
             level,
-            revoke: revoke.as_slice(),
+            revoke: &[],
             recovery_code: recovery_code.as_deref().map(String::as_str),
             now_ms: now_ms(),
         };
@@ -2167,6 +2179,7 @@ impl Device {
         Ok(RotationInFlight {
             pending: Flight::Rotation(Box::new(pending)),
             token,
+            renew: None,
         })
     }
 
@@ -2203,9 +2216,14 @@ impl Device {
     /// returned. [`CliError::Alarm`] for a rollback or a fork shown by the state the retry
     /// rule fetched: the alarm is written, the device is read-only, and the pending record
     /// stays (nothing is deleted from a file that is evidence).
-    pub async fn send_rotation(&mut self, flight: &mut RotationInFlight) -> Result<(), CliError> {
+    pub async fn send_rotation(
+        &mut self,
+        ui: &mut dyn Ui,
+        flight: &mut RotationInFlight,
+    ) -> Result<(), CliError> {
         loop {
             let body = self.persist_rotation(flight).await?;
+            ui.checkpoint(Checkpoint::Persisted)?;
             let sent = self
                 .http
                 .post_bytes_empty(paths::ACCOUNT_COMMIT, body, Auth::Bearer(&flight.token))
@@ -2213,6 +2231,13 @@ impl Device {
             match sent {
                 Ok(()) => return Ok(()),
                 Err(CliError::Server(ErrorCode::StateConflict)) => {
+                    // ADR 0091 §3 step 7: a revocation renews its window, and checks H, before
+                    // every rebuild. A failure leaves the pending record for the next run,
+                    // which finds the stored commit refused and drops it.
+                    if let Some(first) = flight.renew {
+                        let renewed = self.suspend(&flight.token, first.device_id).await?;
+                        check_renewed_head(first.last_accepted_device_seq, renewed)?;
+                    }
                     self.fetch().await?;
                     let view: AccountView = self
                         .http
@@ -2436,6 +2461,9 @@ pub struct RotationInFlight {
     pub(crate) pending: Flight,
     /// The bearer token of the re-authentication.
     pub(crate) token: SessionToken,
+    /// For a revocation (ADR 0091 §3), the first chosen device and its H: the renewing
+    /// suspend that runs before each rebuild (step 7).
+    pub(crate) renew: Option<RevokeDevice>,
 }
 
 impl std::fmt::Debug for RotationInFlight {
