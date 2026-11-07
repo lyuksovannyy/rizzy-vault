@@ -8,7 +8,10 @@
 // (the normalised hostname as the one field, no Authorization header), that the popup shows the
 // icon as a decoded `blob:` image with an empty `alt`, that an item without an icon shows none,
 // that the popup loads no image from anywhere else, and the axe audit of the item list with
-// icons. Self-contained (its own server and account):
+// icons. ADR 0099: the popup asks for no icon until the session's probe (`{"host":""}`, answered
+// `400 invalid_request` by a role) found the role; with the account's website-icons setting
+// turned off (in the web vault's Settings) it sends nothing at all, and with the role off only
+// the probe. Self-contained (its own server and account):
 // `pnpm --filter @rizzy-vault/extension exec playwright test e2e/icons.spec.ts`.
 import { type BrowserContext, chromium, test as base, expect } from "@playwright/test";
 import { type IncomingMessage, type Server, type ServerResponse, createServer, request as httpRequest } from "node:http";
@@ -24,6 +27,9 @@ const EXTENSION_PATH = fileURLToPath(new URL("../dist/chromium", import.meta.url
 /** A 16×16 PNG, as base64url (what the role returns). */
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8_9hAAAAGUlEQVR4nGOQqzjxnxLMMGrAqAGjBgwXAwC6dV0fK4JiqwAAAABJRU5ErkJggg";
 
+/** The probe's body (ADR 0099 §3). */
+const PROBE = '{"host":""}';
+
 /** What the mocked role saw from the extension (its `Origin` is the extension's). */
 interface Seen {
   readonly bodies: string[];
@@ -36,12 +42,14 @@ interface Proxy {
   readonly origin: string;
   readonly seen: Seen;
   upstream: URL | undefined;
+  /** Whether the mocked role is there: the probe answers `400 invalid_request`, else `404`. */
+  role: boolean;
   close(): void;
 }
 
 async function startProxy(): Promise<Proxy> {
   const seen: Seen = { bodies: [], authorization: [] };
-  const proxy: { upstream: URL | undefined } = { upstream: undefined };
+  const proxy: { upstream: URL | undefined; role: boolean } = { upstream: undefined, role: true };
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
@@ -53,7 +61,12 @@ async function startProxy(): Promise<Proxy> {
           seen.bodies.push(text);
           seen.authorization.push(req.headers["authorization"]);
         }
-        const hit = text === '{"host":"icons.example.test"}';
+        if (text === PROBE) {
+          res.writeHead(proxy.role ? 400 : 404, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(proxy.role ? '{"error":"invalid_request"}' : '{"error":"not_found"}');
+          return;
+        }
+        const hit = proxy.role && text === '{"host":"icons.example.test"}';
         res.writeHead(hit ? 200 : 404, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(hit ? JSON.stringify({ content_type: "image/png", data: PNG }) : '{"error":"not_found"}');
         return;
@@ -89,6 +102,12 @@ async function startProxy(): Promise<Proxy> {
     },
     set upstream(url: URL | undefined) {
       proxy.upstream = url;
+    },
+    get role() {
+      return proxy.role;
+    },
+    set role(on: boolean) {
+      proxy.role = on;
     },
     close: () => server.close(),
   };
@@ -180,7 +199,8 @@ test("popup: item icons from the icons role, hostname only, blob: images, audite
   await expect(iconRow).toHaveAccessibleName(/^Icon Site/);
 
   // What the extension sent: one normalised hostname per site, without a session.
-  expect([...new Set(edge.seen.bodies)].sort()).toEqual(['{"host":"icons.example.test"}', '{"host":"no-icon.example.test"}']);
+  expect(edge.seen.bodies[0]).toBe(PROBE);
+  expect([...new Set(edge.seen.bodies)].sort()).toEqual([PROBE, '{"host":"icons.example.test"}', '{"host":"no-icon.example.test"}']);
   for (const auth of edge.seen.authorization) {
     expect(auth).toBeUndefined();
   }
@@ -189,3 +209,82 @@ test("popup: item icons from the icons role, hostname only, blob: images, audite
   }
   await expectAccessible(popup, "popup: items with icons");
 });
+
+/** Enrols the popup into `loginName` at `origin` and waits for its item list. */
+async function enrolPopup(
+  context: BrowserContext,
+  extensionId: string,
+  origin: string,
+  loginName: string,
+  secretKey: string,
+) {
+  const popup = await context.newPage();
+  await popup.goto(`chrome-extension://${extensionId}/src/popup/index.html`);
+  await popup.getByLabel("Server URL").fill(origin);
+  await popup.getByLabel("Account (login name)").fill(loginName);
+  await popup.getByLabel("Secret Key").fill(secretKey);
+  await popup.getByLabel("Master password").fill(TEST_ACCOUNT_PASSWORD);
+  await popup.getByRole("button", { name: "Set up" }).click();
+  await expect(popup.getByRole("button", { name: "Lock" })).toBeVisible({ timeout: 30_000 });
+  return popup;
+}
+
+test("popup: with the icons role off, only the probe is sent and no host", async ({ context, extensionId, edge, server }) => {
+  expect(server.origin).not.toBe(edge.origin);
+  edge.role = false;
+  const setup = await context.newPage();
+  const secretKey = await signUp(setup, edge.origin, "iconsroleoff");
+  await createLoginItem(setup, {
+    title: "Icon Site",
+    username: "icon@example.com",
+    password: "icon-pw",
+    websiteUrl: "https://icons.example.test/",
+  });
+  await setup.close();
+  edge.seen.bodies.length = 0;
+
+  const popup = await enrolPopup(context, extensionId, edge.origin, "iconsroleoff", secretKey);
+  const row = popup.getByRole("button", { name: /Icon Site/ });
+  await expect(row).toBeVisible();
+  await expect.poll(() => edge.seen.bodies.length).toBe(1);
+  await popup.waitForTimeout(1000);
+  expect(edge.seen.bodies).toEqual([PROBE]);
+  await expect(row.locator("img")).toHaveCount(0);
+});
+
+test("popup: with website icons turned off for the account, nothing reaches icons/fetch", async ({
+  context,
+  extensionId,
+  edge,
+  server,
+}) => {
+  expect(server.origin).not.toBe(edge.origin);
+  const setup = await context.newPage();
+  const secretKey = await signUp(setup, edge.origin, "iconsoff");
+  // Settings → Website icons, in the web vault: off for every device of the account.
+  await setup.getByRole("button", { name: "Settings", exact: true }).click();
+  const toggle = setup.getByRole("region", { name: "Website icons" }).getByRole("checkbox", { name: "Show website icons." });
+  await expect(toggle).toBeChecked();
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await expect(toggle).toBeEnabled();
+  await setup.getByRole("button", { name: "All items", exact: true }).click();
+  await createLoginItem(setup, {
+    title: "Icon Site",
+    username: "icon@example.com",
+    password: "icon-pw",
+    websiteUrl: "https://icons.example.test/",
+  });
+  await setup.close();
+  edge.seen.bodies.length = 0;
+
+  const popup = await enrolPopup(context, extensionId, edge.origin, "iconsoff", secretKey);
+  const row = popup.getByRole("button", { name: /Icon Site/ });
+  await expect(row).toBeVisible();
+  await popup.waitForTimeout(1500);
+  // Not a host, not the probe.
+  expect(edge.seen.bodies).toEqual([]);
+  await expect(row.locator("img")).toHaveCount(0);
+  await expectAccessible(popup, "popup: items with website icons off");
+});
+

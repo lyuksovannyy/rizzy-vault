@@ -175,6 +175,10 @@ test("a11y: signup, login, the guide, the vault, its dialogs and settings", asyn
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(page.getByRole("region", { name: "What the server stores" })).toBeVisible();
+  // Website icons (ADR 0099 §6): the switch and its disclosure, audited with the rest below.
+  await expect(
+    page.getByRole("region", { name: "Website icons" }).getByRole("checkbox", { name: "Show website icons." }),
+  ).toBeChecked();
   // The third-party notices (THIRD_PARTY_NOTICES.md; ADR 0080 owner answer 5).
   const notices = page.getByRole("region", { name: "Third-party notices" });
   await expect(notices).toContainText("EFF's Long Wordlist");

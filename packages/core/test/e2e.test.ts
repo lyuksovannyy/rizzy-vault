@@ -37,6 +37,7 @@ import {
   createPasskey,
   decideMatchCandidates,
   PASSKEY_ALG_ES256,
+  fetchItemIcon,
   fetchTransport,
   cxfExportWarning,
   detectImportFormat,
@@ -44,6 +45,7 @@ import {
   cacheStoreNames,
   enrolDevice,
   login,
+  probeItemIcons,
   newElementId,
   plaintextExportHoldMs,
   plaintextExportPhrase,
@@ -1594,8 +1596,71 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     await a.sync();
     await a.deleteVault(temp, false);
     expect(a.items().map((i) => i.title).sort()).toEqual(["Mail", "Mail"]);
+    // On the same account (one signup less against the server's signup rate limit): icons.
+    await iconPermitChecks(a);
     lockAll(a, b);
   });
+
+  /** ADR 0099 §1–§4 on `session`, a fresh login of an account that never touched the setting:
+   * on by default; a server without the `icons` role answers the probe 404 and no host is sent;
+   * a role that answers 400 invalid_request grants the permit; off sends nothing at all. */
+  async function iconPermitChecks(session: VaultSession): Promise<void> {
+    const seen: string[] = [];
+    let role = false;
+    const png = "iVBORw0KGgoAAA";
+    const transport: Transport = async (request) => {
+      if (request.path === "/api/v1/icons/fetch") {
+        const body = new TextDecoder().decode(request.body);
+        seen.push(body);
+        expect(request.headers["Authorization"]).toBeUndefined();
+        if (!role) {
+          return fetchTransport(origin)(request); // this test server runs no icons role: 404
+        }
+        const answer =
+          body === '{"host":""}'
+            ? { status: 400, text: '{"error":"invalid_request"}' }
+            : { status: 200, text: JSON.stringify({ content_type: "image/png", data: png }) };
+        return { status: answer.status, body: new TextEncoder().encode(answer.text) };
+      }
+      return fetchTransport(origin)(request);
+    };
+    expect(session.websiteIcons()).toBe(true);
+    expect(session.iconsStatus()).toBe("unknown");
+    // Not probed yet: no permit, nothing sent.
+    const early = await fetchItemIcon(session, transport, "example.com").catch((e: unknown) => e);
+    expect((early as CoreError).code).toBe("icons_off");
+    expect(seen).toEqual([]);
+
+    // No role on this server: one probe, then no host, and no second probe.
+    expect(await probeItemIcons(session, transport)).toBe("unavailable");
+    expect(seen).toEqual(['{"host":""}']);
+    const none = await fetchItemIcon(session, transport, "example.com").catch((e: unknown) => e);
+    expect((none as CoreError).code).toBe("icons_off");
+    expect(await probeItemIcons(session, transport)).toBe("unavailable");
+    expect(seen).toEqual(['{"host":""}']);
+
+    // Off: written as 0x00 for every device; nothing at all is sent, not even the probe.
+    await session.changeMatchSettings({ kind: "websiteIcons", on: false });
+    expect(session.websiteIcons()).toBe(false);
+    expect(await probeItemIcons(session, transport)).toBe("off");
+    expect(seen).toEqual(['{"host":""}']);
+
+    // On again, against a role: a new probe, then the host.
+    role = true;
+    seen.length = 0;
+    await session.changeMatchSettings({ kind: "websiteIcons", on: true });
+    expect(await probeItemIcons(session, transport)).toBe("available");
+    const bytes = await fetchItemIcon(session, transport, "Secret-Bank.Example.");
+    expect(Array.from(bytes?.subarray(0, 4) ?? [])).toEqual([0x89, 0x50, 0x4e, 0x47]);
+    expect(await fetchItemIcon(session, transport, "[2001:db8::1]")).toBeUndefined();
+    expect(seen).toEqual(['{"host":""}', '{"host":"secret-bank.example"}']);
+
+    // Off drops the permit at once.
+    await session.changeMatchSettings({ kind: "websiteIcons", on: false });
+    const after = await fetchItemIcon(session, transport, "example.com").catch((e: unknown) => e);
+    expect((after as CoreError).code).toBe("icons_off");
+    expect(seen).toHaveLength(2);
+  }
 
   it("lists sessions, ends another one, and ends its own on lock", async () => {
     const secretKey = erinSecretKey;

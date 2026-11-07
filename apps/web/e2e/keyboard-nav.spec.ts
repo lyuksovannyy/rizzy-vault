@@ -193,6 +193,17 @@ test("keyboard only: every audited screen is reachable and operable without a po
   await tabTo(page, theme);
   await kb.press("ArrowDown");
   await expect(theme).toHaveValue("light");
+  // Website icons (ADR 0099 §6): the switch, toggled off and on again with Space.
+  const iconsSwitch = page.getByRole("region", { name: "Website icons" }).getByRole("checkbox", { name: "Show website icons." });
+  await tabTo(page, iconsSwitch);
+  await expect(iconsSwitch).toBeChecked();
+  await kb.press("Space");
+  await expect(iconsSwitch).not.toBeChecked();
+  await expect(iconsSwitch).toBeEnabled();
+  await iconsSwitch.focus();
+  await kb.press("Space");
+  await expect(iconsSwitch).toBeChecked();
+  await expect(iconsSwitch).toBeEnabled();
   await tabTo(page, button("Open the getting-started guide"));
   await kb.press("Enter");
   await tabTo(page, guide.getByRole("button", { name: "Close the guide" }));
