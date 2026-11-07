@@ -9,12 +9,12 @@
 //! `now_ms < expires_at_ms`; an expired row counts as absent, and the next write that reads it
 //! through [`gate`] deletes it.
 //!
-//! **Opening and renewing** (`devices/suspend`, [`open_or_renew`]): no open window inserts or
+//! **Opening and renewing** (`devices/suspend`, `open_or_renew`): no open window inserts or
 //! replaces the row with R and `now + REVOCATION_WINDOW_MS`; an open window of R moves its
 //! expiry to `now + REVOCATION_WINDOW_MS`; an open window of another device refuses the suspend
 //! with [`AuthError::RevocationPending`] before anything is suspended.
 //!
-//! **Closing** ([`close`]): the revocation commit (a `commit_change` that revokes at least one
+//! **Closing** (`close`): the revocation commit (a `commit_change` that revokes at least one
 //! device), a recovery commit, and a `devices/unsuspend` by R that leaves no suspended durable
 //! device. Expiry closes it too, and lifts only the freeze: every suspension stays.
 //!
