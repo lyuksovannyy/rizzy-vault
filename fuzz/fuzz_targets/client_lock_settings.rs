@@ -29,7 +29,11 @@ fuzz_target!(|data: &[u8]| {
     let strict = LockSettings::parse_strict(data);
     let read = LockSettings::parse(data);
     match strict {
-        None => assert_eq!(read, LockSettings::DEFAULT, "a broken record is the defaults"),
+        None => assert_eq!(
+            read,
+            LockSettings::DEFAULT,
+            "a broken record is the defaults"
+        ),
         Some(s) => {
             assert_eq!(read, s);
             assert!(data.len() <= MAX_LOCK_SETTINGS_LEN);
