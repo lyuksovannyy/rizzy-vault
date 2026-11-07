@@ -62,6 +62,15 @@ fn private_new() -> OpenOptions {
     options
 }
 
+/// Creates a new file at `path` with mode 0600 for writing; fails if `path` exists. The
+/// caller removes it again if writing it fails (ADR 0023 §4).
+///
+/// # Errors
+/// The I/O error.
+pub fn create_new_private(path: &Path) -> io::Result<File> {
+    private_new().open(path)
+}
+
 /// Writes `bytes` to a new file at `path` with mode 0600, and flushes it to disk. Fails if
 /// `path` exists, which is then left untouched. If the file was created but writing or
 /// flushing it fails (a full disk, say), the partial file is removed, so a failed write never

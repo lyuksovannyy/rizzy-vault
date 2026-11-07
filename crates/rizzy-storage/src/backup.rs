@@ -139,7 +139,6 @@ pub struct Dumped<W> {
 
 /// Why [`Database::dump_to`] failed.
 #[derive(Debug)]
-#[non_exhaustive]
 pub enum DumpError<E> {
     /// Reading the database failed, or it is not at this release's schema.
     Storage(Error),

@@ -329,7 +329,7 @@ fn backup_and_restore_commands() {
     let piped = out.stdout;
     let parsed = file::parse(&piped).unwrap();
     let summary = rizzy_server::admin::BackupSummary {
-        len: piped.len(),
+        len: piped.len() as u64,
         digest: piped[piped.len() - file::DIGEST_LEN..].try_into().unwrap(),
         encrypted: None,
     };

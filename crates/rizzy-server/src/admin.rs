@@ -52,7 +52,10 @@
 //!
 //! `backup` dumps the database in one read snapshot next to the running server, writes it as
 //! the backup file of `rizzy_storage::backup::file` (canonical, with its trailing SHA-256, and
-//! never longer than `MAX_BACKUP_FILE_LEN`, 1 TiB, ADR 0094 §1), and prints the file's length and SHA-256 on
+//! never longer than `MAX_BACKUP_FILE_LEN`, 1 TiB, ADR 0094 §1), streaming it in two passes over
+//! that snapshot (ADR 0094 §2): pass 1 measures the file and refuses one over the limit
+//! before any output exists, pass 2 writes it (format version 2: sealing each chunk as it
+//! fills) and fails if it saw another snapshot, removing the partial file. It prints the file's length and SHA-256 on
 //! stderr for the operator to record. `--out -` writes the file to stdout, for piping into
 //! `age` or a backup tool, and is refused when stdout is a terminal (usage error). Otherwise
 //! the file is created new with mode 0600, never over an existing one, and removed again if
@@ -181,11 +184,11 @@ use rizzy_domain_auth::secrets::SecretsError;
 use rizzy_domain_auth::types::ServerSetup;
 use rizzy_domain_auth::{ServerSecrets, StartupCheckError};
 use rizzy_storage::backup::file::{
-    self as backup_file, DIGEST_LEN, FileError, MAX_IN_MEMORY_BACKUP_LEN,
+    self as backup_file, DIGEST_LEN, FileError, MAX_BACKUP_FILE_LEN, MAX_IN_MEMORY_BACKUP_LEN,
 };
 use rizzy_storage::{
-    Database, InstanceLock, InstanceLockMode, PostgresOptions, RestoreError, RestoreGeneration,
-    SqliteOptions, StartupMigration, WriterLock, schema_version,
+    Database, DumpError, InstanceLock, InstanceLockMode, PostgresOptions, RestoreError,
+    RestoreGeneration, SqliteOptions, StartupMigration, WriterLock, schema_version,
 };
 use zeroize::Zeroizing;
 
@@ -247,6 +250,18 @@ pub enum AdminError {
     NoBackupKey,
     /// The format version 2 container could not be written or opened (ADR 0071).
     DbBackup(DbBackupError),
+    /// `backup`: the file would be `len` bytes, over [`MAX_BACKUP_FILE_LEN`]; nothing was
+    /// written (ADR 0094 §4).
+    BackupTooLarge {
+        /// The length the file would have.
+        len: u64,
+    },
+    /// `backup`: the two passes did not see one snapshot (ADR 0094 §2, §4); a partial file
+    /// was removed, or the stdout stream is incomplete.
+    SnapshotChanged {
+        /// Whether the output was stdout.
+        to_stdout: bool,
+    },
     /// `secrets restore`: the decrypted backup is not a valid secrets file (ADR 0047 step 3).
     BackupContents(SecretsFileError),
     /// `secrets restore`: the backup does not belong to this database (ADR 0047 step 4).
@@ -334,6 +349,27 @@ impl fmt::Display for InvalidateDiagnosis {
 }
 
 impl AdminError {
+    /// The messages of ADR 0094 §4 for the streaming `backup`'s own failures.
+    fn fmt_streaming(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BackupTooLarge { len } => write!(
+                f,
+                "error: this backup would be {len} bytes, over this release's limit of \
+                 {MAX_BACKUP_FILE_LEN} bytes (1 TiB); nothing was written. Use the database's \
+                 native backup until a later release raises the limit."
+            ),
+            Self::SnapshotChanged { to_stdout: false } => f.write_str(
+                "error: the database changed during the backup snapshot; the partial file was \
+                 removed.",
+            ),
+            Self::SnapshotChanged { to_stdout: true } => f.write_str(
+                "error: the database changed during the backup snapshot; the output is \
+                 incomplete and must be discarded.",
+            ),
+            _ => Ok(()),
+        }
+    }
+
     /// Whether this is a usage or configuration error (exit code 2) rather than a runtime
     /// failure (exit code 1).
     #[must_use]
@@ -399,6 +435,7 @@ impl fmt::Display for AdminError {
                  --backup-key` first, then make a new secrets backup",
             ),
             Self::DbBackup(e) => write!(f, "{e}"),
+            Self::BackupTooLarge { .. } | Self::SnapshotChanged { .. } => self.fmt_streaming(f),
             Self::BackupContents(e) => write!(
                 f,
                 "the backup does not hold a valid secrets file ({e}); nothing was written"
@@ -1076,7 +1113,7 @@ soon.";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BackupSummary {
     /// The written file's length in bytes.
-    pub len: usize,
+    pub len: u64,
     /// The format version 1 file's trailing SHA-256 (ADR 0023 §2): not secret, printed for the
     /// operator of a plain backup. For an encrypted backup it is the digest of the sealed
     /// payload and is not printed: that file has no outer digest (ADR 0071 "Size").
@@ -1146,6 +1183,21 @@ pub async fn backup(
     out: &Path,
     encrypt: bool,
 ) -> Result<BackupSummary, AdminError> {
+    backup_with_limit(config, out, encrypt, MAX_BACKUP_FILE_LEN).await
+}
+
+/// [`backup`] with a file limit of `limit` bytes instead of [`MAX_BACKUP_FILE_LEN`]. Only the
+/// tests pass another limit (ADR 0094 §6 test 4).
+///
+/// # Errors
+/// As [`backup`].
+#[doc(hidden)]
+pub async fn backup_with_limit(
+    config: &Config,
+    out: &Path,
+    encrypt: bool,
+    limit: u64,
+) -> Result<BackupSummary, AdminError> {
     let to_stdout = is_stdio(out);
     if to_stdout && std::io::stdout().is_terminal() {
         return Err(AdminError::StdoutIsTerminal);
@@ -1160,48 +1212,143 @@ pub async fn backup(
     } else {
         None
     };
+    let key = secrets.as_ref().and_then(|s| s.current_backup_key());
     let db = open_backup_reader(config).await?;
-    let dump = db.dump().await;
-    db.close().await;
-    let dump = dump.map_err(AdminError::Storage)?;
     let created_at_ms = now_ms();
-    let plain = backup_file::write(&dump, created_at_ms).map_err(AdminError::BackupFile)?;
-    drop(dump);
-    let digest = plain
-        .len()
-        .checked_sub(DIGEST_LEN)
-        .and_then(|start| plain.get(start..))
-        .and_then(|d| <[u8; DIGEST_LEN]>::try_from(d).ok())
-        .ok_or(AdminError::BackupFile(FileError::Truncated))?;
-    let (file, encrypted) = match secrets.as_ref().and_then(|s| s.current_backup_key()) {
-        Some(key) => {
-            let sealed = db_backup::seal(&mut os_rng(), key, &plain, created_at_ms)
-                .map_err(AdminError::DbBackup)?;
-            drop(plain);
-            let header = db_backup::parse_header(&sealed).map_err(AdminError::DbBackup)?;
+    let mut rng = os_rng();
+    let mut created = false;
+    let mut len = 0u64;
+    // ADR 0094 §2: pass 1 sizes the file; `open` refuses one over the limit before the output
+    // is created, then pass 2 writes it, sealing chunks as they fill for format version 2.
+    let dumped = db
+        .dump_to(created_at_ms, |plain_len| {
+            let total = match key {
+                Some(_) => db_backup::sealed_len(plain_len),
+                None => Some(plain_len),
+            };
+            len = total
+                .filter(|&n| n <= limit)
+                .ok_or(AdminError::BackupTooLarge {
+                    len: total.unwrap_or(u64::MAX),
+                })?;
+            let output = if to_stdout {
+                Output::Stdout(std::io::stdout().lock())
+            } else {
+                let file =
+                    fsutil::create_new_private(out).map_err(|e| AdminError::Write(e.kind()))?;
+                created = true;
+                Output::File(std::io::BufWriter::new(file))
+            };
+            Ok(match key {
+                Some(key) => Sink::Sealed(
+                    db_backup::Sealer::new(&mut rng, key, output, plain_len, created_at_ms)
+                        .map_err(AdminError::DbBackup)?,
+                ),
+                None => Sink::Plain(output),
+            })
+        })
+        .await;
+    db.close().await;
+    let outcome = finish_backup(dumped, to_stdout, len);
+    drop(secrets);
+    if outcome.is_err() && created {
+        let _cleanup = std::fs::remove_file(out);
+    }
+    outcome
+}
+
+/// Pass 2's end for [`backup`]: seals the last chunk, flushes (and for a file syncs) the
+/// output, and maps a failure to its [`AdminError`].
+fn finish_backup<R: rizzy_domain_auth::types::CryptoRng + ?Sized>(
+    dumped: Result<rizzy_storage::Dumped<Sink<'_, R>>, DumpError<AdminError>>,
+    to_stdout: bool,
+    len: u64,
+) -> Result<BackupSummary, AdminError> {
+    let dumped = dumped.map_err(|e| match e {
+        DumpError::Storage(e) => AdminError::Storage(e),
+        DumpError::File(e) => AdminError::BackupFile(e),
+        DumpError::Open(e) => e,
+        DumpError::SnapshotChanged => AdminError::SnapshotChanged { to_stdout },
+    })?;
+    let (output, encrypted) = match dumped.out {
+        Sink::Plain(output) => (output, None),
+        Sink::Sealed(sealer) => {
+            let (output, header) = sealer.finish().map_err(AdminError::DbBackup)?;
             let summary = EncryptedSummary {
                 backup_key_id: header.backup_key_id,
                 chunk_count: header.chunk_count,
             };
-            (sealed, Some(summary))
+            (output, Some(summary))
         }
-        None => (plain, None),
     };
-    drop(secrets);
-    if to_stdout {
-        let mut stdout = std::io::stdout().lock();
-        stdout
-            .write_all(&file)
-            .and_then(|()| stdout.flush())
-            .map_err(|e| AdminError::Write(e.kind()))?;
-    } else {
-        fsutil::write_new_private(out, &file).map_err(|e| AdminError::Write(e.kind()))?;
-    }
+    output.finish().map_err(|e| AdminError::Write(e.kind()))?;
     Ok(BackupSummary {
-        len: file.len(),
-        digest,
+        len,
+        digest: dumped.digest,
         encrypted,
     })
+}
+
+/// Where `backup` writes: stdout, or the new file through a buffer.
+enum Output {
+    /// `--out -`.
+    Stdout(std::io::StdoutLock<'static>),
+    /// `--out <file>`, created new with mode 0600.
+    File(std::io::BufWriter<std::fs::File>),
+}
+
+impl Output {
+    /// Flushes the output; a file is also synced to disk.
+    fn finish(self) -> std::io::Result<()> {
+        match self {
+            Self::Stdout(mut stdout) => stdout.flush(),
+            Self::File(file) => file
+                .into_inner()
+                .map_err(std::io::IntoInnerError::into_error)?
+                .sync_all(),
+        }
+    }
+}
+
+impl std::io::Write for Output {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Stdout(stdout) => stdout.write(buf),
+            Self::File(file) => file.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Stdout(stdout) => stdout.flush(),
+            Self::File(file) => file.flush(),
+        }
+    }
+}
+
+/// What pass 2 writes the format version 1 bytes into: the output itself, or a format version 2
+/// sealer over it.
+enum Sink<'a, R: ?Sized> {
+    /// A plain backup.
+    Plain(Output),
+    /// `--encrypt`.
+    Sealed(db_backup::Sealer<'a, R, Output>),
+}
+
+impl<R: rizzy_domain_auth::types::CryptoRng + ?Sized> std::io::Write for Sink<'_, R> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(output) => output.write(buf),
+            Self::Sealed(sealer) => sealer.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(output) => output.flush(),
+            Self::Sealed(sealer) => sealer.flush(),
+        }
+    }
 }
 
 /// Reads the backup file from `path`, or from standard input when `path` is `-`, refusing

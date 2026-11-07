@@ -569,7 +569,7 @@ fn backup_wipe_restore_drill() {
         let backup_path = root.join("db.rvbackup");
         let summary = admin::backup(&config, &backup_path, false).await.unwrap();
         let backup_file = std::fs::read(&backup_path).unwrap();
-        assert_eq!(summary.len, backup_file.len());
+        assert_eq!(summary.len, backup_file.len() as u64);
         assert_eq!(
             summary.digest.as_slice(),
             &backup_file[backup_file.len() - file::DIGEST_LEN..]
@@ -805,6 +805,20 @@ fn encrypted_backup_wipe_restore_drill() {
         assert!(refused.is_usage());
         assert!(!backup_path.exists());
 
+        // ADR 0094 §6 test 4: over the file limit (lowered for the test), `backup` refuses
+        // with BackupTooLarge after pass 1, before it creates the file.
+        let refused = admin::backup_with_limit(&config, &backup_path, false, 1024)
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, admin::AdminError::BackupTooLarge { len } if len > 1024));
+        assert!(!refused.is_usage());
+        assert!(
+            refused
+                .to_string()
+                .starts_with("error: this backup would be ")
+        );
+        assert!(!backup_path.exists());
+
         // 1. The operator adds a backup key (server stopped), and keeps a secrets backup.
         let rotated = admin::secrets_rotate(&config, admin::Rotate::BackupKey)
             .await
@@ -816,7 +830,7 @@ fn encrypted_backup_wipe_restore_drill() {
         let services = open_services(&config).await.unwrap();
         let summary = admin::backup(&config, &backup_path, true).await.unwrap();
         let encrypted = std::fs::read(&backup_path).unwrap();
-        assert_eq!(summary.len, encrypted.len());
+        assert_eq!(summary.len, encrypted.len() as u64);
         assert_eq!(
             summary.encrypted,
             Some(admin::EncryptedSummary {
