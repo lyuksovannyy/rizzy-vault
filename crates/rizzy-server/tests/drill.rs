@@ -1039,3 +1039,216 @@ fn postgres_encrypted_backup_restore_drill() {
         stop(services).await;
     });
 }
+
+/// Flips one bit of the file at `path` at `at`, in place (the inode an open handle reads).
+fn flip_in_place(path: &Path, at: u64) {
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    let mut b = [0u8; 1];
+    f.seek(SeekFrom::Start(at)).unwrap();
+    f.read_exact(&mut b).unwrap();
+    b[0] ^= 1;
+    f.seek(SeekFrom::Start(at)).unwrap();
+    f.write_all(&b).unwrap();
+    f.sync_all().unwrap();
+}
+
+/// ADR 0094 §3, §4 and §6: the two-pass streaming restore, through `admin::restore`. A
+/// format version 1 file and a multi-chunk format version 2 file (a 9 MiB attachment chunk,
+/// so the plaintext spans two 8 MiB chunks) restore from a regular file and from stdin; a
+/// file changed in place between the passes is refused with `FileChanged` and leaves the
+/// target empty; stdin over the (lowered) in-memory cap is `StdinTooLarge`; a regular file
+/// over 1 TiB (sparse) is `TooLarge` with its length. The messages are ADR 0094 §4's.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario: the files are made once and restored several ways"
+)]
+fn streaming_restore_drill() {
+    block_on(async {
+        let root = TempDir::new();
+        let secrets_dir = root.join("secrets");
+        std::fs::create_dir_all(&secrets_dir).unwrap();
+        let secrets_path = secrets_dir.join("secrets.json");
+        let source_dir = root.join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let config = server_config(&source_dir, &secrets_path);
+        admin::secrets_init(&config).unwrap();
+        admin::secrets_rotate(&config, admin::Rotate::BackupKey)
+            .await
+            .unwrap();
+        let mut instance = populated(&secrets_path);
+        let chunks = instance
+            .tables
+            .iter_mut()
+            .find(|t| t.table == "vault_attachment_chunks")
+            .unwrap();
+        chunks.rows[0][2] = blob(39, 9 * 1024 * 1024);
+        let expected = {
+            let db = open_writer(&config).await;
+            db.restore(&instance, RestoreGeneration([0x31; 16]), 1_000)
+                .await
+                .unwrap();
+            let dump = db.dump().await.unwrap();
+            db.close().await;
+            dump
+        };
+        let plain = root.join("plain.rvbackup");
+        let sealed = root.join("sealed.rvbackup");
+        admin::backup(&config, &plain, false).await.unwrap();
+        admin::backup(&config, &sealed, true).await.unwrap();
+        let plain_bytes = std::fs::read(&plain).unwrap();
+        let sealed_bytes = std::fs::read(&sealed).unwrap();
+        let header = db_backup::parse_header(&sealed_bytes).unwrap();
+        assert_eq!(header.chunk_count, 2, "a multi-chunk format version 2 file");
+
+        let mut n = 0u32;
+        let mut target = || {
+            n += 1;
+            let dir = root.join(&format!("target-{n}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            server_config(&dir, &secrets_path)
+        };
+        let restored_dump = |config: Config| async move {
+            let db = open_writer(&config).await;
+            let dump = db.dump().await.unwrap();
+            db.close().await;
+            dump
+        };
+        let still_empty = |config: Config| async move {
+            let db = open_writer(&config).await;
+            db.check_restore_target().await.unwrap();
+            db.close().await;
+        };
+
+        // Round trips: both formats from a regular file, and from stdin.
+        for (path, bytes) in [(&plain, &plain_bytes), (&sealed, &sealed_bytes)] {
+            let config = target();
+            admin::restore(&config, path).await.unwrap();
+            assert_eq!(restored_dump(config).await, expected);
+
+            let config = target();
+            let mut stdin = std::io::Cursor::new(bytes.clone());
+            let hooks = admin::RestoreHooks {
+                stdin: Some(&mut stdin),
+                in_memory_cap: Some(bytes.len()),
+                ..admin::RestoreHooks::default()
+            };
+            admin::restore_with(&config, Path::new("-"), hooks)
+                .await
+                .unwrap();
+            assert_eq!(restored_dump(config).await, expected);
+
+            // One byte over the in-memory cap.
+            let config = target();
+            let mut stdin = std::io::Cursor::new(bytes.clone());
+            let hooks = admin::RestoreHooks {
+                stdin: Some(&mut stdin),
+                in_memory_cap: Some(bytes.len() - 1),
+                ..admin::RestoreHooks::default()
+            };
+            let e = admin::restore_with(&config, Path::new("-"), hooks)
+                .await
+                .unwrap_err();
+            assert!(matches!(e, admin::AdminError::StdinTooLarge), "{e}");
+            assert_eq!(
+                e.to_string(),
+                "error: restore reads at most 2147483648 bytes from stdin or a pipe; save the \
+                 backup to a file and pass --in <file>."
+            );
+            still_empty(config).await;
+        }
+
+        // Changed in place between the passes: a byte of the 9 MiB blob (format version 1),
+        // a byte of the second chunk (format version 2). Pass 1 saw the old bytes.
+        for (path, at) in [
+            (&plain, plain_bytes.len() as u64 - 4096),
+            (&sealed, sealed_bytes.len() as u64 - 4096),
+        ] {
+            let original = std::fs::read(path).unwrap();
+            let config = target();
+            let mut between = || flip_in_place(path, at);
+            let hooks = admin::RestoreHooks {
+                between_passes: Some(&mut between),
+                ..admin::RestoreHooks::default()
+            };
+            let e = admin::restore_with(&config, path, hooks).await.unwrap_err();
+            assert!(matches!(e, admin::AdminError::FileChanged), "{e}");
+            assert_eq!(
+                e.to_string(),
+                "error: the backup file changed while it was being restored; nothing was \
+                 restored."
+            );
+            still_empty(config).await;
+            std::fs::write(path, original).unwrap();
+        }
+
+        // Over 1 TiB: refused from the metadata, before a byte is read (a sparse file).
+        let huge = root.join("huge.rvbackup");
+        let f = std::fs::File::create(&huge).unwrap();
+        f.set_len(file::MAX_BACKUP_FILE_LEN + 1).unwrap();
+        drop(f);
+        let config = target();
+        let e = admin::restore(&config, &huge).await.unwrap_err();
+        assert!(
+            matches!(e, admin::AdminError::RestoreTooLarge { len } if len == (1 << 40) + 1),
+            "{e}"
+        );
+        assert_eq!(
+            e.to_string(),
+            "error: the backup file is 1099511627777 bytes, over this release's limit of \
+             1099511627776 bytes."
+        );
+        std::fs::remove_file(&huge).unwrap();
+        still_empty(config).await;
+    });
+}
+
+/// ADR 0094 §6 test 4: `BackupTooLarge` writes nothing to stdout. The test runs itself again
+/// as a child process with stdout piped (so not a terminal); there `backup --out -` over a
+/// lowered limit refuses, and the child's stdout holds no byte of a backup file (every one
+/// starts with the magic).
+#[test]
+fn backup_too_large_writes_nothing_to_stdout() {
+    const CHILD: &str = "RIZZY_DRILL_BACKUP_TOO_LARGE_CHILD";
+    const NAME: &str = "backup_too_large_writes_nothing_to_stdout";
+    if std::env::var_os(CHILD).is_some() {
+        block_on(async {
+            let root = TempDir::new();
+            let data = root.join("data");
+            let secrets_dir = root.join("secrets");
+            std::fs::create_dir_all(&data).unwrap();
+            std::fs::create_dir_all(&secrets_dir).unwrap();
+            let config = server_config(&data, &secrets_dir.join("secrets.json"));
+            admin::secrets_init(&config).unwrap();
+            let db = open_writer(&config).await;
+            db.migrate().await.unwrap();
+            db.close().await;
+            let e = admin::backup_with_limit(&config, Path::new("-"), false, 100)
+                .await
+                .unwrap_err();
+            assert!(matches!(e, admin::AdminError::BackupTooLarge { .. }), "{e}");
+        });
+        return;
+    }
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+        .env(CHILD, "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("1 passed"), "{stdout}");
+    assert!(!contains(&out.stdout, &file::MAGIC[..8]), "{stdout}");
+}

@@ -181,7 +181,7 @@ pub use error::AuthError;
 pub use maintenance::{Purged, Resealed};
 pub use ports::{PersonalVault, VaultPort};
 pub use recovery::{RecoveryPending, RecoveryRelease};
-pub use secrets::{ServerSecrets, StartupCheckError};
+pub use secrets::{DumpCheck, ServerSecrets, StartupCheckError};
 pub use session::{Session, SessionKind};
 pub use totp::TotpEnrolment;
 #[doc(hidden)]

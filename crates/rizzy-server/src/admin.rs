@@ -68,19 +68,30 @@
 //!    refused while any server process holds it. Then require an empty target: no migration
 //!    applied, or exactly this release's, and no row
 //!    ([`rizzy_storage::Database::check_restore_target`]).
-//! 2. **Read the file** (into memory, at most `MAX_IN_MEMORY_BACKUP_LEN`, 2 GiB, from a path
-//!    or `-` for stdin) and parse it: magic,
-//!    format version and SHA-256 first, then every table strictly.
+//! 2. **Verify the file without parsing it** (pass 1 of [ADR 0094] §3): a regular file is
+//!    opened once, its length taken from its metadata (over `MAX_BACKUP_FILE_LEN`, 1 TiB:
+//!    `TooLarge` with the length), and the same handle serves both passes, so replacing the
+//!    path in between has no effect. Stdin (`-`) or a path that is not a regular file is read
+//!    into memory, at most `MAX_IN_MEMORY_BACKUP_LEN` (2 GiB; one byte more is
+//!    `StdinTooLarge`). The magic and format version are checked, then the bytes are streamed
+//!    through SHA-256 and compared with the digest; a format version 2 file has its header and
+//!    framing checked first and every chunk opened and streamed through, never reassembled.
+//!    Only the 42-byte header and the digest are kept.
 //! 3. **Require this release's schema version**; an older backup is restored with the release
 //!    that wrote it, then upgraded with `migrate` (ADR 0023 open question 4, as recommended).
-//! 4. **Check the secrets file against the backup** (CRYPTO.md §5.8, §5.11):
-//!    [`ServerSecrets::check_dump`] refuses a setup mismatch, a fresh secrets file, and a TOTP
-//!    row sealed under a data key the file lacks, and tells the operator to restore the
-//!    secrets first.
+//! 4. **Check the secrets file against the backup** (CRYPTO.md §5.8, §5.11): loaded before
+//!    the transaction, its checks ([`ServerSecrets::dump_check`], those of
+//!    [`ServerSecrets::check_dump`]) run on each row as pass 2 reads it, the setups' before any
+//!    later table; they refuse a setup mismatch, a fresh secrets file, and a TOTP row sealed
+//!    under a data key the file lacks, and tell the operator to restore the secrets first.
 //! 5. **Draw a new restore generation** from the OS CSPRNG (ADR 0021 §2), check once more that
 //!    the instance lock is still held (reading a large file takes time, and a lock whose
-//!    connection dropped meanwhile excludes nobody), and load the rows in one transaction, which opens a reconciliation epoch for every restored account (INV-59)
-//!    and raises the store-sequence counters (`rizzy_storage::Database::restore`).
+//!    connection dropped meanwhile excludes nobody), and run pass 2: the same bytes again from
+//!    the start (format version 2: every chunk reopened) through the incremental decoder, each
+//!    row inserted as it is decoded, in one transaction, which requires the header bytes and
+//!    the digest to equal pass 1's (`FileChanged` otherwise), opens a reconciliation epoch for
+//!    every restored account (INV-59) and raises the store-sequence counters
+//!    (`rizzy_storage::Database::restore_from`).
 //! 6. **Report**: the caller prints the row count, the number of accounts in reconciliation
 //!    and the INV-59 notice with the AR-19 warning ([`RESTORE_NOTICE`]).
 //!
@@ -167,6 +178,7 @@
 //! [ADR 0011]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0011-storage.md
 //! [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
 //! [ADR 0031]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0031-retiring-old-opaque-setups.md
+//! [ADR 0094]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0094-backup-container-limits.md
 //! [ADR 0047]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0047-opaque-secrets-operator-commands.md
 //! [ADR 0071]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0071-encrypted-db-backup-format.md
 
@@ -188,7 +200,8 @@ use rizzy_storage::backup::file::{
 };
 use rizzy_storage::{
     Database, DumpError, InstanceLock, InstanceLockMode, PostgresOptions, RestoreError,
-    RestoreGeneration, SqliteOptions, StartupMigration, WriterLock, schema_version,
+    RestoreFromError, RestoreGeneration, SqliteOptions, StartupMigration, WriterLock,
+    schema_version,
 };
 use zeroize::Zeroizing;
 
@@ -262,6 +275,17 @@ pub enum AdminError {
         /// Whether the output was stdout.
         to_stdout: bool,
     },
+    /// `restore`: the backup file is `len` bytes, over [`MAX_BACKUP_FILE_LEN`] (ADR 0094 §4).
+    RestoreTooLarge {
+        /// The file's length.
+        len: u64,
+    },
+    /// `restore`: stdin or a path that is not a regular file holds more than
+    /// [`MAX_IN_MEMORY_BACKUP_LEN`] bytes (ADR 0094 §4).
+    StdinTooLarge,
+    /// `restore`: the file's bytes changed between the two passes; nothing was restored
+    /// (ADR 0094 §3 point 4, §4).
+    FileChanged,
     /// `secrets restore`: the decrypted backup is not a valid secrets file (ADR 0047 step 3).
     BackupContents(SecretsFileError),
     /// `secrets restore`: the backup does not belong to this database (ADR 0047 step 4).
@@ -366,6 +390,20 @@ impl AdminError {
                 "error: the database changed during the backup snapshot; the output is \
                  incomplete and must be discarded.",
             ),
+            Self::RestoreTooLarge { len } => write!(
+                f,
+                "error: the backup file is {len} bytes, over this release's limit of \
+                 {MAX_BACKUP_FILE_LEN} bytes."
+            ),
+            Self::StdinTooLarge => write!(
+                f,
+                "error: restore reads at most {MAX_IN_MEMORY_BACKUP_LEN} bytes from stdin or a \
+                 pipe; save the backup to a file and pass --in <file>."
+            ),
+            Self::FileChanged => f.write_str(
+                "error: the backup file changed while it was being restored; nothing was \
+                 restored.",
+            ),
             _ => Ok(()),
         }
     }
@@ -435,7 +473,11 @@ impl fmt::Display for AdminError {
                  --backup-key` first, then make a new secrets backup",
             ),
             Self::DbBackup(e) => write!(f, "{e}"),
-            Self::BackupTooLarge { .. } | Self::SnapshotChanged { .. } => self.fmt_streaming(f),
+            Self::BackupTooLarge { .. }
+            | Self::SnapshotChanged { .. }
+            | Self::RestoreTooLarge { .. }
+            | Self::StdinTooLarge
+            | Self::FileChanged => self.fmt_streaming(f),
             Self::BackupContents(e) => write!(
                 f,
                 "the backup does not hold a valid secrets file ({e}); nothing was written"
@@ -1351,33 +1393,132 @@ impl<R: rizzy_domain_auth::types::CryptoRng + ?Sized> std::io::Write for Sink<'_
     }
 }
 
-/// Reads the backup file from `path`, or from standard input when `path` is `-`, refusing
-/// anything longer than [`MAX_IN_MEMORY_BACKUP_LEN`] without reading past it.
-fn read_backup(path: &Path) -> Result<Zeroizing<Vec<u8>>, AdminError> {
-    if is_stdio(path) {
-        let mut buf = Zeroizing::new(Vec::new());
-        let limit = u64::try_from(MAX_IN_MEMORY_BACKUP_LEN)
-            .unwrap_or(u64::MAX)
-            .saturating_add(1);
-        std::io::stdin()
-            .lock()
-            .take(limit)
-            .read_to_end(&mut buf)
-            .map_err(|e| AdminError::Input(e.kind()))?;
-        if buf.len() > MAX_IN_MEMORY_BACKUP_LEN {
-            return Err(AdminError::BackupFile(FileError::TooLarge));
+/// The longest backup [`restore`] reads into memory: from stdin, or from a path that is not a
+/// regular file (ADR 0094 §3, "Stdin and non-regular paths").
+const MAX_IN_MEMORY: usize = MAX_IN_MEMORY_BACKUP_LEN;
+
+/// The read buffer of [`restore`]'s pass 1.
+const READ_LEN: usize = 64 * 1024;
+
+/// The backup file [`restore`] reads twice: one open regular file (both passes use the same
+/// handle, rewound), or bytes read into memory from stdin or a path that cannot be read twice.
+enum Input {
+    /// A regular file, open once.
+    File(std::fs::File),
+    /// The bytes, and how far they were read.
+    Memory(Zeroizing<Vec<u8>>, usize),
+}
+
+impl std::io::Read for Input {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::File(file) => file.read(out),
+            Self::Memory(bytes, pos) => {
+                let rest = bytes.get(*pos..).unwrap_or_default();
+                let n = rest.len().min(out.len());
+                for (slot, b) in out.iter_mut().zip(rest) {
+                    *slot = *b;
+                }
+                *pos += n;
+                Ok(n)
+            }
         }
-        Ok(buf)
-    } else {
-        fsutil::read_limited(path, MAX_IN_MEMORY_BACKUP_LEN).map_err(|e| match e {
-            ReadError::TooLarge => AdminError::BackupFile(FileError::TooLarge),
-            ReadError::Io(e) => AdminError::Input(e.kind()),
-        })
     }
 }
 
-/// `rizzy-vault restore --in <file|->`: the steps of ADR 0023 §5 (module docs). The caller
-/// prints the report and [`RESTORE_NOTICE`].
+impl Input {
+    /// Back to the first byte, for pass 2.
+    fn rewind(&mut self) -> Result<(), AdminError> {
+        match self {
+            Self::File(file) => {
+                std::io::Seek::rewind(file).map_err(|e| AdminError::Input(e.kind()))
+            }
+            Self::Memory(_, pos) => {
+                *pos = 0;
+                Ok(())
+            }
+        }
+    }
+
+    /// Reads until `buf` is full or the input ends; returns how many bytes it read.
+    fn read_full(&mut self, buf: &mut [u8]) -> Result<usize, AdminError> {
+        let mut filled = 0;
+        while let Some(rest) = buf.get_mut(filled..).filter(|r| !r.is_empty()) {
+            match self.read(rest) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(AdminError::Input(e.kind())),
+            }
+        }
+        Ok(filled)
+    }
+}
+
+/// Reads at most `cap` bytes of `src` into memory; one more refuses with
+/// [`AdminError::StdinTooLarge`] (ADR 0094 §4).
+fn read_capped(src: impl std::io::Read, cap: usize) -> Result<Input, AdminError> {
+    let mut buf = Zeroizing::new(Vec::new());
+    let limit = u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1);
+    src.take(limit)
+        .read_to_end(&mut buf)
+        .map_err(|e| AdminError::Input(e.kind()))?;
+    if buf.len() > cap {
+        return Err(AdminError::StdinTooLarge);
+    }
+    Ok(Input::Memory(buf, 0))
+}
+
+/// Opens the backup at `path` (`-`: standard input, or `hooks.stdin`): a regular file stays
+/// open, its length from its metadata, refused over [`MAX_BACKUP_FILE_LEN`]; anything else is
+/// read into memory, at most the in-memory cap. Returns the input and its length.
+fn open_input(path: &Path, hooks: &mut RestoreHooks<'_>) -> Result<(Input, u64), AdminError> {
+    let cap = hooks.in_memory_cap.unwrap_or(MAX_IN_MEMORY);
+    let input = if is_stdio(path) {
+        match hooks.stdin.as_deref_mut() {
+            Some(stdin) => read_capped(stdin, cap)?,
+            None => read_capped(std::io::stdin().lock(), cap)?,
+        }
+    } else {
+        let file = std::fs::File::open(path).map_err(|e| AdminError::Input(e.kind()))?;
+        let meta = file.metadata().map_err(|e| AdminError::Input(e.kind()))?;
+        if !meta.is_file() {
+            read_capped(file, cap)?
+        } else if meta.len() > MAX_BACKUP_FILE_LEN {
+            return Err(AdminError::RestoreTooLarge { len: meta.len() });
+        } else {
+            return Ok((Input::File(file), meta.len()));
+        }
+    };
+    let len = match &input {
+        Input::Memory(bytes, _) => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        Input::File(file) => file.metadata().map_or(0, |m| m.len()),
+    };
+    Ok((input, len))
+}
+
+/// The test hooks of [`restore_with`]. Only the tests set them (ADR 0094 §6).
+#[doc(hidden)]
+#[derive(Default)]
+pub struct RestoreHooks<'h> {
+    /// Read instead of standard input for `--in -`.
+    pub stdin: Option<&'h mut dyn std::io::Read>,
+    /// The in-memory cap instead of [`MAX_IN_MEMORY_BACKUP_LEN`].
+    pub in_memory_cap: Option<usize>,
+    /// Runs between pass 1 and pass 2.
+    pub between_passes: Option<&'h mut dyn FnMut()>,
+}
+
+impl fmt::Debug for RestoreHooks<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RestoreHooks")
+            .field("in_memory_cap", &self.in_memory_cap)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `rizzy-vault restore --in <file|->`: the steps of ADR 0023 §5 as ADR 0094 §5(b) replaces
+/// steps 2, 4 and 5 (module docs). The caller prints the report and [`RESTORE_NOTICE`].
 ///
 /// # Errors
 /// [`AdminError`]; the target then holds no application row.
@@ -1385,13 +1526,112 @@ pub async fn restore(
     config: &Config,
     input: &Path,
 ) -> Result<rizzy_storage::RestoreReport, AdminError> {
+    restore_with(config, input, RestoreHooks::default()).await
+}
+
+/// [`restore`] with test hooks: another stdin, a lower in-memory cap, a step between the
+/// passes. Only the tests call it.
+///
+/// # Errors
+/// As [`restore`].
+#[doc(hidden)]
+pub async fn restore_with(
+    config: &Config,
+    input: &Path,
+    mut hooks: RestoreHooks<'_>,
+) -> Result<rizzy_storage::RestoreReport, AdminError> {
     check_location(config)?;
     // 1. Exclude every server process: the SQLite writer lock, or the PostgreSQL instance lock
     //    taken exclusively (ADR 0023 §5 step 1).
     let (db, mut lock) = open_exclusive(config).await?;
-    let outcome = restore_into(&db, &mut lock, config, input).await;
+    let outcome = restore_into(&db, &mut lock, config, input, &mut hooks).await;
     Exclusion::Database(db, lock).end().await;
     outcome
+}
+
+/// What pass 1 found: the format version 1 file's [`backup_file::Verified`], and for format
+/// version 2 the container header, its bytes and the secrets file holding its key.
+struct Pass1 {
+    /// The format version 1 file, verified.
+    verified: backup_file::Verified,
+    /// Format version 2: the header, its bytes and the loaded secrets file.
+    sealed: Option<(
+        db_backup::Header,
+        [u8; db_backup::HEADER_LEN],
+        ServerSecrets,
+    )>,
+}
+
+/// Pass 1 (ADR 0094 §3 point 1; ADR 0023 §5 step 2 as ADR 0094 §5(b) replaces it): the
+/// length, magic and format version, then the digest, streamed. A format version 2 file has
+/// its header and framing checked before any crypto (ADR 0071, ADR 0083) and every chunk
+/// opened, the plaintext streamed through SHA-256 and dropped.
+fn pass1(input: &mut Input, len: u64, config: &Config) -> Result<Pass1, AdminError> {
+    let mut head = [0u8; db_backup::HEADER_LEN];
+    let got = input.read_full(&mut head)?;
+    let head = head.get(..got).unwrap_or_default();
+    let mut buf = Zeroizing::new(vec![0u8; READ_LEN]);
+    if db_backup::format_version(head) == Some(db_backup::FORMAT_VERSION) {
+        let header = db_backup::parse_header_of(head, len).map_err(AdminError::DbBackup)?;
+        let header_bytes = <[u8; db_backup::HEADER_LEN]>::try_from(head).map_err(|_| {
+            AdminError::DbBackup(DbBackupError::Malformed("shorter than the header"))
+        })?;
+        let secrets = secrets_file::load(&config.secrets_file).map_err(AdminError::Secrets)?;
+        let key = secrets
+            .backup_key(header.backup_key_id)
+            .ok_or(AdminError::DbBackup(DbBackupError::UnknownBackupKey {
+                backup_key_id: header.backup_key_id,
+            }))?;
+        let mut digest =
+            backup_file::Verifier::new(header.plaintext_len).map_err(AdminError::BackupFile)?;
+        let mut opener = db_backup::Opener::new(header, key, &mut *input);
+        loop {
+            match opener.read(&mut buf).map_err(read_error)? {
+                0 => break,
+                n => digest
+                    .update(buf.get(..n).unwrap_or_default())
+                    .map_err(file_error)?,
+            }
+        }
+        let verified = digest.finish().map_err(file_error)?;
+        drop(opener);
+        Ok(Pass1 {
+            verified,
+            sealed: Some((header, header_bytes, secrets)),
+        })
+    } else {
+        let mut digest = backup_file::Verifier::new(len).map_err(AdminError::BackupFile)?;
+        digest.update(head).map_err(file_error)?;
+        loop {
+            match input.read_full(&mut buf)? {
+                0 => break,
+                n => digest
+                    .update(buf.get(..n).unwrap_or_default())
+                    .map_err(file_error)?,
+            }
+        }
+        let verified = digest.finish().map_err(file_error)?;
+        Ok(Pass1 {
+            verified,
+            sealed: None,
+        })
+    }
+}
+
+/// A backup file error, [`FileError::Changed`] being [`AdminError::FileChanged`].
+fn file_error(e: FileError) -> AdminError {
+    match e {
+        FileError::Changed => AdminError::FileChanged,
+        e => AdminError::BackupFile(e),
+    }
+}
+
+/// A container error in pass 1: a read error is the input's.
+fn read_error(e: DbBackupError) -> AdminError {
+    match e {
+        DbBackupError::Read(kind) => AdminError::Input(kind),
+        e => AdminError::DbBackup(e),
+    }
 }
 
 /// Steps 1 (the empty target) to 5 of [`restore`], on the database `lock` excludes every
@@ -1400,42 +1640,41 @@ async fn restore_into(
     db: &Database,
     lock: &mut InstanceLock,
     config: &Config,
-    input: &Path,
+    path: &Path,
+    hooks: &mut RestoreHooks<'_>,
 ) -> Result<rizzy_storage::RestoreReport, AdminError> {
     db.check_restore_target()
         .await
         .map_err(AdminError::Storage)?;
-    // 2. Read and parse: magic, format version and digest before anything else. A format
-    //    version 2 file is opened first with the secrets file's backup key named in its header
-    //    (ADR 0071): any framing, commitment or AEAD failure refuses it, and the format
-    //    version 1 bytes inside continue at this step.
-    let bytes = read_backup(input)?;
-    let bytes = if db_backup::format_version(&bytes) == Some(db_backup::FORMAT_VERSION) {
-        let secrets = secrets_file::load(&config.secrets_file).map_err(AdminError::Secrets)?;
-        db_backup::open(|id| secrets.backup_key(id), &bytes).map_err(AdminError::DbBackup)?
-    } else {
-        bytes
-    };
-    let parsed = backup_file::parse(&bytes).map_err(AdminError::BackupFile)?;
-    drop(bytes);
-    // 3. This release's schema version only.
+    // 2. Pass 1: verify the file without parsing it (ADR 0094 §3 point 1).
+    let (mut input, len) = open_input(path, hooks)?;
+    let Pass1 { verified, sealed } = pass1(&mut input, len, config)?;
+    // 3. This release's schema version only, from the verified header.
     let current = schema_version();
-    if parsed.dump.schema_version != current {
+    if verified.schema_version() != current {
         return Err(AdminError::Storage(
             RestoreError::SchemaVersion {
-                dump: parsed.dump.schema_version,
+                dump: verified.schema_version(),
                 current,
             }
             .into(),
         ));
     }
-    // 4. The secrets file must belong to the backup.
-    let secrets = secrets_file::load(&config.secrets_file).map_err(AdminError::Secrets)?;
-    secrets
-        .check_dump(&parsed.dump)
-        .map_err(AdminError::SecretsMismatch)?;
-    drop(secrets);
-    // 5. A new restore generation; the rows, the epochs and the counters in one transaction.
+    // 4. The secrets file, loaded before the transaction; its comparison with the dump runs
+    //    on each row as pass 2 reads it (ADR 0094 §5(b) step 4).
+    let (header, secrets) = match sealed {
+        Some((header, bytes, secrets)) => (Some((header, bytes)), secrets),
+        None => (
+            None,
+            secrets_file::load(&config.secrets_file).map_err(AdminError::Secrets)?,
+        ),
+    };
+    let mut dump_check = secrets.dump_check().map_err(AdminError::SecretsMismatch)?;
+    if let Some(between) = hooks.between_passes.as_deref_mut() {
+        between();
+    }
+    // 5. A new restore generation; pass 2 reads the same bytes again from the start and loads
+    //    them in one transaction, with the epochs and the counters.
     let mut generation = [0u8; 16];
     os_rng().fill_bytes(&mut generation);
     let now = i64::try_from(now_ms()).unwrap_or(i64::MAX);
@@ -1443,7 +1682,40 @@ async fn restore_into(
     if !server::instance_lock_held(lock).await {
         return Err(AdminError::Serve(ServeError::InstanceLockLost));
     }
-    db.restore(&parsed.dump, RestoreGeneration(generation), now)
-        .await
-        .map_err(AdminError::Storage)
+    input.rewind()?;
+    let check = |spec: &'static rizzy_storage::tables::TableSpec, row: &[rizzy_storage::Value]| {
+        dump_check
+            .row(spec.name, row)
+            .map_err(AdminError::SecretsMismatch)
+    };
+    let outcome = if let Some((header, bytes)) = header {
+        let mut again = [0u8; db_backup::HEADER_LEN];
+        if input.read_full(&mut again)? != again.len() || again != bytes {
+            return Err(AdminError::FileChanged);
+        }
+        let key = secrets
+            .backup_key(header.backup_key_id)
+            .ok_or(AdminError::FileChanged)?;
+        let mut opener = db_backup::Opener::new(header, key, &mut input);
+        // Pass 1 opened every chunk: a container failure now means the file changed.
+        let read = |out: &mut [u8]| {
+            opener.read(out).map_err(|e| match e {
+                DbBackupError::Read(kind) => AdminError::Input(kind),
+                _ => AdminError::FileChanged,
+            })
+        };
+        db.restore_from(&verified, read, check, RestoreGeneration(generation), now)
+            .await
+    } else {
+        let read = |out: &mut [u8]| {
+            std::io::Read::read(&mut input, out).map_err(|e| AdminError::Input(e.kind()))
+        };
+        db.restore_from(&verified, read, check, RestoreGeneration(generation), now)
+            .await
+    };
+    outcome.map_err(|e| match e {
+        RestoreFromError::Storage(e) => AdminError::Storage(e),
+        RestoreFromError::File(e) => file_error(e),
+        RestoreFromError::Caller(e) => e,
+    })
 }

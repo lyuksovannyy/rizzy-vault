@@ -74,11 +74,11 @@
 //! [ADR 0094]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0094-backup-container-limits.md
 
 use core::fmt;
-use std::io::Write;
+use std::io::{Read, Write};
 
 use rizzy_domain_auth::types::{BackupId, CryptoRng, ServerDbBackupCtx, ServerDbBackupKey};
 use rizzy_storage::backup::file::{MAGIC, MAX_BACKUP_FILE_LEN};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 /// The container's `format_version` (ADR 0071; format version 1 is ADR 0023's plain file).
 pub const FORMAT_VERSION: u16 = 2;
@@ -169,6 +169,8 @@ pub enum DbBackupError {
     Seal,
     /// Writing the sealed file failed.
     Write(std::io::ErrorKind),
+    /// Reading the sealed file failed.
+    Read(std::io::ErrorKind),
 }
 
 impl fmt::Display for DbBackupError {
@@ -192,6 +194,7 @@ impl fmt::Display for DbBackupError {
             ),
             Self::Seal => f.write_str("encrypted backup: a chunk could not be sealed"),
             Self::Write(kind) => write!(f, "writing the encrypted backup failed: {kind}"),
+            Self::Read(kind) => write!(f, "reading the encrypted backup failed: {kind}"),
         }
     }
 }
@@ -461,14 +464,33 @@ pub fn parse_header(bytes: &[u8]) -> Result<Header, DbBackupError> {
     parse_header_with(bytes, CHUNK_LEN)
 }
 
+/// [`parse_header`] for a file read in a stream: `head` is its first bytes (at least
+/// [`HEADER_LEN`], more are ignored) and `file_len` its whole length, a regular file's
+/// metadata (ADR 0094 §3 point 1).
+///
+/// # Errors
+/// As [`parse_header`].
+pub fn parse_header_of(head: &[u8], file_len: u64) -> Result<Header, DbBackupError> {
+    parse_header_parts(head, file_len, CHUNK_LEN)
+}
+
 /// [`parse_header`] with `chunk_len`-byte chunks (only the unit tests pass another length).
 fn parse_header_with(bytes: &[u8], chunk_len: usize) -> Result<Header, DbBackupError> {
-    const SHORT: DbBackupError = DbBackupError::Malformed("shorter than the header");
     let file_len = u64::try_from(bytes.len()).map_err(|_| DbBackupError::TooLarge)?;
+    parse_header_parts(bytes, file_len, chunk_len)
+}
+
+/// The header checks over the header bytes `head` of a file of `file_len` bytes.
+fn parse_header_parts(
+    head: &[u8],
+    file_len: u64,
+    chunk_len: usize,
+) -> Result<Header, DbBackupError> {
+    const SHORT: DbBackupError = DbBackupError::Malformed("shorter than the header");
     if file_len > MAX_BACKUP_FILE_LEN {
         return Err(DbBackupError::TooLarge);
     }
-    let mut r = Reader(bytes);
+    let mut r = Reader(head);
     if r.take(MAGIC.len()).ok_or(SHORT)? != MAGIC.as_slice() {
         return Err(DbBackupError::Malformed(
             "not a rizzy-vault database backup",
@@ -541,28 +563,155 @@ fn open_with<'k>(
     // allocation is bounded by the input.
     let payload = usize::try_from(header.plaintext_len)
         .map_err(|_| DbBackupError::Malformed(LENGTH_MISMATCH))?;
-    let mut out = Zeroizing::new(Vec::with_capacity(payload));
-    let mut rest = bytes.get(HEADER_LEN..).unwrap_or_default();
-    for index in 0..header.chunk_count {
-        let failed = DbBackupError::Authentication { chunk_index: index };
-        let len = chunk_len.min(payload.saturating_sub(out.len()));
-        let (envelope, tail) = rest
-            .split_at_checked(len.saturating_add(CHUNK_OVERHEAD))
-            .ok_or(DbBackupError::Malformed(LENGTH_MISMATCH))?;
-        let chunk = key
-            .open_chunk(&header.chunk_ctx(index), envelope)
-            .map_err(|_| failed)?;
-        // The AEAD covers the ciphertext length, so this holds; checked anyway.
-        if chunk.len() != len {
-            return Err(failed);
+    let mut out = Zeroizing::new(vec![0u8; payload]);
+    let mut opener = Opener::with_chunk_len(
+        header,
+        key,
+        bytes.get(HEADER_LEN..).unwrap_or_default(),
+        chunk_len,
+    );
+    let mut filled = 0;
+    while let Some(rest) = out.get_mut(filled..).filter(|r| !r.is_empty()) {
+        match opener.read(rest)? {
+            0 => return Err(DbBackupError::Malformed(LENGTH_MISMATCH)),
+            n => filled += n,
         }
-        out.extend_from_slice(chunk.expose_secret());
-        rest = tail;
     }
-    if out.len() != payload || !rest.is_empty() {
+    if opener.read(&mut [0u8; 1])? != 0 {
         return Err(DbBackupError::Malformed(LENGTH_MISMATCH));
     }
     Ok(out)
+}
+
+/// Opens a format version 2 file's chunks in order, one at a time, as a stream of the format
+/// version 1 bytes inside (ADR 0094 §3: pass 1 streams them through SHA-256, pass 2 reopens
+/// every chunk into the decoder). It holds one sealed chunk and one opened chunk, never the
+/// file. `src` is the file after its [`HEADER_LEN`]-byte header, which [`parse_header_of`]
+/// (or [`parse_header`]) checked first.
+pub struct Opener<'k, R> {
+    /// The header's backup key.
+    key: &'k ServerDbBackupKey,
+    /// The checked header.
+    header: Header,
+    /// The sealed chunks.
+    src: R,
+    /// The chunk length (only the unit tests pass another than [`CHUNK_LEN`]).
+    chunk_len: usize,
+    /// The next chunk's index.
+    index: u32,
+    /// The plaintext bytes of the chunks opened so far.
+    opened: u64,
+    /// The current sealed chunk.
+    sealed: Vec<u8>,
+    /// The current chunk's plaintext.
+    plain: Zeroizing<Vec<u8>>,
+    /// How much of `plain` was handed out.
+    pos: usize,
+}
+
+impl<R> fmt::Debug for Opener<'_, R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Opener")
+            .field("header", &self.header)
+            .field("index", &self.index)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'k, R: Read> Opener<'k, R> {
+    /// An opener for the file of `header`, sealed under `key` (the secrets file's key the
+    /// header names).
+    pub fn new(header: Header, key: &'k ServerDbBackupKey, src: R) -> Self {
+        Self::with_chunk_len(header, key, src, CHUNK_LEN)
+    }
+
+    /// [`Opener::new`] with `chunk_len`-byte chunks.
+    fn with_chunk_len(
+        header: Header,
+        key: &'k ServerDbBackupKey,
+        src: R,
+        chunk_len: usize,
+    ) -> Self {
+        Self {
+            key,
+            header,
+            src,
+            chunk_len,
+            index: 0,
+            opened: 0,
+            sealed: Vec::new(),
+            plain: Zeroizing::new(Vec::new()),
+            pos: 0,
+        }
+    }
+
+    /// Reads the next plaintext bytes into `out`, opening the next chunk when the current one
+    /// is used up; 0 after the last chunk, once nothing follows it.
+    ///
+    /// # Errors
+    /// [`DbBackupError::Authentication`] for the first chunk that fails,
+    /// [`DbBackupError::Malformed`] when the file ends early or continues after the last
+    /// chunk, [`DbBackupError::Read`] when reading fails.
+    pub fn read(&mut self, out: &mut [u8]) -> Result<usize, DbBackupError> {
+        if self.pos == self.plain.len() && !self.next_chunk()? {
+            return Ok(0);
+        }
+        let avail = self.plain.get(self.pos..).unwrap_or_default();
+        let mut n = 0;
+        for (slot, b) in out.iter_mut().zip(avail) {
+            *slot = *b;
+            n += 1;
+        }
+        self.pos += n;
+        Ok(n)
+    }
+
+    /// Opens the next chunk into `plain`; `false` after the last one.
+    fn next_chunk(&mut self) -> Result<bool, DbBackupError> {
+        if self.index == self.header.chunk_count {
+            return match read_full(&mut self.src, &mut [0u8; 1])? {
+                0 => Ok(false),
+                _ => Err(DbBackupError::Malformed(LENGTH_MISMATCH)),
+            };
+        }
+        let failed = DbBackupError::Authentication {
+            chunk_index: self.index,
+        };
+        let left = self.header.plaintext_len.saturating_sub(self.opened);
+        let len = usize::try_from(left).map_or(self.chunk_len, |n| n.min(self.chunk_len));
+        self.sealed.resize(len.saturating_add(CHUNK_OVERHEAD), 0);
+        if read_full(&mut self.src, &mut self.sealed)? != self.sealed.len() {
+            return Err(DbBackupError::Malformed(LENGTH_MISMATCH));
+        }
+        let chunk = self
+            .key
+            .open_chunk(&self.header.chunk_ctx(self.index), &self.sealed)
+            .map_err(|_| failed)?;
+        // The AEAD covers the ciphertext length, so this holds; checked anyway.
+        if chunk.len() != len || len == 0 {
+            return Err(failed);
+        }
+        self.plain.zeroize();
+        self.plain.extend_from_slice(chunk.expose_secret());
+        self.pos = 0;
+        self.index += 1;
+        self.opened += u64::try_from(len).unwrap_or(u64::MAX);
+        Ok(true)
+    }
+}
+
+/// Reads until `buf` is full or the input ends; returns how many bytes it read.
+fn read_full(src: &mut impl Read, buf: &mut [u8]) -> Result<usize, DbBackupError> {
+    let mut filled = 0;
+    while let Some(rest) = buf.get_mut(filled..).filter(|r| !r.is_empty()) {
+        match src.read(rest) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(DbBackupError::Read(e.kind())),
+        }
+    }
+    Ok(filled)
 }
 
 /// A cursor over the header bytes; every read is bounds-checked.
@@ -756,6 +905,57 @@ mod tests {
             parse_header(&file).unwrap().backup_id,
             parse_header(&again).unwrap().backup_id
         );
+    }
+
+    /// ADR 0094 §3: the streaming [`Opener`] reads a multi-chunk file's plaintext in pieces of
+    /// any size, one chunk held at a time, and refuses a file that ends early or goes on;
+    /// [`parse_header_of`] checks the header against a length known from metadata.
+    #[test]
+    fn opener_streams_every_chunk() {
+        let k = key(3);
+        let len = 4 * SMALL + 5;
+        let file = seal_small(len, 11);
+        let header = parse_header_parts(&file, file.len() as u64, SMALL).unwrap();
+        assert_eq!(header.chunk_count, 5);
+        assert!(matches!(
+            parse_header_parts(&file[..HEADER_LEN], file.len() as u64 + 1, SMALL),
+            Err(DbBackupError::Malformed(LENGTH_MISMATCH))
+        ));
+        assert_eq!(
+            parse_header_of(&file, MAX_BACKUP_FILE_LEN + 1),
+            Err(DbBackupError::TooLarge)
+        );
+        for piece in [1, 3, SMALL - 1, SMALL + 1, 1 << 16] {
+            let mut opener = Opener::with_chunk_len(header, &k, &file[HEADER_LEN..], SMALL);
+            let mut out = Vec::new();
+            let mut buf = vec![0u8; piece];
+            loop {
+                match opener.read(&mut buf).unwrap() {
+                    0 => break,
+                    n => out.extend_from_slice(&buf[..n]),
+                }
+            }
+            assert_eq!(out, payload(len), "piece {piece}");
+        }
+        let drain = |src: &[u8]| -> Result<(), DbBackupError> {
+            let mut opener = Opener::with_chunk_len(header, &k, src, SMALL);
+            let mut buf = [0u8; 64];
+            while opener.read(&mut buf)? != 0 {}
+            Ok(())
+        };
+        assert_eq!(
+            drain(&file[HEADER_LEN..file.len() - 1]),
+            Err(DbBackupError::Malformed(LENGTH_MISMATCH))
+        );
+        let mut longer = file[HEADER_LEN..].to_vec();
+        longer.push(0);
+        assert_eq!(
+            drain(&longer),
+            Err(DbBackupError::Malformed(LENGTH_MISMATCH))
+        );
+        let mut flipped = file[HEADER_LEN..].to_vec();
+        flipped[2 * (SMALL + CHUNK_OVERHEAD) + 1] ^= 1;
+        assert_eq!(drain(&flipped), Err(auth(2)));
     }
 
     /// ADR 0094 §2: the payload streamed through a [`Sealer`] in pieces of any size gives

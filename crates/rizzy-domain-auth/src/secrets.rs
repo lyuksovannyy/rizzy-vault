@@ -725,31 +725,102 @@ impl ServerSecrets {
     /// TOTP row naming a data key the file lacks, or [`StartupCheckError::DumpShape`] when one
     /// of those tables is missing or a value there is not the integer or blob it must be.
     pub fn check_dump(&self, dump: &Dump) -> Result<(), StartupCheckError> {
-        /// The rows of table `name`, and the index of each named column.
-        fn table<'d, const N: usize>(
-            dump: &'d Dump,
-            name: &str,
-            columns: [&str; N],
-        ) -> Result<(&'d [Vec<Value>], [usize; N]), StartupCheckError> {
-            let spec = TABLES
-                .iter()
-                .find(|s| s.name == name)
-                .ok_or(StartupCheckError::DumpShape)?;
-            let mut indexes = [0usize; N];
-            for (slot, column) in indexes.iter_mut().zip(columns) {
-                *slot = spec
-                    .columns
-                    .iter()
-                    .position(|c| c.name == column)
-                    .ok_or(StartupCheckError::DumpShape)?;
+        for name in [SETUPS, CREDENTIALS, TOTP] {
+            if !dump.tables.iter().any(|t| t.table == name) {
+                return Err(StartupCheckError::DumpShape);
             }
-            let rows = dump
-                .tables
-                .iter()
-                .find(|t| t.table == name)
-                .ok_or(StartupCheckError::DumpShape)?;
-            Ok((rows.rows.as_slice(), indexes))
         }
+        let mut check = self.dump_check()?;
+        for table in &dump.tables {
+            for row in &table.rows {
+                check.row(&table.table, row)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// [`ServerSecrets::check_dump`]'s checks one row at a time, for the streaming
+    /// `rizzy-vault restore` (ADR 0094 §5(b) step 4): it hands every row over in file order, and
+    /// each check runs as soon as its row is read, the setups' before any later table.
+    ///
+    /// # Errors
+    ///
+    /// [`StartupCheckError::DumpShape`] when this release's tables lack a column the checks
+    /// read (not expected).
+    pub fn dump_check(&self) -> Result<DumpCheck<'_>, StartupCheckError> {
+        let [setup_id, setup_hash, setup_retired] =
+            columns(SETUPS, ["setup_id", "ake_public_key_hash", "retired_at_ms"])?;
+        let [totp_key] = columns(TOTP, ["data_key_id"])?;
+        Ok(DumpCheck {
+            secrets: self,
+            setup_id,
+            setup_hash,
+            setup_retired,
+            totp_key,
+            recorded_any: false,
+        })
+    }
+}
+
+/// The table [`DumpCheck`] compares with the loaded setups.
+const SETUPS: &str = "auth_opaque_setups";
+/// The table whose rows need a recorded, loaded setup.
+const CREDENTIALS: &str = "auth_credentials";
+/// The table whose rows name a data key.
+const TOTP: &str = "auth_totp_credentials";
+
+/// The index of each named column of table `name` in this release's [`TABLES`].
+fn columns<const N: usize>(name: &str, names: [&str; N]) -> Result<[usize; N], StartupCheckError> {
+    let spec = TABLES
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or(StartupCheckError::DumpShape)?;
+    let mut indexes = [0usize; N];
+    for (slot, column) in indexes.iter_mut().zip(names) {
+        *slot = spec
+            .columns
+            .iter()
+            .position(|c| c.name == column)
+            .ok_or(StartupCheckError::DumpShape)?;
+    }
+    Ok(indexes)
+}
+
+/// The checks 1–3 of [`ServerSecrets::check_database`] on a backup's rows, fed one at a time
+/// in file order ([`ServerSecrets::dump_check`]). Pure: it reads the rows and writes nothing.
+pub struct DumpCheck<'s> {
+    /// The loaded secrets file.
+    secrets: &'s ServerSecrets,
+    /// `auth_opaque_setups.setup_id`.
+    setup_id: usize,
+    /// `auth_opaque_setups.ake_public_key_hash`.
+    setup_hash: usize,
+    /// `auth_opaque_setups.retired_at_ms`.
+    setup_retired: usize,
+    /// `auth_totp_credentials.data_key_id`.
+    totp_key: usize,
+    /// Whether a setup row named a loaded setup.
+    recorded_any: bool,
+}
+
+impl fmt::Debug for DumpCheck<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DumpCheck")
+            .field("recorded_any", &self.recorded_any)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DumpCheck<'_> {
+    /// Checks the next row of table `table`: 1. every loaded setup the dump records must match
+    /// and not be retired; 2. OPAQUE records need one (checked on the first
+    /// `auth_credentials` row, after every setup row); 3. every data key a sealed TOTP row
+    /// names must be loaded. Rows of other tables pass.
+    ///
+    /// # Errors
+    ///
+    /// As [`ServerSecrets::check_dump`].
+    pub fn row(&mut self, table: &str, row: &[Value]) -> Result<(), StartupCheckError> {
         /// The integer at `index` of `row`.
         fn int(row: &[Value], index: usize) -> Result<i64, StartupCheckError> {
             match row.get(index) {
@@ -757,49 +828,39 @@ impl ServerSecrets {
                 _ => Err(StartupCheckError::DumpShape),
             }
         }
-
-        // 1. Every loaded setup the dump records must match; 2. OPAQUE records need one.
-        let (setups, [id_col, hash_col, retired_col]) = table(
-            dump,
-            "auth_opaque_setups",
-            ["setup_id", "ake_public_key_hash", "retired_at_ms"],
-        )?;
-        let mut recorded_any = false;
-        for row in setups {
-            let id = int(row, id_col)?;
-            let Some(Value::Blob(hash)) = row.get(hash_col) else {
-                return Err(StartupCheckError::DumpShape);
-            };
-            let retired = match row.get(retired_col) {
-                Some(Value::Null) => false,
-                Some(Value::Integer(_)) => true,
-                _ => return Err(StartupCheckError::DumpShape),
-            };
-            let loaded = u32::try_from(id)
-                .ok()
-                .and_then(|id| Some((id, self.setup(id)?)));
-            if let Some((setup_id, setup)) = loaded {
-                if hash.as_slice() != setup.public_key_hash().as_slice() {
-                    return Err(StartupCheckError::SetupMismatch { setup_id });
+        match table {
+            SETUPS => {
+                let id = int(row, self.setup_id)?;
+                let Some(Value::Blob(hash)) = row.get(self.setup_hash) else {
+                    return Err(StartupCheckError::DumpShape);
+                };
+                let retired = match row.get(self.setup_retired) {
+                    Some(Value::Null) => false,
+                    Some(Value::Integer(_)) => true,
+                    _ => return Err(StartupCheckError::DumpShape),
+                };
+                let loaded = u32::try_from(id)
+                    .ok()
+                    .and_then(|id| Some((id, self.secrets.setup(id)?)));
+                if let Some((setup_id, setup)) = loaded {
+                    if hash.as_slice() != setup.public_key_hash().as_slice() {
+                        return Err(StartupCheckError::SetupMismatch { setup_id });
+                    }
+                    if retired {
+                        return Err(StartupCheckError::RetiredSetupLoaded { setup_id });
+                    }
+                    self.recorded_any = true;
                 }
-                if retired {
-                    return Err(StartupCheckError::RetiredSetupLoaded { setup_id });
+            }
+            CREDENTIALS if !self.recorded_any => return Err(StartupCheckError::NoRecordedSetup),
+            TOTP => {
+                let id = int(row, self.totp_key)?;
+                let data_key_id = u32::try_from(id).map_err(|_| StartupCheckError::DumpShape)?;
+                if !self.secrets.data_keys.contains_key(&data_key_id) {
+                    return Err(StartupCheckError::MissingDataKey { data_key_id });
                 }
-                recorded_any = true;
             }
-        }
-        let (credentials, _) = table(dump, "auth_credentials", ["setup_id"])?;
-        if !credentials.is_empty() && !recorded_any {
-            return Err(StartupCheckError::NoRecordedSetup);
-        }
-        // 3. Every data key a sealed TOTP row names must be loaded.
-        let (totp, [key_col]) = table(dump, "auth_totp_credentials", ["data_key_id"])?;
-        for row in totp {
-            let id = int(row, key_col)?;
-            let data_key_id = u32::try_from(id).map_err(|_| StartupCheckError::DumpShape)?;
-            if !self.data_keys.contains_key(&data_key_id) {
-                return Err(StartupCheckError::MissingDataKey { data_key_id });
-            }
+            _ => {}
         }
         Ok(())
     }
