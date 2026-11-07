@@ -375,7 +375,7 @@ What the file is, and is not:
 - **Integrity, not authentication.** The file ends with a SHA-256 of everything before it; `restore` checks it before reading anything, so a truncated or corrupted file is refused. It does not stop a deliberate edit: anyone who can write the file can recompute it. Protect the archives like the database itself.
 - **Not encrypted.** It holds what the database holds: every user's ciphertext, login names, device metadata, OPAQUE records and timestamps ([THREAT_MODEL §3.4](THREAT_MODEL.md#34-what-the-server-holds-by-sync-mode)). It never holds the server secrets ([INV-50](THREAT_MODEL.md#8-security-invariants)), but a database backup **plus** the secrets allows offline password guessing, so encrypt it (`age` above, or your backup tool's encryption) and store it apart from the secrets backup.
 - **Tied to its release.** It restores only with a release of the same database schema version. After an upgrade, take a new backup; to restore an older one, use the release that wrote it, then upgrade ([§7](#7-upgrades-and-migrations)).
-- **At most 2 GiB** in this release, which reads the whole file into memory. `backup` refuses to write a larger one, so every backup it writes can be restored. **Attachments count toward it:** they are stored as database rows, so every attachment byte is in every backup ([ADR 0054](adr/0054-attachments-envelope-and-api.md) §5). A server with many large attachments reaches this limit sooner; watch the size `backup` prints. Sessions and in-flight login state are not in it: after a restore every user signs in again.
+- **At most 1 TiB** (1099511627776 bytes) in this release ([ADR 0094](adr/0094-backup-container-limits.md)). `backup` and `restore` stream the file in two passes and never hold it in memory. `backup` measures the file before it writes a byte and refuses a larger one, so every backup it writes can be restored from a file. A backup over 2 GiB (2147483648 bytes) restores **only from a file** (`--in <file>`), not from stdin or a pipe, which `restore` reads into memory; `backup` prints a note when that applies, and a warning from 75 % of the limit. `restore` loads the whole backup in one transaction, so the database needs free disk for about the backup's size again while it runs. **Attachments count toward it:** they are stored as database rows, so every attachment byte is in every backup ([ADR 0054](adr/0054-attachments-envelope-and-api.md) §5). A server with many large attachments reaches this limit sooner; watch the size `backup` prints. Sessions and in-flight login state are not in it: after a restore every user signs in again.
 
 It works the same on PostgreSQL (one `REPEATABLE READ` snapshot), and the same pair moves an instance from SQLite to PostgreSQL: `backup` on the SQLite instance, `restore` into the empty PostgreSQL database ([§9](#9-restore)).
 
@@ -408,7 +408,7 @@ What the file is:
 - **Bound to the secrets file.** A holder of the file **and** the secrets file has the same exposure as with a plain backup: store the encrypted backups apart from the secrets file and from its backup, exactly as before. At-rest encryption of the archive (`age`) is now optional defence in depth.
 - **Rotation keeps old backups restorable.** `secrets rotate --backup-key` adds a new current key. The older keys stay in the file and nothing drops them ([ADR 0071](adr/0071-encrypted-db-backup-format.md) owner answer 3), so a backup made under key 1 still restores after key 2 is added. Keep the secrets backup that holds a key for as long as you keep database backups sealed under it.
 - **One-way compatibility.** A secrets file that holds a backup key is refused by an older `rizzy-vault` binary, which does not know the field. Upgrade every instance that shares the file first, and keep the pre-rotation secrets backup if you might roll back.
-- **The same limits otherwise:** at most 2 GiB for the encrypted file (header, data and 90 bytes per 8 MiB chunk), so a database just under the plain limit may not fit encrypted. Restore needs a release of the same schema version, and the backup works the same on PostgreSQL.
+- **The same limits otherwise:** at most 1 TiB for the encrypted file (header, data and 90 bytes per 8 MiB chunk), so a database just under the plain limit may not fit encrypted; from stdin, at most 2 GiB. Restore needs a release of the same schema version, and the backup works the same on PostgreSQL.
 - **A lost secrets file strands every encrypted backup.** This build has no `secrets restore` command yet ([§5](#5-the-secrets-file)). Recover the file from your secrets backup by hand, as §5 describes.
 
 ### The native copy, for losing the disk
@@ -455,13 +455,25 @@ An account used only from the web vault has no device that can heal it, and stay
 
 `rizzy-vault restore` loads a `rizzy-vault backup` file into an **empty** database, with the server stopped. In order ([ADR 0023](adr/0023-logical-backup-format.md) §5), it:
 1. shuts every server process out, with the SQLite writer lock or the PostgreSQL instance lock (below; it refuses while a server runs), and checks that the database is empty: no row, and either new or at exactly this release's schema;
-2. reads the file (at most 2 GiB) and checks its magic, format version and SHA-256 before anything else, then parses it strictly. An **encrypted** backup (format version 2, `backup --encrypt`) is opened first with the backup key its header names, which must still be in the secrets file (it need not be the current one). Every chunk is checked, and a damaged, truncated, reordered or foreign file, or a missing key, is refused before anything is loaded. The plain backup inside then goes through this step;
+2. verifies the file without loading it: from a regular file (at most 1 TiB), opened once and read twice through the same handle; from stdin (`--in -`) or a pipe, read into memory first (at most 2 GiB). It checks the length, magic and format version, then streams the file through SHA-256 and compares the digest before anything else is parsed. An **encrypted** backup (format version 2, `backup --encrypt`) is opened first with the backup key its header names, which must still be in the secrets file (it need not be the current one). Every chunk is checked, and a damaged, truncated, reordered or foreign file, or a missing key, is refused before anything is loaded. The plain backup inside then goes through this step, chunk by chunk;
 3. requires the backup's schema version to be this release's;
 4. checks the secrets file against the backup, as the server's startup check does: the OPAQUE setups the backup records must be the secrets file's, and every data key a 2FA row names must be in it. A fresh secrets file is refused; restore the instance's own secrets first;
-5. loads every row in one transaction, draws a **new restore generation** and puts **every account into a reconciliation epoch**;
+5. reads the file a second time, parsing it strictly and loading each row as it is parsed, in one transaction (step 4's comparison runs on the rows as they arrive), requires the bytes to be the ones step 2 verified, draws a **new restore generation** and puts **every account into a reconciliation epoch**;
 6. prints the number of rows and of accounts in reconciliation, and the notice above.
 
-Any failure leaves the database without a single application row (it may be left migrated to this release's schema), so you can fix the cause and run it again.
+Any failure leaves the database without a single application row (it may be left migrated to this release's schema), so you can fix the cause and run it again. Do not change the file while `restore` runs: replacing the path has no effect (the open file is read), but writing into it is detected.
+
+The size messages ([ADR 0094](adr/0094-backup-container-limits.md) §4; sizes in bytes, exit code 1 for the errors, 0 for the note and the warning):
+
+| When | Message |
+|---|---|
+| `backup`, the file would exceed 1 TiB | `error: this backup would be {L} bytes, over this release's limit of 1099511627776 bytes (1 TiB); nothing was written. Use the database's native backup until a later release raises the limit.` |
+| `backup`, the database changed between its two passes | `error: the database changed during the backup snapshot; the partial file was removed.` (to stdout: `… the output is incomplete and must be discarded.`) |
+| `backup`, success, over 2 GiB | `note: this backup is {L} bytes; restore it from a file (--in <file>): restore reads at most 2147483648 bytes from stdin.` |
+| `backup`, success, from 75 % of the limit | `warning: this backup is {L} bytes, {P}% of this release's limit of 1099511627776 bytes.` |
+| `restore`, the file exceeds 1 TiB | `error: the backup file is {N} bytes, over this release's limit of 1099511627776 bytes.` |
+| `restore`, stdin or a pipe over 2 GiB | `error: restore reads at most 2147483648 bytes from stdin or a pipe; save the backup to a file and pass --in <file>.` |
+| `restore`, the file changed between its two passes | `error: the backup file changed while it was being restored; nothing was restored.` |
 
 Procedure (Docker; the same with `podman`). Keep the current database aside first if it holds anything you may need (a native archive, [§8](#8-backup)):
 
