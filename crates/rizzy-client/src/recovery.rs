@@ -95,17 +95,19 @@ use rizzy_core::secret_key::{RecoveryCode, SecretKey};
 use rizzy_core::sign::{DeviceCertificate, DeviceKind};
 use rizzy_proto::auth::RecoveryRegistration;
 use rizzy_proto::change::{
-    CommitChangeRequest, ReregisterStartRequest, ReregisterStartResponse, VaultRotation,
-    VaultRotationUpload,
+    CommitChangeRequest, ReregisterStartRequest, ReregisterStartResponse, StageRequest,
+    VaultRotation, VaultRotationUpload, WrapLocator,
 };
-use rizzy_proto::limits::MAX_UPLOAD_BODY_LEN;
+use rizzy_proto::limits::{MAX_ITEM_KEY_WRAPS, MAX_UPLOAD_BODY_LEN};
 use rizzy_proto::objects::{
     AccountKeyRecoveryWrap, AccountKeyServerWrap, DeviceGrant, IdentitySecretKeys, ItemKeyWrap,
     VaultSelfGrant,
 };
-use rizzy_proto::recovery::{RecoveryCompleteResponse, RecoveryRequest};
+use rizzy_proto::recovery::{
+    RecoveryCompleteResponse, RecoveryRequest, RecoveryWrapsRequest, RecoveryWrapsResponse,
+};
 use rizzy_proto::vault::SeqVector;
-use rizzy_proto::wire::{Fixed, List, SecretFixed, SessionToken, Text};
+use rizzy_proto::wire::{Fixed, Id, List, SecretFixed, SessionToken, Text};
 use zeroize::Zeroizing;
 
 use crate::account::{
@@ -116,6 +118,7 @@ use crate::device::{DeviceState, NewDevice, UnlockedDevice};
 use crate::error::{ClientError, internal};
 use crate::rotation::{build_vault_half, reencrypt_settings};
 use crate::signup::EmergencyKit;
+use crate::staging::Stager;
 use crate::store;
 use crate::store::record::Stage;
 use crate::store::rows::{Changeset, Write};
@@ -174,10 +177,25 @@ pub fn start_recovery(input: &RecoveryInput<'_>) -> Result<RecoveryStarted, Clie
 struct RecoveredVault {
     /// The vault key, opened from the verified self-grant.
     key: VaultKey,
-    /// The server's heads: the cursor of the rotation's vault half.
+    /// The self-grant `recovery/complete` served, which every page must repeat.
+    grant: VaultSelfGrant,
+    /// The server's heads: the cursor of the rotation's vault half (of the last page, when
+    /// paged).
     heads: SeqVector,
     /// The wrap set.
     wraps: Vec<ItemKeyWrap>,
+}
+
+/// Where a paged recovery read stands ([ADR 0092] §5): the vault being read and the last row
+/// read.
+///
+/// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+#[derive(Clone, Copy)]
+struct Paging {
+    /// The index of the vault being read.
+    vault: usize,
+    /// The last row read in it.
+    after: Option<WrapLocator>,
 }
 
 impl RecoveryStarted {
@@ -245,12 +263,21 @@ impl RecoveryStarted {
             let (Some(vault), None) = (matching.next(), matching.next()) else {
                 return Err(bad);
             };
+            // ADR 0092 §0 item 2: a paged answer carries no wraps; they come page by page.
+            if response.wraps_paged && !vault.item_key_wraps.is_empty() {
+                return Err(bad);
+            }
             vaults.push(RecoveredVault {
                 key: account.take_vault_key(vault_id).ok_or(bad)?,
+                grant: vault.self_grant.clone(),
                 heads: vault.heads.clone(),
                 wraps: vault.item_key_wraps.as_slice().to_vec(),
             });
         }
+        let paging = (response.wraps_paged && !vaults.is_empty()).then_some(Paging {
+            vault: 0,
+            after: None,
+        });
         Ok(Recovered {
             origin: self.origin,
             login_name: self.login_name,
@@ -258,6 +285,7 @@ impl RecoveryStarted {
             account_key,
             session_token: response.session_token,
             vaults,
+            paging,
         })
     }
 }
@@ -277,6 +305,10 @@ pub struct Recovered {
     session_token: SessionToken,
     /// The vaults, ascending by id.
     vaults: Vec<RecoveredVault>,
+    /// The paged read still to do ([ADR 0092] §5), `None` once every wrap set is complete.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    paging: Option<Paging>,
 }
 
 impl fmt::Debug for Recovered {
@@ -317,6 +349,78 @@ impl Recovered {
         &self.account
     }
 
+    /// [ADR 0092] §5: the next `POST /api/v1/recovery/wraps` to send over
+    /// [`Recovered::bearer_token`]'s session, while `recovery/complete` answered
+    /// `wraps_paged` and a vault's wrap set is not complete yet; `None` when every wrap set
+    /// is. Each answer goes to [`Recovered::add_wraps`]. A rotating recovery reads every page
+    /// before [`Recovered::start_commit`].
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    #[must_use]
+    pub fn wraps_request(&self) -> Option<RecoveryWrapsRequest> {
+        let paging = self.paging?;
+        let vault = self.vaults.get(paging.vault)?;
+        Some(RecoveryWrapsRequest {
+            vault_id: id(vault.key.vault_id().to_bytes()),
+            after: paging.after,
+        })
+    }
+
+    /// Takes the answer to [`Recovered::wraps_request`] ([ADR 0092] §5). The page must repeat
+    /// the self-grant `recovery/complete` served for the vault, and its rows must be strictly
+    /// ascending by `(item_id, item_key_id)` after the request's `after`; `next`, when
+    /// present, is its last row. The vault's cursor becomes the page's `heads`.
+    ///
+    /// # Errors
+    /// [`ClientError::InvalidInput`] with no page to read; [`ClientError::InvalidServerResponse`]
+    /// for a page that fails a check (nothing is taken from it).
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    pub fn add_wraps(&mut self, page: RecoveryWrapsResponse) -> Result<(), ClientError> {
+        let bad = ClientError::InvalidServerResponse;
+        let paging = self.paging.ok_or(ClientError::InvalidInput)?;
+        let count = self.vaults.len();
+        let vault = self
+            .vaults
+            .get_mut(paging.vault)
+            .ok_or(ClientError::Internal)?;
+        if page.self_grant != vault.grant {
+            return Err(bad);
+        }
+        let rows = page.item_key_wraps.into_vec();
+        let mut last = paging.after;
+        for wrap in &rows {
+            let at = WrapLocator {
+                item_id: wrap.item_id,
+                item_key_id: wrap.item_key_id,
+            };
+            if last.is_some_and(|before| at <= before) {
+                return Err(bad);
+            }
+            last = Some(at);
+        }
+        if page.next.is_some() && (rows.is_empty() || page.next != last)
+            || vault.wraps.len().saturating_add(rows.len()) > MAX_ITEM_KEY_WRAPS
+        {
+            return Err(bad);
+        }
+        vault.wraps.extend(rows);
+        vault.heads = page.heads;
+        let next = paging.vault.saturating_add(1);
+        self.paging = if page.next.is_some() {
+            Some(Paging {
+                vault: paging.vault,
+                after: page.next,
+            })
+        } else {
+            (next < count).then_some(Paging {
+                vault: next,
+                after: None,
+            })
+        };
+        Ok(())
+    }
+
     /// The recovery-only session's bearer token, for the host's transport. Never log it.
     #[must_use]
     pub const fn bearer_token(&self) -> &SessionToken {
@@ -335,7 +439,8 @@ impl Recovered {
         rng: &mut R,
         options: &RecoveryOptions<'_>,
     ) -> Result<(Reregistering, ReregisterStartRequest), ClientError> {
-        if !options.device_kind.is_durable() {
+        // A rotation needs every wrap set: a paged read must be finished first (ADR 0092 §5).
+        if !options.device_kind.is_durable() || (options.rotate && self.paging.is_some()) {
             return Err(ClientError::InvalidInput);
         }
         let secret_key = SecretKey::generate(rng);
@@ -408,6 +513,7 @@ impl Reregistering {
             account_key: old_account_key,
             session_token,
             vaults,
+            paging: _,
         } = self.recovered;
         let kdf_id = KdfId::DEFAULT;
         let registration = client_registration_finish(
@@ -622,6 +728,10 @@ impl Reregistering {
             .ok_or(ClientError::Internal)?;
         }
         let state_wire = state.sign(identity.signing_key()).map_err(internal)?;
+        let staging_base = (
+            base.state_seq,
+            Id::from_bytes(*state.account_key_id.as_bytes()),
+        );
         let request = CommitChangeRequest {
             account_state: bytes(state_wire.clone())?,
             registration_upload: Some(bytes(registration.upload)?),
@@ -705,6 +815,8 @@ impl Reregistering {
             served,
             authors,
             dropped_items,
+            stager: Stager::default(),
+            staging_base,
         })
     }
 }
@@ -737,6 +849,10 @@ pub struct PendingRecovery {
     authors: Authors,
     /// How many wrap-set rows the rotation dropped.
     dropped_items: usize,
+    /// The rotation staging of a commit too large to send inline ([`crate::staging`]).
+    stager: Stager,
+    /// The `state_seq` the commit advances and the new account key's id, for staging.
+    staging_base: (u64, Id),
 }
 
 impl fmt::Debug for PendingRecovery {
@@ -803,7 +919,8 @@ impl PendingRecovery {
     }
 
     /// The commit (§11.9 step 6), only after the kit was confirmed. The same bytes on every
-    /// call.
+    /// call, except that [`PendingRecovery::stage_requests`] turns a commit too large to send
+    /// inline into its staged form once.
     ///
     /// # Errors
     /// [`ClientError::EmergencyKitNotConfirmed`].
@@ -813,6 +930,29 @@ impl PendingRecovery {
         } else {
             Err(ClientError::EmergencyKitNotConfirmed)
         }
+    }
+
+    /// As [`crate::rotation::PendingRotation::stage_requests`], for the recovery's rotation
+    /// ([ADR 0092] §4, INV-115): given the length of the JSON of
+    /// [`PendingRecovery::commit_request`], the stage requests to send over the recovery-only
+    /// session before the commit, empty when it fits inline; the host then encodes the commit
+    /// again (and only then writes the stage-3 record with its exact body).
+    ///
+    /// # Errors
+    /// [`ClientError::EmergencyKitNotConfirmed`]; [`ClientError::Internal`].
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    pub fn stage_requests<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        encoded_len: usize,
+    ) -> Result<Vec<StageRequest>, ClientError> {
+        if !self.confirmed {
+            return Err(ClientError::EmergencyKitNotConfirmed);
+        }
+        let (base, key_id) = self.staging_base;
+        self.stager
+            .plan(rng, &mut self.request, base, key_id, encoded_len)
     }
 
     /// The cache of the new device (ADR 0026 §1, §3), for the host to create in one

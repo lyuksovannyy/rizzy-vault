@@ -108,7 +108,7 @@ use zeroize::Zeroizing;
 
 use crate::commands::delete_account_files;
 use crate::db::Db;
-use crate::device::{Device, Env, copy_token};
+use crate::device::{Device, Env, copy_token, send_stages};
 use crate::error::CliError;
 use crate::http::{Auth, Http};
 use crate::paths::{AccountLock, cache_path, check_data_dir, enrolled_accounts, ensure_data_dir};
@@ -239,7 +239,7 @@ async fn prepare_with(env: &mut Env<'_>, http: Http, login_name: &str) -> Result
         .post(paths::RECOVERY_COMPLETE, &started.request()?, Auth::None)
         .await?;
     drop(code);
-    let recovered = started.open(answer)?;
+    let mut recovered = started.open(answer)?;
     let account = recovered.account().account_id().to_bytes();
     if cache_path(&env.data_dir, &account).exists() {
         return Err(CliError::AlreadyEnrolled);
@@ -249,6 +249,17 @@ async fn prepare_with(env: &mut Env<'_>, http: Http, login_name: &str) -> Result
     // Checked again under the lock: another `rv` may have written its stage-3 file since.
     if cache_path(&env.data_dir, &account).exists() {
         return Err(CliError::AlreadyEnrolled);
+    }
+    // ADR 0092 §5: an account too large for one answer has its wrap sets read page by page.
+    while let Some(request) = recovered.wraps_request() {
+        let page = http
+            .post(
+                paths::RECOVERY_WRAPS,
+                &request,
+                Auth::Bearer(recovered.bearer_token()),
+            )
+            .await?;
+        recovered.add_wraps(page)?;
     }
     Ok(Opened {
         http,
@@ -316,6 +327,13 @@ impl Opened {
             .ui
             .line("Type the last four characters of the Secret Key to confirm you saved the kit")?;
         pending.confirm_kit(typed.trim())?;
+
+        // ADR 0092 §4: a rotation too large for one body is staged first.
+        let inline =
+            serde_json::to_vec(pending.commit_request()?).map_err(|_| ClientError::Internal)?;
+        let stages = pending.stage_requests(&mut rng, inline.len())?;
+        drop(inline);
+        send_stages(&http, env.ui, &token, &stages).await?;
 
         // ADR 0046 §2: the stage-3 cache with the exact body, before the commit leaves.
         let body =
