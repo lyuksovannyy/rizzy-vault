@@ -243,6 +243,11 @@ impl fmt::Display for CliError {
                 "the server refused: revocation_pending ({REVOCATION_PENDING_MESSAGE} Nothing was \
                  changed; run the command again once the other device has finished)"
             ),
+            // ADR 0092 §2, §6: the write would take the account or a vault past the size it can
+            // still rotate in one request. Nothing was written; deleting items frees room.
+            Self::Server(ErrorCode::RotationLimit) => f.write_str(
+                "the server refused: rotation_limit (this account is at its item limit of 65,536; you can't add items above it. Delete items or empty Trash to free space; nothing was changed)",
+            ),
             Self::Server(code) => write!(f, "the server refused: {}", code_name(*code)),
             Self::RateLimited(Some(seconds)) => write!(
                 f,
@@ -380,6 +385,11 @@ mod tests {
         let quota = CliError::Server(ErrorCode::QuotaExceeded).to_string();
         assert!(quota.contains("quota_exceeded") && quota.contains("RIZZY_ACCOUNT_QUOTA_BYTES"));
         assert!(!CliError::Server(ErrorCode::QuotaExceeded).refuses_commit());
+        // ADR 0092 §6: the size refusal names the limit and how to free room.
+        let limit = CliError::Server(ErrorCode::RotationLimit).to_string();
+        assert!(
+            limit.contains("rotation_limit") && limit.contains("65,536") && limit.contains("Trash")
+        );
         // ADR 0091 §2: not applied, and the same bytes are good once the window closes: kept,
         // like a rate limit, and the message is the pause message.
         let paused = CliError::Server(ErrorCode::RevocationPending);

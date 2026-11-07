@@ -35,13 +35,13 @@ use rizzy_proto::auth::{
 };
 use rizzy_proto::change::{
     CommitChangeRequest, DeviceSuspensionRequest, ReregisterStartRequest, ReregisterStartResponse,
-    SuspendDeviceResponse, VaultRotationUpload,
+    StageRequest, StageResponse, SuspendDeviceResponse, VaultRotationUpload,
 };
 use rizzy_proto::error::ErrorResponse;
 use rizzy_proto::meta::{ClientHeader, MetaResponse};
 use rizzy_proto::recovery::{
     RecoveryCancelResponse, RecoveryCompleteResponse, RecoveryRequest, RecoveryStartResponse,
-    RecoveryVault,
+    RecoveryVault, RecoveryWrapsRequest, RecoveryWrapsResponse,
 };
 use rizzy_proto::session::{EndSessionRequest, SessionListResponse};
 use rizzy_proto::totp::{TotpDisableRequest, TotpEnrolConfirmRequest, TotpEnrolStartResponse};
@@ -72,7 +72,7 @@ fuzz_target!(|data: &[u8]| {
     let Some((&selector, json)) = data.split_first() else {
         return;
     };
-    match selector % 44 {
+    match selector % 48 {
         // Requests.
         0 => check::<RegisterStartRequest>(json),
         1 => check::<RegisterFinishRequest>(json),
@@ -123,6 +123,12 @@ fuzz_target!(|data: &[u8]| {
         // The `sessions` resource (ADR 0075 §3): the one request and the bounded list.
         41 => check::<EndSessionRequest>(json),
         42 => check::<SessionListResponse>(json),
+        // Rotation staging and the paged recovery read (ADR 0092 §4, §5, §8 test 11); the
+        // extended `vault_rotation` is reached through 29 and 40.
+        44 => check::<StageRequest>(json),
+        45 => check::<StageResponse>(json),
+        46 => check::<RecoveryWrapsRequest>(json),
+        47 => check::<RecoveryWrapsResponse>(json),
         _ => check::<RecoveryVault>(json),
     }
 });
