@@ -38,6 +38,7 @@
 //! | [`db_backup`] | ADR 0071; CRYPTO.md §9.8 | The encrypted database backup, format version 2 |
 //! | [`admin`] | ADR 0010 §2, §4; ADR 0011; CRYPTO.md §5.8, §5.11 | The admin subcommands |
 //! | [`log`] | INV-48 | Allow-listed structured log lines |
+//! | [`source`] | ADR 0017 §7; ADR 0106 §1–§2 | The source URL `/api/meta` serves and its compiled default |
 //! | [`fsutil`] | ADR 0010 §4 | Bounded reads, 0600 files, atomic replace, the inside-the-data-directory check |
 //! | [`sys`] | ADR 0009 "RNG rules"; ADR 0016 R2 | The OS CSPRNG and the clock |
 //! | [`coredump`] | INV-60; ADR 0024 | Core dumps off at process start, read back |
@@ -156,6 +157,7 @@ pub mod log;
 pub mod secrets_backup;
 pub mod secrets_file;
 pub mod server;
+pub mod source;
 pub mod sys;
 pub mod usage;
 pub mod worker;

@@ -236,10 +236,10 @@ pub mod types {
     /// `/api/v1` errors and `/api/meta` (ADR 0002 point 3).
     pub use rizzy_proto::error::{ErrorCode, ErrorResponse};
     /// `/api/meta` and the `Rizzy-Client` header (ADR 0002 point 3, as ADR 0022 amends it; ADR
-    /// 0028 item 14).
+    /// 0028 item 14; ADR 0106: the source URL).
     pub use rizzy_proto::meta::{
         API_V1, ApiVersion, CLIENT_HEADER, ClientHeader, META_PATH, MetaResponse, MinClientVersion,
-        Platform, Version, client_too_old,
+        Platform, SourceUrl, Version, client_too_old,
     };
     /// The self-grants [`crate::VaultPort`] moves between the domains.
     pub use rizzy_proto::objects::VaultSelfGrant;

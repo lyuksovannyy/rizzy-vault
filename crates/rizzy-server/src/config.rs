@@ -65,6 +65,11 @@
 //!   `RIZZY_BREACH_CHECK` and `RIZZY_ICON_CACHE_DIR` and the bounds are this crate's choice,
 //!   reported to the owner. `RIZZY_LISTEN` is the role's listener; `RIZZY_TRUSTED_PROXIES`
 //!   names the proxies whose `X-Forwarded-For` its rate limit reads.
+//! - **The source URL** ([ADR 0106] §1; [ADR 0017] §7, AGPL §13): `RIZZY_SOURCE_URL`, where
+//!   users get the source of the running server and web vault, served as `/api/meta`'s
+//!   `source_url`. An `https://` URL of at most 2048 bytes ([`SourceUrl::parse`]), kept byte
+//!   for byte. Set but empty, or invalid, refuses the configuration; unset, the build's upstream
+//!   source applies ([`crate::source`]). It is no secret and is logged once at startup.
 //!
 //! Every value has a default except the canonical origin, which the `api` and `worker` roles
 //! require (both build the auth domain, which binds the origin into OPAQUE and every
@@ -75,6 +80,8 @@
 //! [ADR 0048]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0048-per-account-storage-quota.md
 //! [ADR 0060]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0060-admin-panel-stack-boundary.md
 //! [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
+//! [ADR 0017]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0017-licensing.md
+//! [ADR 0106]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0106-agpl-source-url.md
 
 use core::fmt;
 use std::collections::BTreeMap;
@@ -84,7 +91,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rizzy_domain_auth::config::{DEFAULT_RECOVERY_WAIT_MS, MAX_RECOVERY_WAIT_MS};
-use rizzy_domain_auth::types::{DEFAULT_UPLOAD_BODY_LEN, MAX_UPLOAD_BODY_LEN, ServerOrigin};
+use rizzy_domain_auth::types::{
+    DEFAULT_UPLOAD_BODY_LEN, MAX_UPLOAD_BODY_LEN, ServerOrigin, SourceUrl,
+};
 use zeroize::Zeroizing;
 
 use crate::log::Level;
@@ -129,6 +138,8 @@ pub const ICON_CACHE_DIR: &str = "RIZZY_ICON_CACHE_DIR";
 pub const ICON_CACHE_TTL_SECS: &str = "RIZZY_ICON_CACHE_TTL_SECS";
 /// The `icons` cache's total size cap, in bytes (ADR 0052 point 5).
 pub const ICON_CACHE_MAX_BYTES: &str = "RIZZY_ICON_CACHE_MAX_BYTES";
+/// Where users get the running server's source (ADR 0106 §1).
+pub const SOURCE_URL: &str = "RIZZY_SOURCE_URL";
 
 /// Every setting name the file and the environment accept.
 pub const KEYS: &[&str] = &[
@@ -150,6 +161,7 @@ pub const KEYS: &[&str] = &[
     ICON_CACHE_DIR,
     ICON_CACHE_TTL_SECS,
     ICON_CACHE_MAX_BYTES,
+    SOURCE_URL,
 ];
 
 /// The settings a configuration file holds, by name.
@@ -447,6 +459,18 @@ pub struct Config {
     pub icon_cache_ttl: Duration,
     /// The `icons` cache's total size cap, in bytes.
     pub icon_cache_max_bytes: u64,
+    /// `RIZZY_SOURCE_URL`; `None` when unset, and the build's default applies
+    /// ([`crate::source`]).
+    pub source_url: Option<SourceUrl>,
+}
+
+/// `RIZZY_SOURCE_URL` (ADR 0106 §1): unset is `None`; set, it must parse, so an empty value
+/// is refused like any other invalid one.
+fn source_url(sources: &Sources<'_>) -> Result<Option<SourceUrl>, ConfigError> {
+    sources
+        .get(SOURCE_URL)?
+        .map(|text| SourceUrl::parse(&text).map_err(|_| ConfigError::Invalid(SOURCE_URL)))
+        .transpose()
 }
 
 /// `RIZZY_ACCOUNT_QUOTA_BYTES` (ADR 0048 §1): whole bytes, at least
@@ -801,6 +825,7 @@ impl Config {
         let recovery_wait_ms = recovery_wait(sources)?;
         let (breach_check, icon_cache_dir, icon_cache_ttl, icon_cache_max_bytes) =
             icon_settings(sources, roles)?;
+        let source_url = source_url(sources)?;
         Ok(Self {
             roles,
             origin,
@@ -820,6 +845,7 @@ impl Config {
             icon_cache_dir,
             icon_cache_ttl,
             icon_cache_max_bytes,
+            source_url,
         })
     }
 
@@ -1049,6 +1075,77 @@ mod tests {
             env: &env,
             roles_flag: None,
         })
+    }
+
+    /// ADR 0106 §1 (implementation step 2): `RIZZY_SOURCE_URL` from the environment or the
+    /// file, the environment winning; unset is `None`; empty, invalid or repeated refuses the
+    /// configuration, and the error names the setting, never the value.
+    #[test]
+    fn source_url_setting() {
+        let of = |config: Result<Config, ConfigError>| {
+            config.map(|c| c.source_url.map(|u| u.as_str().to_owned()))
+        };
+        assert_eq!(of(from_env(&[])), Ok(None));
+        assert_eq!(
+            of(from_env(&[(SOURCE_URL, "https://example.com/src?v=1#x")])),
+            Ok(Some("https://example.com/src?v=1#x".to_owned()))
+        );
+        let with_file = |file: &str, env: &'static [(&'static str, &'static str)]| {
+            let env = env_of(env);
+            Config::from_sources(&Sources {
+                file: parse_file(file).unwrap(),
+                env: &env,
+                roles_flag: None,
+            })
+        };
+        assert_eq!(
+            of(with_file(
+                "RIZZY_SOURCE_URL=https://file.example/src\n",
+                &[]
+            )),
+            Ok(Some("https://file.example/src".to_owned()))
+        );
+        assert_eq!(
+            of(with_file(
+                "RIZZY_SOURCE_URL=https://file.example/src\n",
+                &[(SOURCE_URL, "https://env.example/src")]
+            )),
+            Ok(Some("https://env.example/src".to_owned()))
+        );
+        // The environment wins even when the file's value is invalid.
+        assert!(
+            with_file(
+                "RIZZY_SOURCE_URL=http://file.example\n",
+                &[(SOURCE_URL, "https://env.example")]
+            )
+            .is_ok()
+        );
+        for bad in [
+            "",
+            "http://example.com/src",
+            "https://user:hunter2@example.com/src",
+            "https://example.com/a b",
+            "https://example.com:0",
+        ] {
+            let env = env_of(Box::leak(Box::new([(SOURCE_URL, bad)])));
+            let err = Config::from_sources(&Sources {
+                file: Settings::new(),
+                env: &env,
+                roles_flag: None,
+            })
+            .unwrap_err();
+            assert_eq!(err, ConfigError::Invalid(SOURCE_URL), "{bad:?}");
+            assert_eq!(err.to_string(), "RIZZY_SOURCE_URL has an invalid value");
+        }
+        assert_eq!(
+            with_file("RIZZY_SOURCE_URL=\n", &[]).unwrap_err(),
+            ConfigError::Invalid(SOURCE_URL)
+        );
+        assert_eq!(
+            parse_file("RIZZY_SOURCE_URL=https://a.example\nRIZZY_SOURCE_URL=https://b.example")
+                .unwrap_err(),
+            ConfigError::RepeatedSetting(SOURCE_URL)
+        );
     }
 
     /// ADR 0060 §2: the admin listener defaults to loopback port 8081, never `0.0.0.0`; it is

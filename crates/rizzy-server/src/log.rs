@@ -12,7 +12,9 @@
 //!   no secret and says nothing about the account's content;
 //! - [`Field::Error`]: the `Display` of an error type whose docs promise it carries no value
 //!   (`rizzy_domain_auth::AuthError`, `rizzy_domain_vault::VaultError` and its reports,
-//!   `rizzy_storage::Error`, this crate's own errors), each call site reviewed as such.
+//!   `rizzy_storage::Error`, this crate's own errors), each call site reviewed as such;
+//! - [`Field::SourceUrl`]: the source URL users are shown (ADR 0106 §1: "It may appear in
+//!   logs"), a public `https://` URL that only `SourceUrl::parse` makes, logged once at startup.
 //!
 //! There is no field kind for request or response bodies, headers, tokens, keys, OPAQUE
 //! messages, envelopes, statements, login names or paths, and no free-form string: a value that
@@ -29,6 +31,8 @@ use std::io::Write as _;
 use std::sync::OnceLock;
 
 use serde_json::{Map, Value};
+
+use rizzy_domain_auth::types::SourceUrl;
 
 use crate::sys::now_ms;
 
@@ -80,6 +84,8 @@ pub enum Field<'a> {
     Id(&'static str, &'a [u8; 16]),
     /// The `Display` of an error type documented to carry no value (module docs).
     Error(&'static str, &'a dyn fmt::Display),
+    /// The public source URL (module docs).
+    SourceUrl(&'static str, &'a SourceUrl),
 }
 
 impl fmt::Debug for Field<'_> {
@@ -89,6 +95,7 @@ impl fmt::Debug for Field<'_> {
             Self::Str(k, v) => write!(f, "{k}={v}"),
             Self::Id(k, v) => write!(f, "{k}={}", hex(v)),
             Self::Error(k, v) => write!(f, "{k}={v}"),
+            Self::SourceUrl(k, v) => write!(f, "{k}={v}"),
         }
     }
 }
@@ -131,6 +138,7 @@ pub fn render(ts_ms: u64, level: Level, event: &'static str, fields: &[Field<'_>
             Field::Str(k, v) => (*k, Value::from(*v)),
             Field::Id(k, v) => (*k, Value::from(hex(v))),
             Field::Error(k, v) => (*k, Value::from(v.to_string())),
+            Field::SourceUrl(k, v) => (*k, Value::from(v.as_str())),
         };
         line.insert(key.to_owned(), value);
     }
