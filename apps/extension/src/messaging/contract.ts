@@ -52,6 +52,9 @@ export const MAX_PASSKEY_BYTES_B64 = 2730; // base64 of 2048 raw bytes, rounded 
 export const MAX_RP_NAME_LEN = 256;
 export const MAX_USER_NAME_LEN = 256;
 export const MAX_RP_ID_LEN = 256;
+/** ADR 0110 §5 point 1: the page's `userVerification` value is relayed only as a string of at
+ * most 16 UTF-16 code units; anything else is not relayed at all. */
+export const MAX_USER_VERIFICATION_LEN = 16;
 export const MAX_ALGS = 16;
 export const MAX_ALLOW_CREDENTIALS = 16;
 
@@ -141,6 +144,9 @@ export interface PasskeyCreateRequestMessage {
   readonly type: "passkey_create_request";
   readonly pageUrl: string;
   readonly rpIdHint?: string;
+  /** ADR 0110 §5: `publicKey.authenticatorSelection.userVerification`, as the page sent it (at
+   * most {@link MAX_USER_VERIFICATION_LEN} code units), handed raw to Rust at signing. */
+  readonly userVerification?: string;
   readonly rpName: string;
   readonly userIdB64: string;
   readonly userName: string;
@@ -158,6 +164,8 @@ export interface PasskeyGetRequestMessage {
   readonly type: "passkey_get_request";
   readonly pageUrl: string;
   readonly rpIdHint?: string;
+  /** ADR 0110 §5: `publicKey.userVerification`, as for {@link PasskeyCreateRequestMessage}. */
+  readonly userVerification?: string;
   readonly challengeB64: string;
   readonly allowCredentialIdsB64: readonly string[];
 }
@@ -681,6 +689,11 @@ export interface PasskeyOfferMessage {
    * vaults, the Personal vault preselected every time. Display only, for the consent iframe. */
   readonly vaults?: readonly SaveDialogVaultView[];
   readonly defaultVaultId?: string;
+  /** ADR 0110 §7 point 1, advisory: `true` when the request is Required, the lock policy is not
+   * bounding and no master-password verification is fresh as the prompt is shown, so the approve
+   * button reads "Verify and use passkey" / "Verify and save passkey". The decision is made again
+   * at signing (§6 point 5). */
+  readonly verifyFirst?: boolean;
 }
 
 /** An explicit failure answer (e.g. the device is locked, or — for
@@ -738,7 +751,112 @@ export type InlineMenuGeneratePasswordResponse = InlineMenuGeneratePasswordDispa
 
 /** `core-host/listener.ts`'s answer to a {@link PasskeyCeremonyMessage} — same
  * never-the-secret-itself rule, see {@link PasskeyCeremonyDispatchedMessage}'s own doc. */
-export type PasskeyCeremonyResponse = PasskeyCeremonyDispatchedMessage | ContentErrorMessage;
+/** ADR 0110 §7 point 2: the approval needs a master-password verification first. The ceremony
+ * waits (`awaiting_verification`); the consent iframe shows "Waiting for verification in the
+ * rizzy toolbar button" and a Cancel button, and the result reaches the tab later, as
+ * {@link ApplyPasskeyResultMessage}, after the toolbar popup verified the master password. */
+export interface PasskeyCeremonyAwaitingVerificationMessage {
+  readonly type: "passkey_ceremony_awaiting_verification";
+}
+
+export type PasskeyCeremonyResponse =
+  | PasskeyCeremonyDispatchedMessage
+  | PasskeyCeremonyAwaitingVerificationMessage
+  | ContentErrorMessage;
+
+/** The reply codes of the toolbar popup's verification (ADR 0110 §7 point 6). */
+export type UvReplyCode =
+  | "uv_ok"
+  | "uv_wrong_password"
+  | "uv_attempts_exhausted"
+  | "uv_ceremony_gone"
+  | "uv_cancelled"
+  | "uv_locked";
+
+/** What the popup's verification view shows (ADR 0110 §7 point 3): never chosen by the popup. */
+export interface PasskeyVerificationView {
+  readonly ceremonyToken: string;
+  /** The browser-verified origin the ceremony is bound to. */
+  readonly origin: string;
+  readonly rpId: string;
+  /** The credential's user name: the new one of a registration, the chosen one of a sign-in. */
+  readonly userName: string;
+  readonly kind: "create" | "get";
+}
+
+/**
+ * Chromium-only internal relay (ADR 0110 §7 point 2): the offscreen document has no `action`
+ * API, so it asks the service worker to set (`on`) or clear the toolbar badge of `tabId`, and,
+ * with `openPopup`, to try `action.openPopup()`. Accepted only from the offscreen document
+ * itself (`background/uv-relay.ts`).
+ */
+export interface RelayUvBadgeMessage {
+  readonly type: "relay_uv_badge";
+  readonly tabId: number;
+  readonly on: boolean;
+  readonly openPopup: boolean;
+}
+
+/**
+ * Chromium-only internal relay (ADR 0110 §7 point 4.2): the offscreen document has no `tabs`
+ * API, so it asks the service worker for the live URL of `tabId` before a verified ceremony
+ * signs. Answered `{ url }` (absent when the tab is gone), only to the offscreen document.
+ */
+export interface RelayTabUrlMessage {
+  readonly type: "relay_tab_url";
+  readonly tabId: number;
+}
+
+export function isRelayUvBadgeMessage(value: unknown): value is RelayUvBadgeMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  return (
+    v["type"] === "relay_uv_badge" &&
+    typeof v["tabId"] === "number" &&
+    Number.isInteger(v["tabId"]) &&
+    typeof v["on"] === "boolean" &&
+    typeof v["openPopup"] === "boolean"
+  );
+}
+
+/** The three popup messages of ADR 0110 §7 points 3–5. */
+export type PasskeyVerifyRequest = Extract<
+  PopupRequest,
+  { readonly type: "passkey_verify_pending" | "passkey_verify_submit" | "passkey_verify_cancel" }
+>;
+
+/** Validates a {@link PasskeyVerifyRequest}'s shape: a whole `tabId`, a bounded
+ * `ceremonyToken`, and a master password that is a string of at most
+ * {@link MAX_FIELD_VALUE_LEN} code units. The sender (the toolbar popup only) is checked by
+ * `core-host/listener.ts` (`isPopupSender`). */
+export function isPasskeyVerifyRequest(value: unknown): value is PasskeyVerifyRequest {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  const token = v["ceremonyToken"];
+  const tokenOk = typeof token === "string" && token.length > 0 && token.length <= 256;
+  switch (v["type"]) {
+    case "passkey_verify_pending":
+      return typeof v["tabId"] === "number" && Number.isInteger(v["tabId"]) && v["tabId"] >= 0;
+    case "passkey_verify_submit":
+      return tokenOk && typeof v["masterPassword"] === "string" && v["masterPassword"].length <= MAX_FIELD_VALUE_LEN;
+    case "passkey_verify_cancel":
+      return tokenOk;
+    default:
+      return false;
+  }
+}
+
+export function isRelayTabUrlMessage(value: unknown): value is RelayTabUrlMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  return v["type"] === "relay_tab_url" && typeof v["tabId"] === "number" && Number.isInteger(v["tabId"]);
+}
 
 function isBoundedString(value: unknown, maxLen: number): value is string {
   return typeof value === "string" && value.length <= maxLen;
@@ -1052,6 +1170,13 @@ export type PopupRequest =
       readonly totp?: string;
     }
   | { readonly type: "unlock"; readonly masterPassword: string }
+  /** ADR 0110 §7 point 3: the ceremony of `tabId` (the popup's active tab) that waits for a
+   * master-password verification, if any. Accepted from the toolbar popup only. */
+  | { readonly type: "passkey_verify_pending"; readonly tabId: number }
+  /** ADR 0110 §7 point 4: the verification itself. Accepted from the toolbar popup only. */
+  | { readonly type: "passkey_verify_submit"; readonly ceremonyToken: string; readonly masterPassword: string }
+  /** ADR 0110 §7 point 5: the popup's Cancel. Accepted from the toolbar popup only. */
+  | { readonly type: "passkey_verify_cancel"; readonly ceremonyToken: string }
   | { readonly type: "lock" }
   | { readonly type: "sync" }
   | { readonly type: "list_items" }
@@ -1146,6 +1271,11 @@ export type PopupResponse =
   | { readonly type: "fields"; readonly fields: readonly ItemFieldSummary[] }
   | { readonly type: "revealed"; readonly value: string }
   | { readonly type: "generated"; readonly value: string }
+  /** `passkey_verify_pending`'s answers. */
+  | ({ readonly type: "passkey_verify_pending" } & PasskeyVerificationView)
+  | { readonly type: "passkey_verify_none" }
+  /** `passkey_verify_submit`'s and `passkey_verify_cancel`'s answer. */
+  | { readonly type: "passkey_verify_reply"; readonly code: UvReplyCode }
   /** `removal_check`'s answer. `refusal`: the code of the alarm that refuses removal
    * (`rollback`, `fork`, `identity_change_unconfirmed`, `alarm_unknown`). `unlocked`: whether
    * the unsent own rows could be verified and uploaded first; when it is, `uploaded` says
@@ -1190,8 +1320,11 @@ export const MESSAGE_TYPES = [
   "passkey_ceremony_approved",
   "passkey_ceremony_declined",
   "passkey_ceremony_dispatched",
+  "passkey_ceremony_awaiting_verification",
   "apply_passkey_result",
   "relay_passkey_result",
+  "relay_uv_badge",
+  "relay_tab_url",
   "candidates",
   "save_prompt",
   "save_prompt_done",

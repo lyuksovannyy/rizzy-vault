@@ -60,6 +60,9 @@ export interface PasskeyConsentShowMessage {
    * with the Personal vault preselected. */
   readonly vaults?: readonly { readonly id: string; readonly label: string }[];
   readonly defaultVaultId?: string;
+  /** ADR 0110 §7 point 1 (advisory): the approval will need the toolbar popup's master-password
+   * verification, so the approve button reads "Verify and use passkey"/"Verify and save passkey". */
+  readonly verifyFirst?: boolean;
 }
 
 export interface PasskeyConsentDoneMessage {
@@ -108,6 +111,9 @@ export function isPasskeyConsentShowMessage(value: unknown): value is PasskeyCon
     return false;
   }
   if (v["candidates"] !== undefined && (!Array.isArray(v["candidates"]) || !v["candidates"].every(isCandidate))) {
+    return false;
+  }
+  if (v["verifyFirst"] !== undefined && typeof v["verifyFirst"] !== "boolean") {
     return false;
   }
   if (v["vaults"] !== undefined || v["defaultVaultId"] !== undefined) {

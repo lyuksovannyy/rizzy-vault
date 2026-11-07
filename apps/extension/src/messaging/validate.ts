@@ -35,6 +35,7 @@ import {
   MAX_RP_NAME_LEN,
   MAX_URL_LEN,
   MAX_USER_NAME_LEN,
+  MAX_USER_VERIFICATION_LEN,
 } from "./contract.ts";
 import { isCustomToken } from "./autocomplete.ts";
 
@@ -184,6 +185,9 @@ function parsePasskeyCreateRequest(body: Record<string, unknown>): PasskeyCreate
   if (body["rpIdHint"] !== undefined && !isBoundedString(body["rpIdHint"], MAX_RP_ID_LEN)) {
     throw new MessageRejected("passkey_create_request: rpIdHint");
   }
+  if (body["userVerification"] !== undefined && !isBoundedString(body["userVerification"], MAX_USER_VERIFICATION_LEN)) {
+    throw new MessageRejected("passkey_create_request: userVerification");
+  }
   if (!isBoundedString(body["rpName"], MAX_RP_NAME_LEN)) {
     throw new MessageRejected("passkey_create_request: rpName");
   }
@@ -207,6 +211,7 @@ function parsePasskeyCreateRequest(body: Record<string, unknown>): PasskeyCreate
     type: "passkey_create_request",
     pageUrl: body["pageUrl"],
     ...(body["rpIdHint"] !== undefined ? { rpIdHint: body["rpIdHint"] as string } : {}),
+    ...(body["userVerification"] !== undefined ? { userVerification: body["userVerification"] as string } : {}),
     rpName: body["rpName"],
     userIdB64: body["userIdB64"],
     userName: body["userName"],
@@ -223,6 +228,9 @@ function parsePasskeyGetRequest(body: Record<string, unknown>): PasskeyGetReques
   if (body["rpIdHint"] !== undefined && !isBoundedString(body["rpIdHint"], MAX_RP_ID_LEN)) {
     throw new MessageRejected("passkey_get_request: rpIdHint");
   }
+  if (body["userVerification"] !== undefined && !isBoundedString(body["userVerification"], MAX_USER_VERIFICATION_LEN)) {
+    throw new MessageRejected("passkey_get_request: userVerification");
+  }
   if (!isBoundedString(body["challengeB64"], MAX_PASSKEY_BYTES_B64)) {
     throw new MessageRejected("passkey_get_request: challengeB64");
   }
@@ -238,6 +246,7 @@ function parsePasskeyGetRequest(body: Record<string, unknown>): PasskeyGetReques
     type: "passkey_get_request",
     pageUrl: body["pageUrl"],
     ...(body["rpIdHint"] !== undefined ? { rpIdHint: body["rpIdHint"] as string } : {}),
+    ...(body["userVerification"] !== undefined ? { userVerification: body["userVerification"] as string } : {}),
     challengeB64: body["challengeB64"],
     allowCredentialIdsB64: allow as readonly string[],
   };

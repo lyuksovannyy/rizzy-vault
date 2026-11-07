@@ -32,7 +32,7 @@ import {
   DurableSession,
   MatchMode,
   PASSKEY_ALG_ES256,
-  DEFAULT_LOCK_SETTINGS,
+  type LockSettingsChoice,
   cacheStoreNames,
   decideMatchCandidates,
   enrolDevice as coreEnrolDevice,
@@ -57,12 +57,16 @@ export const PASSKEY_LIST = "passkey";
 export const PASSKEY_ATTR_RP_ID = "rp_id";
 export const PASSKEY_ATTR_CREATED_MS = "created_ms";
 
-/** The `UV` input of `DurableSession.createPasskey`/`passkeyAssertion` (ADR 0110 §6 point 5):
- * the page's relayed `userVerification` (none is relayed yet, so Preferred) and the default lock
- * settings, under which a master-password session is bounding and signs with `UV=1` as before.
- * Wired in the extension step (the relayed value, the stored settings, the re-verification). */
-export function passkeyUvInput(userVerification?: string): PasskeyUvInput {
-  return { userVerification, lockSettings: DEFAULT_LOCK_SETTINGS };
+/** The `UV` input of `DurableSession.createPasskey`/`passkeyAssertion`/`passkeyUvDecision`
+ * (ADR 0110 §6 point 5): the page's relayed `userVerification` (§5, handed raw to Rust, which
+ * maps it), the lock settings the long-lived context applies now (`core-context.ts`'s
+ * `currentLockSettings`) and the clock, read at signing. */
+export function passkeyUvInput(
+  userVerification: string | undefined,
+  lockSettings: LockSettingsChoice,
+  nowMs?: number,
+): PasskeyUvInput {
+  return { userVerification, lockSettings, ...(nowMs !== undefined ? { nowMs } : {}) };
 }
 
 /** One stored passkey's non-secret, re-derivable-from-`fields()` metadata — the `rp_id`/

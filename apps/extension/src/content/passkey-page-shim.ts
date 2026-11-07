@@ -21,6 +21,7 @@ import { base64ToBytes, bytesToBase64 } from "../messaging/bytes.ts";
 import {
   PASSKEY_PAGE_REQUEST,
   isPasskeyResponseToPage,
+  relayableUserVerification,
   type PasskeyPageResultPayload,
   type PasskeyRequestFromPage,
 } from "./passkey-protocol.ts";
@@ -116,11 +117,14 @@ export function installPasskeyPageShim(): void {
       return originalCreate(options);
     }
     const timeoutMs = typeof publicKey.timeout === "number" ? Math.min(publicKey.timeout, DEFAULT_TIMEOUT_MS) : DEFAULT_TIMEOUT_MS;
+    // ADR 0110 §5 point 1: relayed only as a short string; the background maps it in Rust.
+    const userVerification = relayableUserVerification(publicKey.authenticatorSelection?.userVerification);
     const request: PasskeyRequestFromPage = {
       type: PASSKEY_PAGE_REQUEST,
       nonce: crypto.randomUUID(),
       kind: "create",
       ...(publicKey.rp.id !== undefined ? { rpIdHint: publicKey.rp.id } : {}),
+      ...(userVerification !== undefined ? { userVerification } : {}),
       rpName: publicKey.rp.name,
       userIdB64: bytesToBase64(toBytes(publicKey.user.id)),
       userName: publicKey.user.name,
@@ -142,11 +146,13 @@ export function installPasskeyPageShim(): void {
       return originalGet(options);
     }
     const timeoutMs = typeof publicKey.timeout === "number" ? Math.min(publicKey.timeout, DEFAULT_TIMEOUT_MS) : DEFAULT_TIMEOUT_MS;
+    const userVerification = relayableUserVerification(publicKey.userVerification);
     const request: PasskeyRequestFromPage = {
       type: PASSKEY_PAGE_REQUEST,
       nonce: crypto.randomUUID(),
       kind: "get",
       ...(publicKey.rpId !== undefined ? { rpIdHint: publicKey.rpId } : {}),
+      ...(userVerification !== undefined ? { userVerification } : {}),
       challengeB64: bytesToBase64(toBytes(publicKey.challenge)),
       allowCredentialIdsB64: (publicKey.allowCredentials ?? []).map((c) => bytesToBase64(toBytes(c.id))),
     };

@@ -18,6 +18,7 @@ import {
   lockSettingsFromLegacyMinutes,
   parseLockSettings,
   type LockSettings,
+  UV_REQUIRED,
 } from "@rizzy-vault/core";
 
 import { deleteAccountConfig, readAccountConfig, saveAccountConfig } from "./account-config.ts";
@@ -28,6 +29,7 @@ import {
   type ItemChange,
   type MatchCandidate,
   type MatchFrameInfo,
+  type PasskeyUvInput,
   addPasskeyChange,
   cacheRemovalRefusal,
   cacheStoreNames,
@@ -64,10 +66,16 @@ import {
 import { createIframeInstanceStore } from "./iframe-instance.ts";
 import { type OfferRecord, type OfferRefusal, type OfferedItem, createOfferStore } from "./offer-store.ts";
 import {
+  type AwaitingCeremony,
+  type PasskeyCeremonyChoice,
   type PasskeyCeremonyRequest,
   createPasskeyCeremonyStore,
   isOfferedCandidate,
 } from "./passkey-ceremony.ts";
+import { type PasskeyVerifyDeps, cancelVerification, pendingVerification, submitVerification } from "./passkey-verify.ts";
+import { deliverPasskeyResult } from "./passkey-push.ts";
+import { setUvBadge } from "./uv-badge.ts";
+import type { RelayTabUrlMessage } from "../messaging/contract.ts";
 import { base64ToBytes, bytesToBase64 } from "../messaging/bytes.ts";
 import type {
   CapturedCustomField,
@@ -86,6 +94,9 @@ import type {
 let session: DurableSession | undefined;
 let cache: ExtensionCache | undefined;
 let lockController: LockController | undefined;
+/** The namespace `startCoreContext` was given, for the work a lock does outside a message
+ * (clearing the toolbar badge of a passkey ceremony that waited, ADR 0110 §8). */
+let coreExt: WebExtNamespace | undefined;
 
 /** Opens the one durable-device cache (ADR 0026 §3), creating its object stores on first use.
  * `cacheStoreNames()` needs `initCore()` to have resolved first (it calls the core's own
@@ -105,6 +116,7 @@ async function ensureCache(): Promise<ExtensionCache> {
  * No extension storage area ever holds key material (§1.1), so there is nothing to resume from.
  * Starts the lock controller and reads the lock settings. Call once, at module load. */
 export async function startCoreContext(ext: WebExtNamespace, lockSource: LockSettingsSource): Promise<void> {
+  coreExt = ext;
   lockController = newLockController(ext, lockSource);
   await startLockSettings(ext, lockSource);
 }
@@ -120,7 +132,16 @@ async function lock(): Promise<void> {
   // gone anyway.
   pendingSavePrompts.clear();
   savePromptLocations.clear();
+  // ADR 0110 §8: a ceremony that waited for verification goes with the lock, and so does its
+  // badge; the popup's next submit gets `uv_locked`.
+  const waitingTabs = passkeyCeremonies.awaitingTabs();
   passkeyCeremonies.clear();
+  passkeysInFlight.clear();
+  if (coreExt !== undefined) {
+    for (const tabId of waitingTabs) {
+      void setUvBadge(coreExt, tabId, false);
+    }
+  }
   iframeInstances.clear();
   offers.clear();
 }
@@ -522,6 +543,7 @@ export function offerPasskeyCreate(
   userName: string,
   userDisplayName: string,
   challengeB64: string,
+  userVerification?: string,
 ): {
   readonly ceremonyToken: string;
   readonly rpId: string;
@@ -529,6 +551,7 @@ export function offerPasskeyCreate(
   readonly userName: string;
   readonly vaults?: readonly { readonly id: string; readonly label: string }[];
   readonly defaultVaultId?: string;
+  readonly verifyFirst: boolean;
 } | undefined {
   if (session === undefined) {
     return undefined;
@@ -546,6 +569,7 @@ export function offerPasskeyCreate(
     userName,
     userDisplayName,
     challengeB64,
+    ...(userVerification !== undefined ? { userVerification } : {}),
   };
   const ceremonyToken = passkeyCeremonies.create(request, tabId, origin, Date.now());
   // ADR 0081 §A8: a passkey that saves a new login offers the vault picker (Personal
@@ -561,7 +585,19 @@ export function offerPasskeyCreate(
     ...(targets.length > 1 && personal !== undefined
       ? { vaults: targets.map((v) => ({ id: v.id, label: vaultLabel(v) })), defaultVaultId: personal.id }
       : {}),
+    verifyFirst: verifyFirst(session, userVerification),
   };
+}
+
+/** ADR 0110 §7 point 1, advisory: whether a ceremony asked now would need the toolbar popup's
+ * verification first (Required, not bounding, not fresh). The decision is Rust's, made again at
+ * signing (§6 point 5); a failure here only means the plain label. */
+function verifyFirst(s: DurableSession, userVerification: string | undefined): boolean {
+  try {
+    return s.passkeyUvDecision(passkeyUvInput(userVerification, currentLockSettings())) === UV_REQUIRED;
+  } catch {
+    return false;
+  }
 }
 
 /** `content-handler.ts`'s `passkey_get_request` handling: registers a pending "sign in with a
@@ -586,7 +622,15 @@ export function offerPasskeyGet(
   rpIdHint: string | undefined,
   challengeB64: string,
   allowCredentialIdsB64: readonly string[],
-): { readonly ceremonyToken: string; readonly rpId: string; readonly candidates: readonly PasskeyCandidateSummary[] } | undefined {
+  userVerification?: string,
+):
+  | {
+      readonly ceremonyToken: string;
+      readonly rpId: string;
+      readonly candidates: readonly PasskeyCandidateSummary[];
+      readonly verifyFirst: boolean;
+    }
+  | undefined {
   if (session === undefined) {
     return undefined;
   }
@@ -607,9 +651,16 @@ export function offerPasskeyGet(
     itemTitle: m.itemTitle,
     userName: m.userName,
   }));
-  const request: PasskeyCeremonyRequest = { kind: "get", origin, rpId, challengeB64, candidates };
+  const request: PasskeyCeremonyRequest = {
+    kind: "get",
+    origin,
+    rpId,
+    challengeB64,
+    candidates,
+    ...(userVerification !== undefined ? { userVerification } : {}),
+  };
   const ceremonyToken = passkeyCeremonies.create(request, tabId, origin, Date.now());
-  return { ceremonyToken, rpId, candidates };
+  return { ceremonyToken, rpId, candidates, verifyFirst: verifyFirst(session, userVerification) };
 }
 
 /** `origin`'s host, port excluded (`URL.hostname`, never `URL.host`, which includes a non-default
@@ -638,16 +689,32 @@ function splitPasskeyRef(passkeyRef: string): { readonly itemId: string; readonl
   return { itemId: passkeyRef.slice(0, i), elementId: passkeyRef.slice(i + 1) };
 }
 
+/** What an approval click led to (ADR 0039 §2; ADR 0110 §7 point 2). */
+export type PasskeyApproval =
+  /** Signed: deliver `result` to the tab. */
+  | { readonly kind: "result"; readonly result: PasskeyResultPayload }
+  /** Fall back to the native authenticator: an unknown, expired or mismatched token, a locked
+   * device, or any failure along the way, never distinguished further (ADR 0039 §2's "Decline,
+   * timeout or no match" rule treats every one of these the same). */
+  | { readonly kind: "fallback" }
+  /** A second approval of a ceremony that is signing right now: its own result is on its way. */
+  | { readonly kind: "in_flight" }
+  /** `uv_required`: the ceremony now waits for the toolbar popup's verification; `declined` are
+   * the older ceremonies of the same tab that waited, now declined (§7 point 7). */
+  | { readonly kind: "awaiting_verification"; readonly declined: readonly string[] };
+
+/** The tokens whose approval is running its ceremony now: `peek` keeps the record until the
+ * result, so a second click must not start a second ceremony (single use, ADR 0110 §7 point 2). */
+const passkeysInFlight = new Set<string>();
+
 /**
- * `content-handler.ts`'s `passkey_ceremony_approved` handling: looks up and consumes
- * `ceremonyToken` (single-use, and bound to `liveTabId`/`liveOrigin` — `passkey-ceremony.ts`'s
- * own doc on why a navigation invalidates it), then runs the real ceremony — `createPasskey` +
- * an immediate `createItem`/`editItem` for a `create`, or `DurableSession.passkeyAssertion` for
- * a `get` — and returns the page-facing result. `undefined` means "fall back to the native
- * authenticator": an unknown/expired/mismatched token, a locked device, or any failure along the
- * way, never distinguished further to the caller (`core-host/content-handler.ts` always answers
- * the content script with `apply_passkey_result`'s `outcome: "fallback"` either way — ADR 0039
- * §2's "Decline, timeout or no match" rule treats every one of these the same).
+ * `content-handler.ts`'s `passkey_ceremony_approved` handling (ADR 0110 §7 point 2): `peek`s
+ * `ceremonyToken` (bound to `liveTabId`/`liveOrigin` — `passkey-ceremony.ts`'s own doc on why a
+ * navigation invalidates it), runs the real ceremony — `createPasskey` + an immediate
+ * `createItem`/`editItem` for a `create`, or `DurableSession.passkeyAssertion` for a `get` —
+ * with the page's requirement, the current lock settings and `now` (§6 point 5), and deletes the
+ * record once there is a result. On `uv_required` the record moves to `awaiting_verification`
+ * with the user's choice instead; nothing was generated or signed.
  */
 export async function approvePasskeyCeremony(
   ceremonyToken: string,
@@ -655,39 +722,135 @@ export async function approvePasskeyCeremony(
   liveOrigin: string,
   chosenPasskeyRef: string | undefined,
   vaultId?: string,
-): Promise<PasskeyResultPayload | undefined> {
-  const request = passkeyCeremonies.take(ceremonyToken, liveTabId, liveOrigin, Date.now());
-  if (request === undefined || session === undefined) {
-    return undefined;
+): Promise<PasskeyApproval> {
+  if (passkeysInFlight.has(ceremonyToken)) {
+    return { kind: "in_flight" };
   }
+  const now = Date.now();
+  const request = passkeyCeremonies.peek(ceremonyToken, liveTabId, liveOrigin, now);
+  if (request === undefined || session === undefined) {
+    return { kind: "fallback" };
+  }
+  const choice: PasskeyCeremonyChoice = {
+    ...(chosenPasskeyRef !== undefined ? { passkeyRef: chosenPasskeyRef } : {}),
+    ...(vaultId !== undefined ? { vaultId } : {}),
+  };
+  passkeysInFlight.add(ceremonyToken);
   try {
-    if (request.kind === "create") {
-      return await runCreatePasskey(session, request, vaultId);
+    const result = await runPasskeyCeremony(session, request, choice, now);
+    passkeyCeremonies.remove(ceremonyToken);
+    return result === undefined ? { kind: "fallback" } : { kind: "result", result };
+  } catch (e) {
+    if (errorCode(e, "") === UV_REQUIRED) {
+      const moved = passkeyCeremonies.awaitVerification(ceremonyToken, choice, now);
+      if (moved !== undefined) {
+        scheduleCeremonySweep();
+        return { kind: "awaiting_verification", declined: moved.declined };
+      }
     }
-    return runGetPasskey(session, request, chosenPasskeyRef);
-  } catch {
-    // Any failure (a Rust `rp_id_rejected`/`invalid_input`, a write error, a bad `passkeyRef`):
-    // fall back, never surface the raw error to the page (ADR 0039 §2 names no error channel
-    // back to the page at all — only "fallback to the native authenticator").
-    return undefined;
+    // Any other failure (a Rust `rp_id_rejected`/`invalid_input`, a write error, a bad
+    // `passkeyRef`): fall back, never surface the raw error to the page (ADR 0039 §2 names no
+    // error channel back to the page at all — only "fallback to the native authenticator").
+    passkeyCeremonies.remove(ceremonyToken);
+    return { kind: "fallback" };
+  } finally {
+    passkeysInFlight.delete(ceremonyToken);
   }
 }
 
-/** `content-handler.ts`'s `passkey_ceremony_declined` handling: single-use consume, same
+/** §6's signing call of one ceremony at `nowMs`, with the user's choice. `undefined` for no
+ * result (a `get` whose choice is not one of its candidates). */
+async function runPasskeyCeremony(
+  s: DurableSession,
+  request: PasskeyCeremonyRequest,
+  choice: PasskeyCeremonyChoice,
+  nowMs: number,
+): Promise<PasskeyResultPayload | undefined> {
+  const uv = passkeyUvInput(request.userVerification, currentLockSettings(), nowMs);
+  if (request.kind === "create") {
+    return runCreatePasskey(s, request, choice.vaultId, uv);
+  }
+  return runGetPasskey(s, request, choice.passkeyRef, uv);
+}
+
+/** `content-handler.ts`'s `passkey_ceremony_declined` handling (also the consent iframe's
+ * Cancel of a ceremony waiting for verification, ADR 0110 §7 point 5): single-use consume, same
  * binding check, no further action — the caller still pushes `apply_passkey_result`'s
- * `outcome: "fallback"` to the tab either way. */
-export function declinePasskeyCeremony(ceremonyToken: string, liveTabId: number, liveOrigin: string): void {
-  passkeyCeremonies.take(ceremonyToken, liveTabId, liveOrigin, Date.now());
+ * `outcome: "fallback"` to the tab either way. Returns whether the ceremony was waiting for
+ * verification, so the caller clears the badge. */
+export function declinePasskeyCeremony(ceremonyToken: string, liveTabId: number, liveOrigin: string): boolean {
+  const now = Date.now();
+  const waited = passkeyCeremonies.isAwaiting(ceremonyToken, now);
+  passkeyCeremonies.take(ceremonyToken, liveTabId, liveOrigin, now);
+  return waited;
+}
+
+let ceremonySweep: ReturnType<typeof setTimeout> | undefined;
+
+/** Clears the badge of a ceremony that expired while it waited (ADR 0110 §8: the 2-minute TTL
+ * bounds the record either way). One timer, re-armed while any ceremony waits. */
+function scheduleCeremonySweep(): void {
+  if (ceremonySweep !== undefined) {
+    return;
+  }
+  ceremonySweep = setTimeout(() => {
+    ceremonySweep = undefined;
+    const expired = passkeyCeremonies.sweep(Date.now());
+    if (coreExt !== undefined) {
+      for (const tabId of expired) {
+        void setUvBadge(coreExt, tabId, false);
+      }
+    }
+    if (passkeyCeremonies.awaitingTabs().length > 0) {
+      scheduleCeremonySweep();
+    }
+  }, CEREMONY_SWEEP_MS);
+}
+
+/** How often {@link scheduleCeremonySweep} looks for an expired waiting ceremony. */
+const CEREMONY_SWEEP_MS = 15_000;
+
+/** The parts of ADR 0110 §7's verification, real ones (`passkey-verify.ts`'s module docs). */
+function verifyDeps(ext: WebExtNamespace): PasskeyVerifyDeps {
+  return {
+    store: passkeyCeremonies,
+    now: () => Date.now(),
+    session: () => session,
+    liveTabUrl: (tabId) => liveTabUrl(ext, tabId),
+    sign: async (ceremony: AwaitingCeremony, nowMs: number) =>
+      session === undefined ? undefined : runPasskeyCeremony(session, ceremony.request, ceremony.choice, nowMs),
+    deliver: (tabId, ceremonyToken, result) => deliverPasskeyResult(ext, tabId, ceremonyToken, result),
+    clearBadge: (tabId) => setUvBadge(ext, tabId, false),
+  };
+}
+
+/** The live URL of `tabId`: from `tabs.get` where this context has it (Firefox's background
+ * page), from the service worker otherwise (the Chromium offscreen document has no `tabs`). */
+async function liveTabUrl(ext: WebExtNamespace, tabId: number): Promise<string | undefined> {
+  try {
+    const get = ext.tabs?.get;
+    if (get !== undefined) {
+      const tab = await get.call(ext.tabs, tabId);
+      return tab.url;
+    }
+    const answer = (await ext.runtime.sendMessage({ type: "relay_tab_url", tabId } satisfies RelayTabUrlMessage)) as
+      | { url?: unknown }
+      | undefined;
+    return typeof answer?.url === "string" ? answer.url : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function runCreatePasskey(
   s: DurableSession,
   request: Extract<PasskeyCeremonyRequest, { kind: "create" }>,
   vaultId: string | undefined,
+  uv: PasskeyUvInput,
 ): Promise<PasskeyResultPayload> {
-  // ADR 0110 §6: the UV flag is decided in Rust at signing; Preferred and the default lock
-  // settings for now (`passkeyUvInput`'s doc), wired in the extension step.
-  const created = s.createPasskey(request.origin, request.rpId, base64ToBytes(request.challengeB64), passkeyUvInput());
+  // ADR 0110 §6: the UV flag is decided in Rust here, at signing; `uv_required` throws before
+  // any key is generated or anything is written.
+  const created = s.createPasskey(request.origin, request.rpId, base64ToBytes(request.challengeB64), uv);
   const passkeyInput: AddPasskeyInput = {
     elementId: newElementId(),
     rpId: request.rpId,
@@ -737,6 +900,7 @@ function runGetPasskey(
   s: DurableSession,
   request: Extract<PasskeyCeremonyRequest, { kind: "get" }>,
   chosenPasskeyRef: string | undefined,
+  uv: PasskeyUvInput,
 ): PasskeyResultPayload | undefined {
   if (chosenPasskeyRef === undefined || !isOfferedCandidate(request, chosenPasskeyRef)) {
     return undefined;
@@ -745,14 +909,13 @@ function runGetPasskey(
   if (ref === undefined) {
     return undefined;
   }
-  // ADR 0110 §6, as for `runCreatePasskey`: wired in the extension step.
   const assertion = s.passkeyAssertion(
     ref.itemId,
     ref.elementId,
     request.origin,
     request.rpId,
     base64ToBytes(request.challengeB64),
-    passkeyUvInput(),
+    uv,
   );
   return {
     credentialIdB64: bytesToBase64(assertion.credentialId),
@@ -1126,6 +1289,15 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
     case "lock":
       await lock();
       return { type: "locked" };
+    // ADR 0110 §7 points 3–5 (the listener admits these from the toolbar popup only).
+    case "passkey_verify_pending": {
+      const view = pendingVerification(verifyDeps(ext), request.tabId);
+      return view === undefined ? { type: "passkey_verify_none" } : { type: "passkey_verify_pending", ...view };
+    }
+    case "passkey_verify_submit":
+      return { type: "passkey_verify_reply", code: await submitVerification(verifyDeps(ext), request.ceremonyToken, request.masterPassword) };
+    case "passkey_verify_cancel":
+      return { type: "passkey_verify_reply", code: await cancelVerification(verifyDeps(ext), request.ceremonyToken) };
     case "sync": {
       if (session === undefined) {
         return { type: "error", code: "locked" };

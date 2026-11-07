@@ -13,7 +13,13 @@
 // (`messaging/contract.ts`) `core-context.ts` answers with. If the owner wants the literal
 // `packages/core`-relocation, moving this file there later is a pure move, since it already
 // depends on nothing extension-specific beyond the injected `transport`.
-import type { PopupRecoveryNotice, PopupRequest, PopupResponse } from "../messaging/contract.ts";
+import type {
+  PasskeyVerificationView,
+  PopupRecoveryNotice,
+  PopupRequest,
+  PopupResponse,
+  UvReplyCode,
+} from "../messaging/contract.ts";
 
 /** The three lock settings the options page can change (ADR 0110 §1). */
 export interface LockSettingsChoice {
@@ -156,6 +162,38 @@ export class ExtensionClient {
     if (response.type !== "unlocked") {
       throw this.#unexpected(response);
     }
+  }
+
+  /** ADR 0110 §7 point 3: the ceremony of the popup's active tab `tabId` that waits for a
+   * master-password verification, or `undefined`. */
+  async passkeyVerifyPending(tabId: number): Promise<PasskeyVerificationView | undefined> {
+    const response = await this.#transport({ type: "passkey_verify_pending", tabId });
+    if (response.type === "passkey_verify_none") {
+      return undefined;
+    }
+    if (response.type !== "passkey_verify_pending") {
+      throw this.#unexpected(response);
+    }
+    const { ceremonyToken, origin, rpId, userName, kind } = response;
+    return { ceremonyToken, origin, rpId, userName, kind };
+  }
+
+  /** ADR 0110 §7 point 4: one verification attempt; the reply is one of six fixed codes. */
+  async passkeyVerifySubmit(ceremonyToken: string, masterPassword: string): Promise<UvReplyCode> {
+    const response = await this.#transport({ type: "passkey_verify_submit", ceremonyToken, masterPassword });
+    if (response.type !== "passkey_verify_reply") {
+      throw this.#unexpected(response);
+    }
+    return response.code;
+  }
+
+  /** ADR 0110 §7 point 5: the popup's Cancel. */
+  async passkeyVerifyCancel(ceremonyToken: string): Promise<UvReplyCode> {
+    const response = await this.#transport({ type: "passkey_verify_cancel", ceremonyToken });
+    if (response.type !== "passkey_verify_reply") {
+      throw this.#unexpected(response);
+    }
+    return response.code;
   }
 
   async lock(): Promise<void> {

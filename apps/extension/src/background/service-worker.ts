@@ -22,6 +22,7 @@ import { SenderRejected, isContentScriptSender, trustedOriginOf } from "../messa
 import { isRelayApplyFillMessage, isRelayPasskeyResultMessage } from "../messaging/contract.ts";
 import type { ApplyFillMessage, ApplyPasskeyResultMessage, ContentScriptForward, ToContentScript } from "../messaging/contract.ts";
 import { isEnsureCoreMessage } from "./ensure-core.ts";
+import { handleUvRelay } from "./uv-relay.ts";
 import {
   LEGACY_AUTO_LOCK_KEY,
   LOCK_SETTINGS_KEY,
@@ -149,6 +150,10 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // `isContentScriptSender`'s own comment (it is also what this extension's own pages look
     // like when a test opens one directly in a tab, e.g. the popup, instead of through
     // `chrome.action`). It's our own popup/options/offscreen talking to each other directly.
+    // ADR 0110 §7: the toolbar badge and a tab's live URL, for the offscreen document only.
+    if (handleUvRelay(ext, message, sender, sendResponse)) {
+      return true;
+    }
     if (isEnsureCoreMessage(message)) {
       // The popup/options transport's priming call (`core/client.ts`): make sure the offscreen
       // document exists, then answer, so the caller's very next `sendMessage` has somewhere to

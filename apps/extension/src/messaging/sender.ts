@@ -133,3 +133,48 @@ export function isInlineMenuSender(sender: WebExtMessageSender, extensionId: str
 export function isOwnExtensionPage(sender: WebExtMessageSender, extensionId: string): boolean {
   return sender.id === extensionId && !isContentScriptSender(sender, extensionId);
 }
+
+/** The toolbar popup's document (`manifest.*.json`'s `default_popup`). */
+export const POPUP_PATH = "src/popup/index.html";
+
+/** The Chromium offscreen document (`background/service-worker.ts`'s `OFFSCREEN_URL`). */
+export const OFFSCREEN_PATH = "src/core-host/offscreen.html";
+
+/** `url` without its query and fragment, or `undefined` when it does not parse. */
+function documentUrlOf(url: string | undefined): string | undefined {
+  if (url === undefined) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether `sender` is the toolbar popup (ADR 0110 §7 point 4: the master password of a
+ * re-verification is accepted from the popup only, never from a content script, the inline menu,
+ * the consent iframe, the options page or any other window). The browser sets every field read
+ * here: `sender.id` is this extension, the sending document's own `sender.url` is the popup's,
+ * and the sender is not framed in a web page (no `sender.tab`, as for the real toolbar popup; or
+ * a tab whose top-level document is the popup itself, which a web page cannot open or frame,
+ * since the popup is not web-accessible — the development and end-to-end case of the popup
+ * opened at its own URL).
+ */
+export function isPopupSender(sender: WebExtMessageSender, extensionId: string, popupUrl: string): boolean {
+  if (sender.id !== extensionId || documentUrlOf(sender.url) !== popupUrl) {
+    return false;
+  }
+  return sender.tab === undefined || documentUrlOf(sender.tab.url) === popupUrl;
+}
+
+/**
+ * Whether `sender` is the Chromium offscreen document (ADR 0110 §7: the one context that asks
+ * the service worker to set the toolbar badge or read a tab's URL on its behalf): this
+ * extension, no tab, and the offscreen document's own URL.
+ */
+export function isOffscreenDocumentSender(sender: WebExtMessageSender, extensionId: string, offscreenUrl: string): boolean {
+  return sender.id === extensionId && sender.tab === undefined && documentUrlOf(sender.url) === offscreenUrl;
+}

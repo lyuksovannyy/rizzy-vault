@@ -38,6 +38,17 @@ interface WebExtMessageSender {
   readonly origin?: string;
   readonly tab?: { readonly id?: number; readonly url?: string };
   readonly frameId?: number;
+  /** The sending document's own URL (an extension page's, for the popup and the offscreen
+   * document; ADR 0110 §7 point 4 checks the popup's). */
+  readonly url?: string;
+}
+
+/** `chrome.action` (Chromium MV3) or `browser.browserAction` (Firefox MV2): only the toolbar
+ * badge and `openPopup` (ADR 0110 §7 point 2). `openPopup` is optional: not every browser and
+ * version offers it, or allows it without a user gesture (**U**). */
+interface WebExtAction {
+  setBadgeText(details: { tabId?: number; text: string }): Promise<void> | void;
+  openPopup?(): Promise<void>;
 }
 
 interface WebExtEvent<Listener> {
@@ -86,6 +97,9 @@ interface WebExtTabs {
    * `tabs.query`'s arbitrary-tab lookup, this never asks the browser for a tab this extension
    * was not already given. */
   sendMessage(tabId: number, message: unknown): Promise<unknown>;
+  /** One tab's current state (ADR 0110 §7 point 4.2 reads its live URL); optional because the
+   * unit tests' fakes do not all provide it. */
+  get?(tabId: number): Promise<{ id?: number; url?: string }>;
 }
 
 interface WebExtNamespace {
@@ -111,6 +125,10 @@ interface WebExtNamespace {
   // there. The popup and options page, and Firefox's `background-page.ts`, always have it.
   readonly tabs?: WebExtTabs;
   readonly offscreen?: WebExtOffscreen;
+  /** Chromium MV3's toolbar action; absent in the offscreen document (ADR 0110 §7 point 2). */
+  readonly action?: WebExtAction;
+  /** Firefox MV2's toolbar action. */
+  readonly browserAction?: WebExtAction;
 }
 
 // `chrome` exists in Chromium; `browser` in Firefox. Both are optional at the type level so

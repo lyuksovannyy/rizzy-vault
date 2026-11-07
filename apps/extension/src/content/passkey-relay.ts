@@ -66,6 +66,7 @@ function installPasskeyRelay(): void {
             type: "passkey_create_request",
             pageUrl: location.href,
             ...(request.rpIdHint !== undefined ? { rpIdHint: request.rpIdHint } : {}),
+            ...(request.userVerification !== undefined ? { userVerification: request.userVerification } : {}),
             rpName: request.rpName,
             userIdB64: request.userIdB64,
             userName: request.userName,
@@ -77,6 +78,7 @@ function installPasskeyRelay(): void {
             type: "passkey_get_request",
             pageUrl: location.href,
             ...(request.rpIdHint !== undefined ? { rpIdHint: request.rpIdHint } : {}),
+            ...(request.userVerification !== undefined ? { userVerification: request.userVerification } : {}),
             challengeB64: request.challengeB64,
             allowCredentialIdsB64: request.allowCredentialIdsB64,
           };
@@ -98,6 +100,7 @@ function installPasskeyRelay(): void {
       ...(answer.vaults !== undefined && answer.defaultVaultId !== undefined
         ? { vaults: answer.vaults, defaultVaultId: answer.defaultVaultId }
         : {}),
+      ...(answer.verifyFirst === true ? { verifyFirst: true } : {}),
     });
   }
 

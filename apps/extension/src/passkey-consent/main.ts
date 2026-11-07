@@ -13,6 +13,14 @@ import "../surface.css";
 import { isPasskeyConsentShowMessage, PASSKEY_CONSENT_DONE, type PasskeyConsentShowMessage } from "./protocol.ts";
 import type { PasskeyCeremonyMessage, PasskeyCeremonyResponse } from "../messaging/contract.ts";
 
+/** ADR 0110 §7 point 1: the approve button's label and the sentence when the approval will need
+ * the toolbar popup's master-password verification. Advisory: the decision is made at signing. */
+const VERIFY_USE_LABEL = "Verify and use passkey";
+const VERIFY_SAVE_LABEL = "Verify and save passkey";
+const VERIFY_NOTE = "The rizzy toolbar button will ask for your master password.";
+/** ADR 0110 §7 point 2: shown while the ceremony waits for that verification. */
+const WAITING_TEXT = "Waiting for verification in the rizzy toolbar button";
+
 const prompt = document.getElementById("prompt");
 if (prompt === null) {
   throw new Error("passkey-consent: #prompt is missing from index.html");
@@ -47,19 +55,27 @@ function render(offer: PasskeyConsentShowMessage): void {
       : `Sign in to ${offer.rpId} with a saved passkey`;
   prompt.appendChild(heading);
 
+  const verifyFirst = offer.verifyFirst === true;
+  if (verifyFirst) {
+    const note = document.createElement("p");
+    note.textContent = VERIFY_NOTE;
+    prompt.appendChild(note);
+  }
   if (offer.kind === "create") {
     // ADR 0081 §A8: a new login's vault, the Personal vault preselected every time.
     const picker = vaultPicker(offer);
     prompt.appendChild(
-      button(offer.rpName ?? offer.rpId, () => void respond(offer, approvedMessage(offer, undefined, picker?.value))),
+      button(verifyFirst ? VERIFY_SAVE_LABEL : (offer.rpName ?? offer.rpId), () =>
+        void respond(offer, approvedMessage(offer, undefined, picker?.value)),
+      ),
     );
   } else {
-    for (const candidate of offer.candidates ?? []) {
-      prompt.appendChild(
-        button(`${candidate.itemTitle} (${candidate.userName})`, () =>
-          void respond(offer, approvedMessage(offer, candidate.passkeyRef)),
-        ),
-      );
+    const candidates = offer.candidates ?? [];
+    for (const candidate of candidates) {
+      const account = `${candidate.itemTitle} (${candidate.userName})`;
+      // One candidate: the button is the approval itself; several: each names its account.
+      const label = !verifyFirst ? account : candidates.length === 1 ? VERIFY_USE_LABEL : `${VERIFY_USE_LABEL}: ${account}`;
+      prompt.appendChild(button(label, () => void respond(offer, approvedMessage(offer, candidate.passkeyRef))));
     }
   }
   prompt.appendChild(
@@ -129,21 +145,45 @@ function button(label: string, onClick: (event: MouseEvent) => void): HTMLButton
  * chance to complete the round trip). The response itself (`PasskeyCeremonyResponse`) is never
  * inspected beyond that: a failure here still means "fall back" to the content script/page, via
  * the separate `apply_passkey_result` push this response's own doc explains — never a secret,
- * either way (ADR 0040 "never back to the iframe"). */
+ * either way (ADR 0040 "never back to the iframe"). The one exception is ADR 0110 §7 point 2's
+ * `passkey_ceremony_awaiting_verification`: the iframe then stays, says it waits for the toolbar
+ * button, and offers Cancel (the same decline); the result, or the fallback, reaches the content
+ * script later and removes the iframe. */
 async function respond(offer: PasskeyConsentShowMessage, message: PasskeyCeremonyMessage): Promise<void> {
   const origin = replyOrigin;
   const ext = typeof chrome !== "undefined" ? chrome : browser;
+  let waiting = false;
   try {
     if (ext !== undefined) {
-      await (ext.runtime.sendMessage(message) as Promise<PasskeyCeremonyResponse | undefined>);
+      const answer = await (ext.runtime.sendMessage(message) as Promise<PasskeyCeremonyResponse | undefined>);
+      waiting = message.type === "passkey_ceremony_approved" && answer?.type === "passkey_ceremony_awaiting_verification";
     }
   } catch {
     // The background/offscreen document was unreachable: nothing more to do — the page's own
     // pending ceremony falls back on its own timeout either way.
   } finally {
-    if (origin !== undefined) {
+    if (waiting) {
+      renderWaiting(offer);
+    } else if (origin !== undefined) {
       window.parent.postMessage({ type: PASSKEY_CONSENT_DONE }, origin);
     }
   }
+}
+
+/** ADR 0110 §7 point 2: the ceremony waits for the toolbar popup's verification. */
+function renderWaiting(offer: PasskeyConsentShowMessage): void {
+  if (prompt === null) {
+    return;
+  }
+  prompt.replaceChildren();
+  const status = document.createElement("p");
+  status.setAttribute("role", "status");
+  status.textContent = WAITING_TEXT;
+  prompt.appendChild(status);
+  prompt.appendChild(
+    button("Cancel", () =>
+      void respond(offer, { type: "passkey_ceremony_declined", instanceToken: offer.instanceToken, ceremonyToken: offer.ceremonyToken }),
+    ),
+  );
 }
 

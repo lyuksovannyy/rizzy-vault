@@ -19,7 +19,15 @@ const root = document.getElementById("root");
 if (root !== null) {
   createRoot(root).render(
     <StrictMode>
-      <App client={client} openTab={(url) => void ext.tabs?.create({ url })} />
+      <App
+        client={client}
+        openTab={(url) => void ext.tabs?.create({ url })}
+        activeTabId={async () => {
+          const [tab] = (await ext.tabs?.query({ active: true, currentWindow: true })) ?? [];
+          return tab?.id;
+        }}
+        closePopup={() => window.close()}
+      />
     </StrictMode>,
   );
 }

@@ -28,6 +28,8 @@ import {
   isContentScriptSender,
   isInlineMenuSender,
   isOwnExtensionPage,
+  isPopupSender,
+  POPUP_PATH,
   SenderRejected,
   trustedOriginOf,
 } from "../messaging/sender.ts";
@@ -37,6 +39,7 @@ import {
   isInlineMenuGeneratePasswordRequestMessage,
   isInlineMenuOfferRequestMessage,
   isPasskeyCeremonyMessage,
+  isPasskeyVerifyRequest,
   isSaveDialogRequestMessage,
   isSaveDialogResolveMessage,
 } from "../messaging/contract.ts";
@@ -236,6 +239,17 @@ export function installCoreContextListener(ext: WebExtNamespace, options: Instal
       void handleContentScriptRequest(message.message, message.trustedOrigin, message.trustedTabId).then(
         (response: ToContentScript) => sendResponse(response),
       );
+      return true;
+    }
+    // ADR 0110 §7 points 3–5: the passkey re-verification is the toolbar popup's alone (the
+    // master password is entered nowhere else, INV-123); any other sender — the options page, any
+    // other extension page — is ignored like a malformed message. A content script, the inline
+    // menu and the consent iframe never reach this far (the branches above refuse them).
+    if (isPasskeyVerifyRequest(message)) {
+      if (!isPopupSender(sender, ext.runtime.id, ext.runtime.getURL(POPUP_PATH))) {
+        return undefined;
+      }
+      void handlePopupRequest(ext, message).then((response: PopupResponse) => sendResponse(response));
       return true;
     }
     if (isPopupRequest(message)) {

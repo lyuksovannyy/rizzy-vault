@@ -23,6 +23,7 @@ import {
   MAX_RP_ID_LEN,
   MAX_RP_NAME_LEN,
   MAX_USER_NAME_LEN,
+  MAX_USER_VERIFICATION_LEN,
 } from "../messaging/contract.ts";
 
 export const PASSKEY_PAGE_REQUEST = "rizzy-passkey-request";
@@ -33,6 +34,9 @@ export interface PasskeyCreateRequestFromPage {
   readonly nonce: string;
   readonly kind: "create";
   readonly rpIdHint?: string;
+  /** ADR 0110 §5 point 1: `publicKey.authenticatorSelection.userVerification`
+   * ({@link relayableUserVerification}). */
+  readonly userVerification?: string;
   readonly rpName: string;
   readonly userIdB64: string;
   readonly userName: string;
@@ -46,6 +50,8 @@ export interface PasskeyGetRequestFromPage {
   readonly nonce: string;
   readonly kind: "get";
   readonly rpIdHint?: string;
+  /** ADR 0110 §5 point 1: `publicKey.userVerification` ({@link relayableUserVerification}). */
+  readonly userVerification?: string;
   readonly challengeB64: string;
   readonly allowCredentialIdsB64: readonly string[];
 }
@@ -80,6 +86,15 @@ function isBoundedStringArray(value: unknown, maxItems: number, maxLen: number):
   return Array.isArray(value) && value.length <= maxItems && value.every((v) => isBoundedString(v, maxLen));
 }
 
+/**
+ * ADR 0110 §5 point 1: the page's `userVerification` value as the shim relays it — a string of
+ * at most {@link MAX_USER_VERIFICATION_LEN} UTF-16 code units, unchanged (the background maps it,
+ * in Rust); anything else (not a string, longer, absent) is not relayed (`undefined`).
+ */
+export function relayableUserVerification(value: unknown): string | undefined {
+  return isBoundedString(value, MAX_USER_VERIFICATION_LEN) ? value : undefined;
+}
+
 export function isPasskeyRequestFromPage(value: unknown): value is PasskeyRequestFromPage {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -89,6 +104,9 @@ export function isPasskeyRequestFromPage(value: unknown): value is PasskeyReques
     return false;
   }
   if (v["rpIdHint"] !== undefined && !isBoundedString(v["rpIdHint"], MAX_RP_ID_LEN)) {
+    return false;
+  }
+  if (v["userVerification"] !== undefined && !isBoundedString(v["userVerification"], MAX_USER_VERIFICATION_LEN)) {
     return false;
   }
   if (v["kind"] === "create") {

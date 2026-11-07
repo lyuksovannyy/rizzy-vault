@@ -14,17 +14,38 @@ import { GeneratorView } from "./views/Generator.tsx";
 import { ItemsView } from "./views/Items.tsx";
 import { LockedView } from "./views/Locked.tsx";
 import { RemoveDeviceView } from "./views/RemoveDevice.tsx";
+import { VerifyPasskeyView } from "./views/VerifyPasskey.tsx";
+import { uvReplySentence } from "./passkey-verify.ts";
+import type { PasskeyVerificationView, UvReplyCode } from "../messaging/contract.ts";
 
 export interface AppProps {
   readonly client: ExtensionClient;
   /** Opens `url` in a new tab (`chrome.tabs.create`/`browser.tabs.create`) — injected so this
    * component stays testable without a real `WebExtNamespace`. */
   readonly openTab: (url: string) => void;
+  /** The id of the popup's active tab (`tabs.query({ active: true, currentWindow: true })`), for
+   * ADR 0110 §7 point 3's passkey verification; `undefined` when there is none. */
+  readonly activeTabId?: () => Promise<number | undefined>;
+  /** Closes the popup (ADR 0110 §7 point 4.5: after `uv_ok`). */
+  readonly closePopup?: () => void;
 }
 
-type View = "loading" | "enrol" | "locked" | "items" | "generator" | "remove";
+type View = "loading" | "enrol" | "locked" | "items" | "generator" | "remove" | "verify";
 
-export function App({ client, openTab }: AppProps) {
+/** The waiting passkey ceremony of the popup's active tab, if any (ADR 0110 §7 point 3). */
+async function pendingVerificationOf(
+  client: ExtensionClient,
+  activeTabId: (() => Promise<number | undefined>) | undefined,
+): Promise<PasskeyVerificationView | undefined> {
+  try {
+    const tabId = activeTabId === undefined ? undefined : await activeTabId();
+    return tabId === undefined ? undefined : await client.passkeyVerifyPending(tabId);
+  } catch {
+    return undefined;
+  }
+}
+
+export function App({ client, openTab, activeTabId, closePopup }: AppProps) {
   const [view, setView] = useState<View>("loading");
   const [error, setError] = useState<string | undefined>(undefined);
   const [serverOrigin, setServerOrigin] = useState<string | undefined>(undefined);
@@ -37,6 +58,10 @@ export function App({ client, openTab }: AppProps) {
   // would remount it) keeps showing "No items." forever after a sync that pulled or pushed real
   // items, even while the popup's own "Synced." message says the sync succeeded.
   const [itemsRevision, setItemsRevision] = useState(0);
+  // ADR 0110 §7 point 3: the passkey ceremony of the active tab waiting for verification, shown
+  // before anything else, and the sentence of how its verification ended.
+  const [verification, setVerification] = useState<PasskeyVerificationView | undefined>(undefined);
+  const [verifyOutcome, setVerifyOutcome] = useState<UvReplyCode | undefined>(undefined);
   // ADR 0045: the server's advisory pending-recovery notice of the last account answer, for the
   // banner only (INV-70). Replaced by every status and sync answer, so it goes with the first
   // answer that has none (point 3).
@@ -69,6 +94,14 @@ export function App({ client, openTab }: AppProps) {
         setRecoveryNotice(status.locked ? undefined : status.recoveryNotice);
         setAlarms(status.locked ? [] : (status.alarms ?? []));
         setView(!status.enrolled ? "enrol" : status.locked ? "locked" : "items");
+        if (status.enrolled && !status.locked) {
+          void pendingVerificationOf(client, activeTabId).then((pending) => {
+            if (pending !== undefined) {
+              setVerification(pending);
+              setView("verify");
+            }
+          });
+        }
       })
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : "status_failed");
@@ -162,6 +195,21 @@ export function App({ client, openTab }: AppProps) {
           </p>
         </section>
       ) : undefined}
+      {view === "verify" && verification !== undefined ? (
+        <VerifyPasskeyView
+          client={client}
+          ceremony={verification}
+          onFinished={(code) => {
+            setVerification(undefined);
+            if (code === "uv_ok" && closePopup !== undefined) {
+              closePopup();
+            }
+            setVerifyOutcome(code);
+            refreshStatus();
+          }}
+        />
+      ) : undefined}
+      {view !== "verify" && verifyOutcome !== undefined ? <p role="status">{uvReplySentence(verifyOutcome)}</p> : undefined}
       {view === "enrol" ? <EnrolView client={client} onEnrolled={refreshStatus} /> : undefined}
       {view === "locked" ? (
         <LockedView client={client} onUnlocked={refreshStatus} onRemove={() => setView("remove")} />

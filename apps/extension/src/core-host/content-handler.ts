@@ -32,7 +32,6 @@ import {
 } from "./core-context.ts";
 import type {
   ApplyFillMessage,
-  ApplyPasskeyResultMessage,
   ContentErrorMessage,
   FillOnly,
   FillValues,
@@ -49,9 +48,10 @@ import type {
   PasskeyCeremonyMessage,
   PasskeyCeremonyResponse,
   RelayApplyFillMessage,
-  RelayPasskeyResultMessage,
   ToContentScript,
 } from "../messaging/contract.ts";
+import { deliverPasskeyResult, pushApplyPasskeyResult } from "./passkey-push.ts";
+import { setUvBadge } from "./uv-badge.ts";
 import type { MatchCandidate } from "./bindings.ts";
 
 /** The one COSE algorithm id this project can create a credential for today (ADR 0039 §3: ES256
@@ -94,15 +94,6 @@ async function pushApplyFill(ext: WebExtNamespace, tabId: number, values: FillVa
   await ext.runtime.sendMessage({ type: "relay_apply_fill", tabId, values } satisfies RelayApplyFillMessage);
 }
 
-/** {@link pushApplyFill}'s exact pattern, for a passkey ceremony's result (ADR 0039 §2;
- * `messaging/contract.ts`'s `ApplyPasskeyResultMessage`/`RelayPasskeyResultMessage`). */
-async function pushApplyPasskeyResult(ext: WebExtNamespace, tabId: number, msg: Omit<ApplyPasskeyResultMessage, "type">): Promise<void> {
-  if (ext.tabs !== undefined) {
-    await ext.tabs.sendMessage(tabId, { type: "apply_passkey_result", ...msg } satisfies ApplyPasskeyResultMessage);
-    return;
-  }
-  await ext.runtime.sendMessage({ type: "relay_passkey_result", tabId, ...msg } satisfies RelayPasskeyResultMessage);
-}
 
 /**
  * Whether `pageUrl` (the content script's own, untrusted claim) is consistent with
@@ -208,6 +199,7 @@ export async function handleContentScriptRequest(
         message.userName,
         message.userDisplayName,
         message.challengeB64,
+        message.userVerification,
       );
       if (offer === undefined) {
         return refused("passkey_create_request: the device is locked");
@@ -222,6 +214,7 @@ export async function handleContentScriptRequest(
         ...(offer.vaults !== undefined && offer.defaultVaultId !== undefined
           ? { vaults: offer.vaults, defaultVaultId: offer.defaultVaultId }
           : {}),
+        ...(offer.verifyFirst ? { verifyFirst: true } : {}),
       };
     }
     case "passkey_get_request": {
@@ -231,11 +224,25 @@ export async function handleContentScriptRequest(
       if (!isSecureOrigin(trustedOrigin)) {
         return refused("passkey_get_request: origin is not https");
       }
-      const offer = offerPasskeyGet(trustedOrigin, trustedTabId, message.rpIdHint, message.challengeB64, message.allowCredentialIdsB64);
+      const offer = offerPasskeyGet(
+        trustedOrigin,
+        trustedTabId,
+        message.rpIdHint,
+        message.challengeB64,
+        message.allowCredentialIdsB64,
+        message.userVerification,
+      );
       if (offer === undefined) {
         return refused("passkey_get_request: the device is locked, or no stored passkey matches this rpId");
       }
-      return { type: "passkey_offer", ceremonyToken: offer.ceremonyToken, kind: "get", rpId: offer.rpId, candidates: offer.candidates };
+      return {
+        type: "passkey_offer",
+        ceremonyToken: offer.ceremonyToken,
+        kind: "get",
+        rpId: offer.rpId,
+        candidates: offer.candidates,
+        ...(offer.verifyFirst ? { verifyFirst: true } : {}),
+      };
     }
     case "register_iframe_instance": {
       // ADR 0043 point 2: bound to the browser-vouched tab and origin only. A content script
@@ -281,19 +288,34 @@ export async function handlePasskeyCeremonyApproval(
     return refused("passkey_ceremony: the sender's tab URL does not parse");
   }
   if (message.type === "passkey_ceremony_declined") {
-    declinePasskeyCeremony(message.ceremonyToken, tabId, origin);
+    // Also the consent iframe's Cancel while the ceremony waits for verification (ADR 0110 §7
+    // point 5): the same decline, and the badge goes.
+    if (declinePasskeyCeremony(message.ceremonyToken, tabId, origin)) {
+      await setUvBadge(ext, tabId, false);
+    }
     await pushApplyPasskeyResult(ext, tabId, { ceremonyToken: message.ceremonyToken, outcome: "fallback" });
     return { type: "passkey_ceremony_dispatched" };
   }
-  const result = await approvePasskeyCeremony(message.ceremonyToken, tabId, origin, message.chosenPasskeyRef, message.vaultId);
-  await pushApplyPasskeyResult(
-    ext,
-    tabId,
-    result === undefined
-      ? { ceremonyToken: message.ceremonyToken, outcome: "fallback" }
-      : { ceremonyToken: message.ceremonyToken, outcome: "ok", result },
-  );
-  return { type: "passkey_ceremony_dispatched" };
+  const approval = await approvePasskeyCeremony(message.ceremonyToken, tabId, origin, message.chosenPasskeyRef, message.vaultId);
+  switch (approval.kind) {
+    case "result":
+      await deliverPasskeyResult(ext, tabId, message.ceremonyToken, approval.result);
+      return { type: "passkey_ceremony_dispatched" };
+    case "fallback":
+      await deliverPasskeyResult(ext, tabId, message.ceremonyToken, undefined);
+      return { type: "passkey_ceremony_dispatched" };
+    case "in_flight":
+      // A second click on a ceremony already signing: its own result is on its way.
+      return { type: "passkey_ceremony_dispatched" };
+    case "awaiting_verification":
+      // ADR 0110 §7 points 2 and 7: an older ceremony of this tab that waited is declined; this
+      // one waits for the toolbar popup, which the badge points to.
+      for (const declined of approval.declined) {
+        await deliverPasskeyResult(ext, tabId, declined, undefined);
+      }
+      await setUvBadge(ext, tabId, true, true);
+      return { type: "passkey_ceremony_awaiting_verification" };
+  }
 }
 
 function refused(reason: string): ContentErrorMessage {
