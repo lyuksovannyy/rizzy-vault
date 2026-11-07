@@ -41,6 +41,7 @@ use crate::coredump;
 use crate::server;
 use rizzy_domain_auth::invalidation::LossCase;
 use rizzy_domain_auth::retirement::{DAY_MS, DEFAULT_GRACE_DAYS, MAX_GRACE_DAYS};
+use rizzy_storage::backup::file::{MAX_BACKUP_FILE_LEN, MAX_IN_MEMORY_BACKUP_LEN};
 
 /// The help text, printed on `--help` (stdout) and on a usage error (stderr).
 pub const USAGE: &str = "\
@@ -868,10 +869,34 @@ fn run_backup(config: &Config, out: &std::path::Path, encrypt: bool) -> ExitCode
     match rt.block_on(admin::backup(config, out, encrypt)) {
         Ok(summary) => {
             eprint_line(&backup_message(&summary));
+            for line in backup_size_notes(summary.len) {
+                eprint_line(&line);
+            }
             ExitCode::SUCCESS
         }
         Err(e) => admin_failure(&e),
     }
+}
+
+/// The size lines `backup` prints after a success (ADR 0094 §4): a note when the file is
+/// too large to restore from stdin, a warning at 75 % of the file limit or more.
+fn backup_size_notes(len: u64) -> Vec<String> {
+    let in_memory = u64::try_from(MAX_IN_MEMORY_BACKUP_LEN).unwrap_or(u64::MAX);
+    let mut lines = Vec::new();
+    if len > in_memory {
+        lines.push(format!(
+            "note: this backup is {len} bytes; restore it from a file (--in <file>): restore \
+             reads at most {in_memory} bytes from stdin."
+        ));
+    }
+    if len >= MAX_BACKUP_FILE_LEN / 4 * 3 {
+        let percent = len.saturating_mul(100) / MAX_BACKUP_FILE_LEN;
+        lines.push(format!(
+            "warning: this backup is {len} bytes, {percent}% of this release's limit of \
+             {MAX_BACKUP_FILE_LEN} bytes."
+        ));
+    }
+    lines
 }
 
 /// The line `backup` prints on stderr: for a plain backup its length and SHA-256 (ADR 0023
@@ -929,6 +954,27 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    /// ADR 0094 §4: the note above 2 GiB and the warning from 75 % of the 1 TiB limit.
+    #[test]
+    fn backup_size_notes_follow_the_limits() {
+        assert!(backup_size_notes(2_147_483_648).is_empty());
+        assert_eq!(
+            backup_size_notes(2_147_483_649),
+            [
+                "note: this backup is 2147483649 bytes; restore it from a file (--in <file>): \
+              restore reads at most 2147483648 bytes from stdin."
+            ]
+        );
+        let near = backup_size_notes(824_633_720_832);
+        assert_eq!(near.len(), 2);
+        assert_eq!(
+            near[1],
+            "warning: this backup is 824633720832 bytes, 75% of this release's limit of \
+             1099511627776 bytes."
+        );
+        assert_eq!(backup_size_notes(824_633_720_831).len(), 1);
+    }
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
