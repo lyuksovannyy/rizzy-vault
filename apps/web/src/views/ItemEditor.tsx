@@ -48,8 +48,9 @@ import {
   fixedChanges,
   group,
   MATCH_MODE_OPTIONS,
-  MATCH_MODE_REGEX,
+  uriPatternChange,
 } from "../fields.ts";
+import { UriPatternField, isRegexMode } from "./UriPattern.tsx";
 import { GENERATOR_LIMITS } from "../generator-constants.ts";
 import { fillGenerated, generateValue } from "../generator-flow.ts";
 import { messageFor } from "../messages.ts";
@@ -81,6 +82,8 @@ interface PendingUri {
   /** `uri/<id>/match`'s wire value, as a decimal string; `"0"` (account default) is never
    * written (module docs; `fields.ts` `MATCH_MODE_OPTIONS`). */
   match: string;
+  /** `uri/<id>/pattern`, written only in Regex mode (ADR 0097 §3.1, §3.6). */
+  pattern: string;
 }
 
 /** A custom field the user is adding, not yet saved. */
@@ -133,6 +136,9 @@ export function ItemEditor(props: {
   // from `texts` because an existing URI may hold no `match` register at all (ADR 0018 §7:
   // absent means the account default, `"0"`), unlike `value`/`order` which every saved URI has.
   const [matchModes, setMatchModes] = useState<Record<string, string>>({});
+  // `uri/<id>/pattern` as typed, keyed by element id (ADR 0097 §3.6): shown and written only in
+  // Regex mode, emptied when the mode changes away from it.
+  const [patterns, setPatterns] = useState<Record<string, string>>({});
   const [clearSecret, setClearSecret] = useState<Record<string, boolean>>({});
   const [favorite, setFavorite] = useState(false);
   const [removed, setRemoved] = useState<Record<string, boolean>>({});
@@ -198,10 +204,13 @@ export function ItemEditor(props: {
       }
       setTexts(initial);
       const initialMatch: Record<string, string> = {};
+      const initialPatterns: Record<string, string> = {};
       for (const u of g.uris) {
         initialMatch[u.element] = u.attributes.get("match")?.value ?? "0";
+        initialPatterns[u.element] = u.attributes.get("pattern")?.value ?? "";
       }
       setMatchModes(initialMatch);
+      setPatterns(initialPatterns);
     } catch (e: unknown) {
       setError(codeOf(e));
     }
@@ -373,7 +382,7 @@ export function ItemEditor(props: {
   const addPendingUri = () =>
     void run(async () => {
       const id = await ctx.client.call("newElementId");
-      setPendingUris((rows) => [...rows, { id, uri: "", match: "0" }]);
+      setPendingUris((rows) => [...rows, { id, uri: "", match: "0", pattern: "" }]);
     });
 
   const addPendingCustom = () =>
@@ -438,6 +447,7 @@ export function ItemEditor(props: {
           attr.attribute === "order" ||
           attr.attribute === "kind" ||
           attr.attribute === "match" ||
+          attr.attribute === "pattern" ||
           attr.attribute === "autocomplete"
         ) {
           continue;
@@ -460,6 +470,8 @@ export function ItemEditor(props: {
     // `uri/<id>/match` of existing websites (module docs: a separate pass, since a URI may
     // hold no `match` register at all). A removed row is already covered by `removeElement`
     // above, which clears every register of the element (ADR 0018 §6), `match` included.
+    // Regex patterns to check before the save (ADR 0097 §3.6): only those the user touched.
+    const patternsToCheck: string[] = [];
     for (const u of current.uris) {
       if (removed[`${u.list}/${u.element}`] === true) {
         continue;
@@ -467,6 +479,19 @@ export function ItemEditor(props: {
       const matchKey = `uri/${u.element}/match`;
       const held = u.attributes.get("match")?.value ?? "0";
       const selected = matchModes[u.element] ?? held;
+      const patternChange = uriPatternChange(
+        u.element,
+        held,
+        selected,
+        u.attributes.get("pattern")?.value,
+        patterns[u.element] ?? "",
+      );
+      if (patternChange !== undefined) {
+        changes.push(patternChange);
+      }
+      if (isRegexMode(selected) && (patternChange !== undefined || selected !== held)) {
+        patternsToCheck.push(patterns[u.element] ?? "");
+      }
       if (selected === held) {
         continue;
       }
@@ -486,6 +511,12 @@ export function ItemEditor(props: {
         changes.push({ op: "addUri", element: row.id, uri: row.uri.trim() });
         if (row.match !== "0") {
           changes.push({ op: "set", key: `uri/${row.id}/match`, value: row.match });
+        }
+        if (isRegexMode(row.match)) {
+          patternsToCheck.push(row.pattern);
+          if (row.pattern !== "") {
+            changes.push({ op: "set", key: `uri/${row.id}/pattern`, value: row.pattern });
+          }
         }
       }
     }
@@ -550,6 +581,13 @@ export function ItemEditor(props: {
       }
     }
     void run(async () => {
+      // ADR 0097 §3.6: an invalid Regex pattern cannot be saved; the row names why.
+      for (const pattern of patternsToCheck) {
+        const status = await ctx.client.call("uriPatternCheck", pattern);
+        if (status.error !== undefined) {
+          throw new CallError("regex_invalid");
+        }
+      }
       let id = props.id;
       if (id === undefined) {
         if (props.newType === undefined) {
@@ -723,9 +761,13 @@ export function ItemEditor(props: {
                   aria-label={`Website ${index + 1} match mode`}
                   value={matchValue}
                   disabled={removed[k] === true}
-                  onChange={(e) =>
-                    setMatchModes({ ...matchModes, [u.element]: e.currentTarget.value })
-                  }
+                  onChange={(e) => {
+                    const next = e.currentTarget.value;
+                    setMatchModes({ ...matchModes, [u.element]: next });
+                    if (!isRegexMode(next)) {
+                      setPatterns({ ...patterns, [u.element]: "" });
+                    }
+                  }}
                 >
                   {MATCH_MODE_OPTIONS.map((o) => (
                     <option key={o.value} value={o.value}>
@@ -733,11 +775,14 @@ export function ItemEditor(props: {
                     </option>
                   ))}
                 </select>
-                {Number.parseInt(matchValue, 10) === MATCH_MODE_REGEX && (
-                  <p className="muted small">
-                    Regex matching is not evaluated by this build yet: this website will never
-                    be offered for autofill until that lands.
-                  </p>
+                {isRegexMode(matchValue) && (
+                  <UriPatternField
+                    client={ctx.client}
+                    label={`Website ${index + 1}`}
+                    value={patterns[u.element] ?? ""}
+                    disabled={removed[k] === true}
+                    onChange={(value) => setPatterns({ ...patterns, [u.element]: value })}
+                  />
                 )}
                 <div className="row-actions">
                   <button
@@ -788,7 +833,11 @@ export function ItemEditor(props: {
                 value={row.match}
                 onChange={(e) => {
                   const match = e.currentTarget.value;
-                  setPendingUris((rows) => rows.map((r) => (r.id === row.id ? { ...r, match } : r)));
+                  setPendingUris((rows) =>
+                    rows.map((r) =>
+                      r.id === row.id ? { ...r, match, pattern: isRegexMode(match) ? r.pattern : "" } : r,
+                    ),
+                  );
                 }}
               >
                 {MATCH_MODE_OPTIONS.map((o) => (
@@ -797,11 +846,15 @@ export function ItemEditor(props: {
                   </option>
                 ))}
               </select>
-              {Number.parseInt(row.match, 10) === MATCH_MODE_REGEX && (
-                <p className="muted small">
-                  Regex matching is not evaluated by this build yet: this website will never be
-                  offered for autofill until that lands.
-                </p>
+              {isRegexMode(row.match) && (
+                <UriPatternField
+                  client={ctx.client}
+                  label={`New website ${index + 1}`}
+                  value={row.pattern}
+                  onChange={(pattern) =>
+                    setPendingUris((rows) => rows.map((r) => (r.id === row.id ? { ...r, pattern } : r)))
+                  }
+                />
               )}
               <div className="row-actions">
                 <button

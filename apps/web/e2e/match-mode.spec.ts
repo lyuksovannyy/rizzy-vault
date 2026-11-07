@@ -6,6 +6,7 @@
 // to "Base domain" merely because an unrelated field was edited and saved.
 import { type Page, expect, test } from "@playwright/test";
 
+import { expectAccessible } from "./a11y.ts";
 import { lockVault, logIn, newItem, signUp } from "./helpers.ts";
 import { type RunningServer, startServer } from "./server.ts";
 
@@ -74,6 +75,57 @@ test("an untouched website's match mode stays Account default after an unrelated
   await expect(page.getByText("Match: Account default")).toBeVisible();
   await page.getByRole("button", { name: "Edit" }).click();
   await expect(page.getByLabel("Website 1 match mode")).toHaveValue("0");
+
+  await lockVault(page);
+});
+
+// ADR 0097 §3.6: Regex shows a Pattern input; an invalid pattern names its kind and cannot be
+// saved (`regex_invalid`); an unanchored one warns and still saves; leaving Regex clears it.
+test("a Regex website needs a valid pattern, warns when unanchored, and clears on a mode change", async ({ page }) => {
+  await signUp(page, server.origin, "RegexEditorUser");
+  await createLoginWithWebsite(page, "Regex Site", "https://example.com/login");
+  const mode = page.getByLabel("New website 1 match mode");
+  const pattern = page.getByLabel("New website 1 pattern");
+  await expect(pattern).toHaveCount(0);
+  await mode.selectOption("5");
+  await expect(pattern).toBeVisible();
+
+  // Keyboard: the Pattern input follows the mode select in the tab order.
+  await mode.focus();
+  await page.keyboard.press("Tab");
+  await expect(pattern).toBeFocused();
+  await page.keyboard.type("(");
+  const invalid = page.locator('p[data-code="regex_invalid"][data-kind="invalid"]');
+  await expect(invalid).toBeVisible();
+  await expect(pattern).toHaveAttribute("aria-invalid", "true");
+  await expectAccessible(page, "item editor, invalid Regex pattern");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.locator('p[role="alert"][data-code="regex_invalid"]')).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Regex Site" })).toHaveCount(0);
+
+  // Unanchored: the exact warning of ADR 0097 §3.6; saving is still allowed.
+  const warning = page.getByText("This pattern can match anywhere in the address, on any page of this site");
+  await pattern.fill("x=1");
+  await expect(warning).toBeVisible();
+  await expect(invalid).toHaveCount(0);
+  await expectAccessible(page, "item editor, unanchored Regex pattern");
+  await pattern.fill("^https://example\\.com/login$");
+  await expect(warning).toHaveCount(0);
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("heading", { name: "Regex Site" })).toBeVisible();
+  await expect(page.getByText("Synced", { exact: true })).toBeVisible();
+
+  // The pattern round-trips; leaving Regex hides and empties it, and the save clears it.
+  await page.getByRole("button", { name: "Edit" }).click();
+  const saved = page.getByLabel("Website 1 pattern");
+  await expect(saved).toHaveValue("^https://example\\.com/login$");
+  await page.getByLabel("Website 1 match mode").selectOption("4");
+  await expect(saved).toHaveCount(0);
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText("Match: Exact")).toBeVisible();
+  await page.getByRole("button", { name: "Edit" }).click();
+  await page.getByLabel("Website 1 match mode").selectOption("5");
+  await expect(page.getByLabel("Website 1 pattern")).toHaveValue("");
 
   await lockVault(page);
 });

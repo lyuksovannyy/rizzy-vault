@@ -11,7 +11,14 @@
 //
 // The server takes a settings change only within five minutes of logging in (CRYPTO.md §11
 // "Replacing credentials"); after that the change fails with "Log in again to do this."
-import type { EquivalenceGroupInfo, MatchModeValue, MatchSettings, SettingsChange } from "@rizzy-vault/core";
+import type {
+  EquivalenceGroupInfo,
+  InertGroupInfo,
+  MatchModeValue,
+  MatchSettings,
+  SettingsChange,
+} from "@rizzy-vault/core";
+import { t } from "@rizzy-vault/i18n";
 import { type FormEvent, useCallback, useEffect, useId, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
@@ -47,6 +54,42 @@ export function GroupDomains(props: { readonly domains: readonly string[]; reado
         </ul>
       </details>
     </div>
+  );
+}
+
+/** A reason line of an inert group (ADR 0097 §4.2). */
+export function inertReasonText(reason: InertGroupInfo["reasons"][number]): string {
+  return t(`matching.inertReason.${reason.kind}`, { domain: reason.domain ?? "" });
+}
+
+/** A stored group of the user's that is "Ignored for matching" (ADR 0097 §4.2): kept as it was
+ * written, never part of a match; Delete is the one edit (editing is Delete, then Add). */
+export function InertGroupRow(props: {
+  readonly group: InertGroupInfo;
+  readonly busy: boolean;
+  readonly onDelete: () => void;
+}) {
+  const { group } = props;
+  const { label } = groupSummary(group.domains);
+  return (
+    <li className="inert-group" data-inert="true">
+      <GroupDomains domains={group.domains} muted />{" "}
+      <span className="badge">{t("matching.ignoredForMatching")}</span>
+      <ul className="hint" aria-label={`Why the group ${label} is ignored`}>
+        {group.reasons.map((r) => (
+          <li key={`${r.kind}:${r.domain ?? ""}`}>{inertReasonText(r)}</li>
+        ))}
+      </ul>
+      <button
+        type="button"
+        className="secondary"
+        disabled={props.busy}
+        aria-label={`${t("matching.deleteGroup")} the group ${label}`}
+        onClick={props.onDelete}
+      >
+        {t("matching.deleteGroup")}
+      </button>
+    </li>
   );
 }
 
@@ -220,7 +263,7 @@ export function MatchingPane(props: { readonly ctx: VaultContext }) {
             Sites that share one login, like example.com and example.net. Autofill offers a login
             saved for one of them on the others, with a warning first.
           </p>
-          {settings.userGroups.length === 0 ? (
+          {settings.userGroups.length === 0 && settings.inertGroups.length === 0 ? (
             <p className="muted">No groups of your own.</p>
           ) : (
             <ul className="matching-list" aria-label="Your equivalence groups">
@@ -237,6 +280,14 @@ export function MatchingPane(props: { readonly ctx: VaultContext }) {
                     Remove
                   </button>
                 </li>
+              ))}
+              {settings.inertGroups.map((g) => (
+                <InertGroupRow
+                  key={g.id}
+                  group={g}
+                  busy={busy}
+                  onDelete={() => change({ kind: "removeUserGroup", id: g.id }, "The group is removed.")}
+                />
               ))}
             </ul>
           )}

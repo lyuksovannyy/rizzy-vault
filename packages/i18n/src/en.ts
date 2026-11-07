@@ -88,6 +88,7 @@ export const en = {
   "errors.wrong_state": "That step is not possible now.",
   "errors.already_shown": "The Emergency Kit can be shown only once.",
   "errors.core_crashed": "The vault core stopped. Reload the page and log in again.",
+  "errors.regex_invalid": "A website's Regex pattern is missing or not valid, so nothing was saved.",
   "errors.settings_unreadable":
     "The account's settings could not be read; another device may have written them incorrectly. Autofill uses only addresses with their own match rule until they are reset.",
   "errors.settings_update_required":
@@ -253,4 +254,18 @@ export const en = {
   "vaults.cancel": "Cancel",
   "vaults.dismiss": "Dismiss",
   "vaults.working": "Working…",
+  "matching.pattern": "Pattern",
+  "matching.patternUnanchored": "This pattern can match anywhere in the address, on any page of this site",
+  "matching.patternError.empty": "Enter a pattern: a Regex website needs one.",
+  "matching.patternError.too_long": "The pattern is longer than 1,024 characters.",
+  "matching.patternError.not_ascii": "The pattern may use printable ASCII characters only; write a host in its xn-- form.",
+  "matching.patternError.invalid":
+    "The pattern is not a regular expression rizzy-vault accepts (look-around, backreferences and Unicode classes are not supported).",
+  "matching.ignoredForMatching": "Ignored for matching",
+  "matching.inertReason.not_registrable": "{domain} is not a registrable domain for this version of rizzy-vault",
+  "matching.inertReason.not_canonical": "{domain} is not written in its normal form",
+  "matching.inertReason.ip_literal": "{domain} is an IP address",
+  "matching.inertReason.dotless": "{domain} has no dot",
+  "matching.inertReason.third_party_flag": "The group is marked as a third-party hosting group",
+  "matching.deleteGroup": "Delete",
 } as const satisfies Readonly<Record<string, string>>;

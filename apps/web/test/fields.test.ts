@@ -25,6 +25,7 @@ import {
   MATCH_MODE_OPTIONS,
   MATCH_MODE_REGEX,
   matchModeLabel,
+  uriPatternChange,
   matches,
   orderFixed,
   tagCounts,
@@ -340,8 +341,30 @@ describe("MATCH_MODE_OPTIONS / matchModeLabel", () => {
     expect(matchModeLabel("6")).toBe("Never");
   });
 
-  it("flags Regex as not evaluated by this build, never as a working mode", () => {
+  it("labels Regex as advanced", () => {
     expect(matchModeLabel(String(MATCH_MODE_REGEX))).toMatch(/advanced/i);
+  });
+});
+
+describe("uriPatternChange (ADR 0097 §3.1, §3.6)", () => {
+  const key = "uri/aa/pattern";
+  it("writes a typed pattern in Regex mode, and nothing when it is unchanged", () => {
+    expect(uriPatternChange("aa", "0", "5", undefined, "^https://a\\.example/")).toEqual({
+      op: "set",
+      key,
+      value: "^https://a\\.example/",
+    });
+    expect(uriPatternChange("aa", "5", "5", "x", "x")).toBeUndefined();
+    expect(uriPatternChange("aa", "5", "5", "x", "")).toEqual({ op: "clear", key });
+  });
+  it("clears a stored pattern in the same op when the mode leaves Regex", () => {
+    expect(uriPatternChange("aa", "5", "1", "x", "")).toEqual({ op: "clear", key });
+    expect(uriPatternChange("aa", "5", "0", "x", "")).toEqual({ op: "clear", key });
+  });
+  it("never rewrites a pattern the user did not touch, even an invalid one", () => {
+    expect(uriPatternChange("aa", "5", "5", "(", "(")).toBeUndefined();
+    expect(uriPatternChange("aa", "1", "1", "x", "")).toBeUndefined();
+    expect(uriPatternChange("aa", "1", "2", undefined, "")).toBeUndefined();
   });
 
   it("never throws on an unassigned or malformed value — shows as unknown instead (ADR 0018 §6: invalid values never reject anything)", () => {

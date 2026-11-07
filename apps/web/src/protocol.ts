@@ -37,6 +37,7 @@ import type {
   LockSettingsChoice,
   MatchDecisionResult,
   MatchSettings,
+  UriPatternError,
   Notice,
   PassphraseOptions,
   PasswordOptions,
@@ -249,6 +250,9 @@ export interface CoreApi {
   matchCandidates(pageUrl: string): MatchDecisionResult;
   /** One change to the matching settings (checked with {@link isSettingsChange}). */
   changeMatchSettings(change: SettingsChange): void;
+  /** A *Regex* URI's pattern, checked for the editor (ADR 0097 §3.6): why it cannot be saved,
+   * if it cannot, and whether it anchors itself. */
+  uriPatternCheck(pattern: string): { error: UriPatternError | undefined; anchored: boolean };
   generatePasswordWithOptions(options: Partial<PasswordOptions>): Generated;
   generatePassphraseWithOptions(options: Partial<PassphraseOptions>): Generated;
   passwordEntropy(options: Partial<PasswordOptions>): number;
@@ -375,6 +379,7 @@ export const METHODS: readonly Method[] = [
   "matchSettings",
   "matchCandidates",
   "changeMatchSettings",
+  "uriPatternCheck",
   "generatePasswordWithOptions",
   "generatePassphraseWithOptions",
   "passwordEntropy",

@@ -41,6 +41,8 @@ import {
   encodeLockSettings,
   generatorLimits,
   identityCountries,
+  uriPatternError,
+  uriPatternIsAnchored,
   init,
   login,
   newElementId,
@@ -463,6 +465,7 @@ async function run(m: CallMessage): Promise<unknown> {
         lockOnSleep: bool(choice.lockOnSleep),
       });
     },
+    uriPatternCheck: () => ({ error: uriPatternError(str(a[0])), anchored: uriPatternIsAnchored(str(a[0])) }),
     newElementId: () => newElementId(),
     plaintextExportWarning: () => plaintextExportWarning(),
     plaintextExportPhrase: () => plaintextExportPhrase(),

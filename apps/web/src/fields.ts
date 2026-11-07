@@ -174,9 +174,9 @@ export function isMultiline(key: string): boolean {
 /** `uri/<id>/match`'s wire values (ADR 0037 §4, Accepted M2), for the editor's select and the
  * item detail view. `0x0000` ("absent") falls back to the account-level match default
  * (ADR 0037 §6), which Settings → Website matching sets (`MatchingPane.tsx`; ADR 0042), so it is
- * shown as "Account default" here without naming which mode that resolves to. `0x0005` (Regex) is a value `rizzy-match` accepts and stores, but its own matching
- * decision reports `NotSupported` for it today (`crates/rizzy-match/src/modes.rs`): the editor
- * must not claim it works. */
+ * shown as "Account default" here without naming which mode that resolves to. `0x0005` (Regex)
+ * runs the URI's own `uri/<id>/pattern` behind the same gates as every mode (ADR 0097 §3); the
+ * editor shows a Pattern input for it (`views/UriPattern.tsx`). */
 export const MATCH_MODE_OPTIONS: readonly { readonly value: number; readonly label: string }[] = [
   { value: 0x0000, label: "Account default" },
   { value: 0x0001, label: "Base domain" },
@@ -187,9 +187,36 @@ export const MATCH_MODE_OPTIONS: readonly { readonly value: number; readonly lab
   { value: 0x0006, label: "Never" },
 ];
 
-/** The wire value of `uri/<id>/match` this build does not yet evaluate for matching
- * (`crates/rizzy-match/src/modes.rs`'s `MatchOutcome::NotSupported`). */
+/** The wire value of `uri/<id>/match` for *Regex* (ADR 0097 §3): the URI also needs a valid
+ * `uri/<id>/pattern`. */
 export const MATCH_MODE_REGEX = 0x0005;
+
+/**
+ * The `uri/<id>/pattern` write of one saved website (ADR 0097 §3.1, §3.6), or none. In Regex
+ * mode: the typed pattern when it differs from the stored one (a clear when emptied, which the
+ * save check then refuses). Leaving Regex mode: a clear of a stored pattern in the same op, so a
+ * hidden pattern never keeps the website alive. A pattern the user did not touch is never
+ * rewritten, even one this build finds invalid.
+ */
+export function uriPatternChange(
+  element: string,
+  heldMode: string,
+  selectedMode: string,
+  heldPattern: string | undefined,
+  typed: string,
+): ItemChange | undefined {
+  const key = `uri/${element}/pattern`;
+  if (Number.parseInt(selectedMode, 10) === MATCH_MODE_REGEX) {
+    if (typed === (heldPattern ?? "")) {
+      return undefined;
+    }
+    return typed === "" ? { op: "clear", key } : { op: "set", key, value: typed };
+  }
+  if (heldPattern !== undefined && selectedMode !== heldMode) {
+    return { op: "clear", key };
+  }
+  return undefined;
+}
 
 /** The label for a `uri/<id>/match` displayed value (`undefined` or out of range shows as
  * "Account default" and "Unknown" respectively, never a thrown error: ADR 0018 §6, "invalid

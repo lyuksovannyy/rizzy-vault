@@ -251,7 +251,8 @@ detail side by side, unchanged. Covered by `e2e/phone.spec.ts` at 375×812.
 (the mode every website whose own match is "Account default" uses), the account's own
 equivalence groups (add: two or more domains, each a site's own registrable domain — a public
 suffix such as `co.uk` or a subdomain such as `www.example.com` is refused with
-`equivalence_domain_rejected`; remove), the signed global list's groups with a Turn off / Turn on
+`equivalence_domain_rejected`; remove; a stored group that fails a PSL- or IDNA-dependent rule is
+shown as "Ignored for matching" with its reason and can only be deleted, ADR 0097 §4.2), the signed global list's groups with a Turn off / Turn on
 switch each (none today: no signed list ships yet, and the pane says so), and "Check a website",
 which asks the core what autofill would offer on an address under these settings. All of it is
 the account's encrypted `ACCOUNT_SETTINGS`, committed with a new signed account state; the core
