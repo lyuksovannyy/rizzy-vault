@@ -574,7 +574,8 @@ fn every_refusal_leaves_the_vault_unchanged() {
                     records: List::empty(),
                     self_grant: None,
                 },
-                NOW)
+                NOW,
+            )
             .await
             .unwrap();
         let caught_up = Half {
@@ -703,7 +704,8 @@ fn healing_below_the_current_epoch_fills_nothing() {
                     records: List::empty(),
                     self_grant: None,
                 },
-                NOW)
+                NOW,
+            )
             .await
             .unwrap();
         let (_, pages) = observe(&env).await;
@@ -751,7 +753,8 @@ fn a_healed_old_epoch_record_brings_back_no_old_wrap() {
                     records: List::new(vec![Record::Op(healed)]).unwrap(),
                     self_grant: None,
                 },
-                NOW)
+                NOW,
+            )
             .await
             .unwrap();
         let (_, pages) = observe(&env).await;

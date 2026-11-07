@@ -89,12 +89,19 @@ fn vault_writes_are_frozen_for_every_writer_but_the_revoker() {
                 Err(VaultError::RevocationPending)
             ));
             assert!(matches!(
-                d.heal(ACCOUNT, writer, writer, &heal(chain(&other, item(1), 1, 1)), NOW)
-                    .await,
+                d.heal(
+                    ACCOUNT,
+                    writer,
+                    writer,
+                    &heal(chain(&other, item(1), 1, 1)),
+                    NOW
+                )
+                .await,
                 Err(HealingError::Failed(VaultError::RevocationPending))
             ));
             assert!(matches!(
-                d.create_attachment(ACCOUNT, writer, &attachment(2), NOW).await,
+                d.create_attachment(ACCOUNT, writer, &attachment(2), NOW)
+                    .await,
                 Err(VaultError::RevocationPending)
             ));
             assert!(matches!(
@@ -112,7 +119,8 @@ fn vault_writes_are_frozen_for_every_writer_but_the_revoker() {
         assert_eq!(ops(&env).await, 0);
         assert_eq!(env.counted().await, counted);
         assert!(matches!(
-            d.attachment_key_wrap(ACCOUNT, attachment(2).attachment_id).await,
+            d.attachment_key_wrap(ACCOUNT, attachment(2).attachment_id)
+                .await,
             Err(VaultError::NotFound)
         ));
 
@@ -143,7 +151,12 @@ fn vault_writes_are_frozen_for_every_writer_but_the_revoker() {
         // At `expires_at_ms - 1` the window is open (above); at `expires_at_ms` it is not.
         let at = NOW + 1;
         let answer = d
-            .upload(ACCOUNT, Some(other.id), &upload(chain(&other, item(2), 1, 1)), at)
+            .upload(
+                ACCOUNT,
+                Some(other.id),
+                &upload(chain(&other, item(2), 1, 1)),
+                at,
+            )
             .await
             .unwrap();
         assert_eq!(answer.results.into_vec(), vec![UploadResult::Stored]);

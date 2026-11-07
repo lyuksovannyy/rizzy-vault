@@ -124,8 +124,7 @@ pub fn next_revocation_retry(
     let at = now_ms.saturating_add(REVOCATION_RETRY_MS);
     match window {
         Some((_, expires_at_ms))
-            if retries_done > 0
-                && at > expires_at_ms.saturating_add(REVOCATION_RETRY_GRACE_MS) =>
+            if retries_done > 0 && at > expires_at_ms.saturating_add(REVOCATION_RETRY_GRACE_MS) =>
         {
             None
         }

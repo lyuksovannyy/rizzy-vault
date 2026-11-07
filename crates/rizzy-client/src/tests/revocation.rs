@@ -13,8 +13,8 @@
 //! [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
 
 use rizzy_core::envelope::purpose::AccountKeyDeviceGrantCtx;
-use rizzy_core::keys::{GrantSender, GrantSigner, open_account_key_device_grant};
 use rizzy_core::keys::seal_account_key_device_grant;
+use rizzy_core::keys::{GrantSender, GrantSigner, open_account_key_device_grant};
 use rizzy_proto::account::{DeviceGrantsResponse, RevocationWindowNotice};
 use rizzy_proto::objects::DeviceGrant;
 
@@ -73,12 +73,8 @@ fn a_grant_from_a_revoked_device_is_refused_and_the_revoked_device_drops_its_pen
 
     // D, the device about to be revoked, holds a pending commit of its own: a rotation it built
     // and persisted (secrets before commit, step 3) but has not sent.
-    let mut d_vault = VaultSync::new(
-        d.account.take_vault_key(vault_id).unwrap(),
-        &d.unlocked,
-        1,
-    )
-    .unwrap();
+    let mut d_vault =
+        VaultSync::new(d.account.take_vault_key(vault_id).unwrap(), &d.unlocked, 1).unwrap();
     fetch(&server, &mut d_vault);
     let d_options = RotationOptions {
         level: RotationLevel::Standard,
@@ -96,15 +92,11 @@ fn a_grant_from_a_revoked_device_is_refused_and_the_revoked_device_drops_its_pen
         &d_options,
     )
     .unwrap();
-    let d_record = d
-        .device
-        .record(Stage::Committed)
-        .unwrap()
-        .with_pending(
-            d_pending
-                .pending_record(&mut rng, &d.device, &d.unlocked)
-                .unwrap(),
-        );
+    let d_record = d.device.record(Stage::Committed).unwrap().with_pending(
+        d_pending
+            .pending_record(&mut rng, &d.device, &d.unlocked)
+            .unwrap(),
+    );
     assert!(d_record.has_pending());
 
     // A revokes D: the set names it once, with its H (the server holds no op from D).
@@ -145,7 +137,9 @@ fn a_grant_from_a_revoked_device_is_refused_and_the_revoked_device_drops_its_pen
     // The grants go to the remaining devices only: B, not D.
     assert_eq!(request.device_grants.len(), 1);
     assert_eq!(
-        request.device_grants.as_slice()[0].recipient_device_id.to_bytes(),
+        request.device_grants.as_slice()[0]
+            .recipient_device_id
+            .to_bytes(),
         b.device.device_id().to_bytes()
     );
     server.commit_rotation(&request).unwrap();
@@ -281,7 +275,10 @@ fn the_revocation_pending_retry_is_bounded() {
         next_revocation_retry(40, now, None),
         Some(now + REVOCATION_RETRY_MS)
     );
-    assert_eq!(next_revocation_retry(MAX_REVOCATION_RETRIES, now, None), None);
+    assert_eq!(
+        next_revocation_retry(MAX_REVOCATION_RETRIES, now, None),
+        None
+    );
     // 41 tries span the 10-minute window and its grace.
     assert!(u64::from(MAX_REVOCATION_RETRIES) * REVOCATION_RETRY_MS >= 605_000);
     // The renewing suspend must return the same H.
@@ -298,7 +295,10 @@ fn the_revocation_notice_is_read_as_served() {
     let mut server = Server::new(94);
     let _signed_up = signup_with_code(&mut server, &mut rng);
     let mut view = server.view();
-    assert_eq!(RevocationNotice::of_view(&view), RevocationNotice::default());
+    assert_eq!(
+        RevocationNotice::of_view(&view),
+        RevocationNotice::default()
+    );
     assert!(!RevocationNotice::of_view(&view).removal_in_progress());
     view.suspended_devices = List::new(vec![Id::from_bytes([1; 16])]).unwrap();
     view.revocation_window = Some(RevocationWindowNotice {

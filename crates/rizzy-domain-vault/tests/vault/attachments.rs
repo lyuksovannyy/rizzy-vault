@@ -79,7 +79,9 @@ fn an_attachment_is_declared_uploaded_downloaded_and_deleted() {
         d.create_attachment(ACCOUNT, None, &a, NOW).await.unwrap();
         assert_eq!(env.counted().await, counted(size));
         // A byte-identical repeat is a no-op; any other declaration under the id conflicts.
-        d.create_attachment(ACCOUNT, None, &a, NOW + 1).await.unwrap();
+        d.create_attachment(ACCOUNT, None, &a, NOW + 1)
+            .await
+            .unwrap();
         assert_eq!(env.counted().await, counted(size));
         for changed in [
             NewAttachment {
@@ -115,12 +117,14 @@ fn an_attachment_is_declared_uploaded_downloaded_and_deleted() {
         assert_eq!(last.len(), 100);
         for (index, bad) in [(0, &last), (1, &full), (1, &last[..99].to_vec())] {
             assert!(matches!(
-                d.upload_attachment_chunk(ACCOUNT, None, id, index, bad, NOW).await,
+                d.upload_attachment_chunk(ACCOUNT, None, id, index, bad, NOW)
+                    .await,
                 Err(VaultError::Invalid)
             ));
         }
         assert!(matches!(
-            d.upload_attachment_chunk(ACCOUNT, None, id, 2, &last, NOW).await,
+            d.upload_attachment_chunk(ACCOUNT, None, id, 2, &last, NOW)
+                .await,
             Err(VaultError::NotFound)
         ));
         // Downloads before the upload: not found.
@@ -190,7 +194,9 @@ fn the_cap_and_the_quota_are_checked_at_create() {
         let mut short = new(1, 10);
         short.attachment_key_wrap.pop();
         assert!(matches!(
-            env.domain.create_attachment(ACCOUNT, None, &short, NOW).await,
+            env.domain
+                .create_attachment(ACCOUNT, None, &short, NOW)
+                .await,
             Err(VaultError::Invalid)
         ));
         // Exactly at the quota passes; one byte over is refused and charges nothing. The
@@ -228,7 +234,8 @@ fn the_cap_and_the_quota_are_checked_at_create() {
                 attachment(4),
                 49,
                 &envelope(MAX_ATTACHMENT_LEN, 49, 1),
-                NOW)
+                NOW,
+            )
             .await
             .unwrap();
         // Deleting releases exactly what create charged.
@@ -247,9 +254,16 @@ fn another_accounts_attachment_is_not_found() {
         let d = &env.domain;
         let a = new(1, 1000);
         d.create_attachment(ACCOUNT, None, &a, NOW).await.unwrap();
-        d.upload_attachment_chunk(ACCOUNT, None, a.attachment_id, 0, &envelope(1000, 0, 1), NOW)
-            .await
-            .unwrap();
+        d.upload_attachment_chunk(
+            ACCOUNT,
+            None,
+            a.attachment_id,
+            0,
+            &envelope(1000, 0, 1),
+            NOW,
+        )
+        .await
+        .unwrap();
         let id = a.attachment_id;
         // Every call of the other account on this id answers not_found.
         assert!(matches!(
@@ -277,7 +291,8 @@ fn another_accounts_attachment_is_not_found() {
             Err(VaultError::NotFound)
         ));
         assert!(matches!(
-            d.create_attachment(OTHER_ACCOUNT, None, &new(2, 10), NOW).await,
+            d.create_attachment(OTHER_ACCOUNT, None, &new(2, 10), NOW)
+                .await,
             Err(VaultError::NotFound)
         ));
         // Nothing moved.
@@ -308,7 +323,9 @@ fn the_sweep_deletes_only_old_unfinished_uploads() {
         d.create_attachment(ACCOUNT, None, &new(3, 2000), NOW - 10)
             .await
             .unwrap();
-        d.create_attachment(ACCOUNT, None, &new(4, 0), old).await.unwrap();
+        d.create_attachment(ACCOUNT, None, &new(4, 0), old)
+            .await
+            .unwrap();
         assert_eq!(env.counted().await, 3 * counted(2000) + counted(0));
         assert_eq!(d.sweep_attachments(NOW).await.unwrap(), 1);
         assert!(matches!(

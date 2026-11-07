@@ -119,9 +119,10 @@ pub(crate) async fn build<V: VaultPort>(
         .map(|c| Id::from_bytes(*c.cert.device_id.as_bytes()))
         .collect();
     suspended.sort_unstable_by_key(|id| id.to_bytes());
-    let revocation_window = crate::revocation::window(reborrow(&mut conn), trust.account_id, now_ms)
-        .await?
-        .map(|w| w.notice());
+    let revocation_window =
+        crate::revocation::window(reborrow(&mut conn), trust.account_id, now_ms)
+            .await?
+            .map(|w| w.notice());
     Ok(AccountView {
         account_state: Bytes::new(trust.state_wire.clone()).map_err(over_limit)?,
         bundles: List::new(bundles).map_err(over_limit)?,
