@@ -18,8 +18,8 @@ use crate::account::{
     PublishGrantsRequest, RevocationWindowNotice, UploadWebDeviceCertificateRequest, VaultSummary,
 };
 use crate::attachments::{
-    AttachmentRequest, CreateAttachmentRequest, DownloadChunkRequest, DownloadChunkResponse,
-    GetAttachmentResponse, UploadChunkRequest,
+    AttachmentItemRequest, AttachmentItemResponse, AttachmentRequest, CreateAttachmentRequest,
+    DownloadChunkRequest, DownloadChunkResponse, GetAttachmentResponse, UploadChunkRequest,
 };
 use crate::auth::{
     DeviceAuthFinishRequest, DeviceAuthFinishResponse, DeviceAuthStartRequest,
@@ -1480,6 +1480,11 @@ fn attachment_messages_round_trip_and_are_bounded() {
     round_trip(&AttachmentRequest {
         attachment_id: id(1),
     });
+    round_trip(&AttachmentItemRequest {
+        vault_id: id(2),
+        item_id: id(3),
+    });
+    round_trip(&AttachmentItemResponse { remaining: true });
     round_trip(&GetAttachmentResponse {
         attachment_key_wrap: Fixed::from_bytes([7; ATTACHMENT_KEY_WRAP_LEN]),
     });
@@ -1515,6 +1520,13 @@ fn attachment_messages_round_trip_and_are_bounded() {
     assert!(serde_json::from_str::<DownloadChunkRequest>(&extra).is_err());
     let response = r#"{"envelope":"AQID","chunk_count":3}"#;
     assert!(serde_json::from_str::<DownloadChunkResponse>(response).is_ok());
+    let extra =
+        format!(r#"{{"vault_id":"{ZERO_ID}","item_id":"{ZERO_ID}","attachment_id":"{ZERO_ID}"}}"#);
+    assert!(serde_json::from_str::<AttachmentItemRequest>(&extra).is_err());
+    let missing = format!(r#"{{"vault_id":"{ZERO_ID}"}}"#);
+    assert!(serde_json::from_str::<AttachmentItemRequest>(&missing).is_err());
+    let response = r#"{"remaining":false,"deleted":16}"#;
+    assert!(serde_json::from_str::<AttachmentItemResponse>(response).is_ok());
 }
 
 /// ADR 0092 §8 test 2 (the vault half): the worst-case inline vault half at the account cap,

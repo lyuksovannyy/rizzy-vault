@@ -28,6 +28,7 @@ use rizzy_proto::account::{
     EnrolDeviceRequest, PublishAccountStateRequest, PublishBundlesRequest, PublishGrantsRequest,
     UploadWebDeviceCertificateRequest,
 };
+use rizzy_proto::attachments::{AttachmentItemRequest, AttachmentItemResponse};
 use rizzy_proto::auth::{
     DeviceAuthFinishRequest, DeviceAuthFinishResponse, DeviceAuthStartRequest,
     DeviceAuthStartResponse, LoginFinishRequest, LoginFinishResponse, LoginStartRequest,
@@ -72,7 +73,7 @@ fuzz_target!(|data: &[u8]| {
     let Some((&selector, json)) = data.split_first() else {
         return;
     };
-    match selector % 48 {
+    match selector % 50 {
         // Requests.
         0 => check::<RegisterStartRequest>(json),
         1 => check::<RegisterFinishRequest>(json),
@@ -129,6 +130,9 @@ fuzz_target!(|data: &[u8]| {
         45 => check::<StageResponse>(json),
         46 => check::<RecoveryWrapsRequest>(json),
         47 => check::<RecoveryWrapsResponse>(json),
+        // The per-item attachment cleanup (ADR 0093 §1.1): its body and its answer.
+        48 => check::<AttachmentItemRequest>(json),
+        49 => check::<AttachmentItemResponse>(json),
         _ => check::<RecoveryVault>(json),
     }
 });

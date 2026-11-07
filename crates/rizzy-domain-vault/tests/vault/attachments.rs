@@ -346,3 +346,166 @@ fn the_sweep_deletes_only_old_unfinished_uploads() {
         ));
     });
 }
+
+/// `attachments/delete-item` (ADR 0093 §1.1, §5): every attachment of one item, complete or
+/// not, with its chunks and its counted bytes, in batches of 16; another item's are untouched.
+#[test]
+fn delete_item_removes_one_items_attachments_in_batches() {
+    block_on(async {
+        let env = Env::new(1).await;
+        let d = &env.domain;
+        // Item 1: 17 attachments, the first complete, the rest declared only.
+        for n in 0..17u8 {
+            let mut a = new(n, 1000);
+            a.attachment_id =
+                AttachmentId::from_bytes([0xe0, n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            d.create_attachment(ACCOUNT, None, &a, NOW).await.unwrap();
+            if n == 0 {
+                d.upload_attachment_chunk(
+                    ACCOUNT,
+                    None,
+                    a.attachment_id,
+                    0,
+                    &envelope(1000, 0, 1),
+                    NOW,
+                )
+                .await
+                .unwrap();
+            }
+        }
+        // Item 2 in the same vault: one attachment that must stay.
+        let mut keep = new(1, 2000);
+        keep.item_id = item(2);
+        d.create_attachment(ACCOUNT, None, &keep, NOW)
+            .await
+            .unwrap();
+        assert_eq!(env.counted().await, 17 * counted(1000) + counted(2000));
+
+        // The first call deletes 16 and says one is left; the counter drops in the same
+        // transaction (`counted` checks the counter against the rows).
+        assert!(
+            d.delete_item_attachments(ACCOUNT, None, VAULT, item(1), NOW)
+                .await
+                .unwrap()
+        );
+        assert_eq!(env.counted().await, counted(1000) + counted(2000));
+        assert!(
+            !d.delete_item_attachments(ACCOUNT, None, VAULT, item(1), NOW)
+                .await
+                .unwrap()
+        );
+        assert_eq!(env.counted().await, counted(2000));
+        for n in 0..17u8 {
+            let id = AttachmentId::from_bytes([0xe0, n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            assert!(matches!(
+                d.attachment_key_wrap(ACCOUNT, id).await,
+                Err(VaultError::NotFound)
+            ));
+        }
+        let mut r = env.db.begin_read().await.unwrap();
+        let chunks: i64 = rizzy_storage::on_engine!(r.conn(), |c| sqlx::query_scalar(
+            "SELECT CAST(COUNT(*) AS BIGINT) FROM vault_attachment_chunks"
+        )
+        .fetch_one(&mut *c)
+        .await
+        .unwrap());
+        r.finish().await.unwrap();
+        assert_eq!(chunks, 0, "the complete attachment's chunk went with it");
+        d.attachment_key_wrap(ACCOUNT, keep.attachment_id)
+            .await
+            .unwrap();
+
+        // Idempotent: an item with no rows left, or one that never had any, is a success.
+        assert!(
+            !d.delete_item_attachments(ACCOUNT, None, VAULT, item(1), NOW)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !d.delete_item_attachments(ACCOUNT, None, VAULT, item(9), NOW)
+                .await
+                .unwrap()
+        );
+        assert_eq!(env.counted().await, counted(2000));
+    });
+}
+
+/// `attachments/delete-item` on another account's vault, an unknown vault and a deleted vault
+/// is `not_found`, and deletes nothing (ADR 0093 §1.1 "Access").
+#[test]
+fn delete_item_of_a_foreign_or_missing_vault_is_not_found() {
+    block_on(async {
+        let env = Env::new(1).await;
+        other_vault(&env).await;
+        let d = &env.domain;
+        let a = new(1, 1000);
+        d.create_attachment(ACCOUNT, None, &a, NOW).await.unwrap();
+        assert!(matches!(
+            d.delete_item_attachments(OTHER_ACCOUNT, None, VAULT, item(1), NOW)
+                .await,
+            Err(VaultError::NotFound)
+        ));
+        assert!(matches!(
+            d.delete_item_attachments(ACCOUNT, None, OTHER_VAULT, item(1), NOW)
+                .await,
+            Err(VaultError::NotFound)
+        ));
+        let unknown = VaultId::from_bytes([0xb9; 16]);
+        assert!(matches!(
+            d.delete_item_attachments(ACCOUNT, None, unknown, item(1), NOW)
+                .await,
+            Err(VaultError::NotFound)
+        ));
+        d.attachment_key_wrap(ACCOUNT, a.attachment_id)
+            .await
+            .unwrap();
+        assert_eq!(env.counted().await, counted(1000));
+
+        // A deleted vault: its row is gone, so the call is not_found as for an unknown one.
+        let mut tx = env.db.begin_write().await.unwrap();
+        lock_account(&mut tx, OTHER_ACCOUNT.as_bytes())
+            .await
+            .unwrap();
+        rizzy_storage::on_engine!(tx.conn(), |c| sqlx::query(
+            "DELETE FROM vault_vaults WHERE id = $1"
+        )
+        .bind(&OTHER_VAULT.as_bytes()[..])
+        .execute(&mut *c)
+        .await
+        .map(|_| ())
+        .unwrap());
+        tx.commit().await.unwrap();
+        assert!(matches!(
+            d.delete_item_attachments(OTHER_ACCOUNT, None, OTHER_VAULT, item(1), NOW)
+                .await,
+            Err(VaultError::NotFound)
+        ));
+    });
+}
+
+/// The migration's index exists on the engine under test (ADR 0093 §1.1 "Storage").
+#[test]
+fn the_per_item_attachment_index_exists() {
+    block_on(async {
+        let env = Env::new(1).await;
+        let mut r = env.db.begin_read().await.unwrap();
+        let found: i64 = match r.conn() {
+            rizzy_storage::Conn::Sqlite(c) => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'vault_attachments_by_item' AND tbl_name = 'vault_attachments'",
+            )
+            .fetch_one(&mut *c)
+            .await
+            .unwrap(),
+            rizzy_storage::Conn::Postgres(c) => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_indexes WHERE indexname = 'vault_attachments_by_item' \
+                 AND tablename = 'vault_attachments'",
+            )
+            .fetch_one(&mut *c)
+            .await
+            .unwrap(),
+        };
+        r.finish().await.unwrap();
+        assert_eq!(found, 1);
+    });
+}

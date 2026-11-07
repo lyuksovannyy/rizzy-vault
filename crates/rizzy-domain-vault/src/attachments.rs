@@ -31,6 +31,9 @@
 //!   the count.
 //! - [`VaultDomain::delete_attachment`]: both tables' rows and the counted bytes, in one
 //!   transaction.
+//! - [`VaultDomain::delete_item_attachments`] (ADR 0093 §1.1): the same for at most
+//!   [`DELETE_ITEM_BATCH`] attachments of one purged item per transaction; the vault must be the
+//!   account's.
 //!
 //! **Counted bytes** (ADR 0048 §2, ADR 0054 §6). An attachment counts its wrap's length plus
 //! every chunk envelope its declared size implies, `total_plaintext_len + 90 × chunk_count`,
@@ -48,8 +51,8 @@
 use rizzy_core::attachment::{ATTACHMENT_KEY_WRAP_LEN, AttachmentLayout};
 use rizzy_core::ids::{AccountId, AttachmentId, DeviceId, ItemId, VaultId};
 use rizzy_proto::attachments::{
-    AttachmentRequest, CreateAttachmentRequest, DownloadChunkRequest, DownloadChunkResponse,
-    GetAttachmentResponse, UploadChunkRequest,
+    AttachmentItemRequest, AttachmentItemResponse, AttachmentRequest, CreateAttachmentRequest,
+    DownloadChunkRequest, DownloadChunkResponse, GetAttachmentResponse, UploadChunkRequest,
 };
 use rizzy_proto::limits::ATTACHMENT_KEY_WRAP_LEN as WIRE_WRAP_LEN;
 use rizzy_proto::wire::{Bytes, Fixed, Id};
@@ -78,6 +81,12 @@ const ATTACHMENT_CHUNK_INSERT: &str = include_str!("../queries/attachment_chunk_
 const ATTACHMENT_SWEEP_LIST: &str = include_str!("../queries/attachment_sweep_list.sql");
 /// One account's attachment rows for the storage counter.
 const USAGE_ATTACHMENTS: &str = include_str!("../queries/usage_attachments.sql");
+/// Up to a limit of one item's attachment ids.
+const ATTACHMENT_ITEM_LIST: &str = include_str!("../queries/attachment_item_list.sql");
+
+/// The most attachments one `attachments/delete-item` transaction deletes (ADR 0093 §1.1): 16
+/// of at most 50 chunks each bound it at 816 deleted rows.
+pub const DELETE_ITEM_BATCH: usize = 16;
 
 /// How old an unfinished upload must be before the sweep deletes it: 24 h (ADR 0054 §7).
 pub const SWEEP_AGE_MS: u64 = 24 * 60 * 60 * 1000;
@@ -372,9 +381,32 @@ impl<D: DeviceDirectory> VaultDomain<D> {
         )
         .await
     }
+
+    /// `attachments/delete-item`: [`VaultDomain::delete_item_attachments`].
+    ///
+    /// # Errors
+    /// As [`VaultDomain::delete_item_attachments`].
+    pub async fn attachments_delete_item(
+        &self,
+        account_id: AccountId,
+        writer: Option<DeviceId>,
+        request: &AttachmentItemRequest,
+        now_ms: u64,
+    ) -> Result<AttachmentItemResponse, VaultError> {
+        let remaining = self
+            .delete_item_attachments(
+                account_id,
+                writer,
+                VaultId::from_bytes(request.vault_id.to_bytes()),
+                ItemId::from_bytes(request.item_id.to_bytes()),
+                now_ms,
+            )
+            .await?;
+        Ok(AttachmentItemResponse { remaining })
+    }
 }
 
-/// The three attachment writes refuse a `writer` that is not the revoker while another device's
+/// The four attachment writes refuse a `writer` that is not the revoker while another device's
 /// revocation window is open ([`VaultError::RevocationPending`], ADR 0091 §2), checked first
 /// under the account lock; reads are never frozen.
 impl<D: DeviceDirectory> VaultDomain<D> {
@@ -545,6 +577,58 @@ impl<D: DeviceDirectory> VaultDomain<D> {
         charge(&mut tx, account_id, credit(stored.counted()), now_sql).await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// `attachments/delete-item` ([ADR 0093] §1.1): deletes at most [`DELETE_ITEM_BATCH`] of the
+    /// attachments of item `item_id` in vault `vault_id`, complete or not, with their chunks,
+    /// and releases their counted bytes, in one account-locked transaction. Returns whether an
+    /// attachment of the item is left (the client calls again). An item with no attachment is a
+    /// success that returns `false`, so a repeat is harmless.
+    ///
+    /// # Errors
+    /// [`VaultError::NotFound`] for a vault that does not exist or is not the account's (one
+    /// deleted under ADR 0081 §A5 included), as `attachments/create` checks it;
+    /// [`VaultError::RevocationPending`] (a write ADR 0093 places in no column of ADR 0091 §2's
+    /// table, so the left one); storage errors.
+    ///
+    /// [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
+    pub async fn delete_item_attachments(
+        &self,
+        account_id: AccountId,
+        writer: Option<DeviceId>,
+        vault_id: VaultId,
+        item_id: ItemId,
+        now_ms: u64,
+    ) -> Result<bool, VaultError> {
+        let now_sql = to_sql_time(now_ms)?;
+        let mut tx = self.database().begin_write().await?;
+        lock_account(&mut tx, account_id.as_bytes()).await?;
+        revocation_gate(self.directory(), tx.conn(), account_id, writer, now_ms).await?;
+        repo::vault(tx.conn(), vault_id)
+            .await?
+            .filter(|v| v.account_id == account_id)
+            .ok_or(VaultError::NotFound)?;
+        // One row past the batch tells whether any is left after it.
+        let limit = i64::try_from(DELETE_ITEM_BATCH + 1).unwrap_or(i64::MAX);
+        let ids: Vec<Vec<u8>> =
+            on_engine!(tx.conn(), |c| sqlx::query_scalar(ATTACHMENT_ITEM_LIST)
+                .bind(&vault_id.as_bytes()[..])
+                .bind(&item_id.as_bytes()[..])
+                .bind(limit)
+                .fetch_all(&mut *c)
+                .await)?;
+        let remaining = ids.len() > DELETE_ITEM_BATCH;
+        let mut released: u64 = 0;
+        for raw in ids.iter().take(DELETE_ITEM_BATCH) {
+            let attachment_id =
+                AttachmentId::from_bytes(id16(raw, "vault_attachments.attachment_id")?);
+            let stored = owned(tx.conn(), attachment_id, account_id).await?;
+            delete_rows(&mut tx.conn(), attachment_id).await?;
+            released = released.saturating_add(stored.counted());
+        }
+        charge(&mut tx, account_id, credit(released), now_sql).await?;
+        tx.commit().await?;
+        Ok(remaining)
     }
 
     /// The `worker` sweep of ADR 0054 §7: deletes up to 256 attachments created more than

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Encrypted attachments: the five `attachments` endpoints of [ADR 0054] §6.
+//! Encrypted attachments: the five `attachments` endpoints of [ADR 0054] §6, and the
+//! per-item cleanup of [ADR 0093] §1.1.
 //!
 //! | Endpoint | Request | Response | Caller |
 //! |---|---|---|---|
@@ -9,6 +10,7 @@
 //! | `attachments/upload-chunk` | [`UploadChunkRequest`] | empty success | OPAQUE or device |
 //! | `attachments/download-chunk` | [`DownloadChunkRequest`] | [`DownloadChunkResponse`] | OPAQUE or device |
 //! | `attachments/delete` | [`AttachmentRequest`] | empty success | OPAQUE or device |
+//! | `attachments/delete-item` | [`AttachmentItemRequest`] | [`AttachmentItemResponse`] | OPAQUE or device |
 //!
 //! - **Small bodies.** A chunk envelope is at most [`MAX_ATTACHMENT_CHUNK_ENVELOPE_LEN`] bytes,
 //!   about 699 KiB as base64url, so every request and response fits ADR 0028 item 7's 1 MiB
@@ -24,6 +26,7 @@
 //!   `invalid_request`, so the number parses as any `u64`.
 //!
 //! [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
+//! [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
 
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +61,31 @@ pub struct CreateAttachmentRequest {
 pub struct AttachmentRequest {
     /// The attachment.
     pub attachment_id: Id,
+}
+
+/// Body of `attachments/delete-item` ([ADR 0093] §1.1): every attachment of one purged item.
+///
+/// The server deletes at most 16 of the item's attachment rows, complete or not, per call, and
+/// releases their counted bytes in the same transaction. A vault the caller may not write, or
+/// one that does not exist, is `not_found`; an item with no rows left is a success.
+///
+/// [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentItemRequest {
+    /// The item's vault.
+    pub vault_id: Id,
+    /// The purged item.
+    pub item_id: Id,
+}
+
+/// Answer to `attachments/delete-item`.
+///
+/// A response type: unknown fields are ignored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentItemResponse {
+    /// Whether an attachment row of this item is left after the call: the client calls again.
+    pub remaining: bool,
 }
 
 /// Answer to `attachments/get`: the wrap, and nothing a reader could put into an AAD.

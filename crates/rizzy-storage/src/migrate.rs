@@ -159,6 +159,14 @@ pub const MIGRATIONS: &[MigrationFile] = &[
         sqlite: include_str!("../migrations/sqlite/0013_vault_rotation_staging.sql"),
         postgres: include_str!("../migrations/postgres/0013_vault_rotation_staging.sql"),
     },
+    // ADR 0093 §1.1 "Storage": the index `attachments/delete-item` reads by, after ADR 0092's
+    // 0013. Raises the backup `schema_version` to 14; an index adds no backed-up column.
+    MigrationFile {
+        version: 14,
+        description: "vault_attachments_by_item",
+        sqlite: include_str!("../migrations/sqlite/0014_vault_attachments_by_item.sql"),
+        postgres: include_str!("../migrations/postgres/0014_vault_attachments_by_item.sql"),
+    },
 ];
 
 /// This release's schema version: the last migration's version. A logical backup is stamped

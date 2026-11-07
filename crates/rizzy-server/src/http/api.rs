@@ -61,6 +61,7 @@
 //! | `POST /api/v1/attachments/upload-chunk` | `UploadChunkRequest` → 204 | OPAQUE or device |
 //! | `POST /api/v1/attachments/download-chunk` | `DownloadChunkRequest` → `DownloadChunkResponse` | OPAQUE or device |
 //! | `POST /api/v1/attachments/delete` | `AttachmentRequest` → 204 | OPAQUE or device |
+//! | `POST /api/v1/attachments/delete-item` | `AttachmentItemRequest` → `AttachmentItemResponse` | OPAQUE or device |
 //!
 //! "Empty success" (`rizzy-proto`'s tables) is `204 No Content`; "no body" endpoints take an
 //! empty body (limit 0) and are `POST` because they change state. The recovery-only session
@@ -427,6 +428,8 @@ pub enum Endpoint {
     AttachmentDownloadChunk,
     /// Delete an attachment (ADR 0054 §7).
     AttachmentDelete,
+    /// Delete a purged item's attachments (ADR 0093 §1.1).
+    AttachmentDeleteItem,
 }
 
 impl Endpoint {
@@ -476,6 +479,7 @@ impl Endpoint {
         Self::AttachmentUploadChunk,
         Self::AttachmentDownloadChunk,
         Self::AttachmentDelete,
+        Self::AttachmentDeleteItem,
     ];
 
     /// The path.
@@ -526,6 +530,7 @@ impl Endpoint {
             Self::AttachmentUploadChunk => paths::ATTACHMENTS_UPLOAD_CHUNK,
             Self::AttachmentDownloadChunk => paths::ATTACHMENTS_DOWNLOAD_CHUNK,
             Self::AttachmentDelete => paths::ATTACHMENTS_DELETE,
+            Self::AttachmentDeleteItem => paths::ATTACHMENTS_DELETE_ITEM,
         }
     }
 
@@ -584,7 +589,8 @@ impl Endpoint {
             | Self::AttachmentGet
             | Self::AttachmentUploadChunk
             | Self::AttachmentDownloadChunk
-            | Self::AttachmentDelete => SessionNeed::NotRecovery,
+            | Self::AttachmentDelete
+            | Self::AttachmentDeleteItem => SessionNeed::NotRecovery,
         }
     }
 
@@ -1378,6 +1384,12 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
                 .map_err(ve)?;
             Ok(Reply::Empty)
         }
+        Endpoint::AttachmentDeleteItem => json(
+            &api.vault
+                .attachments_delete_item(need()?.account_id, need()?.device_id, &parse(&body)?, now)
+                .await
+                .map_err(ve)?,
+        ),
     }
 }
 
@@ -1440,13 +1452,14 @@ mod tests {
             | Endpoint::AttachmentGet
             | Endpoint::AttachmentUploadChunk
             | Endpoint::AttachmentDownloadChunk
-            | Endpoint::AttachmentDelete => true,
+            | Endpoint::AttachmentDelete
+            | Endpoint::AttachmentDeleteItem => true,
         }
     }
 
     #[test]
     fn all_is_complete_and_paths_unique() {
-        assert_eq!(Endpoint::ALL.len(), 44);
+        assert_eq!(Endpoint::ALL.len(), 45);
         assert!(Endpoint::ALL.iter().all(|e| listed(*e)));
         let unique: HashSet<_> = Endpoint::ALL.iter().copied().map(Endpoint::path).collect();
         assert_eq!(unique.len(), Endpoint::ALL.len());

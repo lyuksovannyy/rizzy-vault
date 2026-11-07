@@ -113,6 +113,12 @@ fn vault_writes_are_frozen_for_every_writer_but_the_revoker() {
                     .await,
                 Err(VaultError::RevocationPending)
             ));
+            // ADR 0093's `delete-item` is a write no ADR places in ADR 0091 §2's right column.
+            assert!(matches!(
+                d.delete_item_attachments(ACCOUNT, writer, VAULT, item(1), NOW)
+                    .await,
+                Err(VaultError::RevocationPending)
+            ));
         }
         // Nothing was written: no op, no attachment, no counted byte.
         assert_eq!(ops(&env).await, 0);

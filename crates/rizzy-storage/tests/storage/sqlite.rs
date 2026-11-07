@@ -871,14 +871,11 @@ fn pre_migration_copy() {
         let last = MIGRATIONS.last().unwrap().version;
         let mut w = db.begin_write().await.unwrap();
         on_engine!(w.conn(), |c| {
-            // Undo the last migration (0013: ADR 0092's rotation staging).
-            for drop in [
-                "DROP TABLE vault_rotation_staging",
-                "DROP TABLE vault_rotation_staging_vaults",
-                "DROP TABLE vault_rotation_stagings",
-            ] {
-                sqlx::query(drop).execute(&mut *c).await.unwrap();
-            }
+            // Undo the last migration (0014: ADR 0093's per-item attachment index).
+            sqlx::query("DROP INDEX vault_attachments_by_item")
+                .execute(&mut *c)
+                .await
+                .unwrap();
             sqlx::query("DELETE FROM _sqlx_migrations WHERE version = $1")
                 .bind(last)
                 .execute(&mut *c)

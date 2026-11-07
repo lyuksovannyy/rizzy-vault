@@ -34,7 +34,8 @@
 //! # What is enumerated, exhaustively
 //! - [`idor`]: every ordered pair of the three accounts, for every route that takes a
 //!   client-supplied resource id — `devices/suspend`, `devices/unsuspend` (`device_id`),
-//!   `vault/upload`, `vault/fetch`, `vault/heal` (`vault_id`), and `device-auth/start`,
+//!   `vault/upload`, `vault/fetch`, `vault/heal`, `attachments/delete-item` (`vault_id`), and
+//!   `device-auth/start`,
 //!   `device-auth/finish` (an `account_id`/`device_id` pair from two different accounts).
 //!   Threat model A15 "IDOR attempts against other users' ciphertext, shares and device lists",
 //!   INV-7 "authorization check and test for every endpoint and resource type". The one other
@@ -762,6 +763,11 @@ fn seed_value(endpoint: Endpoint, me: &Account) -> Value {
             "attachment_id": b64(&[0xa7; 16]),
             "chunk_index": 0,
         }),
+        // ADR 0093 §1.1: the account's own vault, an item with no attachment (a success).
+        Endpoint::AttachmentDeleteItem => json!({
+            "vault_id": b64(&me.vault_id.to_bytes()),
+            "item_id": b64(&[0u8; 16]),
+        }),
     }
 }
 
@@ -1452,7 +1458,12 @@ fn idor_matrix_across_three_accounts() {
 
                 // vault/upload, vault/fetch, vault/heal: the acting account's real device
                 // session, naming the victim's real vault id.
-                for endpoint in [Endpoint::Upload, Endpoint::Fetch, Endpoint::Heal] {
+                for endpoint in [
+                    Endpoint::Upload,
+                    Endpoint::Fetch,
+                    Endpoint::Heal,
+                    Endpoint::AttachmentDeleteItem,
+                ] {
                     let seed = seed_value(endpoint, &scenario.accounts[acting]);
                     let body = with_field(seed, "vault_id", json!(b64(&victim_vault)));
                     let client = &mut scenario.accounts[acting].client;

@@ -14,10 +14,11 @@ use chacha20::rand_core::SeedableRng as _;
 use rizzy_client::attachments::{AttachmentUpload, delete_request};
 use rizzy_client::rizzy_core::attachment::{CHUNK_SIZE, MAX_ATTACHMENT_LEN};
 use rizzy_client::rizzy_proto::attachments::{
-    AttachmentRequest, CreateAttachmentRequest, DownloadChunkRequest, DownloadChunkResponse,
-    GetAttachmentResponse,
+    AttachmentItemRequest, AttachmentItemResponse, AttachmentRequest, CreateAttachmentRequest,
+    DownloadChunkRequest, DownloadChunkResponse, GetAttachmentResponse,
 };
 use rizzy_client::rizzy_proto::limits::MAX_BODY_LEN;
+use rizzy_client::rizzy_proto::wire::Id;
 use rizzy_server::config;
 use rizzy_storage::lock_account;
 
@@ -29,6 +30,7 @@ const GET: &str = "/api/v1/attachments/get";
 const UPLOAD: &str = "/api/v1/attachments/upload-chunk";
 const DOWNLOAD: &str = "/api/v1/attachments/download-chunk";
 const DELETE: &str = "/api/v1/attachments/delete";
+const DELETE_ITEM: &str = "/api/v1/attachments/delete-item";
 
 /// `len` bytes, byte `i` = `i mod 251`.
 fn file(len: usize) -> Vec<u8> {
@@ -424,5 +426,118 @@ fn create_is_refused_past_the_account_quota() {
                 .unwrap(),
             quota
         );
+    });
+}
+
+/// `attachments/delete-item` over HTTP (ADR 0093 §1.1, §5): every attachment of the item goes
+/// in one call and the counter drops in the same transaction; a repeat is a success; an unknown
+/// member is `invalid_request`; another account's vault and an unknown one are `not_found`.
+#[test]
+fn delete_item_removes_the_items_attachments_and_releases_the_quota() {
+    block_on(async {
+        let server = Server::start().await;
+        let mut rng = ChaCha20Rng::seed_from_u64(0x93);
+        let (up, _, _) = signup(&server, &mut rng, false).await;
+        let mut a = Client::signed_up(&server, up).await;
+        let item = a.create(&mut rng, "login");
+        let other_item = a.create(&mut rng, "login");
+        assert!(a.sync(&server, &mut rng).await.is_empty());
+        let before = a.account_view(&server).await["bytes_used"]
+            .as_u64()
+            .unwrap();
+        for (target, len) in [(item, 1000), (item, CHUNK_SIZE + 7), (other_item, 50)] {
+            let upload = a
+                .vault
+                .add_attachment(
+                    &mut rng,
+                    &a.unlocked,
+                    target,
+                    "a.txt",
+                    "text/plain",
+                    &file(len),
+                    now_ms(),
+                )
+                .unwrap();
+            send(&server, &mut a, &upload).await;
+        }
+        let kept = counted(50);
+        let all = counted(1000) + counted(CHUNK_SIZE as u64 + 7) + kept;
+        let used = |v: serde_json::Value| v["bytes_used"].as_u64().unwrap();
+        assert!(used(a.account_view(&server).await) >= before + all);
+        let with_all = used(a.account_view(&server).await);
+
+        let vault_id = Id::from_bytes(a.vault.vault_id().to_bytes());
+        let request = AttachmentItemRequest {
+            vault_id,
+            item_id: Id::from_bytes(item.to_bytes()),
+        };
+        let reply = post(
+            &server,
+            DELETE_ITEM,
+            &request,
+            Auth::Device(&mut a.session, &a.unlocked),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(
+            reply.json::<AttachmentItemResponse>(),
+            AttachmentItemResponse { remaining: false }
+        );
+        assert_eq!(
+            used(a.account_view(&server).await),
+            with_all - (all - kept),
+            "the item's bytes are released, the other item's stay"
+        );
+        // Idempotent.
+        let reply = post(
+            &server,
+            DELETE_ITEM,
+            &request,
+            Auth::Device(&mut a.session, &a.unlocked),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert!(!reply.json::<AttachmentItemResponse>().remaining);
+
+        // An unknown member is refused.
+        let mut extra = serde_json::to_value(&request).unwrap();
+        extra["attachment_id"] = serde_json::to_value(vault_id).unwrap();
+        let reply = post(
+            &server,
+            DELETE_ITEM,
+            &extra,
+            Auth::Device(&mut a.session, &a.unlocked),
+        )
+        .await;
+        assert_eq!(reply.error(), "invalid_request");
+
+        // An unknown vault, and another account's, are not_found.
+        let unknown = AttachmentItemRequest {
+            vault_id: Id::from_bytes([0x77; 16]),
+            item_id: request.item_id,
+        };
+        let reply = post(
+            &server,
+            DELETE_ITEM,
+            &unknown,
+            Auth::Device(&mut a.session, &a.unlocked),
+        )
+        .await;
+        assert_eq!(reply.error(), "not_found");
+        let (up_b, _, _) = signup_named(&server, &mut rng, "bob-0093", false).await;
+        let mut b = Client::signed_up(&server, up_b).await;
+        let foreign = AttachmentItemRequest {
+            vault_id,
+            item_id: Id::from_bytes(other_item.to_bytes()),
+        };
+        let reply = post(
+            &server,
+            DELETE_ITEM,
+            &foreign,
+            Auth::Device(&mut b.session, &b.unlocked),
+        )
+        .await;
+        assert_eq!(reply.error(), "not_found");
+        assert_eq!(used(a.account_view(&server).await), with_all - (all - kept));
     });
 }

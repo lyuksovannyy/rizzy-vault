@@ -171,6 +171,8 @@ pub mod paths {
     pub const ATTACHMENTS_DOWNLOAD_CHUNK: &str = "/api/v1/attachments/download-chunk";
     /// Delete an attachment and release its quota (ADR 0054 §7).
     pub const ATTACHMENTS_DELETE: &str = "/api/v1/attachments/delete";
+    /// Delete every attachment of a purged item and release its quota (ADR 0093 §1.1).
+    pub const ATTACHMENTS_DELETE_ITEM: &str = "/api/v1/attachments/delete-item";
 
     /// The breach-check range query of the `icons` role ([ADR 0053]; [`crate::breach`]). Not
     /// in [`ALL`]: the `api` role never serves it, the `icons` role's own listener does
@@ -189,7 +191,7 @@ pub mod paths {
     pub const ICONS_PREFIX: &str = "/api/v1/icons/";
 
     /// Every `/api/v1` path, in the order above.
-    pub const ALL: [&str; 44] = [
+    pub const ALL: [&str; 45] = [
         REGISTER_START,
         REGISTER_FINISH,
         LOGIN_START,
@@ -234,6 +236,7 @@ pub mod paths {
         ATTACHMENTS_UPLOAD_CHUNK,
         ATTACHMENTS_DOWNLOAD_CHUNK,
         ATTACHMENTS_DELETE,
+        ATTACHMENTS_DELETE_ITEM,
     ];
 }
 
@@ -271,7 +274,7 @@ mod tests {
         let mut sorted = paths::ALL.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 44);
+        assert_eq!(sorted.len(), 45);
         for path in paths::ALL {
             assert!(path.starts_with(API_V1_PREFIX), "{path}");
             // Nothing a proxy or a URL library would rewrite, and no query.
