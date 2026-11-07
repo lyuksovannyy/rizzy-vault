@@ -1802,8 +1802,10 @@ export class VaultSession {
   #cleanupFailures = 0;
 
   /**
-   * One cleanup round (ADR 0093 §1.2 "Running a row"). Transport failures, `5xx`, `429` and
-   * `401` keep the row for the next sync; a refusal no retry fixes drops it and is counted once.
+   * One cleanup round (ADR 0093 §1.2 "Running a row"). Transport failures, `5xx`, `429`, `401`
+   * and a `409 revocation_pending` (the lead's interpretation pending an owner erratum: ADR
+   * 0091's window is temporary) keep the row for the next sync; a refusal no retry fixes drops
+   * it and is counted once.
    */
   async #attachmentCleanups(s: Session): Promise<void> {
     for (const ref of call(() => s.attachmentCleanupsDue())) {

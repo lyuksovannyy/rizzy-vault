@@ -32,15 +32,25 @@
 //! | 200, `remaining: true` | `Again` (at most [`MAX_CALLS_PER_ROUND`] calls this round), then `Keep` | kept |
 //! | 404 | `Done` | deleted (the vault is gone) |
 //! | no answer (status 0), 5xx, 429, 401 | `Keep` | kept for the next round |
+//! | 409 `revocation_pending` | `Keep` | kept for the next round (see below) |
 //! | any other 4xx | [`ClientError::AttachmentCleanupFailed`], once | deleted |
+//!
+//! **409 `revocation_pending` is the lead's interpretation, pending an owner erratum to ADR
+//! 0093 §1.2.** The ADR's table puts it under "any other 4xx", which would drop the row and
+//! leak the item's files from the account's quota for good. But [ADR 0091] §2's revocation
+//! window is temporary (10 minutes) and `delete-item` is gated by it, so the refusal is
+//! transient: the row is kept, like a 429, and the next round after the window closes deletes
+//! the files.
 //!
 //! A failed cleanup is never a sync error, and a row never blocks a round, an unlock or another
 //! vault. A vault dropped from the directory drops its rows ([`Write::DropVault`]).
 //!
 //! [ADR 0093]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0093-attachment-lifecycle.md
+//! [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
 
 use rizzy_core::ids::ItemId;
 use rizzy_proto::attachments::{AttachmentItemRequest, AttachmentItemResponse};
+use rizzy_proto::error::ErrorCode;
 use rizzy_proto::wire::Id;
 
 use crate::error::ClientError;
@@ -157,8 +167,9 @@ impl VaultSync {
     }
 
     /// Applies the answer to `attachments/delete-item` for `item` (module docs, the table):
-    /// `status` `0` stands for no answer (a network error); `answer` is the 200 body as the
-    /// host parsed it (`None` when it did not parse). This crate parses no JSON (the hosts own
+    /// `status` `0` stands for no answer (a network error); `error` is the error answer's code
+    /// as the host parsed it (`None` for a success or a body that did not parse); `answer` is
+    /// the 200 body as the host parsed it (`None` when it did not parse). This crate parses no JSON (the hosts own
     /// the transport), so the host hands over the parsed body instead of its bytes. Writes the
     /// row change into the journal.
     ///
@@ -171,6 +182,7 @@ impl VaultSync {
         &mut self,
         item: ItemId,
         status: u16,
+        error: Option<ErrorCode>,
         answer: Option<&AttachmentItemResponse>,
     ) -> Result<CleanupStep, ClientError> {
         let Some(row) = self.cleanups.get_mut(&item) else {
@@ -195,6 +207,10 @@ impl VaultSync {
                 Ok(CleanupStep::Done)
             }
             401 | 429 | 0 => Ok(CleanupStep::Keep),
+            // The lead's interpretation pending an owner erratum to ADR 0093 §1.2 (module docs):
+            // ADR 0091's revocation window closes by itself, so this refusal is retried next
+            // round instead of dropping the row and leaking its quota.
+            409 if error == Some(ErrorCode::RevocationPending) => Ok(CleanupStep::Keep),
             s if (400..500).contains(&s) => {
                 self.drop_cleanup(item);
                 Err(ClientError::AttachmentCleanupFailed)

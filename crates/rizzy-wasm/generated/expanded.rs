@@ -47758,7 +47758,9 @@ pub mod session {
             " Applies the answer to [`Session::attachment_cleanup_request`] (ADR 0093 §1.2): `\"again\"`"]
             #[doc =
             " (send the request again now), `\"done\"` or `\"keep\"` (the next sync round retries)."]
-            #[doc = " `status` `0` stands for no answer (a network error)."]
+            #[doc =
+            " `status` `0` stands for no answer (a network error); a 409 `revocation_pending` (ADR 0091\'s"]
+            #[doc = " temporary window) is `\"keep\"`."]
             #[doc = ""]
             #[doc = " # Errors"]
             #[doc =
@@ -47778,7 +47780,8 @@ pub mod session {
                         #[doc =
                         " (send the request again now), `\"done\"` or `\"keep\"` (the next sync round retries)."]
                         #[doc =
-                        " `status` `0` stands for no answer (a network error)."]
+                        " `status` `0` stands for no answer (a network error); a 409 `revocation_pending` (ADR 0091\'s"]
+                        #[doc = " temporary window) is `\"keep\"`."]
                         #[doc = ""]
                         #[doc = " # Errors"]
                         #[doc =
@@ -47888,7 +47891,8 @@ pub mod session {
                         #[doc =
                         " (send the request again now), `\"done\"` or `\"keep\"` (the next sync round retries)."]
                         #[doc =
-                        " `status` `0` stands for no answer (a network error)."]
+                        " `status` `0` stands for no answer (a network error); a 409 `revocation_pending` (ADR 0091\'s"]
+                        #[doc = " temporary window) is `\"keep\"`."]
                         #[doc = ""]
                         #[doc = " # Errors"]
                         #[doc =
@@ -47921,7 +47925,7 @@ pub mod session {
                         const _ENCODED_BYTES: &[u8] =
                             {
                                 const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                    [b"\x01\x01\x07Session\tZ Applies the answer to [`Session::attachment_cleanup_request`] (ADR 0093 \xc2\xa71.2): `\"again\"`R (send the request again now), `\"done\"` or `\"keep\"` (the next sync round retries).5 `status` `0` stands for no answer (a network error).\0\t # ErrorsX `attachment_cleanup_failed` once, for a refusal no retry fixes (the row is dropped; theU files still count toward the account's storage); `invalid_server_response` for a 200U that does not parse; `locked`; `invalid_input`; `unknown_vault`; `unknown_item` when\" the reference has no cleanup row.\0\x03\x02id\0\0\0\x06status\0\0\0\x04body\0\0\0\0\0\x19attachmentCleanupResponse\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                    [b"\x01\x01\x07Session\nZ Applies the answer to [`Session::attachment_cleanup_request`] (ADR 0093 \xc2\xa71.2): `\"again\"`R (send the request again now), `\"done\"` or `\"keep\"` (the next sync round retries).\\ `status` `0` stands for no answer (a network error); a 409 `revocation_pending` (ADR 0091's\x1f temporary window) is `\"keep\"`.\0\t # ErrorsX `attachment_cleanup_failed` once, for a refusal no retry fixes (the row is dropped; theU files still count toward the account's storage); `invalid_server_response` for a 200U that does not parse; `locked`; `invalid_input`; `unknown_vault`; `unknown_item` when\" the reference has no cleanup row.\0\x03\x02id\0\0\0\x06status\0\0\0\x04body\0\0\0\0\0\x19attachmentCleanupResponse\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                                 #[allow(long_running_const_eval)]
                                 const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                                 #[allow(long_running_const_eval)]
@@ -47952,9 +47956,10 @@ pub mod session {
                     if status == 200 && body.len() <= http::MAX_RESPONSE_LEN {
                         serde_json::from_slice(body).ok()
                     } else { None };
+                let code = http::server_code(status, body);
                 let vault = self.inner_mut()?.vaults.get_mut(vault_id)?;
                 let step =
-                    vault.attachment_cleanup_respond(item, status,
+                    vault.attachment_cleanup_respond(item, status, code,
                             answer.as_ref())?;
                 Ok(match step {
                             CleanupStep::Done => "done",

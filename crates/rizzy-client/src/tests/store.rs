@@ -2946,6 +2946,7 @@ mod attachment_cleanup {
 
     use proptest::prelude::*;
     use rizzy_proto::attachments::AttachmentItemResponse;
+    use rizzy_proto::error::ErrorCode;
 
     use super::*;
     use crate::store::rows::AttachmentCleanupRow;
@@ -3021,7 +3022,7 @@ mod attachment_cleanup {
         assert_eq!(request.vault_id.to_bytes(), a.vault.vault_id().to_bytes());
         assert_eq!(
             a.vault
-                .attachment_cleanup_respond(item, 200, Some(&DONE))
+                .attachment_cleanup_respond(item, 200, None, Some(&DONE))
                 .unwrap(),
             CleanupStep::Done
         );
@@ -3073,7 +3074,7 @@ mod attachment_cleanup {
             calls += 1;
             match a
                 .vault
-                .attachment_cleanup_respond(many, 200, Some(&MORE))
+                .attachment_cleanup_respond(many, 200, None, Some(&MORE))
                 .unwrap()
             {
                 CleanupStep::Again => {}
@@ -3084,16 +3085,18 @@ mod attachment_cleanup {
         assert_eq!(calls, MAX_CALLS_PER_ROUND);
         // 404: the vault is gone, the row goes.
         assert_eq!(
-            a.vault.attachment_cleanup_respond(gone, 404, None).unwrap(),
+            a.vault
+                .attachment_cleanup_respond(gone, 404, None, None)
+                .unwrap(),
             CleanupStep::Done
         );
         // Any other 4xx: the row goes, reported once.
         assert_eq!(
-            a.vault.attachment_cleanup_respond(refused, 403, None),
+            a.vault.attachment_cleanup_respond(refused, 403, None, None),
             Err(ClientError::AttachmentCleanupFailed)
         );
         assert_eq!(
-            a.vault.attachment_cleanup_respond(refused, 403, None),
+            a.vault.attachment_cleanup_respond(refused, 403, None, None),
             Err(ClientError::UnknownItem),
             "the report is one-time: the row is gone"
         );
@@ -3101,13 +3104,13 @@ mod attachment_cleanup {
         for status in [0, 500, 503, 429, 401] {
             assert_eq!(
                 a.vault
-                    .attachment_cleanup_respond(kept, status, None)
+                    .attachment_cleanup_respond(kept, status, None, None)
                     .unwrap(),
                 CleanupStep::Keep
             );
         }
         assert_eq!(
-            a.vault.attachment_cleanup_respond(kept, 200, None),
+            a.vault.attachment_cleanup_respond(kept, 200, None, None),
             Err(ClientError::InvalidServerResponse)
         );
         a.flush();
@@ -3118,10 +3121,71 @@ mod attachment_cleanup {
         assert_eq!(a.vault.attachment_cleanups_due().len(), 2);
         assert_eq!(
             a.vault
-                .attachment_cleanup_respond(many, 200, Some(&MORE))
+                .attachment_cleanup_respond(many, 200, None, Some(&MORE))
                 .unwrap(),
             CleanupStep::Again
         );
+    }
+
+    /// The lead's interpretation pending an owner erratum to ADR 0093 §1.2: a 409
+    /// `revocation_pending` answer (ADR 0091 §2's window, which closes by itself within 10
+    /// minutes) keeps the row for the next round instead of dropping it, which would leak the
+    /// files' quota for good. Any other 409 is still "any other 4xx".
+    #[test]
+    fn a_revocation_pending_answer_keeps_the_row() {
+        let mut rng = ChaCha20Rng::seed_from_u64(0x9315);
+        let mut server = Server::new(0x9316);
+        let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+        a.fetch(&server);
+        let paused = a.create(&mut rng, "paused");
+        let conflict = a.create(&mut rng, "conflict");
+        let unparsed = a.create(&mut rng, "unparsed");
+        a.flush();
+        for item in [paused, conflict, unparsed] {
+            purge(&mut a, &mut rng, item);
+        }
+        a.upload(&mut server, &mut rng);
+        assert_eq!(a.vault.attachment_cleanups_due().len(), 3);
+        // The window is open: every round keeps the row.
+        for _ in 0..3 {
+            assert_eq!(
+                a.vault.attachment_cleanup_respond(
+                    paused,
+                    409,
+                    Some(ErrorCode::RevocationPending),
+                    None
+                ),
+                Ok(CleanupStep::Keep)
+            );
+        }
+        // Another 409, or one whose code did not parse, is a refusal no retry fixes.
+        assert_eq!(
+            a.vault.attachment_cleanup_respond(
+                conflict,
+                409,
+                Some(ErrorCode::RecordConflict),
+                None
+            ),
+            Err(ClientError::AttachmentCleanupFailed)
+        );
+        assert_eq!(
+            a.vault
+                .attachment_cleanup_respond(unparsed, 409, None, None),
+            Err(ClientError::AttachmentCleanupFailed)
+        );
+        a.flush();
+        let left: Vec<[u8; 16]> = rows(&a).iter().map(|r| r.item_id).collect();
+        assert_eq!(left, vec![paused.to_bytes()]);
+        // The window closed: the next round deletes the files and the row.
+        assert_eq!(a.vault.attachment_cleanups_due(), vec![paused]);
+        assert_eq!(
+            a.vault
+                .attachment_cleanup_respond(paused, 200, None, Some(&DONE))
+                .unwrap(),
+            CleanupStep::Done
+        );
+        a.flush();
+        assert!(rows(&a).is_empty());
     }
 
     #[test]
@@ -3301,7 +3365,7 @@ mod attachment_cleanup {
                 };
                 match a
                     .vault
-                    .attachment_cleanup_respond(item, 200, Some(&answer))
+                    .attachment_cleanup_respond(item, 200, None, Some(&answer))
                     .unwrap()
                 {
                     CleanupStep::Again => {}

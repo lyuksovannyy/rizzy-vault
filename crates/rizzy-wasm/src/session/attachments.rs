@@ -421,7 +421,8 @@ impl Session {
 
     /// Applies the answer to [`Session::attachment_cleanup_request`] (ADR 0093 §1.2): `"again"`
     /// (send the request again now), `"done"` or `"keep"` (the next sync round retries).
-    /// `status` `0` stands for no answer (a network error).
+    /// `status` `0` stands for no answer (a network error); a 409 `revocation_pending` (ADR 0091's
+    /// temporary window) is `"keep"`.
     ///
     /// # Errors
     /// `attachment_cleanup_failed` once, for a refusal no retry fixes (the row is dropped; the
@@ -442,8 +443,11 @@ impl Session {
             } else {
                 None
             };
+        // A 409 `revocation_pending` keeps the row: the lead's interpretation pending an owner
+        // erratum to ADR 0093 §1.2 (`rizzy_client::sync`'s cleanup docs).
+        let code = http::server_code(status, body);
         let vault = self.inner_mut()?.vaults.get_mut(vault_id)?;
-        let step = vault.attachment_cleanup_respond(item, status, answer.as_ref())?;
+        let step = vault.attachment_cleanup_respond(item, status, code, answer.as_ref())?;
         Ok(match step {
             CleanupStep::Done => "done",
             CleanupStep::Again => "again",

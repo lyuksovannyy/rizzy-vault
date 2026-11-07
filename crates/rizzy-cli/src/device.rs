@@ -324,18 +324,31 @@ const STAGE_RESENDS: u32 = 2;
 
 /// The answer to `attachments/delete-item` as the status class ADR 0093 §1.2's table reads:
 /// `rv`'s transport hands back the error code, not the HTTP status, so the code stands for it.
-/// No answer (network, TLS) is `0`; a 200 whose body did not parse is `(200, None)`.
-fn cleanup_status<R>(answer: &Result<R, CliError>) -> (u16, Option<&R>) {
+/// No answer (network, TLS) is `0`; a 200 whose body did not parse is `(200, None, None)`.
+/// The middle value is the server's code, which the table reads for a 409.
+fn cleanup_status<R>(answer: &Result<R, CliError>) -> (u16, Option<ErrorCode>, Option<&R>) {
     match answer {
-        Ok(body) => (200, Some(body)),
-        Err(CliError::Server(ErrorCode::NotFound)) => (404, None),
-        Err(CliError::Server(ErrorCode::Unauthorized)) => (401, None),
-        Err(CliError::Server(ErrorCode::RateLimited) | CliError::RateLimited(_)) => (429, None),
+        Ok(body) => (200, None, Some(body)),
+        Err(CliError::Server(ErrorCode::NotFound)) => (404, Some(ErrorCode::NotFound), None),
+        Err(CliError::Server(ErrorCode::Unauthorized)) => {
+            (401, Some(ErrorCode::Unauthorized), None)
+        }
+        Err(CliError::Server(ErrorCode::RateLimited) | CliError::RateLimited(_)) => {
+            (429, Some(ErrorCode::RateLimited), None)
+        }
+        // The lead's interpretation pending an owner erratum to ADR 0093 §1.2
+        // (`rizzy_client::sync`'s cleanup docs): ADR 0091's revocation window is temporary, so
+        // the row is kept for the next round. `Http::send` has already retried it in-call.
+        Err(CliError::Server(ErrorCode::RevocationPending)) => {
+            (409, Some(ErrorCode::RevocationPending), None)
+        }
         // A code this build does not know may be a newer server's transient answer: kept.
-        Err(CliError::Server(ErrorCode::Internal | ErrorCode::Unknown)) => (500, None),
-        Err(CliError::Server(_)) => (400, None),
-        Err(CliError::BadAnswer) => (200, None),
-        Err(_) => (0, None),
+        Err(CliError::Server(code @ (ErrorCode::Internal | ErrorCode::Unknown))) => {
+            (500, Some(*code), None)
+        }
+        Err(CliError::Server(code)) => (400, Some(*code), None),
+        Err(CliError::BadAnswer) => (200, None, None),
+        Err(_) => (0, None, None),
     }
 }
 
@@ -1783,11 +1796,11 @@ impl Device {
                         .attachment_cleanup_request(item);
                     let answer: Result<AttachmentItemResponse, CliError> =
                         self.call(paths::ATTACHMENTS_DELETE_ITEM, &request).await;
-                    let (status, body) = cleanup_status(&answer);
+                    let (status, code, body) = cleanup_status(&answer);
                     let step = self
                         .vaults
                         .require_mut(vault_id)?
-                        .attachment_cleanup_respond(item, status, body);
+                        .attachment_cleanup_respond(item, status, code, body);
                     match step {
                         Ok(CleanupStep::Again) => {}
                         Err(e @ ClientError::AttachmentCleanupFailed) => {
@@ -2708,5 +2721,33 @@ impl Flight {
             Self::Rotation(r) => (*r).finalize(rng, state, unlocked, vaults),
             Self::Credential(c) => (*c).finalize(rng, state, unlocked, vaults),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ADR 0093 §1.2's table as `rv` feeds it: a `revocation_pending` refusal reaches the
+    /// client as a 409 with its code, which keeps the row (the lead's interpretation pending an
+    /// owner erratum), and another refusal as a plain 4xx, which drops it.
+    #[test]
+    fn cleanup_status_keeps_revocation_pending() {
+        let paused: Result<(), CliError> = Err(CliError::Server(ErrorCode::RevocationPending));
+        assert_eq!(
+            cleanup_status(&paused),
+            (409, Some(ErrorCode::RevocationPending), None)
+        );
+        let refused: Result<(), CliError> = Err(CliError::Server(ErrorCode::InvalidRequest));
+        assert_eq!(
+            cleanup_status(&refused),
+            (400, Some(ErrorCode::InvalidRequest), None)
+        );
+        let gone: Result<(), CliError> = Err(CliError::Server(ErrorCode::NotFound));
+        assert_eq!(cleanup_status(&gone).0, 404);
+        let lost: Result<(), CliError> = Err(CliError::Network);
+        assert_eq!(cleanup_status(&lost), (0, None, None));
+        let ok: Result<u8, CliError> = Ok(7);
+        assert_eq!(cleanup_status(&ok), (200, None, Some(&7)));
     }
 }
