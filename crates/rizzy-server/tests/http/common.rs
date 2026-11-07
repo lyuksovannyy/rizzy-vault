@@ -334,4 +334,16 @@ impl Server {
     pub(crate) async fn start_with_recovery_wait(hours: u32) -> Self {
         Self::start_with(&[(config::RECOVERY_WAIT_HOURS, &hours.to_string())]).await
     }
+
+    /// A server with no recovery wait whose paged recovery read uses `paging`'s lower limits
+    /// (ADR 0092 §8 test 10), so a small account is read page by page.
+    pub(crate) async fn start_with_recovery_paging(
+        paging: rizzy_domain_vault::port::RecoveryPaging,
+    ) -> Self {
+        Self::start_adjusted(&[(config::RECOVERY_WAIT_HOURS, "0")], |api| {
+            *api.auth.vault_port_mut() =
+                rizzy_server::bridge::VaultBridge::with_recovery_paging(paging);
+        })
+        .await
+    }
 }

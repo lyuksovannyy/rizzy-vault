@@ -44,7 +44,26 @@ use rizzy_storage::{Conn, WriteTx};
 
 /// The `auth` domain's view of the `vault` domain (module docs).
 #[derive(Clone, Copy, Debug, Default)]
-pub struct VaultBridge;
+pub struct VaultBridge {
+    /// The paged recovery read's limits: ADR 0092's, or a test's lower ones.
+    paging: port::RecoveryPaging,
+}
+
+impl VaultBridge {
+    /// The bridge with ADR 0092's paging limits.
+    pub const STANDARD: Self = Self {
+        paging: port::RecoveryPaging::STANDARD,
+    };
+
+    /// The bridge with lower paging limits, for tests ([ADR 0092] §8 test 10): a small account
+    /// is read page by page. Production uses [`VaultBridge::STANDARD`].
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    #[must_use]
+    pub const fn with_recovery_paging(paging: port::RecoveryPaging) -> Self {
+        Self { paging }
+    }
+}
 
 /// Maps a vault error inside an auth flow.
 fn vault_error(e: &VaultError) -> AuthError {
@@ -112,7 +131,7 @@ impl VaultPort for VaultBridge {
         conn: Conn<'_>,
         account_id: AccountId,
     ) -> Result<(Vec<RecoveryVault>, bool), AuthError> {
-        port::recovery_vaults(conn, account_id)
+        port::recovery_vaults_with(conn, account_id, self.paging)
             .await
             .map_err(|e| vault_error(&e))
     }
@@ -123,7 +142,7 @@ impl VaultPort for VaultBridge {
         account_id: AccountId,
         request: &RecoveryWrapsRequest,
     ) -> Result<RecoveryWrapsResponse, AuthError> {
-        port::recovery_wraps(conn, account_id, request)
+        port::recovery_wraps_with(conn, account_id, request, self.paging)
             .await
             .map_err(|e| match e {
                 VaultError::NotFound => AuthError::NotFound,

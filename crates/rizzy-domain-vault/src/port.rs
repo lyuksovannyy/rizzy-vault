@@ -230,11 +230,48 @@ async fn wire_grant(conn: Conn<'_>, vault_id: VaultId) -> Result<VaultSelfGrant,
 ///
 /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
 pub async fn recovery_vaults(
-    mut conn: Conn<'_>,
+    conn: Conn<'_>,
     account_id: AccountId,
 ) -> Result<(Vec<RecoveryVault>, bool), VaultError> {
-    let paged = repo::account_wrap_rows(reborrow(&mut conn), account_id).await?
-        > MAX_ACCOUNT_WRAP_ROWS as u64;
+    recovery_vaults_with(conn, account_id, RecoveryPaging::STANDARD).await
+}
+
+/// The limits of the paged recovery read: [`RecoveryPaging::STANDARD`] in production; tests
+/// lower them (as [`crate::VaultDomain::with_wrap_caps`] lowers the write caps) so a small
+/// account is read page by page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecoveryPaging {
+    /// Above this many wrap-set rows over the account's vaults, `wraps_paged` is true.
+    pub paged_above: u64,
+    /// The most rows in one page (at most [`ROTATION_STAGE_ROWS`]).
+    pub page_rows: usize,
+}
+
+impl RecoveryPaging {
+    /// ADR 0092's values: [`MAX_ACCOUNT_WRAP_ROWS`] and [`ROTATION_STAGE_ROWS`].
+    pub const STANDARD: Self = Self {
+        paged_above: MAX_ACCOUNT_WRAP_ROWS as u64,
+        page_rows: ROTATION_STAGE_ROWS,
+    };
+}
+
+impl Default for RecoveryPaging {
+    fn default() -> Self {
+        Self::STANDARD
+    }
+}
+
+/// [`recovery_vaults`] with the paging threshold of `paging`.
+///
+/// # Errors
+/// As [`recovery_vaults`].
+pub async fn recovery_vaults_with(
+    mut conn: Conn<'_>,
+    account_id: AccountId,
+    paging: RecoveryPaging,
+) -> Result<(Vec<RecoveryVault>, bool), VaultError> {
+    let paged =
+        repo::account_wrap_rows(reborrow(&mut conn), account_id).await? > paging.paged_above;
     let vaults = repo::list_vaults(reborrow(&mut conn), account_id).await?;
     let mut out = Vec::with_capacity(vaults.len());
     for vault_id in vaults {
@@ -273,10 +310,24 @@ pub async fn recovery_vaults(
 ///
 /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
 pub async fn recovery_wraps(
-    mut conn: Conn<'_>,
+    conn: Conn<'_>,
     account_id: AccountId,
     request: &RecoveryWrapsRequest,
 ) -> Result<RecoveryWrapsResponse, VaultError> {
+    recovery_wraps_with(conn, account_id, request, RecoveryPaging::STANDARD).await
+}
+
+/// [`recovery_wraps`] with the page size of `paging` (capped at [`ROTATION_STAGE_ROWS`]).
+///
+/// # Errors
+/// As [`recovery_wraps`].
+pub async fn recovery_wraps_with(
+    mut conn: Conn<'_>,
+    account_id: AccountId,
+    request: &RecoveryWrapsRequest,
+    paging: RecoveryPaging,
+) -> Result<RecoveryWrapsResponse, VaultError> {
+    let page_rows = paging.page_rows.clamp(1, ROTATION_STAGE_ROWS);
     let vault_id = VaultId::from_bytes(request.vault_id.to_bytes());
     repo::vault(reborrow(&mut conn), vault_id)
         .await?
@@ -294,11 +345,11 @@ pub async fn recovery_wraps(
         reborrow(&mut conn),
         vault_id,
         after,
-        ROTATION_STAGE_ROWS.saturating_add(1),
+        page_rows.saturating_add(1),
     )
     .await?;
-    let more = rows.len() > ROTATION_STAGE_ROWS;
-    rows.truncate(ROTATION_STAGE_ROWS);
+    let more = rows.len() > page_rows;
+    rows.truncate(page_rows);
     let next = if more {
         rows.last().map(|row| WrapLocator {
             item_id: Id::from_bytes(row.item_id.to_bytes()),

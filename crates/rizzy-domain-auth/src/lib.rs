@@ -322,6 +322,12 @@ impl<V: VaultPort> AuthService<V> {
         &self.db
     }
 
+    /// The vault port, mutably: how a test swaps in a port with lower limits (ADR 0092 §8
+    /// test 10's paged recovery) before the service is shared.
+    pub const fn vault_port_mut(&mut self) -> &mut V {
+        &mut self.vault
+    }
+
     /// Ends the transaction of a flow that took a row used at most once (a sealed login state,
     /// CRYPTO.md §5.11; a device-auth challenge, §5.10) with `outcome`.
     ///

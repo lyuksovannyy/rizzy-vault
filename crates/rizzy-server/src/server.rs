@@ -426,7 +426,7 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
         // instances (Q-15). Nothing enforces that here, so the operator is told.
         log::warn("recovery_wait_zero", &[]);
     }
-    let auth = AuthService::new(db.clone(), secrets, auth_config, VaultBridge)
+    let auth = AuthService::new(db.clone(), secrets, auth_config, VaultBridge::STANDARD)
         .map_err(ServeError::AuthConfig)?;
     // ADR 0032 §4: the rows migration 0005 found get their `account_key_epoch` from the
     // current signed state before anything is served.

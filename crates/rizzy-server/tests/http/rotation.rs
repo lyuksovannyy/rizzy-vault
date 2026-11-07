@@ -298,7 +298,7 @@ pub(crate) struct Client {
     /// The personal vault.
     pub(crate) vault: VaultSync,
     /// The account's authors.
-    authors: Authors,
+    pub(crate) authors: Authors,
 }
 
 impl Client {

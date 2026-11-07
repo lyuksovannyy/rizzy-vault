@@ -59,6 +59,7 @@ mod secrets_ops;
 mod sessions;
 mod setups;
 mod signing;
+mod staging;
 mod vaults;
 mod webauthn;
 mod worker;

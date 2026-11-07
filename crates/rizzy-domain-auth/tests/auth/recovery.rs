@@ -15,6 +15,7 @@ use rizzy_domain_auth::{AccountChange, AuthError, RecoveryUpload};
 use rizzy_proto::account::{AccountStateQuery, PendingRecoveryNotice};
 use rizzy_proto::auth::RecoveryRegistration;
 use rizzy_proto::objects::AccountKeyServerWrap;
+use rizzy_proto::recovery::RecoveryWrapsRequest;
 use rizzy_proto::wire::{Fixed, List};
 
 use crate::common::{Env, block_on, bytes, recovery_wrap};
@@ -349,5 +350,69 @@ fn recovery_wait_bounds() {
         let mut config = rizzy_domain_auth::AuthConfig::new(crate::common::origin());
         config.recovery_wait_ms = 30 * 24 * 3_600_000 + 1;
         assert!(config.validate().is_err());
+    });
+}
+
+/// ADR 0092 §5: `recovery_wraps` serves the recovery-only session only: an OPAQUE session and
+/// a device session are refused (`fresh_session_required`), a vault of no account of the
+/// session is `not_found`, and the account's vault answers a page with its served self-grant.
+#[test]
+fn recovery_wraps_takes_the_recovery_session_only() {
+    block_on(async {
+        let mut env = Env::new(43).await;
+        let client = env.signup("lea", "forgotten").await;
+        let token = client.recovery_token();
+        let source = env.source.clone();
+        env.svc
+            .recovery_start("lea", &token, &source, env.now)
+            .await
+            .unwrap();
+        env.tick(WAIT + 1);
+        let release = env
+            .svc
+            .recovery_complete(&mut env.rng, "lea", &token, &source, env.now)
+            .await
+            .unwrap();
+        assert!(!release.wraps_paged);
+        let vault = release.vaults.first().unwrap();
+        let request = RecoveryWrapsRequest {
+            vault_id: vault.vault_id,
+            after: None,
+        };
+        let recovery_session = env.bearer(&release.session_token).await;
+        let page = env
+            .svc
+            .recovery_wraps(&recovery_session, &request, env.now)
+            .await
+            .unwrap();
+        assert_eq!(page.self_grant, vault.self_grant);
+        assert_eq!(page.next, None);
+        // Another vault id: not this account's.
+        let other = RecoveryWrapsRequest {
+            vault_id: rizzy_proto::wire::Id::from_bytes([0xee; 16]),
+            after: None,
+        };
+        assert!(matches!(
+            env.svc
+                .recovery_wraps(&recovery_session, &other, env.now)
+                .await,
+            Err(AuthError::NotFound)
+        ));
+        // An OPAQUE session and a device session are not the recovery-only session.
+        let login = env.login(&client).await;
+        let opaque = env.bearer(&login.response.session_token).await;
+        assert!(matches!(
+            env.svc.recovery_wraps(&opaque, &request, env.now).await,
+            Err(AuthError::FreshSessionRequired)
+        ));
+        let device = &client.devices[0];
+        let mut ds = env.device_auth(&client, device).await.unwrap();
+        let device_session = env.signed(&client, device, &mut ds, b"").await.unwrap();
+        assert!(matches!(
+            env.svc
+                .recovery_wraps(&device_session, &request, env.now)
+                .await,
+            Err(AuthError::FreshSessionRequired)
+        ));
     });
 }

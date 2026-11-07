@@ -118,7 +118,11 @@ pub(crate) async fn recover(
 }
 
 /// The recovered device authenticates, fetches and reads `item`.
-async fn read_as_recovered(server: &Server, done: RecoveryDone, item: ItemId) -> Vec<u8> {
+pub(crate) async fn read_as_recovered(
+    server: &Server,
+    done: RecoveryDone,
+    item: ItemId,
+) -> Vec<u8> {
     let mut session = device_session(server, &done.device, &done.unlocked)
         .await
         .unwrap();
