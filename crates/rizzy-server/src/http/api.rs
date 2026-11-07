@@ -763,6 +763,7 @@ fn vault_code(endpoint: Endpoint, e: &VaultError) -> ErrorCode {
             | VaultError::Invalid
             | VaultError::RecordConflict
             | VaultError::QuotaExceeded
+            | VaultError::RevocationPending
     ) {
         log::error(
             "vault_failure",
@@ -1266,7 +1267,7 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
         }
         Endpoint::Upload => json(
             &api.vault
-                .upload(need()?.account_id, &parse(&body)?, now)
+                .upload(need()?.account_id, need()?.device_id, &parse(&body)?, now)
                 .await
                 .map_err(ve)?,
         ),
@@ -1290,6 +1291,8 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
             .vault
             .heal(
                 need()?.account_id,
+                // ADR 0091 §2: the writer the revocation window's freeze checks.
+                need()?.device_id,
                 // ADR 0032 §3: only a device session names a healer that may repair a
                 // lagging self-grant (healing step 3b).
                 need().ok().and_then(|s| {
@@ -1310,7 +1313,7 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
         // ADR 0054 §6: every request fits the 1 MiB default body (`BODY_LIMIT`).
         Endpoint::AttachmentCreate => {
             api.vault
-                .attachments_create(need()?.account_id, &parse(&body)?, now)
+                .attachments_create(need()?.account_id, need()?.device_id, &parse(&body)?, now)
                 .await
                 .map_err(ve)?;
             Ok(Reply::Empty)
@@ -1323,7 +1326,12 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
         ),
         Endpoint::AttachmentUploadChunk => {
             api.vault
-                .attachments_upload_chunk(need()?.account_id, &parse(&body)?)
+                .attachments_upload_chunk(
+                    need()?.account_id,
+                    need()?.device_id,
+                    &parse(&body)?,
+                    now,
+                )
                 .await
                 .map_err(ve)?;
             Ok(Reply::Empty)
@@ -1336,7 +1344,7 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
         ),
         Endpoint::AttachmentDelete => {
             api.vault
-                .attachments_delete(need()?.account_id, &parse(&body)?, now)
+                .attachments_delete(need()?.account_id, need()?.device_id, &parse(&body)?, now)
                 .await
                 .map_err(ve)?;
             Ok(Reply::Empty)

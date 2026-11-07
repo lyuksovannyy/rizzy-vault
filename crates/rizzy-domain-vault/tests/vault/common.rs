@@ -23,7 +23,7 @@ use rizzy_core::sign::statements::DeviceKind;
 use rizzy_core::sign::{DeviceSigningKey, OpStatement, SnapshotStatement};
 use rizzy_domain_vault::{
     AccountKeyState, AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError,
-    FetchOutcome, VaultDomain, VaultKind, create_vault,
+    FetchOutcome, RevocationWindow, VaultDomain, VaultKind, create_vault,
 };
 use rizzy_proto::objects::{self, Envelope, KeyEnvelope, VaultSelfGrant};
 use rizzy_proto::vault::{
@@ -97,15 +97,23 @@ pub(crate) const fn item(n: u8) -> ItemId {
 }
 
 /// The in-memory certificate source: what `rizzy-server` wires in from `rizzy-domain-auth`.
-/// Clones share the certificates and the account key, so a test can revoke a device or move the
-/// held state's account key while the domain holds one.
+/// Clones share the certificates, the account key and the revocation window, so a test can
+/// revoke a device, move the held state's account key or open a window while the domain holds
+/// one.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Directory(
     Arc<Mutex<BTreeMap<DeviceId, AuthorCertificate>>>,
     Arc<Mutex<Option<AccountKeyState>>>,
+    Arc<Mutex<Option<RevocationWindow>>>,
 );
 
 impl Directory {
+    /// Sets or clears the account's stored revocation window
+    /// ([`DeviceDirectory::revocation_window`]).
+    pub(crate) fn set_window(&self, window: Option<RevocationWindow>) {
+        *self.2.lock().unwrap() = window;
+    }
+
     /// Sets the account key of the held signed state ([`DeviceDirectory::account_key`]).
     pub(crate) fn set_account_key(&self, key: AccountKeyState) {
         *self.1.lock().unwrap() = Some(key);
@@ -149,6 +157,19 @@ impl DeviceDirectory for Directory {
             None
         };
         async move { Ok(key) }
+    }
+
+    fn revocation_window<'a>(
+        &'a self,
+        _conn: Conn<'a>,
+        account_id: AccountId,
+    ) -> impl Future<Output = Result<Option<RevocationWindow>, DirectoryError>> + Send + 'a {
+        let window = if account_id == ACCOUNT {
+            *self.2.lock().unwrap()
+        } else {
+            None
+        };
+        async move { Ok(window) }
     }
 }
 
@@ -568,7 +589,7 @@ impl Env {
             records: List::new(records).unwrap(),
         };
         self.domain
-            .upload(ACCOUNT, &request, NOW)
+            .upload(ACCOUNT, None, &request, NOW)
             .await
             .unwrap()
             .results

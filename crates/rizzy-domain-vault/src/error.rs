@@ -54,6 +54,11 @@ pub enum VaultError {
     /// An attachment's declared size passes the 25 MiB cap or the account's remaining quota
     /// (ADR 0054 §6, ADR 0048 §5); answered `quota_exceeded`.
     QuotaExceeded,
+    /// Another device's revocation window is open ([ADR 0091] §2): the write is frozen for
+    /// every session not bound to the revoking device. Answered `revocation_pending`.
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+    RevocationPending,
 }
 
 impl VaultError {
@@ -66,6 +71,7 @@ impl VaultError {
             Self::StateConflict => ErrorCode::StateConflict,
             Self::RecordConflict => ErrorCode::RecordConflict,
             Self::QuotaExceeded => ErrorCode::QuotaExceeded,
+            Self::RevocationPending => ErrorCode::RevocationPending,
             Self::Storage(_)
             | Self::Directory(_)
             | Self::NoRestoreGeneration
@@ -90,6 +96,7 @@ impl fmt::Display for VaultError {
             Self::WrapSetTooLarge => f.write_str("the wrap set does not fit one Fetch response"),
             Self::RecordConflict => f.write_str("another record is stored under this id"),
             Self::QuotaExceeded => f.write_str("the attachment exceeds the cap or the quota"),
+            Self::RevocationPending => f.write_str("another device's revocation window is open"),
         }
     }
 }

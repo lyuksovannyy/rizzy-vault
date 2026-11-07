@@ -205,4 +205,66 @@ pub trait DeviceDirectory: Send + Sync {
         conn: Conn<'a>,
         account_id: AccountId,
     ) -> impl Future<Output = Result<Option<AccountKeyState>, DirectoryError>> + Send + 'a;
+
+    /// The stored revocation window of `account_id` ([ADR 0091] §2), read on `conn` (the
+    /// caller's write transaction, which holds the account lock), open or expired: the caller
+    /// compares `expires_at_ms` with its clock ([`RevocationWindow::is_open`]). `None` while the
+    /// account has none.
+    ///
+    /// # Errors
+    /// [`DirectoryError`] when the window cannot be read; the caller fails the request.
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+    fn revocation_window<'a>(
+        &'a self,
+        conn: Conn<'a>,
+        account_id: AccountId,
+    ) -> impl Future<Output = Result<Option<RevocationWindow>, DirectoryError>> + Send + 'a;
+}
+
+/// An account's revocation window as the `auth` domain stores it ([ADR 0091] §2): the revoking
+/// device R and when the window expires. While it is open, `vault/upload`, `vault/heal` and
+/// the three attachment writes refuse every writer that is not R with
+/// [`VaultError::RevocationPending`](crate::VaultError::RevocationPending).
+///
+/// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RevocationWindow {
+    /// The revoking device.
+    pub revoker: DeviceId,
+    /// When the window expires, ms since the Unix epoch.
+    pub expires_at_ms: u64,
+}
+
+impl RevocationWindow {
+    /// Whether the window is open at `now_ms` (`now_ms < expires_at_ms`).
+    #[must_use]
+    pub const fn is_open(&self, now_ms: u64) -> bool {
+        now_ms < self.expires_at_ms
+    }
+}
+
+/// The freeze of [ADR 0091] §2 in the vault domain: refuses `writer` (the device of the
+/// caller's session, `None` for a session bound to no device) while another device's window
+/// is open at `now_ms`. Called first in each vault write, on its write transaction under the
+/// account lock.
+///
+/// # Errors
+/// [`VaultError::RevocationPending`](crate::VaultError::RevocationPending); the directory's
+/// error.
+///
+/// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+pub(crate) async fn revocation_gate<D: DeviceDirectory>(
+    directory: &D,
+    conn: Conn<'_>,
+    account_id: AccountId,
+    writer: Option<DeviceId>,
+    now_ms: u64,
+) -> Result<(), crate::VaultError> {
+    match directory.revocation_window(conn, account_id).await? {
+        Some(w) if w.is_open(now_ms) && writer != Some(w.revoker) => {
+            Err(crate::VaultError::RevocationPending)
+        }
+        _ => Ok(()),
+    }
 }

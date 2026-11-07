@@ -28,6 +28,7 @@
 //! [ADR 0016]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0016-workspace-layout.md
 
 use rizzy_domain_auth::directory::{DeviceStanding, device_authors, signed_account_key};
+use rizzy_domain_auth::revocation::stored_window;
 use rizzy_domain_auth::types::{AccountId, DeviceId};
 use rizzy_domain_auth::types::{
     RecoveryVault, VaultId, VaultRotationUpload, VaultSelfGrant, VaultSummary,
@@ -35,7 +36,7 @@ use rizzy_domain_auth::types::{
 use rizzy_domain_auth::{AuthError, PersonalVault, VaultPort};
 use rizzy_domain_vault::{
     AccountKeyState, AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError,
-    PersonalVaultOutcome, VaultError, create_owned_vault, delete_vault,
+    PersonalVaultOutcome, RevocationWindow, VaultError, create_owned_vault, delete_vault,
 };
 use rizzy_domain_vault::{port, rotation};
 use rizzy_storage::{Conn, WriteTx};
@@ -229,6 +230,24 @@ impl DeviceDirectory for AuthDirectory {
         Ok(key.map(|k| AccountKeyState {
             account_key_epoch: k.account_key_epoch,
             account_key_id: k.account_key_id,
+        }))
+    }
+
+    async fn revocation_window<'a>(
+        &'a self,
+        conn: Conn<'a>,
+        account_id: AccountId,
+    ) -> Result<Option<RevocationWindow>, DirectoryError> {
+        // ADR 0091 §2: the auth domain's row, read on the vault write transaction's connection
+        // under the account lock; the vault domain compares the expiry with its clock.
+        let window = stored_window(conn, account_id)
+            .await
+            .map_err(|_| DirectoryError {
+                what: "the auth domain could not read the account's revocation window",
+            })?;
+        Ok(window.map(|w| RevocationWindow {
+            revoker: w.revoker,
+            expires_at_ms: w.expires_at_ms,
         }))
     }
 }

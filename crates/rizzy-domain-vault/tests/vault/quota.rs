@@ -94,7 +94,7 @@ fn a_record_past_the_limit_is_refused_at_the_exact_boundary() {
             vault_id: Id::from_bytes(VAULT.to_bytes()),
             records: List::new(records[1..].to_vec()).unwrap(),
         };
-        let answer = tight.upload(ACCOUNT, &request, NOW).await.unwrap();
+        let answer = tight.upload(ACCOUNT, None, &request, NOW).await.unwrap();
         assert_eq!(
             answer.results.into_vec(),
             vec![
@@ -110,7 +110,7 @@ fn a_record_past_the_limit_is_refused_at_the_exact_boundary() {
         // Exactly at the limit: stored (the refusal is "past", not "at"). The next record of the
         // same request is refused, and the one stored before it stays (ADR 0048 §3).
         let exact = env.domain_with_quota(exactly(at_start + second));
-        let answer = exact.upload(ACCOUNT, &request, NOW).await.unwrap();
+        let answer = exact.upload(ACCOUNT, None, &request, NOW).await.unwrap();
         assert_eq!(
             answer.results.into_vec(),
             vec![
@@ -124,7 +124,7 @@ fn a_record_past_the_limit_is_refused_at_the_exact_boundary() {
         assert_eq!(env.counted().await, at_start + second);
 
         // A record already stored is acknowledged even with the account at its limit.
-        let answer = exact.upload(ACCOUNT, &request, NOW).await.unwrap();
+        let answer = exact.upload(ACCOUNT, None, &request, NOW).await.unwrap();
         assert_eq!(answer.results.as_slice()[0], UploadResult::AlreadyStored);
     });
 }
@@ -150,7 +150,7 @@ fn the_headroom_lets_a_request_that_starts_at_the_quota_finish() {
             vault_id: Id::from_bytes(VAULT.to_bytes()),
             records: List::new(records[1..].to_vec()).unwrap(),
         };
-        let answer = domain.upload(ACCOUNT, &request, NOW).await.unwrap();
+        let answer = domain.upload(ACCOUNT, None, &request, NOW).await.unwrap();
         assert_eq!(answer.results.into_vec(), vec![UploadResult::Stored; 2]);
         assert_eq!(env.counted().await, at_quota + rest);
         // Past the quota and its headroom now: the next record is refused.
@@ -159,7 +159,7 @@ fn the_headroom_lets_a_request_that_starts_at_the_quota_finish() {
             vault_id: Id::from_bytes(VAULT.to_bytes()),
             records: List::new(next).unwrap(),
         };
-        let answer = domain.upload(ACCOUNT, &request, NOW).await.unwrap();
+        let answer = domain.upload(ACCOUNT, None, &request, NOW).await.unwrap();
         assert_eq!(
             answer.results.into_vec(),
             vec![UploadResult::Rejected {
@@ -214,14 +214,14 @@ fn a_healing_request_is_never_refused_for_quota_and_is_charged() {
             records: List::new(records).unwrap(),
             self_grant: None,
         };
-        none.heal(ACCOUNT, None, &heal, NOW).await.unwrap();
+        none.heal(ACCOUNT, None, None, &heal, NOW).await.unwrap();
         assert_eq!(env.counted().await, before + added);
         // An ordinary upload is refused at once.
         let request = rizzy_proto::vault::UploadRequest {
             vault_id: Id::from_bytes(VAULT.to_bytes()),
             records: List::new(chain(&a, item(1), 5, 5)).unwrap(),
         };
-        let answer = none.upload(ACCOUNT, &request, NOW).await.unwrap();
+        let answer = none.upload(ACCOUNT, None, &request, NOW).await.unwrap();
         assert_eq!(
             answer.results.into_vec(),
             vec![UploadResult::Rejected {

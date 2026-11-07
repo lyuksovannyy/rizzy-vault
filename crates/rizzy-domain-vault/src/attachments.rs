@@ -46,7 +46,7 @@
 //! [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
 
 use rizzy_core::attachment::{ATTACHMENT_KEY_WRAP_LEN, AttachmentLayout};
-use rizzy_core::ids::{AccountId, AttachmentId, ItemId, VaultId};
+use rizzy_core::ids::{AccountId, AttachmentId, DeviceId, ItemId, VaultId};
 use rizzy_proto::attachments::{
     AttachmentRequest, CreateAttachmentRequest, DownloadChunkRequest, DownloadChunkResponse,
     GetAttachmentResponse, UploadChunkRequest,
@@ -57,6 +57,7 @@ use rizzy_storage::convert::{sql_to_u32, sql_to_u64, u32_to_sql, u64_to_sql};
 use rizzy_storage::{Conn, lock_account, on_engine};
 use sqlx::Row;
 
+use crate::authors::{DeviceDirectory, revocation_gate};
 use crate::error::VaultError;
 use crate::usage::{charge, credit};
 use crate::{VaultDomain, repo, to_sql_time};
@@ -258,8 +259,10 @@ const fn attachment_id(id: &Id) -> AttachmentId {
 }
 
 /// The endpoint forms of the calls below, as `rizzy-server` maps `/api/v1/attachments/*` onto
-/// them: the `rizzy-proto` request in, the response out.
-impl<D> VaultDomain<D> {
+/// them: the `rizzy-proto` request in, the response out. `writer` is the device of the caller's
+/// session (`None` for a session bound to no device), for the revocation window's freeze
+/// (ADR 0091 §2).
+impl<D: DeviceDirectory> VaultDomain<D> {
     /// `attachments/create`: [`VaultDomain::create_attachment`].
     ///
     /// # Errors
@@ -267,6 +270,7 @@ impl<D> VaultDomain<D> {
     pub async fn attachments_create(
         &self,
         account_id: AccountId,
+        writer: Option<DeviceId>,
         request: &CreateAttachmentRequest,
         now_ms: u64,
     ) -> Result<(), VaultError> {
@@ -277,7 +281,8 @@ impl<D> VaultDomain<D> {
             attachment_key_wrap: request.attachment_key_wrap.as_bytes().to_vec(),
             total_plaintext_len: request.total_plaintext_len,
         };
-        self.create_attachment(account_id, &new, now_ms).await
+        self.create_attachment(account_id, writer, &new, now_ms)
+            .await
     }
 
     /// `attachments/get`: [`VaultDomain::attachment_key_wrap`].
@@ -309,13 +314,17 @@ impl<D> VaultDomain<D> {
     pub async fn attachments_upload_chunk(
         &self,
         account_id: AccountId,
+        writer: Option<DeviceId>,
         request: &UploadChunkRequest,
+        now_ms: u64,
     ) -> Result<(), VaultError> {
         self.upload_attachment_chunk(
             account_id,
+            writer,
             attachment_id(&request.attachment_id),
             request.chunk_index,
             request.envelope.as_slice(),
+            now_ms,
         )
         .await
     }
@@ -351,25 +360,35 @@ impl<D> VaultDomain<D> {
     pub async fn attachments_delete(
         &self,
         account_id: AccountId,
+        writer: Option<DeviceId>,
         request: &AttachmentRequest,
         now_ms: u64,
     ) -> Result<(), VaultError> {
-        self.delete_attachment(account_id, attachment_id(&request.attachment_id), now_ms)
-            .await
+        self.delete_attachment(
+            account_id,
+            writer,
+            attachment_id(&request.attachment_id),
+            now_ms,
+        )
+        .await
     }
 }
 
-impl<D> VaultDomain<D> {
+/// The three attachment writes refuse a `writer` that is not the revoker while another device's
+/// revocation window is open ([`VaultError::RevocationPending`], ADR 0091 §2), checked first
+/// under the account lock; reads are never frozen.
+impl<D: DeviceDirectory> VaultDomain<D> {
     /// `attachments/create` (ADR 0054 §6): declares an attachment and charges its counted bytes.
     ///
     /// # Errors
     /// [`VaultError::QuotaExceeded`] over the 25 MiB cap or the account's remaining quota;
     /// [`VaultError::Invalid`] for a wrap of the wrong length; [`VaultError::NotFound`] for a vault
     /// or an attachment id of another account; [`VaultError::RecordConflict`] for another
-    /// declaration under a stored id; storage errors.
+    /// declaration under a stored id; [`VaultError::RevocationPending`]; storage errors.
     pub async fn create_attachment(
         &self,
         account_id: AccountId,
+        writer: Option<DeviceId>,
         new: &NewAttachment,
         now_ms: u64,
     ) -> Result<(), VaultError> {
@@ -381,6 +400,7 @@ impl<D> VaultDomain<D> {
         let now_sql = to_sql_time(now_ms)?;
         let mut tx = self.database().begin_write().await?;
         lock_account(&mut tx, account_id.as_bytes()).await?;
+        revocation_gate(self.directory(), tx.conn(), account_id, writer, now_ms).await?;
         repo::vault(tx.conn(), new.vault_id)
             .await?
             .filter(|v| v.account_id == account_id)
@@ -440,16 +460,20 @@ impl<D> VaultDomain<D> {
     /// # Errors
     /// [`VaultError::NotFound`] for an unknown or foreign id or an index past the chunk count;
     /// [`VaultError::Invalid`] for an envelope of another length than the index's;
-    /// [`VaultError::RecordConflict`] for another envelope at a stored index; storage errors.
+    /// [`VaultError::RecordConflict`] for another envelope at a stored index;
+    /// [`VaultError::RevocationPending`]; storage errors.
     pub async fn upload_attachment_chunk(
         &self,
         account_id: AccountId,
+        writer: Option<DeviceId>,
         attachment_id: AttachmentId,
         chunk_index: u32,
         envelope: &[u8],
+        now_ms: u64,
     ) -> Result<(), VaultError> {
         let mut tx = self.database().begin_write().await?;
         lock_account(&mut tx, account_id.as_bytes()).await?;
+        revocation_gate(self.directory(), tx.conn(), account_id, writer, now_ms).await?;
         let stored = owned(tx.conn(), attachment_id, account_id).await?;
         let expected = stored
             .layout
@@ -503,17 +527,19 @@ impl<D> VaultDomain<D> {
     /// counted bytes, in one transaction.
     ///
     /// # Errors
-    /// [`VaultError::NotFound`] for an unknown or foreign id (a repeated delete included); storage
-    /// errors.
+    /// [`VaultError::NotFound`] for an unknown or foreign id (a repeated delete included);
+    /// [`VaultError::RevocationPending`]; storage errors.
     pub async fn delete_attachment(
         &self,
         account_id: AccountId,
+        writer: Option<DeviceId>,
         attachment_id: AttachmentId,
         now_ms: u64,
     ) -> Result<(), VaultError> {
         let now_sql = to_sql_time(now_ms)?;
         let mut tx = self.database().begin_write().await?;
         lock_account(&mut tx, account_id.as_bytes()).await?;
+        revocation_gate(self.directory(), tx.conn(), account_id, writer, now_ms).await?;
         let stored = owned(tx.conn(), attachment_id, account_id).await?;
         delete_rows(&mut tx.conn(), attachment_id).await?;
         charge(&mut tx, account_id, credit(stored.counted()), now_sql).await?;

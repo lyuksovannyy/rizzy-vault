@@ -99,7 +99,7 @@ fn a_healing_request_restores_headers_behind_a_fresh_snapshot() {
                 Record::Snapshot(sign_snapshot(&a, item(1), 7, &[(&a, 5)], 0)),
             ],
         );
-        let answer = env.domain.heal(ACCOUNT, None, &heal, NOW).await.unwrap();
+        let answer = env.domain.heal(ACCOUNT, None, None, &heal, NOW).await.unwrap();
         assert_eq!(answer.restore_generation.as_bytes(), &[2; 16]);
 
         let pages = env.fetch_all(&[]).await;
@@ -116,7 +116,7 @@ fn a_healing_request_restores_headers_behind_a_fresh_snapshot() {
         assert_eq!(pages[0].response.item_key_wraps.len(), 1);
 
         // The same request again changes nothing and is accepted: every part is already stored.
-        env.domain.heal(ACCOUNT, None, &heal, NOW).await.unwrap();
+        env.domain.heal(ACCOUNT, None, None, &heal, NOW).await.unwrap();
         assert_eq!(ops_of(&env.fetch_all(&[]).await).len(), 5);
         // Normal uploads continue the healed chain.
         env.store(chain(&a, item(1), 6, 6)).await;
@@ -165,7 +165,7 @@ fn a_healing_request_is_refused_whole() {
             (partly, ErrorCode::InvalidRequest),
             (gap, ErrorCode::PrevSeqMismatch),
         ] {
-            match env.domain.heal(ACCOUNT, None, &heal, NOW).await {
+            match env.domain.heal(ACCOUNT, None, None, &heal, NOW).await {
                 Err(HealingError::Refused(got)) => assert_eq!(got, code),
                 other => panic!("expected a refusal, got {other:?}"),
             }
@@ -184,7 +184,7 @@ fn a_healing_request_is_refused_whole() {
             ],
         );
         assert!(matches!(
-            env.domain.heal(ACCOUNT, None, &claims, NOW).await,
+            env.domain.heal(ACCOUNT, None, None, &claims, NOW).await,
             Err(HealingError::Refused(ErrorCode::InvalidRequest))
         ));
         assert_eq!(ops_of(&env.fetch_all(&[]).await).len(), 2);

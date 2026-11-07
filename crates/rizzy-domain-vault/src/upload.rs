@@ -54,7 +54,7 @@ use rizzy_storage::{WriteTx, lock_account};
 use rizzy_sync::compaction::check_healing_request;
 use rizzy_sync::dot::Dot;
 
-use crate::authors::DeviceDirectory;
+use crate::authors::{DeviceDirectory, revocation_gate};
 use crate::error::{HealingError, VaultError};
 use crate::intake::{WrapRule, verify_op, verify_snapshot};
 use crate::keys::heal_self_grant;
@@ -65,19 +65,22 @@ use crate::store::{
 };
 use crate::{VaultDomain, restore_generation, to_sql_time};
 
-/// Opens the store session of `vault_id` for `account_id` in `tx`: checks the vault's owner,
-/// takes the account lock, and reads the vault row, the heads, the certificates and the account's
-/// counted bytes under it. `byte_limit` is the quota plus headroom of an ordinary upload, `None`
-/// for a healing request (ADR 0048 §3).
+/// Opens the store session of `vault_id` for `account_id` in `tx`: takes the account lock,
+/// refuses `writer` while another device's revocation window is open (ADR 0091 §2), checks the
+/// vault's owner, and reads the vault row, the heads, the certificates and the account's counted
+/// bytes under it. `byte_limit` is the quota plus headroom of an ordinary upload, `None` for a
+/// healing request (ADR 0048 §3).
 pub(crate) async fn open_session<D: DeviceDirectory>(
     tx: &mut WriteTx,
     directory: &D,
     account_id: AccountId,
+    writer: Option<DeviceId>,
     vault_id: VaultId,
     now_ms: u64,
     byte_limit: Option<u64>,
 ) -> Result<Session, VaultError> {
     lock_account(tx, account_id.as_bytes()).await?;
+    revocation_gate(directory, tx.conn(), account_id, writer, now_ms).await?;
     let vault = repo::vault(tx.conn(), vault_id)
         .await?
         .filter(|v| v.account_id == account_id)
@@ -182,8 +185,14 @@ impl<D: DeviceDirectory> VaultDomain<D> {
     /// certificate expiry and the `stored_at_ms` columns.
     ///
     /// The response carries the restore generation (ADR 0021 §2) and one result per record.
+    /// `writer` is the device of the caller's session (`None` for a session bound to no
+    /// device): while another device's revocation window is open the whole upload is refused
+    /// ([ADR 0091] §2).
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
     ///
     /// # Errors
+    /// [`VaultError::RevocationPending`] while another device's revocation window is open;
     /// [`VaultError::NotFound`] for a vault that does not exist or belongs to another account;
     /// [`VaultError::Storage`], [`VaultError::Directory`], [`VaultError::NoRestoreGeneration`]
     /// or [`VaultError::Corrupt`] when the request cannot be served at all, in which case
@@ -191,6 +200,7 @@ impl<D: DeviceDirectory> VaultDomain<D> {
     pub async fn upload(
         &self,
         account_id: AccountId,
+        writer: Option<DeviceId>,
         request: &UploadRequest,
         now_ms: u64,
     ) -> Result<UploadResponse, VaultError> {
@@ -200,6 +210,7 @@ impl<D: DeviceDirectory> VaultDomain<D> {
             &mut tx,
             self.directory(),
             account_id,
+            writer,
             vault_id,
             now_ms,
             Some(self.quota().limit()),
@@ -245,17 +256,23 @@ impl<D: DeviceDirectory> VaultDomain<D> {
     /// self-grant is healing step 3b instead ([ADR 0032] §2–§3, [`crate::keys`]): `healer` is the
     /// device of the caller's session when it is a device session, `None` otherwise (an OPAQUE,
     /// web or recovery session), and only a durable device of the held device set may repair a
-    /// lagging self-grant.
+    /// lagging self-grant. `writer` is the device of the caller's session of any kind (`None`
+    /// for a session bound to no device): while another device's revocation window is open the
+    /// request is refused ([ADR 0091] §2).
     ///
     /// [ADR 0032]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0032-healing-rotation-after-backup.md
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
     ///
     /// # Errors
+    /// [`HealingError::Failed`] with [`VaultError::RevocationPending`] while another device's
+    /// revocation window is open;
     /// [`HealingError::Refused`] with the reason when a rule refuses the request;
     /// [`HealingError::Failed`] when it cannot be served at all ([`VaultError::NotFound`] for a
     /// vault of another account). Nothing is stored in either case.
     pub async fn heal(
         &self,
         account_id: AccountId,
+        writer: Option<DeviceId>,
         healer: Option<DeviceId>,
         request: &HealingRequest,
         now_ms: u64,
@@ -266,6 +283,7 @@ impl<D: DeviceDirectory> VaultDomain<D> {
             &mut tx,
             self.directory(),
             account_id,
+            writer,
             vault_id,
             now_ms,
             None,

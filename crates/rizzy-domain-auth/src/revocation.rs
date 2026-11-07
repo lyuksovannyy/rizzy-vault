@@ -70,8 +70,16 @@ impl RevocationWindow {
     }
 }
 
-/// The stored row of `account`, open or expired.
-async fn stored(conn: Conn<'_>, account: AccountId) -> Result<Option<RevocationWindow>, AuthError> {
+/// The stored window of `account`, open or expired, read on `conn`: what `rizzy-server`'s
+/// bridge hands the vault domain's `DeviceDirectory::revocation_window`, which compares the
+/// expiry with its own clock.
+///
+/// # Errors
+/// Storage errors; [`AuthError::Internal`] for a stored row of the wrong shape.
+pub async fn stored_window(
+    conn: Conn<'_>,
+    account: AccountId,
+) -> Result<Option<RevocationWindow>, AuthError> {
     let row: Option<(Vec<u8>, i64, i64)> = fetch_opt!(
         conn,
         (Vec<u8>, i64, i64),
@@ -102,7 +110,9 @@ pub async fn window(
     account: AccountId,
     now_ms: u64,
 ) -> Result<Option<RevocationWindow>, AuthError> {
-    Ok(stored(conn, account).await?.filter(|w| w.is_open(now_ms)))
+    Ok(stored_window(conn, account)
+        .await?
+        .filter(|w| w.is_open(now_ms)))
 }
 
 /// The open window of `account`, deleting an expired row ("the next write that reads it
@@ -112,7 +122,7 @@ async fn current(
     account: AccountId,
     now_ms: u64,
 ) -> Result<Option<RevocationWindow>, AuthError> {
-    match stored(reborrow(&mut conn), account).await? {
+    match stored_window(reborrow(&mut conn), account).await? {
         Some(w) if w.is_open(now_ms) => Ok(Some(w)),
         Some(_) => {
             close(conn, account).await?;

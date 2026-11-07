@@ -226,7 +226,7 @@ fn a_delete_cascades_and_releases_the_vaults_bytes() {
                 total_plaintext_len: size,
             };
             env.domain
-                .create_attachment(ACCOUNT, &new, NOW)
+                .create_attachment(ACCOUNT, None, &new, NOW)
                 .await
                 .unwrap();
         }

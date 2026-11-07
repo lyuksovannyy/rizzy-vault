@@ -149,7 +149,7 @@ pub mod usage;
 pub use attachments::NewAttachment;
 pub use authors::{
     AccountKeyState, AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError,
-    DuplicateDevice,
+    DuplicateDevice, RevocationWindow,
 };
 pub use compact::{CompactionFailure, CompactionReport, CompactionRun};
 pub use error::{HealingError, VaultError};

@@ -145,7 +145,7 @@ fn a_lagging_self_grant_is_repaired_with_its_wrap_set() {
         let wraps = vec![keys.wrap(true, item(1)), keys.wrap(true, item(3))];
         let new_row = wraps[0].clone();
         env.domain
-            .heal(ACCOUNT, Some(a.id), &step_3b(grant.clone(), wraps), NOW)
+            .heal(ACCOUNT, None, Some(a.id), &step_3b(grant.clone(), wraps), NOW)
             .await
             .unwrap();
         assert_eq!(env.domain.self_grant(ACCOUNT, VAULT).await.unwrap(), grant);
@@ -180,12 +180,12 @@ fn a_lagging_self_grant_is_repaired_with_its_wrap_set() {
         // and another device's valid grant at the stored epochs is one too (first repair wins).
         let wraps = vec![keys.wrap(true, item(1))];
         env.domain
-            .heal(ACCOUNT, Some(a.id), &step_3b(grant.clone(), wraps), NOW)
+            .heal(ACCOUNT, None, Some(a.id), &step_3b(grant.clone(), wraps), NOW)
             .await
             .unwrap();
         let other = keys.grant();
         env.domain
-            .heal(ACCOUNT, Some(a.id), &step_3b(other, Vec::new()), NOW)
+            .heal(ACCOUNT, None, Some(a.id), &step_3b(other, Vec::new()), NOW)
             .await
             .unwrap();
         assert_eq!(env.domain.self_grant(ACCOUNT, VAULT).await.unwrap(), grant);
@@ -197,6 +197,7 @@ fn a_lagging_self_grant_is_repaired_with_its_wrap_set() {
                 env.domain
                     .heal(
                         ACCOUNT,
+                        None,
                         Some(a.id),
                         &step_3b(further_grant, Vec::new()),
                         NOW
@@ -228,7 +229,7 @@ fn only_a_durable_device_of_the_held_set_repairs() {
         for healer in [None, Some(revoked.id), Some(suspended.id), Some(web.id)] {
             let request = step_3b(keys.grant(), vec![keys.wrap(true, item(1))]);
             assert_eq!(
-                refused(env.domain.heal(ACCOUNT, healer, &request, NOW).await),
+                refused(env.domain.heal(ACCOUNT, None, healer, &request, NOW).await),
                 ErrorCode::Unauthorized
             );
         }
@@ -246,7 +247,7 @@ fn each_check_of_the_lag_rule_refuses() {
         let env = restored(&mut keys, &a).await;
         let heal = |request: HealingRequest| {
             let env = &env;
-            async move { refused(env.domain.heal(ACCOUNT, Some(a.id), &request, NOW).await) }
+            async move { refused(env.domain.heal(ACCOUNT, None, Some(a.id), &request, NOW).await) }
         };
         // A wrong `key_id`: the grant under another account key.
         let other_account = AccountKey::generate(&mut keys.rng, 1);
@@ -314,7 +315,7 @@ fn a_heal_without_a_held_account_key_is_refused() {
         env.enrol(&[&a]);
         let request = step_3b(keys.grant(), Vec::new());
         assert_eq!(
-            refused(env.domain.heal(ACCOUNT, Some(a.id), &request, NOW).await),
+            refused(env.domain.heal(ACCOUNT, None, Some(a.id), &request, NOW).await),
             ErrorCode::InvalidRequest
         );
     });
@@ -343,7 +344,7 @@ fn a_vault_epoch_ahead_of_the_account_epoch_heals_but_not_below_a_record() {
         assert_eq!(
             refused(
                 env.domain
-                    .heal(ACCOUNT, Some(a.id), &step_3b(low_grant, Vec::new()), NOW)
+                    .heal(ACCOUNT, None, Some(a.id), &step_3b(low_grant, Vec::new()), NOW)
                     .await
             ),
             ErrorCode::InvalidRequest
@@ -353,10 +354,10 @@ fn a_vault_epoch_ahead_of_the_account_epoch_heals_but_not_below_a_record() {
         env.domain
             .heal(
                 ACCOUNT,
+                None,
                 Some(a.id),
                 &step_3b(grant.clone(), Vec::new()),
-                NOW,
-            )
+                NOW)
             .await
             .unwrap();
         assert_eq!(env.domain.self_grant(ACCOUNT, VAULT).await.unwrap(), grant);

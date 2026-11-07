@@ -39,3 +39,4 @@ mod rotation;
 mod selfgrant;
 mod upload;
 mod vaults;
+mod window;

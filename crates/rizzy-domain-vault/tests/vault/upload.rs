@@ -466,7 +466,7 @@ fn other_accounts_see_no_vault() {
             records: List::new(chain(&a, item(1), 1, 1)).unwrap(),
         };
         assert!(matches!(
-            env.domain.upload(OTHER_ACCOUNT, &upload, NOW).await,
+            env.domain.upload(OTHER_ACCOUNT, None, &upload, NOW).await,
             Err(VaultError::NotFound)
         ));
         assert!(matches!(
