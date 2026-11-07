@@ -21,7 +21,7 @@ use rizzy_proto::wire::List;
 use crate::common::{Client, Device, Env, block_on, bytes, recovery_wrap, self_grant, wid};
 
 /// Enrols a new durable device over a fresh OPAQUE session and returns it.
-async fn enrol(env: &mut Env, client: &mut Client) -> Device {
+pub(crate) async fn enrol(env: &mut Env, client: &mut Client) -> Device {
     let login = env.login(client).await;
     let session = env.bearer(&login.response.session_token).await;
     let device = client.make_device(&mut env.rng, env.now);
@@ -40,7 +40,7 @@ async fn enrol(env: &mut Env, client: &mut Client) -> Device {
 
 /// The rotation half of a change: a new account key, `E_srv'`, `E_id'`, the self-grant, `E_rec'`
 /// and a grant for each of `recipients`, sent by `sender`.
-fn rotation(
+pub(crate) fn rotation(
     env: &mut Env,
     client: &mut Client,
     export_key: &ExportKey,

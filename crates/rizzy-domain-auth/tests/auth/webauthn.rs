@@ -24,7 +24,7 @@ const RP_ID: &str = "vault.example.com";
 /// The test origin (`common::ORIGIN`).
 const ORIGIN: &str = "https://vault.example.com";
 /// Authenticator-data flags.
-const UP: u8 = 0x01;
+pub(crate) const UP: u8 = 0x01;
 const UV: u8 = 0x04;
 const AT: u8 = 0x40;
 
@@ -94,7 +94,7 @@ enum Alg {
 }
 
 /// A software security key: an ES256 key pair from `rizzy-core` and a credential id.
-struct SoftKey {
+pub(crate) struct SoftKey {
     signing: Es256SigningKey,
     cred_id: Vec<u8>,
 }
@@ -108,7 +108,7 @@ fn client_data(kind: &str, options: &str, origin: &str) -> Vec<u8> {
 }
 
 impl SoftKey {
-    fn new(env: &mut Env, id: u8) -> Self {
+    pub(crate) fn new(env: &mut Env, id: u8) -> Self {
         Self {
             signing: Es256SigningKey::generate(&mut env.rng),
             cred_id: vec![id; 32],
@@ -240,7 +240,7 @@ async fn fresh(env: &mut Env, client: &Client) -> rizzy_domain_auth::Session {
 }
 
 /// Enrols `key` under `label` through the fresh session `session`.
-async fn enrol(
+pub(crate) async fn enrol(
     env: &mut Env,
     session: &rizzy_domain_auth::Session,
     key: &SoftKey,

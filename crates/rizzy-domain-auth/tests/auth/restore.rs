@@ -83,7 +83,7 @@ pub(crate) async fn reregister(
 /// Device authentication carrying a certificate, the state `state_wire` that lists it, the
 /// chain, and the certificates of that state's device set (`set`, which lists `device` for a
 /// real one).
-async fn reconcile(
+pub(crate) async fn reconcile(
     env: &mut Env,
     client: &Client,
     device: &Device,
@@ -138,7 +138,7 @@ async fn reconcile(
 
 /// Restores `backup` into a new database a second after now, which opens a reconciliation
 /// epoch for every account, and serves it with `adjust`ed configuration a second later.
-async fn restore(env: &mut Env, backup: &Dump, adjust: impl FnOnce(&mut AuthConfig)) {
+pub(crate) async fn restore(env: &mut Env, backup: &Dump, adjust: impl FnOnce(&mut AuthConfig)) {
     env.tick(1_000);
     let path = env.dir.join("restored.db");
     let lock = WriterLock::acquire(&path).unwrap();
