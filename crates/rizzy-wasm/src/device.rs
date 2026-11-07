@@ -101,6 +101,7 @@ use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, item_ref, type_
 use crate::matching::{self, MatchDecision, MatchSettingsView, UriInput};
 use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
 use crate::removal::UnsentUpload;
+use crate::revocation;
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
 use crate::store::{CacheDelta, KvRow, decode_rows, encode_rows};
@@ -880,6 +881,34 @@ impl DeviceSession {
         self.account
             .recovery_notice()
             .and_then(|n| n.last_recovery_at_ms)
+    }
+
+    /// The device whose revocation holds the account's open revocation window, 32 hex digits,
+    /// as the last account answer served it ([ADR 0091] §2); `undefined` while none is open.
+    /// The server's word, unverified: for display and retry timing only ([`crate::revocation`]).
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+    #[wasm_bindgen(getter, js_name = revocationWindowRevokerId)]
+    #[must_use]
+    pub fn revocation_window_revoker_id(&self) -> Option<String> {
+        revocation::window_revoker(self.account.revocation_notice())
+    }
+
+    /// When that window expires (ADR 0091 §2), Unix milliseconds on the server's clock;
+    /// `undefined` while none is open. Unverified, for display and retry timing only.
+    #[wasm_bindgen(getter, js_name = revocationWindowExpiresAtMs)]
+    #[must_use]
+    pub fn revocation_window_expires_at_ms(&self) -> Option<u64> {
+        revocation::window_expires_at_ms(self.account.revocation_notice())
+    }
+
+    /// When to sync again after a sync the server refused `revocation_pending` (ADR 0091 §2),
+    /// with `retries_done` retries made: as [`crate::Session::revocation_retry_at`], timed by
+    /// this session's last account answer. `undefined`: stop retrying and report the refusal.
+    #[wasm_bindgen(js_name = revocationRetryAt)]
+    #[must_use]
+    pub fn revocation_retry_at(&self, retries_done: u32, now_ms: u64) -> Option<u64> {
+        revocation::retry_at(self.account.revocation_notice(), retries_done, now_ms)
     }
 
     /// Whether a sync is running.

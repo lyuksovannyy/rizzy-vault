@@ -40,6 +40,7 @@
 //! | [`create_passkey`] (`createPasskey`), [`CreatedPasskey`], [`Session::passkey_assertion`] (`passkeyAssertion`), [`PasskeyAssertion`] | `WebAuthn` passkey registration and assertion ([`passkey`]; ADR 0039) |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
 //! | [`cxf_export_warning`] | the CXF passkey export's own warning (ADR 0074 §2) |
+//! | [`revocation_pending_notice`] (`revocationPendingNotice`), `revocationRetryAt` and the `revocationWindow*` getters of [`Session`] and [`DeviceSession`] | the `revocation_pending` banner and its retry (ADR 0091 §2; [`revocation`]) |
 //! | [`plaintext_export_hold_ms`], [`detect_import_format`] | the hold after the plaintext warning; recognising an import file (owner decision 2026-10-05) |
 //! | [`CoreError`] | the one thrown error: a stable code ([`error`]) |
 //!
@@ -5640,6 +5641,7 @@ pub mod device {
     use crate::matching::{self, MatchDecision, MatchSettingsView, UriInput};
     use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
     use crate::removal::UnsentUpload;
+    use crate::revocation;
     use crate::rng::{Rng, os_rng};
     use crate::secret::take_secret;
     use crate::store::{CacheDelta, KvRow, decode_rows, encode_rows};
@@ -9671,6 +9673,375 @@ pub mod device {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             self.account.recovery_notice().and_then(|n| n.last_recovery_at_ms)
+        }
+        #[doc =
+        " The device whose revocation holds the account\'s open revocation window, 32 hex digits,"]
+        #[doc =
+        " as the last account answer served it ([ADR 0091] §2); `undefined` while none is open."]
+        #[doc =
+        " The server\'s word, unverified: for display and retry timing only ([`crate::revocation`])."]
+        #[doc = ""]
+        #[doc =
+        " [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md"]
+        #[must_use]
+        pub fn revocation_window_revoker_id(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The device whose revocation holds the account\'s open revocation window, 32 hex digits,"]
+                    #[doc =
+                    " as the last account answer served it ([ADR 0091] §2); `undefined` while none is open."]
+                    #[doc =
+                    " The server\'s word, unverified: for display and retry timing only ([`crate::revocation`])."]
+                    #[doc = ""]
+                    #[doc =
+                    " [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md"]
+                    #[must_use]
+                    #[export_name =
+                    "devicesession_revocationWindowRevokerId_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_revocationWindowRevokerId(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<DeviceSession>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.revocation_window_revoker_id();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The device whose revocation holds the account\'s open revocation window, 32 hex digits,"]
+                    #[doc =
+                    " as the last account answer served it ([ADR 0091] §2); `undefined` while none is open."]
+                    #[doc =
+                    " The server\'s word, unverified: for display and retry timing only ([`crate::revocation`])."]
+                    #[doc = ""]
+                    #[doc =
+                    " [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md"]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_revocationWindowRevokerId_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x05W The device whose revocation holds the account's open revocation window, 32 hex digits,W as the last account answer served it ([ADR 0091] \xc2\xa72); `undefined` while none is open.Z The server's word, unverified: for display and retry timing only ([`crate::revocation`]).\0p [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md\0\0\0\0\x19revocationWindowRevokerId\x01\x01\0\0\0\0\x01\0\x02\x19revocationWindowRevokerId\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            revocation::window_revoker(self.account.revocation_notice())
+        }
+        #[doc =
+        " When that window expires (ADR 0091 §2), Unix milliseconds on the server\'s clock;"]
+        #[doc =
+        " `undefined` while none is open. Unverified, for display and retry timing only."]
+        #[must_use]
+        pub fn revocation_window_expires_at_ms(&self) -> Option<u64> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When that window expires (ADR 0091 §2), Unix milliseconds on the server\'s clock;"]
+                    #[doc =
+                    " `undefined` while none is open. Unverified, for display and retry timing only."]
+                    #[must_use]
+                    #[export_name =
+                    "devicesession_revocationWindowExpiresAtMs_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_revocationWindowExpiresAtMs(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<u64> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<DeviceSession>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.revocation_window_expires_at_ms();
+                                            _ret
+                                        }
+                                    });
+                        <Option<u64> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When that window expires (ADR 0091 §2), Unix milliseconds on the server\'s clock;"]
+                    #[doc =
+                    " `undefined` while none is open. Unverified, for display and retry timing only."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_revocationWindowExpiresAtMs_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<u64> as WasmDescribe>::describe();
+                        <Option<u64> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x02R When that window expires (ADR 0091 \xc2\xa72), Unix milliseconds on the server's clock;O `undefined` while none is open. Unverified, for display and retry timing only.\0\0\0\0\x1brevocationWindowExpiresAtMs\x01\x01\0\0\0\0\x01\0\x02\x1brevocationWindowExpiresAtMs\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            revocation::window_expires_at_ms(self.account.revocation_notice())
+        }
+        #[doc =
+        " When to sync again after a sync the server refused `revocation_pending` (ADR 0091 §2),"]
+        #[doc =
+        " with `retries_done` retries made: as [`crate::Session::revocation_retry_at`], timed by"]
+        #[doc =
+        " this session\'s last account answer. `undefined`: stop retrying and report the refusal."]
+        #[must_use]
+        pub fn revocation_retry_at(&self, retries_done: u32, now_ms: u64)
+            -> Option<u64> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When to sync again after a sync the server refused `revocation_pending` (ADR 0091 §2),"]
+                    #[doc =
+                    " with `retries_done` retries made: as [`crate::Session::revocation_retry_at`], timed by"]
+                    #[doc =
+                    " this session\'s last account answer. `undefined`: stop retrying and report the refusal."]
+                    #[must_use]
+                    #[export_name =
+                    "devicesession_revocationRetryAt_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_revocationRetryAt(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<u64> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u32>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <u32 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u32 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let _ret = me.revocation_retry_at(arg1, arg2);
+                                            _ret
+                                        }
+                                    });
+                        <Option<u64> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When to sync again after a sync the server refused `revocation_pending` (ADR 0091 §2),"]
+                    #[doc =
+                    " with `retries_done` retries made: as [`crate::Session::revocation_retry_at`], timed by"]
+                    #[doc =
+                    " this session\'s last account answer. `undefined`: stop retrying and report the refusal."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_revocationRetryAt_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(2u32);
+                        <u32 as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
+                        <Option<u64> as WasmDescribe>::describe();
+                        <Option<u64> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x03X When to sync again after a sync the server refused `revocation_pending` (ADR 0091 \xc2\xa72),W with `retries_done` retries made: as [`crate::Session::revocation_retry_at`], timed byW this session's last account answer. `undefined`: stop retrying and report the refusal.\0\x02\x0cretries_done\0\0\0\x06now_ms\0\0\0\0\0\x11revocationRetryAt\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            revocation::retry_at(self.account.revocation_notice(),
+                retries_done, now_ms)
         }
         #[doc = " Whether a sync is running."]
         #[must_use]
@@ -16352,6 +16723,7 @@ pub mod error {
                     ErrorCode::SetupRetired => "server_setup_retired",
                     ErrorCode::CredentialsStale => "server_credentials_stale",
                     ErrorCode::QuotaExceeded => "server_quota_exceeded",
+                    ErrorCode::RevocationPending => "server_revocation_pending",
                     ErrorCode::Internal => "server_internal",
                     _ => "server_unknown",
                 })
@@ -43366,6 +43738,136 @@ mod removal {
         }
     }
 }
+pub mod revocation {
+    //! The server's revocation notice on a web or extension session ([ADR 0091] §2 "What clients
+    //! see"): the banner text, the suspended devices, the open window, and when to retry a write
+    //! the server refused `revocation_pending`.
+    //!
+    //! Every value here comes from `rizzy-client`'s [`rizzy_client::revocation`]: the notice is the
+    //! last verified account answer's (`VerifiedAccount::revocation_notice`), unsigned and advisory.
+    //! A host uses it to show the banner, the Devices pane's "Suspended" and to time the retry,
+    //! never for a security decision; a server that lies in it gains only a delayed or a needless
+    //! retry. Nothing here starts a revocation: ADR 0091 §8 step 7 gives the web vault and the
+    //! extension the banner and the suspended state only (kind 4 cannot revoke, CRYPTO.md §11's flow
+    //! table).
+    //!
+    //! A host that gets `server_revocation_pending` from a sync shows
+    //! [`revocation_pending_notice`] while reads go on, asks `revocationRetryAt` (on
+    //! [`crate::Session`] or [`crate::DeviceSession`]) when to sync again, and stops retrying and
+    //! reports the refusal once it answers `undefined`. A sync starts with `account/state`, so the
+    //! window a retry is timed by is that of a fresh answer.
+    //!
+    //! [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+    use rizzy_client::revocation::{
+        REVOCATION_PENDING_MESSAGE, RevocationNotice, next_revocation_retry,
+    };
+    use wasm_bindgen::prelude::wasm_bindgen;
+    use crate::items::hex;
+    #[allow(dead_code)]
+    #[doc =
+    " What a host shows while a write is refused `revocation_pending` (ADR 0091 §2): \"Another of"]
+    #[doc =
+    " your devices is removing a device. Changes are paused for up to 10 minutes.\""]
+    #[must_use]
+    pub fn revocation_pending_notice() -> String {
+        REVOCATION_PENDING_MESSAGE.to_owned()
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " What a host shows while a write is refused `revocation_pending` (ADR 0091 §2): \"Another of"]
+            #[doc =
+            " your devices is removing a device. Changes are paused for up to 10 minutes.\""]
+            #[must_use]
+            #[export_name = "revocationPendingNotice_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_revocationPendingNotice()
+                ->
+                    wasm_bindgen::convert::WasmRet<<String as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            { { let _ret = revocation_pending_notice(); _ret } });
+                <String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " What a host shows while a write is refused `revocation_pending` (ADR 0091 §2): \"Another of"]
+            #[doc =
+            " your devices is removing a device. Changes are paused for up to 10 minutes.\""]
+            #[must_use]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_revocationPendingNotice_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(0u32);
+                <String as WasmDescribe>::describe();
+                <String as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x02\\ What a host shows while a write is refused `revocation_pending` (ADR 0091 \xc2\xa72): \"Another ofM your devices is removing a device. Changes are paused for up to 10 minutes.\"\0\0\0\0\x17revocationPendingNotice\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    /// The open window's revoking device, 32 hex digits, as served.
+    pub(crate) fn window_revoker(notice: &RevocationNotice)
+        -> Option<String> {
+        notice.window.map(|(revoker, _)| hex(revoker.as_bytes()))
+    }
+    /// When the open window expires, Unix milliseconds on the server's clock, as served.
+    pub(crate) fn window_expires_at_ms(notice: &RevocationNotice)
+        -> Option<u64> {
+        notice.window.map(|(_, expires_at_ms)| expires_at_ms)
+    }
+    /// Whether a device (`device_id`, 16 bytes) shows as suspended: not `revoked` by the verified
+    /// state, and listed as suspended by the notice.
+    pub(crate) fn is_suspended(notice: &RevocationNotice, revoked: bool,
+        device_id: &[u8; 16]) -> bool {
+        !revoked && notice.suspended.iter().any(|d| d.as_bytes() == device_id)
+    }
+    /// When to retry a request refused `revocation_pending`, after `retries_done` retries, timed by
+    /// the notice's window ([`next_revocation_retry`]); `None`: stop and report the refusal.
+    pub(crate) fn retry_at(notice: &RevocationNotice, retries_done: u32,
+        now_ms: u64) -> Option<u64> {
+        next_revocation_retry(retries_done, now_ms, notice.window)
+    }
+}
 mod rng {
     //! The randomness the libraries never draw themselves (ADR 0016 R2; ADR 0009 "RNG rules", as
     //! ADR 0019 §1.3 restates its third bullet; CRYPTO.md §12.1). This leaf crate supplies it to
@@ -43545,6 +44047,7 @@ pub mod session {
     use crate::login::{Credentials, LoginFlow, Purpose};
     use crate::matching::{self, MatchDecision, MatchSettingsView};
     use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
+    use crate::revocation;
     use crate::rng::{Rng, os_rng};
     use crate::secret::take_secret;
     use crate::sync::{Ctx, Signer, SyncDriver};
@@ -53272,6 +53775,407 @@ pub mod session {
             Ok(self.inner()?.account.recovery_notice().and_then(|n|
                         n.last_recovery_at_ms))
         }
+        #[doc =
+        " The device whose revocation holds the account\'s open revocation window, 32 hex digits,"]
+        #[doc =
+        " as the last account answer served it ([ADR 0091] §2); `undefined` while none is open."]
+        #[doc =
+        " The server\'s word, unverified: for display and retry timing only ([`crate::revocation`])."]
+        #[doc = ""]
+        #[doc =
+        " [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md"]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn revocation_window_revoker_id(&self)
+            -> Result<Option<String>, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The device whose revocation holds the account\'s open revocation window, 32 hex digits,"]
+                    #[doc =
+                    " as the last account answer served it ([ADR 0091] §2); `undefined` while none is open."]
+                    #[doc =
+                    " The server\'s word, unverified: for display and retry timing only ([`crate::revocation`])."]
+                    #[doc = ""]
+                    #[doc =
+                    " [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md"]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name =
+                    "session_revocationWindowRevokerId_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_revocationWindowRevokerId(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Option<String>,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<Session>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.revocation_window_revoker_id();
+                                            _ret
+                                        }
+                                    });
+                        <Result<Option<String>, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The device whose revocation holds the account\'s open revocation window, 32 hex digits,"]
+                    #[doc =
+                    " as the last account answer served it ([ADR 0091] §2); `undefined` while none is open."]
+                    #[doc =
+                    " The server\'s word, unverified: for display and retry timing only ([`crate::revocation`])."]
+                    #[doc = ""]
+                    #[doc =
+                    " [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md"]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_revocationWindowRevokerId_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<Option<String>, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<Option<String>, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x08W The device whose revocation holds the account's open revocation window, 32 hex digits,W as the last account answer served it ([ADR 0091] \xc2\xa72); `undefined` while none is open.Z The server's word, unverified: for display and retry timing only ([`crate::revocation`]).\0p [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md\0\t # Errors\n `locked`.\0\0\0\0\x19revocationWindowRevokerId\x01\x01\0\0\0\0\x01\0\x02\x19revocationWindowRevokerId\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            Ok(revocation::window_revoker(self.inner()?.account.revocation_notice()))
+        }
+        #[doc =
+        " When that window expires (ADR 0091 §2), Unix milliseconds on the server\'s clock;"]
+        #[doc =
+        " `undefined` while none is open. Unverified, for display and retry timing only."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn revocation_window_expires_at_ms(&self)
+            -> Result<Option<u64>, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When that window expires (ADR 0091 §2), Unix milliseconds on the server\'s clock;"]
+                    #[doc =
+                    " `undefined` while none is open. Unverified, for display and retry timing only."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name =
+                    "session_revocationWindowExpiresAtMs_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_revocationWindowExpiresAtMs(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Option<u64>,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<Session>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.revocation_window_expires_at_ms();
+                                            _ret
+                                        }
+                                    });
+                        <Result<Option<u64>, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When that window expires (ADR 0091 §2), Unix milliseconds on the server\'s clock;"]
+                    #[doc =
+                    " `undefined` while none is open. Unverified, for display and retry timing only."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_revocationWindowExpiresAtMs_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<Option<u64>, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<Option<u64>, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x05R When that window expires (ADR 0091 \xc2\xa72), Unix milliseconds on the server's clock;O `undefined` while none is open. Unverified, for display and retry timing only.\0\t # Errors\n `locked`.\0\0\0\0\x1brevocationWindowExpiresAtMs\x01\x01\0\0\0\0\x01\0\x02\x1brevocationWindowExpiresAtMs\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            Ok(revocation::window_expires_at_ms(self.inner()?.account.revocation_notice()))
+        }
+        #[doc =
+        " When to sync again after a sync the server refused `revocation_pending` (ADR 0091 §2),"]
+        #[doc =
+        " with `retries_done` retries made: 15 s after `now_ms`, then every 15 s until the last"]
+        #[doc =
+        " account answer\'s window expires plus 5 s, at most 41 retries"]
+        #[doc =
+        " (`rizzy_client::revocation::next_revocation_retry`). `undefined`: stop retrying and"]
+        #[doc = " report the refusal."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn revocation_retry_at(&self, retries_done: u32, now_ms: u64)
+            -> Result<Option<u64>, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When to sync again after a sync the server refused `revocation_pending` (ADR 0091 §2),"]
+                    #[doc =
+                    " with `retries_done` retries made: 15 s after `now_ms`, then every 15 s until the last"]
+                    #[doc =
+                    " account answer\'s window expires plus 5 s, at most 41 retries"]
+                    #[doc =
+                    " (`rizzy_client::revocation::next_revocation_retry`). `undefined`: stop retrying and"]
+                    #[doc = " report the refusal."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name =
+                    "session_revocationRetryAt_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_revocationRetryAt(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Option<u64>,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u32>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <u32 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u32 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let _ret = me.revocation_retry_at(arg1, arg2);
+                                            _ret
+                                        }
+                                    });
+                        <Result<Option<u64>, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When to sync again after a sync the server refused `revocation_pending` (ADR 0091 §2),"]
+                    #[doc =
+                    " with `retries_done` retries made: 15 s after `now_ms`, then every 15 s until the last"]
+                    #[doc =
+                    " account answer\'s window expires plus 5 s, at most 41 retries"]
+                    #[doc =
+                    " (`rizzy_client::revocation::next_revocation_retry`). `undefined`: stop retrying and"]
+                    #[doc = " report the refusal."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_revocationRetryAt_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(2u32);
+                        <u32 as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
+                        <Result<Option<u64>, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<Option<u64>, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x08X When to sync again after a sync the server refused `revocation_pending` (ADR 0091 \xc2\xa72),V with `retries_done` retries made: 15 s after `now_ms`, then every 15 s until the last= account answer's window expires plus 5 s, at most 41 retriesT (`rizzy_client::revocation::next_revocation_retry`). `undefined`: stop retrying and\x14 report the refusal.\0\t # Errors\n `locked`.\0\x02\x0cretries_done\0\0\0\x06now_ms\0\0\0\0\0\x11revocationRetryAt\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            Ok(revocation::retry_at(self.inner()?.account.revocation_notice(),
+                    retries_done, now_ms))
+        }
         #[doc = " Whether a sync is running."]
         #[doc = ""]
         #[doc = " # Errors"]
@@ -61203,12 +62107,16 @@ pub mod session {
                                 c.certificate.in_device_set()).map(|c|
                             {
                                 let certificate = &c.certificate;
+                                let revoked =
+                                    revocations.iter().any(|r|
+                                            r.revocation.device_id == certificate.device_id);
                                 DeviceView {
                                     id: hex(certificate.device_id.as_bytes()),
                                     kind: kind_name(certificate.device_kind),
                                     created_at_ms: certificate.created_at_ms,
-                                    revoked: revocations.iter().any(|r|
-                                            r.revocation.device_id == certificate.device_id),
+                                    revoked,
+                                    suspended: revocation::is_suspended(inner.account.revocation_notice(),
+                                        revoked, certificate.device_id.as_bytes()),
                                 }
                             }).collect())
         }
@@ -69968,6 +70876,9 @@ pub mod session {
         created_at_ms: u64,
         #[doc = " Whether it is revoked."]
         revoked: bool,
+        #[doc =
+        " Whether it is not revoked and the server lists it as suspended (ADR 0091 §2)."]
+        suspended: bool,
     }
     #[automatically_derived]
     impl ::core::clone::Clone for DeviceView {
@@ -69978,6 +70889,7 @@ pub mod session {
                 kind: ::core::clone::Clone::clone(&self.kind),
                 created_at_ms: ::core::clone::Clone::clone(&self.created_at_ms),
                 revoked: ::core::clone::Clone::clone(&self.revoked),
+                suspended: ::core::clone::Clone::clone(&self.suspended),
             }
         }
     }
@@ -69985,10 +70897,10 @@ pub mod session {
     impl ::core::fmt::Debug for DeviceView {
         #[inline]
         fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-            ::core::fmt::Formatter::debug_struct_field4_finish(f,
+            ::core::fmt::Formatter::debug_struct_field5_finish(f,
                 "DeviceView", "id", &self.id, "kind", &self.kind,
                 "created_at_ms", &self.created_at_ms, "revoked",
-                &&self.revoked)
+                &self.revoked, "suspended", &&self.suspended)
         }
     }
     #[automatically_derived]
@@ -70617,6 +71529,118 @@ pub mod session {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             self.revoked
+        }
+        #[doc =
+        " Whether the last account answer lists the device as suspended and not revoked: another"]
+        #[doc =
+        " device is removing it ([ADR 0091] §2 \"What clients see\"). The server\'s word, unsigned:"]
+        #[doc = " for display only, never for a decision."]
+        #[doc = ""]
+        #[doc =
+        " [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md"]
+        #[must_use]
+        pub fn suspended(&self) -> bool {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Whether the last account answer lists the device as suspended and not revoked: another"]
+                    #[doc =
+                    " device is removing it ([ADR 0091] §2 \"What clients see\"). The server\'s word, unsigned:"]
+                    #[doc = " for display only, never for a decision."]
+                    #[doc = ""]
+                    #[doc =
+                    " [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md"]
+                    #[must_use]
+                    #[export_name = "deviceview_suspended_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceView_suspended(me:
+                            <DeviceView as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<bool as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<DeviceView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceView>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.suspended();
+                                            _ret
+                                        }
+                                    });
+                        <bool as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Whether the last account answer lists the device as suspended and not revoked: another"]
+                    #[doc =
+                    " device is removing it ([ADR 0091] §2 \"What clients see\"). The server\'s word, unsigned:"]
+                    #[doc = " for display only, never for a decision."]
+                    #[doc = ""]
+                    #[doc =
+                    " [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md"]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_deviceview_suspended_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <bool as WasmDescribe>::describe();
+                        <bool as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nDeviceView\x05W Whether the last account answer lists the device as suspended and not revoked: anotherX device is removing it ([ADR 0091] \xc2\xa72 \"What clients see\"). The server's word, unsigned:( for display only, never for a decision.\0p [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md\0\0\0\0\tsuspended\x01\x01\0\0\0\0\x01\0\x02\tsuspended\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.suspended
         }
     }
     #[automatically_derived]
@@ -78454,6 +79478,7 @@ pub use matching::{
     normalize_page_url,
 };
 pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
+pub use revocation::revocation_pending_notice;
 pub use session::{
     AttachmentView, CxfExport, DeviceView, EncryptedExport, ImportReport,
     Notice, Session, SessionRow, TotpCode, TwoFactorEnrolment,

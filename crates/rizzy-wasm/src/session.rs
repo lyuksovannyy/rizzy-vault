@@ -111,6 +111,7 @@ use crate::items::{
 use crate::login::{Credentials, LoginFlow, Purpose};
 use crate::matching::{self, MatchDecision, MatchSettingsView};
 use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
+use crate::revocation;
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
 use crate::sync::{Ctx, Signer, SyncDriver};
@@ -426,6 +427,54 @@ impl Session {
             .account
             .recovery_notice()
             .and_then(|n| n.last_recovery_at_ms))
+    }
+
+    /// The device whose revocation holds the account's open revocation window, 32 hex digits,
+    /// as the last account answer served it ([ADR 0091] §2); `undefined` while none is open.
+    /// The server's word, unverified: for display and retry timing only ([`crate::revocation`]).
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(getter, js_name = revocationWindowRevokerId)]
+    pub fn revocation_window_revoker_id(&self) -> Result<Option<String>, CoreError> {
+        Ok(revocation::window_revoker(
+            self.inner()?.account.revocation_notice(),
+        ))
+    }
+
+    /// When that window expires (ADR 0091 §2), Unix milliseconds on the server's clock;
+    /// `undefined` while none is open. Unverified, for display and retry timing only.
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(getter, js_name = revocationWindowExpiresAtMs)]
+    pub fn revocation_window_expires_at_ms(&self) -> Result<Option<u64>, CoreError> {
+        Ok(revocation::window_expires_at_ms(
+            self.inner()?.account.revocation_notice(),
+        ))
+    }
+
+    /// When to sync again after a sync the server refused `revocation_pending` (ADR 0091 §2),
+    /// with `retries_done` retries made: 15 s after `now_ms`, then every 15 s until the last
+    /// account answer's window expires plus 5 s, at most 41 retries
+    /// (`rizzy_client::revocation::next_revocation_retry`). `undefined`: stop retrying and
+    /// report the refusal.
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(js_name = revocationRetryAt)]
+    pub fn revocation_retry_at(
+        &self,
+        retries_done: u32,
+        now_ms: u64,
+    ) -> Result<Option<u64>, CoreError> {
+        Ok(revocation::retry_at(
+            self.inner()?.account.revocation_notice(),
+            retries_done,
+            now_ms,
+        ))
     }
 
     /// Whether a sync is running.
@@ -1527,13 +1576,19 @@ impl Session {
             .filter(|c| c.certificate.in_device_set())
             .map(|c| {
                 let certificate = &c.certificate;
+                let revoked = revocations
+                    .iter()
+                    .any(|r| r.revocation.device_id == certificate.device_id);
                 DeviceView {
                     id: hex(certificate.device_id.as_bytes()),
                     kind: kind_name(certificate.device_kind),
                     created_at_ms: certificate.created_at_ms,
-                    revoked: revocations
-                        .iter()
-                        .any(|r| r.revocation.device_id == certificate.device_id),
+                    revoked,
+                    suspended: revocation::is_suspended(
+                        inner.account.revocation_notice(),
+                        revoked,
+                        certificate.device_id.as_bytes(),
+                    ),
                 }
             })
             .collect())
@@ -2465,6 +2520,8 @@ pub struct DeviceView {
     created_at_ms: u64,
     /// Whether it is revoked.
     revoked: bool,
+    /// Whether it is not revoked and the server lists it as suspended (ADR 0091 §2).
+    suspended: bool,
 }
 
 #[wasm_bindgen]
@@ -2495,6 +2552,17 @@ impl DeviceView {
     #[must_use]
     pub fn revoked(&self) -> bool {
         self.revoked
+    }
+
+    /// Whether the last account answer lists the device as suspended and not revoked: another
+    /// device is removing it ([ADR 0091] §2 "What clients see"). The server's word, unsigned:
+    /// for display only, never for a decision.
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn suspended(&self) -> bool {
+        self.suspended
     }
 }
 

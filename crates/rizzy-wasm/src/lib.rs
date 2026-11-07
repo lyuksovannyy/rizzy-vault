@@ -39,6 +39,7 @@
 //! | [`create_passkey`] (`createPasskey`), [`CreatedPasskey`], [`Session::passkey_assertion`] (`passkeyAssertion`), [`PasskeyAssertion`] | `WebAuthn` passkey registration and assertion ([`passkey`]; ADR 0039) |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
 //! | [`cxf_export_warning`] | the CXF passkey export's own warning (ADR 0074 §2) |
+//! | [`revocation_pending_notice`] (`revocationPendingNotice`), `revocationRetryAt` and the `revocationWindow*` getters of [`Session`] and [`DeviceSession`] | the `revocation_pending` banner and its retry (ADR 0091 §2; [`revocation`]) |
 //! | [`plaintext_export_hold_ms`], [`detect_import_format`] | the hold after the plaintext warning; recognising an import file (owner decision 2026-10-05) |
 //! | [`CoreError`] | the one thrown error: a stable code ([`error`]) |
 //!
@@ -107,6 +108,7 @@ mod login;
 pub mod matching;
 pub mod passkey;
 mod removal;
+pub mod revocation;
 mod rng;
 pub mod secret;
 pub mod session;
@@ -129,6 +131,7 @@ pub use items::{FieldView, HistoryEntryView, ItemDraft, ItemSummary, generate_el
 pub use login::LoginFlow;
 pub use matching::{GlobalEquivalence, MatchDecision, decide_match_candidates, normalize_page_url};
 pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
+pub use revocation::revocation_pending_notice;
 pub use session::{
     AttachmentView, CxfExport, DeviceView, EncryptedExport, ImportReport, Notice, Session,
     SessionRow, TotpCode, TwoFactorEnrolment, cxf_export_warning, detect_import_format,
