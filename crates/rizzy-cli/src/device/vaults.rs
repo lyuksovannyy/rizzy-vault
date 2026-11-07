@@ -729,6 +729,7 @@ impl Device {
     ) -> Result<ItemId, CliError> {
         self.check_vault_writable(target)?;
         self.vaults.require(source)?;
+        self.set_row_rooms();
         let copied = {
             let (from, to) = self.vaults.pair_mut(source, target)?;
             vaults::copy_item(&mut self.rng, &self.unlocked, from, item, to, now_ms())
@@ -762,6 +763,10 @@ impl Device {
     ) -> Result<(ItemId, bool), CliError> {
         self.check_vault_writable(source)?;
         self.check_vault_writable(target)?;
+        // ADR 0092 §6, ADR 0081 §A6 point 4: a move the target has no room for stops before
+        // the source is touched.
+        self.set_row_rooms();
+        self.vaults.require(target)?.check_row_room(1)?;
         let pending = PendingMove::new(&mut self.rng, self.vaults.require(source)?, item, target)?;
         // INV-104: durable before the first op of the copy.
         self.commit(core::iter::once(pending.row_write()).collect())

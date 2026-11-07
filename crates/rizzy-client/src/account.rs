@@ -232,6 +232,11 @@ pub struct StorageUsage {
     pub bytes_used: u64,
     /// The instance's per-account quota.
     pub quota_bytes: u64,
+    /// The account's wrap-set rows as the server counts them ([ADR 0092] §6), 0 from an older
+    /// server; [`crate::row_limits::RowCounts`] takes the larger of it and the replica's count.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    pub wrap_rows: u64,
 }
 
 impl StorageUsage {
@@ -245,6 +250,7 @@ impl StorageUsage {
             Some(Self {
                 bytes_used: view.bytes_used,
                 quota_bytes: view.quota_bytes,
+                wrap_rows: view.wrap_rows as u64,
             })
         }
     }

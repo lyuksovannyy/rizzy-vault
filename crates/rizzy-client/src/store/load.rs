@@ -300,6 +300,8 @@ fn account_view(rows: &CacheRows) -> Result<AccountView, ClientError> {
         pending_recovery: None,
         suspended_devices: List::empty(),
         revocation_window: None,
+        wrap_rows: 0,
+        wrap_rows_limit: 0,
     })
 }
 

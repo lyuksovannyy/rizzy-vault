@@ -498,6 +498,8 @@ impl VaultSync {
         now_ms: u64,
     ) -> Result<ItemsImported, ClientError> {
         self.check_writable(unlocked)?;
+        // ADR 0092 §6: the whole batch fits, or nothing is imported.
+        self.check_row_room(items.len())?;
         let mut out = ItemsImported::default();
         for item in items {
             let writes: Vec<ImportWrite<'_>> = item

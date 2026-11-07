@@ -216,6 +216,13 @@ pub enum ClientError {
     /// vaults without a directory). The client raises an alarm and writes nothing to the vault
     /// set.
     VaultSetMismatch,
+    /// [ADR 0092] §6: the action would take the account past `MAX_ACCOUNT_WRAP_ROWS` wrap-set
+    /// rows or a vault past `MAX_ITEM_KEY_WRAPS`, as this client counts them (the server's
+    /// `rotation_limit` too). Refused whole before anything was written; deleting items or
+    /// emptying Trash frees room.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    RotationLimit,
     /// An internal step failed that the inputs cannot cause: a sealing, signing, encoding or
     /// derivation call that is unreachable for valid state. No detail is kept on purpose.
     Internal,
@@ -282,6 +289,7 @@ impl ClientError {
             Self::PersonalVaultProtected => "personal_vault_protected",
             Self::VaultLimitReached => "vault_limit_reached",
             Self::VaultSetMismatch => "vault_set_mismatch",
+            Self::RotationLimit => "rotation_limit",
             Self::Internal => "internal",
         }
     }
@@ -378,6 +386,7 @@ impl fmt::Display for ClientError {
             Self::PersonalVaultProtected => "the Personal vault cannot be deleted, renamed or shared",
             Self::VaultLimitReached => "the account holds the most vaults allowed",
             Self::VaultSetMismatch => "the server's vaults do not match the account's vault list",
+            Self::RotationLimit => "the account or the vault is at its item limit",
             Self::Internal => "internal error",
         })
     }
@@ -453,6 +462,7 @@ mod tests {
             ClientError::PersonalVaultProtected,
             ClientError::VaultLimitReached,
             ClientError::VaultSetMismatch,
+            ClientError::RotationLimit,
             ClientError::Internal,
         ];
         let mut codes: Vec<&str> = all.iter().map(|e| e.code()).collect();

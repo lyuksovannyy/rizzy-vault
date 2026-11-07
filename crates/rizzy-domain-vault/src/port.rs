@@ -138,6 +138,9 @@ pub async fn vault_summaries(
             vault_id: Id::from_bytes(vault_id.to_bytes()),
             kind: kind.code(),
             bytes_used: vault_counted_bytes(reborrow(&mut conn), vault_id).await?,
+            // ADR 0092 §6: for display; a count above u32 saturates.
+            wrap_rows: u32::try_from(repo::vault_wrap_rows(reborrow(&mut conn), vault_id).await?)
+                .unwrap_or(u32::MAX),
         });
     }
     Ok(out)

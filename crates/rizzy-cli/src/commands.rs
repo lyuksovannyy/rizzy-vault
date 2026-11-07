@@ -471,6 +471,10 @@ async fn unlock(env: &mut Env<'_>) -> Result<(), CliError> {
     env.ui
         .print(&format!("items:    {}", item_count(&device)))?;
     // ADR 0048 §5: the server's figure, not verified; shown only when this run went online.
+    // ADR 0092 §6: the size notices, the urgent one included, on every unlock.
+    for notice in device.row_counts().notices() {
+        env.ui.print(&format!("notice:   {}", notice.text()))?;
+    }
     if let Some(usage) = device.usage() {
         env.ui.print(&format!("storage:  {}", usage_text(usage)))?;
     }

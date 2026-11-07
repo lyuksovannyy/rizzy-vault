@@ -260,6 +260,8 @@ impl Server {
             pending_recovery: None,
             suspended_devices: List::empty(),
             revocation_window: None,
+            wrap_rows: 0,
+            wrap_rows_limit: 0,
         };
         self.capture(serde_json::to_vec(&view));
         view
@@ -1112,6 +1114,7 @@ fn unlock_detects_rollback_fork_and_hidden_devices() {
         Some(crate::account::StorageUsage {
             bytes_used: 4_096,
             quota_bytes: 5 << 30,
+            wrap_rows: 0,
         })
     );
     let mut no_quota = server.view();

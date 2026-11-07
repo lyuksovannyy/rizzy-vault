@@ -150,6 +150,7 @@ use rizzy_client::rotation::{
     ConflictOutcome, PendingRotation, RevokeDevice, RotationDone, RotationLevel, RotationOptions,
     start_rotation,
 };
+use rizzy_client::row_limits::RowCounts;
 use rizzy_client::session::{
     DeviceSession, device_auth_finish, device_auth_finish_reconciling, device_auth_start,
     device_auth_start_reconciling,
@@ -799,6 +800,22 @@ impl Device {
         self.usage
     }
 
+    /// ADR 0092 §6: the account's and each open vault's wrap-set rows, the larger of the
+    /// server's figure and this replica's count.
+    #[must_use]
+    pub fn row_counts(&self) -> RowCounts {
+        RowCounts::new(self.usage.map(|u| u.wrap_rows), &self.vaults.open_refs())
+    }
+
+    /// ADR 0092 §6: gives every open vault its room before a row-adding action, so a new item
+    /// key or an import past a cap is refused before anything is written.
+    pub(crate) fn set_row_rooms(&mut self) {
+        let counts = self.row_counts();
+        for vault in self.vaults.open_mut_refs() {
+            vault.set_row_room(Some(counts.room(vault.vault_id())));
+        }
+    }
+
     /// The server's notice of a pending recovery that came with the account answer adopted in
     /// this run (ADR 0045), if one was: the server's word, for display only (INV-70).
     #[must_use]
@@ -907,6 +924,7 @@ impl Device {
         edit: impl FnOnce(&mut VaultSync, &mut OsRng, &UnlockedDevice, u64) -> Result<T, ClientError>,
     ) -> Result<T, CliError> {
         self.check_vault_writable(vault_id)?;
+        self.set_row_rooms();
         let vault = self.vaults.require_mut(vault_id)?;
         let done = edit(vault, &mut self.rng, &self.unlocked, now_ms());
         // Whatever the edit wrote before it failed is written too: the rows are own ops the

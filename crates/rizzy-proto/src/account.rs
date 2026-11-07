@@ -97,6 +97,19 @@ pub struct AccountView {
     /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revocation_window: Option<RevocationWindowNotice>,
+    /// The account's wrap-set rows over every vault it owns ([ADR 0092] §1, §6): the server's
+    /// own figure, unsigned and for display only (the client also counts its own replica).
+    /// Absent (0) from an older server.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    #[serde(default)]
+    pub wrap_rows: u32,
+    /// [`MAX_ACCOUNT_WRAP_ROWS`](crate::limits::MAX_ACCOUNT_WRAP_ROWS), as the server states it
+    /// ([ADR 0092] §6), for display only. Absent (0) from an older server.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    #[serde(default)]
+    pub wrap_rows_limit: u32,
 }
 
 /// The server's unsigned view of an open revocation window ([ADR 0091] §2): the device whose
@@ -151,6 +164,12 @@ pub struct VaultSummary {
     pub kind: u8,
     /// The vault's counted bytes.
     pub bytes_used: u64,
+    /// The vault's wrap-set rows ([ADR 0092] §6), for display only. Absent (0) from an older
+    /// server.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    #[serde(default)]
+    pub wrap_rows: u32,
 }
 
 /// What an enrolled device already holds, so the server can leave out what has not changed

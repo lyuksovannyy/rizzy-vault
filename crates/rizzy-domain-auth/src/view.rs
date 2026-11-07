@@ -10,6 +10,7 @@
 //! the authority.
 
 use rizzy_proto::account::{AccountStateQuery, AccountView};
+use rizzy_proto::limits::MAX_ACCOUNT_WRAP_ROWS;
 use rizzy_proto::objects::{AccountSettings, IdentitySecretKeys};
 use rizzy_proto::wire::{Bytes, Id, List};
 use rizzy_storage::Conn;
@@ -46,6 +47,10 @@ pub(crate) enum ViewScope {
 #[expect(
     clippy::too_many_arguments,
     reason = "the verified parts of one view, passed once by each of its three callers"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one flat list of the account answer's fields, in the order of AccountView"
 )]
 pub(crate) async fn build<V: VaultPort>(
     vault: &V,
@@ -104,6 +109,10 @@ pub(crate) async fn build<V: VaultPort>(
     let vaults = vault
         .vault_summaries(reborrow(&mut conn), trust.account_id)
         .await?;
+    // ADR 0092 §6: the account's rows, those of the vaults it owns (the summaries' sum).
+    let wrap_rows = vaults
+        .iter()
+        .fold(0u32, |n, v| n.saturating_add(v.wrap_rows));
     // ADR 0045 points 3–5: the stored row, read on the same connection.
     let pending_recovery = if recovery_notice {
         crate::recovery::notice(reborrow(&mut conn), trust.account_id).await?
@@ -156,6 +165,8 @@ pub(crate) async fn build<V: VaultPort>(
         pending_recovery,
         suspended_devices: List::new(suspended).map_err(over_limit)?,
         revocation_window,
+        wrap_rows,
+        wrap_rows_limit: u32::try_from(MAX_ACCOUNT_WRAP_ROWS).unwrap_or(u32::MAX),
     })
 }
 

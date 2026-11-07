@@ -284,6 +284,8 @@ fn build() -> Fixture {
         pending_recovery: None,
         suspended_devices: List::empty(),
         revocation_window: None,
+        wrap_rows: 0,
+        wrap_rows_limit: 0,
     };
     let e_srv = commit_request.account_key_server_wrap.clone();
     let signed_up = pending.finalize().expect("finalised");

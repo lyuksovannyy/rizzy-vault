@@ -98,6 +98,7 @@ fn account_view() -> AccountView {
             vault_id: id(0x11),
             kind: 1,
             bytes_used: 1_000,
+            wrap_rows: 7,
         }]),
         pending_recovery: None,
         suspended_devices: l(vec![id(0x21)]),
@@ -105,6 +106,8 @@ fn account_view() -> AccountView {
             revoker_device_id: id(0x22),
             expires_at_ms: 600_000,
         }),
+        wrap_rows: 7,
+        wrap_rows_limit: 65_536,
     }
 }
 

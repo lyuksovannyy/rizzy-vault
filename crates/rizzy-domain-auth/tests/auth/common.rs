@@ -370,6 +370,7 @@ impl VaultPort for SharedVault {
                         vault_id: g.vault_id,
                         kind: if i == 0 { 1 } else { 2 },
                         bytes_used: 0,
+                        wrap_rows: 0,
                     })
                     .collect()
             })

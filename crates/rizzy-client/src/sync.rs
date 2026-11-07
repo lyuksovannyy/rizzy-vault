@@ -410,6 +410,12 @@ pub struct VaultSync {
     /// The wrap-set rows of the last Fetch page (each page carries the whole set), as served:
     /// what a rotation re-wraps or drops (ADR 0025 §2 step 3).
     wrap_rows: Vec<ItemKeyWrap>,
+    /// The wrap-set rows this vault may still add, as the host set them from
+    /// [`crate::row_limits::RowCounts::room`] ([ADR 0092] §6), less the item keys created since;
+    /// `None`: not checked here (the server still is).
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    row_room: Option<u64>,
     /// Whether the last Fetch page was complete, the server was not behind, and nothing was
     /// written or uploaded since: the cursor is what a rotation sends (ADR 0025 §2 step 1).
     synced: bool,
@@ -596,6 +602,7 @@ impl VaultSync {
             server_behind: false,
             generation: None,
             wrap_rows: Vec::new(),
+            row_room: None,
             synced: false,
             seen_keys,
             stale_from: None,
@@ -813,6 +820,48 @@ impl VaultSync {
     #[must_use]
     pub const fn vault_id(&self) -> VaultId {
         self.vault_id
+    }
+
+    /// The wrap-set rows of the last Fetch ([ADR 0092] §6: this replica's own count).
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    #[must_use]
+    pub const fn wrap_row_count(&self) -> usize {
+        self.wrap_rows.len()
+    }
+
+    /// Sets the rows this vault may still add ([ADR 0092] §6, from
+    /// [`crate::row_limits::RowCounts::room`]); `None` turns the local pre-check off. Each
+    /// new item key takes one; an import checks its whole batch first.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    pub const fn set_row_room(&mut self, room: Option<u64>) {
+        self.row_room = room;
+    }
+
+    /// The pre-check of a batch of `rows` new rows (an import, a move or copy into this vault),
+    /// before its first write ([ADR 0092] §6).
+    ///
+    /// # Errors
+    /// [`ClientError::RotationLimit`] above the room.
+    ///
+    /// [ADR 0092]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0092-rotation-size-limits.md
+    pub const fn check_row_room(&self, rows: usize) -> Result<(), ClientError> {
+        match self.row_room {
+            Some(room) if rows as u64 > room => Err(ClientError::RotationLimit),
+            _ => Ok(()),
+        }
+    }
+
+    /// Takes `rows` from the room.
+    ///
+    /// # Errors
+    /// [`ClientError::RotationLimit`] above the room; nothing is taken.
+    fn take_row_room(&mut self, rows: u64) -> Result<(), ClientError> {
+        if let Some(room) = self.row_room {
+            self.row_room = Some(room.checked_sub(rows).ok_or(ClientError::RotationLimit)?);
+        }
+        Ok(())
     }
 
     /// The next own `device_seq`, for the host to keep with the device: the device's, across
@@ -1807,9 +1856,12 @@ impl VaultSync {
         let plaintext = encode_op(&OpData::new(change.lifecycle, writes))
             .map_err(|_| ClientError::InvalidEdit)?;
         // The item key: the writer rule's, or a fresh one with its wrap.
-        let fresh = match self.writer_key(item) {
-            Some(_) => None,
-            None => Some(ItemKey::generate(rng, self.vault_key.epoch())),
+        let fresh = if self.writer_key(item).is_some() {
+            None
+        } else {
+            // ADR 0092 §6: a new item key is a new wrap-set row.
+            self.take_row_room(1)?;
+            Some(ItemKey::generate(rng, self.vault_key.epoch()))
         };
         // ADR 0081 §A7: the next device_seq of the device, not of this vault alone.
         self.merge_counters();

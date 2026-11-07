@@ -127,6 +127,7 @@ pub mod recovery;
 pub mod reregister;
 pub mod revocation;
 pub mod rotation;
+pub mod row_limits;
 pub mod session;
 pub mod sessions;
 pub mod settings;

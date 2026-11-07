@@ -667,9 +667,12 @@ impl VaultSync {
     ) -> Result<PayloadImport, ClientError> {
         self.check_writable(unlocked)?;
         let entries = parse_payload(payload)?;
+        let importable: Vec<_> = entries.iter().map(|e| importable_item(e, rng)).collect();
+        // ADR 0092 §6: the whole batch fits, or nothing is imported.
+        self.check_row_room(importable.iter().flatten().count())?;
         let mut report = PayloadImport::default();
-        for entry in &entries {
-            let Some(item) = importable_item(entry, rng) else {
+        for item in importable {
+            let Some(item) = item else {
                 report.skipped_items = report.skipped_items.saturating_add(1);
                 continue;
             };

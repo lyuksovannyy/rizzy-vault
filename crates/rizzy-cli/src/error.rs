@@ -230,6 +230,10 @@ impl fmt::Display for CliError {
                 "{e} ({}); no vault change is made until it matches again: run `rv sync` later",
                 e.code()
             ),
+            // ADR 0092 §6: the local pre-check, refused whole before anything was written.
+            Self::Client(ClientError::RotationLimit) => f.write_str(
+                "refused: rotation_limit (this account or vault is at its item limit of 65,536; you can't add items above it. Delete items or empty Trash to free space; nothing was changed)",
+            ),
             Self::Client(e) => write!(f, "{e} ({})", e.code()),
             // ADR 0048 §3: an upload past the account's storage quota. The op stays unsent on
             // this device and is sent again by the next `rv sync`.
