@@ -324,6 +324,9 @@ pub(crate) const PROTO_EXTERNAL_ALLOW: &[&str] = &[
 /// M1"), which turns on `url`'s optional `serde` feature; `rizzy-match`'s own `Cargo.toml` never
 /// enables it (`default-features = false`, `features = ["std"]` only), so these three never
 /// actually build into `rizzy-match`.
+///
+/// `regex-lite` is the *Regex* mode's engine (ADR 0097 §3.3, owner answer 2): it has no
+/// dependencies of its own, so it adds this one entry only.
 pub(crate) const MATCH_EXTERNAL_ALLOW: &[&str] = &[
     "displaydoc@0.2",
     "form_urlencoded@1",
@@ -343,6 +346,7 @@ pub(crate) const MATCH_EXTERNAL_ALLOW: &[&str] = &[
     "psl@2",
     "psl-types@2",
     "quote@1",
+    "regex-lite@0.1",
     "serde@1",
     "serde_core@1",
     "serde_derive@1",

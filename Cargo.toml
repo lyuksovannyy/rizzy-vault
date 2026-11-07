@@ -95,6 +95,11 @@ idna = { version = "=1.1.0", default-features = false, features = ["alloc", "com
 #   `forbid(unsafe_code)`). A version bump updates this pin and both hash constants together,
 #   reviewed with a diff of `rules.txt`.
 psl = { version = "=2.1.240", default-features = false, features = ["helpers"] }
+# - regex-lite: the *Regex* match mode's engine (ADR 0097 §3.3; owner answer 2, 2026-10-25).
+#   Exact pin, as the ADR requires; a bump re-runs ADR 0097 §6's vectors. Maintained in
+#   rust-lang/regex, MIT OR Apache-2.0, `#![forbid(unsafe_code)]`, no dependencies, no build
+#   script. `std` and `string` are its defaults, named explicitly here as ADR 0097 §3.3 does.
+regex-lite = { version = "=0.1.9", default-features = false, features = ["std", "string"] }
 
 # Wire types. Not cryptography.
 # serde: the `/api/v1` request and response types of `rizzy-proto` (ADR 0002 point 3; ADR 0016

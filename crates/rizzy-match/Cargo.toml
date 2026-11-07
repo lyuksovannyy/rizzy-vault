@@ -13,6 +13,7 @@ rizzy-core.workspace = true
 url.workspace = true
 idna.workspace = true
 psl.workspace = true
+regex-lite.workspace = true
 
 [dev-dependencies]
 # Property tests: normalisation idempotence, and that every parser never panics on arbitrary
