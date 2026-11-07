@@ -153,6 +153,36 @@ describe("installCoreContextListener: acceptContentScripts routing", () => {
     await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ type: "status", locked: true, enrolled: false }));
   });
 
+  // ADR 0110 §7 point 4, INV-123: the master password of a passkey re-verification is accepted
+  // from the toolbar popup only; a content script, the inline-menu iframe, the consent iframe and
+  // the options page get no verification at all (only their sender class's usual refusal).
+  it("answers passkey_verify_submit from the toolbar popup only", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: true });
+    const submit = { type: "passkey_verify_submit", ceremonyToken: "c1", masterPassword: "pw" };
+    const page = { id: 3, url: "https://example.com/login" };
+    const refused: WebExtMessageSender[] = [
+      { id: EXT_ID, url: "https://example.com/login", origin: "https://example.com", tab: page },
+      { id: EXT_ID, url: `${EXT_ORIGIN}/src/inline-menu/index.html`, origin: EXT_ORIGIN, tab: page },
+      { id: EXT_ID, url: `${EXT_ORIGIN}/src/passkey-consent/index.html`, origin: EXT_ORIGIN, tab: page },
+      { id: EXT_ID, url: `${EXT_ORIGIN}/src/options/index.html`, origin: EXT_ORIGIN },
+      { id: EXT_ID, origin: EXT_ORIGIN },
+    ];
+    for (const sender of refused) {
+      const sendResponse = vi.fn();
+      installedListener(ext)(submit, sender, sendResponse);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      // Never an answer to a verification: at most the generic refusal of its sender class.
+      for (const [answer] of sendResponse.mock.calls) {
+        expect(answer).not.toMatchObject({ type: "passkey_verify_reply" });
+      }
+    }
+    const sendResponse = vi.fn();
+    const popup = { id: EXT_ID, url: `${EXT_ORIGIN}/src/popup/index.html`, origin: EXT_ORIGIN };
+    expect(installedListener(ext)(submit, popup, sendResponse)).toBe(true);
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ type: "passkey_verify_reply", code: "uv_locked" }));
+  });
+
   // Regression test for a real bug found while writing this change's E2E coverage: measured
   // empirically against a real Chromium build, a `chrome.offscreen` document's own `chrome`
   // object has no `idle` or `storage` namespace at all (both `undefined`), unlike every other

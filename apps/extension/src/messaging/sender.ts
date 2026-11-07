@@ -140,17 +140,12 @@ export const POPUP_PATH = "src/popup/index.html";
 /** The Chromium offscreen document (`background/service-worker.ts`'s `OFFSCREEN_URL`). */
 export const OFFSCREEN_PATH = "src/core-host/offscreen.html";
 
-/** `url` without its query and fragment, or `undefined` when it does not parse. */
+/** `url` without its query and fragment. Plain string work, not `URL`: an extension scheme
+ * (`chrome-extension:`, `moz-extension:`) is not special to every URL parser, whose `origin`
+ * may then read `"null"`; the browser sets this URL, so its form is exactly
+ * `runtime.getURL`'s. */
 function documentUrlOf(url: string | undefined): string | undefined {
-  if (url === undefined) {
-    return undefined;
-  }
-  try {
-    const parsed = new URL(url);
-    return `${parsed.origin}${parsed.pathname}`;
-  } catch {
-    return undefined;
-  }
+  return url?.split(/[?#]/, 1)[0];
 }
 
 /**
