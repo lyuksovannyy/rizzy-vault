@@ -74,6 +74,7 @@
 //! [ADR 0094]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0094-backup-container-limits.md
 
 use core::fmt;
+use std::io::Write;
 
 use rizzy_domain_auth::types::{BackupId, CryptoRng, ServerDbBackupCtx, ServerDbBackupKey};
 use rizzy_storage::backup::file::{MAGIC, MAX_BACKUP_FILE_LEN};
@@ -166,6 +167,8 @@ pub enum DbBackupError {
     },
     /// Sealing a chunk failed (not expected for a payload within the limits).
     Seal,
+    /// Writing the sealed file failed.
+    Write(std::io::ErrorKind),
 }
 
 impl fmt::Display for DbBackupError {
@@ -188,6 +191,7 @@ impl fmt::Display for DbBackupError {
                  damaged or tampered with, or belongs to other secrets"
             ),
             Self::Seal => f.write_str("encrypted backup: a chunk could not be sealed"),
+            Self::Write(kind) => write!(f, "writing the encrypted backup failed: {kind}"),
         }
     }
 }
@@ -246,36 +250,206 @@ fn seal_with<R: CryptoRng + ?Sized>(
     created_at_ms: u64,
     chunk_len: usize,
 ) -> Result<Vec<u8>, DbBackupError> {
-    if plaintext.is_empty() {
-        return Err(DbBackupError::Empty);
-    }
     let plaintext_len = u64::try_from(plaintext.len()).map_err(|_| DbBackupError::TooLarge)?;
-    let total = sealed_len_with(plaintext_len, chunk_len)
-        .filter(|&n| n <= MAX_BACKUP_FILE_LEN)
-        .ok_or(DbBackupError::TooLarge)?;
-    let chunk_count = u32::try_from(plaintext.len().div_ceil(chunk_len))
-        .ok()
-        .filter(|&n| n <= MAX_CHUNK_COUNT)
-        .ok_or(DbBackupError::TooLarge)?;
-    let header = Header {
-        backup_id: BackupId::generate(rng),
-        created_at_ms,
-        backup_key_id: key.backup_key_id(),
+    let mut sealer = Sealer::with_chunk_len(
+        rng,
+        key,
+        Vec::new(),
         plaintext_len,
-        chunk_count,
-    };
-    let mut out = Vec::with_capacity(usize::try_from(total).map_err(|_| DbBackupError::TooLarge)?);
-    out.extend_from_slice(&header.encode());
-    for (index, chunk) in (0..chunk_count).zip(plaintext.chunks(chunk_len)) {
-        let envelope = key
-            .seal_chunk(rng, &header.chunk_ctx(index), chunk)
+        created_at_ms,
+        chunk_len,
+    )?;
+    sealer.push(plaintext)?;
+    sealer.finish().map(|(out, _)| out)
+}
+
+/// The streaming format version 2 writer ([ADR 0094] §2 pass 2): writes the header on
+/// [`Sealer::new`], then cuts the format version 1 bytes it is given into [`CHUNK_LEN`]
+/// plaintext chunks and writes each as soon as it is sealed, exactly as [`seal`] does. It
+/// holds one plaintext chunk (zeroized on drop) and never the file. `plaintext_len` must be
+/// known in advance: pass 1 measured it. [`seal`] is a wrapper over it.
+pub struct Sealer<'a, R: ?Sized, W> {
+    /// The CSPRNG the nonces come from.
+    rng: &'a mut R,
+    /// The backup key.
+    key: &'a ServerDbBackupKey,
+    /// Where the sealed file goes.
+    out: W,
+    /// The file's header.
+    header: Header,
+    /// The plaintext chunk being filled.
+    chunk: Zeroizing<Vec<u8>>,
+    /// The chunk length (only the unit tests pass another than [`CHUNK_LEN`]).
+    chunk_len: usize,
+    /// The chunks sealed so far.
+    sealed: u32,
+    /// The plaintext bytes taken so far.
+    taken: u64,
+    /// The bytes written so far.
+    written: u64,
+    /// The sealed file's length.
+    total: u64,
+}
+
+impl<R: ?Sized, W> fmt::Debug for Sealer<'_, R, W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sealer")
+            .field("header", &self.header)
+            .field("sealed", &self.sealed)
+            .field("taken", &self.taken)
+            .field("written", &self.written)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, R: CryptoRng + ?Sized, W: Write> Sealer<'a, R, W> {
+    /// Starts a format version 2 file of a `plaintext_len`-byte payload on `out`: draws
+    /// `backup_id` from `rng` and writes the header.
+    ///
+    /// # Errors
+    /// [`DbBackupError::Empty`] and [`DbBackupError::TooLarge`], checked before anything is
+    /// drawn or written; [`DbBackupError::Write`].
+    pub fn new(
+        rng: &'a mut R,
+        key: &'a ServerDbBackupKey,
+        out: W,
+        plaintext_len: u64,
+        created_at_ms: u64,
+    ) -> Result<Self, DbBackupError> {
+        Self::with_chunk_len(rng, key, out, plaintext_len, created_at_ms, CHUNK_LEN)
+    }
+
+    /// [`Sealer::new`] with `chunk_len`-byte chunks.
+    fn with_chunk_len(
+        rng: &'a mut R,
+        key: &'a ServerDbBackupKey,
+        mut out: W,
+        plaintext_len: u64,
+        created_at_ms: u64,
+        chunk_len: usize,
+    ) -> Result<Self, DbBackupError> {
+        if plaintext_len == 0 {
+            return Err(DbBackupError::Empty);
+        }
+        let total = sealed_len_with(plaintext_len, chunk_len)
+            .filter(|&n| n <= MAX_BACKUP_FILE_LEN)
+            .ok_or(DbBackupError::TooLarge)?;
+        let chunk_count = u64::try_from(chunk_len)
+            .ok()
+            .and_then(|c| u32::try_from(plaintext_len.div_ceil(c)).ok())
+            .filter(|&n| n <= MAX_CHUNK_COUNT)
+            .ok_or(DbBackupError::TooLarge)?;
+        let header = Header {
+            backup_id: BackupId::generate(rng),
+            created_at_ms,
+            backup_key_id: key.backup_key_id(),
+            plaintext_len,
+            chunk_count,
+        };
+        let encoded = header.encode();
+        out.write_all(&encoded)
+            .map_err(|e| DbBackupError::Write(e.kind()))?;
+        Ok(Self {
+            rng,
+            key,
+            out,
+            header,
+            chunk: Zeroizing::new(Vec::with_capacity(chunk_len)),
+            chunk_len,
+            sealed: 0,
+            taken: 0,
+            written: u64::try_from(encoded.len()).unwrap_or(u64::MAX),
+            total,
+        })
+    }
+
+    /// The file's header.
+    #[must_use]
+    pub const fn header(&self) -> &Header {
+        &self.header
+    }
+
+    /// Takes the next format version 1 bytes, sealing and writing every chunk that fills.
+    ///
+    /// # Errors
+    /// [`DbBackupError::TooLarge`] when the bytes go past `plaintext_len`;
+    /// [`DbBackupError::Seal`]; [`DbBackupError::Write`].
+    pub fn push(&mut self, mut bytes: &[u8]) -> Result<(), DbBackupError> {
+        let n = u64::try_from(bytes.len()).map_err(|_| DbBackupError::TooLarge)?;
+        self.taken = self
+            .taken
+            .checked_add(n)
+            .filter(|&t| t <= self.header.plaintext_len)
+            .ok_or(DbBackupError::TooLarge)?;
+        while !bytes.is_empty() {
+            let room = self.chunk_len.saturating_sub(self.chunk.len());
+            let (now, rest) = bytes.split_at(room.min(bytes.len()));
+            self.chunk.extend_from_slice(now);
+            bytes = rest;
+            if self.chunk.len() == self.chunk_len {
+                self.seal_chunk()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Seals the last chunk and flushes `out`; requires exactly `plaintext_len` bytes taken
+    /// and the header's `chunk_count` sealed. Returns `out` and the header.
+    ///
+    /// # Errors
+    /// [`DbBackupError::Seal`] on a count that does not add up; [`DbBackupError::Write`].
+    pub fn finish(mut self) -> Result<(W, Header), DbBackupError> {
+        if !self.chunk.is_empty() {
+            self.seal_chunk()?;
+        }
+        if self.taken != self.header.plaintext_len
+            || self.sealed != self.header.chunk_count
+            || self.written != self.total
+        {
+            return Err(DbBackupError::Seal);
+        }
+        self.out
+            .flush()
+            .map_err(|e| DbBackupError::Write(e.kind()))?;
+        Ok((self.out, self.header))
+    }
+
+    /// Seals the buffered chunk as chunk `sealed` and writes it.
+    fn seal_chunk(&mut self) -> Result<(), DbBackupError> {
+        if self.sealed >= self.header.chunk_count {
+            return Err(DbBackupError::Seal);
+        }
+        let envelope = self
+            .key
+            .seal_chunk(
+                &mut *self.rng,
+                &self.header.chunk_ctx(self.sealed),
+                &self.chunk,
+            )
             .map_err(|_| DbBackupError::Seal)?;
-        out.extend_from_slice(&envelope);
+        self.out
+            .write_all(&envelope)
+            .map_err(|e| DbBackupError::Write(e.kind()))?;
+        self.written = self
+            .written
+            .saturating_add(u64::try_from(envelope.len()).unwrap_or(u64::MAX));
+        self.sealed = self.sealed.saturating_add(1);
+        self.chunk.clear();
+        Ok(())
     }
-    if u64::try_from(out.len()).ok() != Some(total) {
-        return Err(DbBackupError::Seal);
+}
+
+/// [`Sealer::push`] through [`Write`], so the format version 1 encoder can write into it.
+impl<R: CryptoRng + ?Sized, W: Write> Write for Sealer<'_, R, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.push(buf).map_err(std::io::Error::other)?;
+        Ok(buf.len())
     }
-    Ok(out)
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // A partial chunk cannot be written before it is sealed; finish() seals and flushes.
+        Ok(())
+    }
 }
 
 /// Reads a format version 2 header and checks the file's framing against it (module docs,
@@ -582,6 +756,33 @@ mod tests {
             parse_header(&file).unwrap().backup_id,
             parse_header(&again).unwrap().backup_id
         );
+    }
+
+    /// ADR 0094 §2: the payload streamed through a [`Sealer`] in pieces of any size gives
+    /// [`seal`]'s bytes; a byte more or fewer than declared is refused.
+    #[test]
+    fn streamed_seal_equals_seal() {
+        let payload: Vec<u8> = (0..=u8::MAX).cycle().take(5 * SMALL + 7).collect();
+        let k = key(1);
+        let len = payload.len() as u64;
+        let expected =
+            seal_with(&mut ChaCha20Rng::seed_from_u64(9), &k, &payload, 5, SMALL).unwrap();
+        for piece in [1, 3, SMALL - 1, SMALL, SMALL + 1, payload.len()] {
+            let mut rng = ChaCha20Rng::seed_from_u64(9);
+            let mut sealer =
+                Sealer::with_chunk_len(&mut rng, &k, Vec::new(), len, 5, SMALL).unwrap();
+            for p in payload.chunks(piece) {
+                sealer.push(p).unwrap();
+            }
+            let (out, header) = sealer.finish().unwrap();
+            assert_eq!(out, expected, "{piece}");
+            assert_eq!(header.chunk_count, 6);
+        }
+        let mut rng = ChaCha20Rng::seed_from_u64(9);
+        let mut sealer = Sealer::with_chunk_len(&mut rng, &k, Vec::new(), 3, 5, SMALL).unwrap();
+        assert_eq!(sealer.push(&[0; 4]), Err(DbBackupError::TooLarge));
+        sealer.push(&[0; 2]).unwrap();
+        assert_eq!(sealer.finish().map(|_| ()), Err(DbBackupError::Seal));
     }
 
     #[test]
