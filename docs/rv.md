@@ -268,6 +268,7 @@ rv recovery start    --server https://vault.example.org --name alice
 rv recovery complete --server https://vault.example.org --name alice
 rv recovery cancel                      # on a device that is still enrolled
 rv account status                       # on an enrolled device: is a recovery pending?
+rv recovery abandon --server https://vault.example.org --name alice --confirm
 ```
 
 `recovery start` needs the recovery code from the Emergency Kit. The server then makes you wait (72 hours), and a device that is still enrolled can cancel a recovery you did not start with `rv recovery cancel`. While a recovery is pending, every `rv` command that goes online on an enrolled device (`sync`, `unlock`, the commands that change items, `account status`, and the others that reach the server) prints a warning that says when it was requested and when it can complete, every time, until it is cancelled or completed; `rv account status` shows it as `recovery: PENDING …`. `rv account status` also prints `server source: <url>`, where the server says its source code is (AGPL §13, [ADR 0106](adr/0106-agpl-source-url.md)), or `server source: unavailable` when the server gives none; that changes nothing else. The offline commands (`item list`, `item show`, `totp`, `generate`) never ask the server and never show it, so run `rv sync` now and then. The warning is the server's word, not something `rv` can verify: a server can hide a recovery or invent one, and `rv`'s checks of the account never depend on it. `recovery complete` asks for the recovery code again, sets a new master password, shows a **new Emergency Kit** (the old Secret Key and recovery code stop working), rotates the keys unless `--skip-rotation` is given, and enrols this computer. Every other device then asks for the new master password and Secret Key the next time it goes online. An operator who runs the server for one person can set the wait to 0 hours (`RIZZY_RECOVERY_WAIT_HOURS`, see [self-hosting.md](self-hosting.md)).
@@ -280,6 +281,15 @@ rv account status                       # on an enrolled device: is a recovery p
 - the server cannot be reached: nothing is changed; run the command again later.
 
 While a recovery is saved and unsettled, `rv` makes no new Emergency Kit for that account, no other command opens it, and `rv device forget` does not remove it.
+
+**When you cannot type the new master password** of an interrupted recovery, leave it with `rv recovery abandon --server … --name … --confirm` ([ADR 0108](adr/0108-interrupted-recovery-exit.md)). Without `--confirm` it refuses (exit code 2) and sends nothing. It holds the account's local data for the whole run and asks the server which kit is valid, with real recovery starts (each opens or returns a pending recovery, tells your enrolled devices, and counts toward the rate limit):
+
+1. It asks for the recovery code of the kit the interrupted recovery made. Leave it empty if you do not have that kit. A code that is not that kit's is refused on this computer, before anything is sent.
+2. With that code, if the server accepts it, the recovery had reached the server: that kit is the valid one and its new master password was set. The saved recovery is removed, and `rv` tells you when to run `rv recovery complete` with that kit's code, and which device id to revoke afterwards.
+3. Otherwise it asks for the recovery code of the kit you started from. If the server accepts it, the recovery had not reached the server: the saved recovery is removed, and you finish with `rv recovery complete` and the old code after the wait. Keep the newer kit until that new recovery finishes.
+4. If the server accepts neither code, nothing is removed (`the server accepted neither recovery code`, exit code 1): check the codes and the login name and run it again. If the server cannot be reached, or answers anything else, nothing is removed either.
+
+On success it prints one line on standard output, `landed <ms>` or `not-landed <ms>`, where `<ms>` is when the pending recovery can be completed (milliseconds since the Unix epoch, as `rv recovery start` prints it); everything else goes to standard error.
 
 ## After the server was restored from a backup
 
