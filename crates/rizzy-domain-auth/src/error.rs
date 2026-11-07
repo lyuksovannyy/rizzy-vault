@@ -69,6 +69,12 @@ pub enum AuthError {
     /// restore to before a credential change or a rotation (ADR 0032 §4). Only ever returned
     /// after KE3 and the second factor verified (§5.9).
     CredentialsStale,
+    /// Another device's revocation window is open ([ADR 0091] §2): every write in its left
+    /// column is refused for a session not bound to the window's revoker device. Answered
+    /// `revocation_pending`, with no detail.
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+    RevocationPending,
     /// A pending recovery exists but its waiting period has not ended (CRYPTO.md §11.9 step 3,
     /// ADR 0008 decision 5).
     RecoveryWaiting {
@@ -121,6 +127,7 @@ impl AuthError {
             Self::StateConflict | Self::StateFork => ErrorCode::StateConflict,
             Self::SetupRetired => ErrorCode::SetupRetired,
             Self::CredentialsStale => ErrorCode::CredentialsStale,
+            Self::RevocationPending => ErrorCode::RevocationPending,
             Self::Storage(_) | Self::Internal(_) => ErrorCode::Internal,
         }
     }
@@ -155,6 +162,7 @@ impl fmt::Display for AuthError {
             Self::SignupRefused => f.write_str("signup refused"),
             Self::SetupRetired => f.write_str("OPAQUE setup retired or unknown"),
             Self::CredentialsStale => f.write_str("OPAQUE record lags the signed state"),
+            Self::RevocationPending => f.write_str("another device's revocation window is open"),
             Self::KeyAlgorithm => f.write_str("security key chose an unsupported algorithm"),
             Self::KeyTooLarge => f.write_str("security key serialised JSON exceeds the limit"),
             Self::PossibleClone { .. } => f.write_str("security key counter did not advance"),

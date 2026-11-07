@@ -426,6 +426,9 @@ impl<V: VaultPort> AuthService<V> {
         let session = session::reload(tx.conn(), session, now_ms).await?;
         session.require_fresh_opaque(now_ms)?;
         let account = session.account_id;
+        // ADR 0091 §2: frozen while another device's revocation window is open. The enrolment
+        // challenge stays, so the same confirm can be retried after the window.
+        crate::revocation::gate(tx.conn(), account, &session, now_ms).await?;
         let outcome = self
             .enrol_confirm_locked(&mut tx, rp, account, req, now_ms)
             .await;
@@ -538,6 +541,8 @@ impl<V: VaultPort> AuthService<V> {
         lock_account(&mut tx, session.account_id.as_bytes()).await?;
         let session = session::reload(tx.conn(), session, now_ms).await?;
         session.require_fresh_opaque(now_ms)?;
+        // ADR 0091 §2: frozen while another device's revocation window is open.
+        crate::revocation::gate(tx.conn(), session.account_id, &session, now_ms).await?;
         let removed = exec!(
             tx.conn(),
             sql::WEBAUTHN_DELETE,

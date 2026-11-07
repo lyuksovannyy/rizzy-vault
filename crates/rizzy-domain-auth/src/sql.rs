@@ -171,6 +171,12 @@ queries! {
     PENDING_RECOVERY_DELETE = "pending_recovery_delete";
     /// Lifts a device's suspension.
     CERT_UNSUSPEND = "cert_unsuspend";
+    /// The revocation window of an account (ADR 0091 §2).
+    REVOCATION_WINDOW_GET = "revocation_window_get";
+    /// Opens, replaces or renews the revocation window of an account.
+    REVOCATION_WINDOW_PUT = "revocation_window_put";
+    /// Closes the revocation window of an account.
+    REVOCATION_WINDOW_DELETE = "revocation_window_delete";
     /// Adopts a newer `account-state` during the reconciliation epoch.
     STATE_REPLACE = "state_replace";
     /// Stores or replaces `ACCOUNT_SETTINGS`.

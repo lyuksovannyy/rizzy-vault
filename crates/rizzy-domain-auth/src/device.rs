@@ -48,6 +48,7 @@ use crate::config::{CHALLENGE_TTL_MS, MAX_REQUEST_COUNTER};
 use crate::error::AuthError;
 use crate::healing::{open_epoch, verify_all};
 use crate::ports::VaultPort;
+use crate::revocation;
 use crate::rules;
 use crate::session::{self, Session, SessionKind};
 use crate::sql::{self, exec, fetch_all, fetch_opt};
@@ -297,6 +298,11 @@ impl<V: VaultPort> AuthService<V> {
         if !valid {
             return Err(AuthError::Unauthorized);
         }
+        // ADR 0091 §2: the certificate-carrying variant stores a certificate and a chain
+        // extension, so it is frozen while another device's revocation window is open.
+        if req.reconciliation.is_some() {
+            revocation::gate_device(tx.conn(), account, Some(device), now_ms).await?;
+        }
         let trust = AccountTrust::load(tx.conn(), account)
             .await
             .map_err(not_found_is_unauthorized)?;
@@ -477,11 +483,20 @@ impl<V: VaultPort> AuthService<V> {
         let account = session.account_id;
         let mut tx = self.db.begin_write().await?;
         lock_account(&mut tx, account.as_bytes()).await?;
-        session::reload(tx.conn(), session, now_ms)
-            .await?
-            .require_fresh_opaque(now_ms)?;
+        let session = session::reload(tx.conn(), session, now_ms).await?;
+        session.require_fresh_opaque(now_ms)?;
         let trust = AccountTrust::load(tx.conn(), account).await?;
         let devices = trust.devices(tx.conn()).await?;
+        // ADR 0091 §2: a byte-identical repeat of an applied enrolment is success even while
+        // a revocation window is open; anything else is frozen for a session not bound to R.
+        let repeat = trust.state_wire == req.account_state.as_slice()
+            && devices
+                .certs
+                .iter()
+                .any(|c| c.wire == req.device_certificate.as_slice());
+        if !repeat {
+            revocation::gate(tx.conn(), account, &session, now_ms).await?;
+        }
         let head = trust.head()?;
         let cert = rules::verify_certificate(req.device_certificate.as_slice(), head, account)?;
         let state = rules::verify_state_at_head(req.account_state.as_slice(), head, account)?;
@@ -561,6 +576,7 @@ impl<V: VaultPort> AuthService<V> {
         if session.kind != SessionKind::Opaque {
             return Err(AuthError::Unauthorized);
         }
+        revocation::gate(tx.conn(), account, &session, now_ms).await?;
         let trust = AccountTrust::load(tx.conn(), account).await?;
         let devices = trust.devices(tx.conn()).await?;
         let cert =
@@ -698,18 +714,28 @@ impl<V: VaultPort> AuthService<V> {
     /// Needs a fresh OPAQUE re-authentication of another durable device in the set: an OPAQUE
     /// session that [`AuthService::login_finish`] bound to that device.
     ///
+    /// In the same transaction it opens or renews the account's revocation window for the
+    /// caller's device R ([ADR 0091] §2 "Opening and renewing"): with no open window it opens
+    /// one for [`REVOCATION_WINDOW_MS`](crate::config::REVOCATION_WINDOW_MS); an open window of
+    /// R gets a full new expiry (so does a repeated suspend); an open window of another device
+    /// refuses the suspend before anything is suspended.
+    ///
     /// # Errors
     /// [`AuthError::FreshSessionRequired`]; [`AuthError::NotFound`] for a device that is not a
     /// durable, unrevoked device of the account; [`AuthError::InvalidRequest`] for the caller's
-    /// own device; storage errors.
+    /// own device; [`AuthError::RevocationPending`] while another device's revocation window is
+    /// open; storage errors.
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
     pub async fn suspend_device(
         &self,
         session: &Session,
         target: DeviceId,
         now_ms: u64,
     ) -> Result<u64, AuthError> {
-        let (mut tx, trust, devices) = self.revoker(session, target, now_ms).await?;
+        let (mut tx, trust, devices, own) = self.revoker(session, target, now_ms).await?;
         let account = trust.account_id;
+        revocation::open_or_renew(tx.conn(), account, own, now_ms).await?;
         let held = devices.cert(target).ok_or(AuthError::NotFound)?;
         if !held.suspended {
             exec!(
@@ -728,36 +754,52 @@ impl<V: VaultPort> AuthService<V> {
 
     /// Lifts a suspension (ADR 0012 §6: "Only a fresh session of another device in the device
     /// set can lift a suspension"), under the same session rule as
-    /// [`AuthService::suspend_device`].
+    /// [`AuthService::suspend_device`]. While a revocation window is open only a session bound
+    /// to its revoker R may lift one ([ADR 0091] §0, §2), and the unsuspend by R that leaves no
+    /// suspended durable device in the account closes the window.
     ///
     /// # Errors
     /// As [`AuthService::suspend_device`].
+    ///
+    /// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
     pub async fn unsuspend_device(
         &self,
         session: &Session,
         target: DeviceId,
         now_ms: u64,
     ) -> Result<(), AuthError> {
-        let (mut tx, trust, _) = self.revoker(session, target, now_ms).await?;
+        let (mut tx, trust, devices, own) = self.revoker(session, target, now_ms).await?;
+        let account = trust.account_id;
+        revocation::gate_device(tx.conn(), account, Some(own), now_ms).await?;
         exec!(
             tx.conn(),
             sql::CERT_UNSUSPEND,
-            &trust.account_id.as_bytes()[..],
+            &account.as_bytes()[..],
             &target.as_bytes()[..],
         )?;
+        let still_suspended = devices.certs.iter().any(|c| {
+            c.suspended
+                && c.cert.device_id != target
+                && c.cert.in_device_set()
+                && !devices.is_revoked(c.cert.device_id)
+        });
+        if !still_suspended {
+            // The gate passed: no window is open, or R's is, and R leaves none suspended.
+            revocation::close(tx.conn(), account).await?;
+        }
         tx.commit().await?;
         Ok(())
     }
 
     /// The session rule of suspension: a fresh OPAQUE session bound to a usable durable device
     /// other than `target`, and `target` a durable, unrevoked device of the account. Returns
-    /// the locked transaction with the verified trust and devices.
+    /// the locked transaction with the verified trust and devices, and the caller's device.
     async fn revoker(
         &self,
         session: &Session,
         target: DeviceId,
         now_ms: u64,
-    ) -> Result<(WriteTx, AccountTrust, Devices), AuthError> {
+    ) -> Result<(WriteTx, AccountTrust, Devices, DeviceId), AuthError> {
         let account = session.account_id;
         let mut tx = self.db.begin_write().await?;
         lock_account(&mut tx, account.as_bytes()).await?;
@@ -778,7 +820,7 @@ impl<V: VaultPort> AuthService<V> {
         if !known {
             return Err(AuthError::NotFound);
         }
-        Ok((tx, trust, devices))
+        Ok((tx, trust, devices, own))
     }
 }
 

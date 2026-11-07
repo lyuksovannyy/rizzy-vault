@@ -256,6 +256,8 @@ impl<V: VaultPort> AuthService<V> {
         let session = session::reload(tx.conn(), session, now_ms).await?;
         session.require_fresh_opaque(now_ms)?;
         let account = session.account_id;
+        // ADR 0091 §2: frozen while another device's revocation window is open.
+        crate::revocation::gate(tx.conn(), account, &session, now_ms).await?;
         let pending = list(&mut tx, account)
             .await?
             .into_iter()
@@ -300,6 +302,8 @@ impl<V: VaultPort> AuthService<V> {
         let session = session::reload(tx.conn(), session, now_ms).await?;
         session.require_fresh_opaque(now_ms)?;
         let account = session.account_id;
+        // ADR 0091 §2: frozen while another device's revocation window is open.
+        crate::revocation::gate(tx.conn(), account, &session, now_ms).await?;
         let confirmed: Vec<Stored> = list(&mut tx, account)
             .await?
             .into_iter()

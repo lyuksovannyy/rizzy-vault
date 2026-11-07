@@ -147,6 +147,7 @@ pub mod error;
 pub mod invalidation;
 pub mod ports;
 pub mod retirement;
+pub mod revocation;
 pub mod rules;
 pub mod secrets;
 pub mod session;

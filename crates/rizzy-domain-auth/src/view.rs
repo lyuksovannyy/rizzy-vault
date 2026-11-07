@@ -11,7 +11,7 @@
 
 use rizzy_proto::account::{AccountStateQuery, AccountView};
 use rizzy_proto::objects::{AccountSettings, IdentitySecretKeys};
-use rizzy_proto::wire::{Bytes, List};
+use rizzy_proto::wire::{Bytes, Id, List};
 use rizzy_storage::Conn;
 
 use crate::error::AuthError;
@@ -38,7 +38,15 @@ pub(crate) enum ViewScope {
 /// Builds the view of an account from a verified trust and its verified devices, with the
 /// account's counted bytes and the instance's `quota_bytes` (ADR 0048 §5), and, when
 /// `recovery_notice` is set, the advisory notice of a pending recovery (ADR 0045 point 4: the
-/// caller passes it only for a session that could cancel the recovery).
+/// caller passes it only for a session that could cancel the recovery). It also carries the
+/// suspended, unrevoked devices and the revocation window open at `now_ms` ([ADR 0091] §2
+/// "What clients see"), both advisory.
+///
+/// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the verified parts of one view, passed once by each of its three callers"
+)]
 pub(crate) async fn build<V: VaultPort>(
     vault: &V,
     mut conn: Conn<'_>,
@@ -47,6 +55,7 @@ pub(crate) async fn build<V: VaultPort>(
     scope: ViewScope,
     quota_bytes: u64,
     recovery_notice: bool,
+    now_ms: u64,
 ) -> Result<AccountView, AuthError> {
     let bundles: Vec<Vec<u8>> = match scope {
         ViewScope::Current => vec![trust.head_wire()?.to_vec()],
@@ -101,6 +110,18 @@ pub(crate) async fn build<V: VaultPort>(
     } else {
         None
     };
+    // ADR 0091 §2: the ids of the suspended, unrevoked certificates, ascending, and the open
+    // window, read on the same connection.
+    let mut suspended: Vec<Id> = devices
+        .certs
+        .iter()
+        .filter(|c| c.suspended && !devices.is_revoked(c.cert.device_id))
+        .map(|c| Id::from_bytes(*c.cert.device_id.as_bytes()))
+        .collect();
+    suspended.sort_unstable_by_key(|id| id.to_bytes());
+    let revocation_window = crate::revocation::window(reborrow(&mut conn), trust.account_id, now_ms)
+        .await?
+        .map(|w| w.notice());
     Ok(AccountView {
         account_state: Bytes::new(trust.state_wire.clone()).map_err(over_limit)?,
         bundles: List::new(bundles).map_err(over_limit)?,
@@ -132,6 +153,8 @@ pub(crate) async fn build<V: VaultPort>(
         quota_bytes,
         vaults: List::new(vaults).map_err(over_limit)?,
         pending_recovery,
+        suspended_devices: List::new(suspended).map_err(over_limit)?,
+        revocation_window,
     })
 }
 
@@ -167,6 +190,7 @@ impl<V: VaultPort> AuthService<V> {
             ViewScope::Since(query),
             self.config.account_quota_bytes,
             notice,
+            now_ms,
         )
         .await?;
         tx.finish().await?;

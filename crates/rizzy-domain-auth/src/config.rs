@@ -4,7 +4,8 @@
 //! lifetimes, the recovery waiting period and the rate limits.
 //!
 //! Values the specs fix are constants here ([`LOGIN_STATE_TTL_MS`], [`CHALLENGE_TTL_MS`],
-//! [`FRESH_SESSION_MS`], [`RECOVERY_SESSION_TTL_MS`], [`REQUEST_WINDOW`]). Values the specs
+//! [`FRESH_SESSION_MS`], [`RECOVERY_SESSION_TTL_MS`], [`REVOCATION_WINDOW_MS`],
+//! [`REQUEST_WINDOW`]). Values the specs
 //! leave to the operator carry a default and a documented bound. Values no Accepted ADR fixes
 //! at all (the session lifetimes, the rate-limit numbers) carry a conservative default, and the
 //! crate docs list them as open.
@@ -26,6 +27,13 @@ pub const FRESH_SESSION_MS: u64 = 5 * 60_000;
 
 /// The lifetime of the recovery-only session (CRYPTO.md §11.9 step 3: "a 10-minute TTL").
 pub const RECOVERY_SESSION_TTL_MS: u64 = 10 * 60_000;
+
+/// How long a revocation window stays open after the last `devices/suspend` that opened or
+/// renewed it ([ADR 0091] §2 "Constant": 10 minutes, not operator-configurable). It equals
+/// [`RECOVERY_SESSION_TTL_MS`].
+///
+/// [ADR 0091]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0091-revoked-device-rotation-race.md
+pub const REVOCATION_WINDOW_MS: u64 = 600_000;
 
 /// The request-counter window of a device-authenticated session (CRYPTO.md §5.10: "accepts
 /// each `request_counter` at most once per session, within a sliding window of 64").

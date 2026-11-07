@@ -96,6 +96,9 @@ async fn begin(
     let mut tx = db.begin_write().await?;
     lock_account(&mut tx, session.account_id.as_bytes()).await?;
     let session = session::reload(tx.conn(), session, now_ms).await?;
+    // ADR 0091 §2: the three healing writes are frozen while another device's revocation
+    // window is open.
+    crate::revocation::gate(tx.conn(), session.account_id, &session, now_ms).await?;
     let trust = AccountTrust::load(tx.conn(), session.account_id).await?;
     let devices = trust.devices(tx.conn()).await?;
     let epoch = open_epoch(&mut tx, session.account_id, limit_ms, now_ms).await?;

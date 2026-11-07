@@ -296,6 +296,8 @@ impl<V: VaultPort> AuthService<V> {
         let mut tx = self.db.begin_write().await?;
         lock_account(&mut tx, account.as_bytes()).await?;
         let session = session::reload(tx.conn(), session, now_ms).await?;
+        // ADR 0091 §2: frozen while another device's revocation window is open.
+        crate::revocation::gate(tx.conn(), account, &session, now_ms).await?;
         let trust = AccountTrust::load(tx.conn(), account).await?;
         let devices = trust.devices(tx.conn()).await?;
         if !can_cancel(&session, &devices, now_ms) {
@@ -367,6 +369,7 @@ impl<V: VaultPort> AuthService<V> {
             self.config.account_quota_bytes,
             // ADR 0045 point 4: the recovering client knows of its own recovery.
             false,
+            now_ms,
         )
         .await?;
         let vaults = self.vault.recovery_vaults(tx.conn(), account).await?;

@@ -184,6 +184,9 @@ impl<V: VaultPort> AuthService<V> {
                 }
             }
         }
+        // ADR 0091 §2: R3 and R4 are frozen while another device's revocation window is open
+        // (`sessions/current/end` is not).
+        crate::revocation::gate(tx.conn(), caller.account_id, &caller, now_ms).await?;
         Ok((tx, caller))
     }
 }

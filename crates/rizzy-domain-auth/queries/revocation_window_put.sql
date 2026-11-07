@@ -1,0 +1,2 @@
+-- Opens, replaces or renews the revocation window of account $1 (ADR 0091 §2 "Opening and renewing"). Shared by both engines; every value is a bound parameter (INV-53).
+INSERT INTO auth_revocation_windows (account_id, revoker_device_id, opened_at_ms, expires_at_ms) VALUES ($1, $2, $3, $4) ON CONFLICT (account_id) DO UPDATE SET revoker_device_id = excluded.revoker_device_id, opened_at_ms = excluded.opened_at_ms, expires_at_ms = excluded.expires_at_ms

@@ -71,6 +71,7 @@ use crate::AuthService;
 use crate::error::AuthError;
 use crate::ports::VaultPort;
 use crate::ratelimit::{self, BucketKind};
+use crate::revocation;
 use crate::rules::{self, RecoveryTransition, Transition};
 use crate::session::{self, Session, SessionKind};
 use crate::sql::{self, exec};
@@ -283,6 +284,11 @@ impl<V: VaultPort> AuthService<V> {
         if repeat {
             tx.commit().await?;
             return Ok(());
+        }
+        // ADR 0091 §2: after the byte-identical repeat, the freeze of an open revocation
+        // window. The recovery commit is never frozen (INV-7).
+        if session.kind != SessionKind::Recovery {
+            revocation::gate(tx.conn(), account, &session, now_ms).await?;
         }
         let (new_head, new_bundle) = match &change.bundle {
             Some(wire) => match trust.head()?.verify_successor(wire.as_slice()) {
@@ -642,6 +648,11 @@ impl<V: VaultPort> AuthService<V> {
             now_ms,
         )
         .await?;
+        // ADR 0091 §2 "Closing": the revocation commit (one that revokes at least one device)
+        // and a recovery commit delete the account's revocation window.
+        if session.kind == SessionKind::Recovery || !plan.new_revocations.is_empty() {
+            revocation::close(tx.conn(), account).await?;
+        }
         if session.kind == SessionKind::Recovery {
             // ADR 0045 point 6: only the recovery's own commit stamps the advisory time; every
             // other rotation leaves it.
