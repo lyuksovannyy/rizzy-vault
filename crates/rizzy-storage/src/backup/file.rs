@@ -69,10 +69,11 @@
 //! [ADR 0094]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0094-backup-container-limits.md
 
 use core::fmt;
+use std::io::Write;
 
 use sha2::{Digest as _, Sha256};
 
-use super::{Dump, TableDump, Value, plan};
+use super::{Dump, TableDump, Value, check_row, plan};
 use crate::error::RestoreError;
 use crate::tables::{Column, Kind, TABLES, TableSpec};
 
@@ -261,6 +262,14 @@ pub enum FileError {
         /// Where.
         at: Location,
     },
+    /// Writing: a table got another number of rows than its declared `row_count`
+    /// ([`Encoder`]).
+    RowCount {
+        /// The table's position in the file (0-based).
+        table: usize,
+    },
+    /// Writing: the byte sink failed.
+    Write(std::io::ErrorKind),
 }
 
 impl fmt::Display for FileError {
@@ -293,6 +302,12 @@ impl fmt::Display for FileError {
             Self::ValueTooLarge { at } => {
                 write!(f, "the dump cannot be written: value too large at {at}")
             }
+            Self::RowCount { table } => write!(
+                f,
+                "the dump cannot be written: table {table} has another number of rows than it \
+                 declared"
+            ),
+            Self::Write(kind) => write!(f, "writing the backup failed: {kind}"),
         }
     }
 }
@@ -303,14 +318,6 @@ impl std::error::Error for FileError {}
 #[must_use]
 pub fn digest(bytes: &[u8]) -> [u8; DIGEST_LEN] {
     Sha256::digest(bytes).into()
-}
-
-/// Appends `u32(len) ‖ bytes` (CRYPTO.md §2 `bytes(x)`).
-fn put_bytes(out: &mut Vec<u8>, bytes: &[u8], at: Location) -> Result<(), FileError> {
-    let len = u32::try_from(bytes.len()).map_err(|_| FileError::ValueTooLarge { at })?;
-    out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(bytes);
-    Ok(())
 }
 
 /// The kind byte of a column (ADR 0023 §1).
@@ -334,99 +341,300 @@ const fn kind_byte(kind: Kind) -> u8 {
 /// - [`FileError::Dump`] when the dump does not fit this release's tables.
 /// - [`FileError::ValueTooLarge`] when a text or blob value exceeds its limit.
 /// - [`FileError::TooLarge`] when the file would exceed [`MAX_BACKUP_FILE_LEN`].
+///
+/// A thin wrapper over [`write_to`], which streams the same bytes.
 pub fn write(dump: &Dump, created_at_ms: u64) -> Result<Vec<u8>, FileError> {
-    let schema_version =
-        u64::try_from(dump.schema_version).map_err(|_| FileError::SchemaVersion)?;
-    if schema_version == 0 {
-        return Err(FileError::SchemaVersion);
-    }
-    let planned = plan(dump).map_err(FileError::Dump)?;
-    let table_count = u16::try_from(planned.len()).map_err(|_| FileError::TooLarge)?;
     let mut out = Vec::new();
-    out.extend_from_slice(&MAGIC);
-    out.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
-    out.extend_from_slice(&schema_version.to_be_bytes());
-    out.extend_from_slice(&created_at_ms.to_be_bytes());
-    out.extend_from_slice(&table_count.to_be_bytes());
-    for (table_index, (spec, table)) in planned.into_iter().enumerate() {
-        write_table(&mut out, table_index, spec, table)?;
-    }
-    if !within_file_limit(out.len()) {
-        return Err(FileError::TooLarge);
-    }
-    let sum = digest(&out);
-    out.extend_from_slice(&sum);
+    write_to(&mut out, dump, created_at_ms)?;
     Ok(out)
 }
 
-/// Appends one table: its name, its column descriptors and its rows.
-fn write_table(
-    out: &mut Vec<u8>,
-    table_index: usize,
-    spec: &TableSpec,
-    table: &TableDump,
-) -> Result<(), FileError> {
-    let at = Location {
-        table: Some(table_index),
-        ..Location::default()
-    };
-    put_bytes(out, spec.name.as_bytes(), at)?;
-    let column_count = u16::try_from(spec.columns.len()).map_err(|_| FileError::Malformed {
-        at,
-        problem: Problem::ColumnCount,
-    })?;
-    out.extend_from_slice(&column_count.to_be_bytes());
-    for column in spec.columns {
-        put_bytes(out, column.name.as_bytes(), at)?;
-        out.push(kind_byte(column.kind));
-        out.push(u8::from(column.nullable));
+/// Streams `dump` as a backup file to `out`, stamped with `created_at_ms`: exactly the bytes
+/// [`write()`] returns, through the streaming [`Encoder`] ([ADR 0094] §2). Returns the file's
+/// digest and length.
+///
+/// # Errors
+///
+/// As [`write()`], and [`FileError::Write`] when `out` fails; `out` may then hold a prefix
+/// of the file.
+pub fn write_to<W: Write>(
+    out: W,
+    dump: &Dump,
+    created_at_ms: u64,
+) -> Result<([u8; DIGEST_LEN], u64), FileError> {
+    if u64::try_from(dump.schema_version)
+        .ok()
+        .filter(|&v| v != 0)
+        .is_none()
+    {
+        return Err(FileError::SchemaVersion);
     }
-    let row_count = u64::try_from(table.rows.len()).map_err(|_| FileError::TooLarge)?;
-    out.extend_from_slice(&row_count.to_be_bytes());
-    for (row_index, row) in table.rows.iter().enumerate() {
-        for (column_index, value) in row.iter().enumerate() {
-            let at = Location {
-                table: Some(table_index),
-                row: u64::try_from(row_index).ok(),
-                column: Some(column_index),
+    let planned = plan(dump).map_err(FileError::Dump)?;
+    let mut encoder = Encoder::new(out, dump.schema_version, created_at_ms)?;
+    for (_, table) in planned {
+        encoder.table(u64::try_from(table.rows.len()).map_err(|_| FileError::TooLarge)?)?;
+        for row in &table.rows {
+            encoder.row(row)?;
+        }
+    }
+    let (_, sum, len) = encoder.finish()?;
+    Ok((sum, len))
+}
+
+/// The streaming format version 1 encoder ([ADR 0094] §2): the canonical writer of the module
+/// docs, generic over a byte sink.
+///
+/// [`Encoder::new`] writes the header, [`Encoder::table`] the next table of [`TABLES`] with
+/// its declared `row_count`, [`Encoder::row`] one row of it, and [`Encoder::finish`] the
+/// digest. It holds the hash state and never the file, and it refuses to write a byte past its
+/// file limit ([`MAX_BACKUP_FILE_LEN`] unless [`Encoder::with_limit`] sets another), so every
+/// file it finishes is within it. Over [`std::io::sink`] it is the counting sink of pass 1:
+/// [`Encoder::written`] and [`Encoder::finish`] give the file's exact length.
+pub struct Encoder<W> {
+    /// Where the bytes go.
+    out: W,
+    /// SHA-256 over every byte written so far.
+    hasher: Sha256,
+    /// The bytes written so far.
+    len: u64,
+    /// The longest file this encoder writes, digest included.
+    limit: u64,
+    /// The tables begun so far.
+    tables: usize,
+    /// The current table's declared `row_count`.
+    rows_declared: u64,
+    /// The rows written to the current table.
+    rows: u64,
+}
+
+impl<W> fmt::Debug for Encoder<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Encoder")
+            .field("len", &self.len)
+            .field("limit", &self.limit)
+            .field("tables", &self.tables)
+            .field("rows_declared", &self.rows_declared)
+            .field("rows", &self.rows)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<W: Write> Encoder<W> {
+    /// Starts a file on `out`: writes its header.
+    ///
+    /// # Errors
+    ///
+    /// [`FileError::SchemaVersion`] when `schema_version` is below 1; [`FileError::Write`].
+    pub fn new(out: W, schema_version: i64, created_at_ms: u64) -> Result<Self, FileError> {
+        Self::with_limit(out, schema_version, created_at_ms, MAX_BACKUP_FILE_LEN)
+    }
+
+    /// [`Encoder::new`] with a file limit of `limit` bytes instead of
+    /// [`MAX_BACKUP_FILE_LEN`]: the test-only lower limits of ADR 0094 §6 go through here.
+    ///
+    /// # Errors
+    ///
+    /// As [`Encoder::new`], and [`FileError::TooLarge`] when the header does not fit `limit`.
+    pub fn with_limit(
+        out: W,
+        schema_version: i64,
+        created_at_ms: u64,
+        limit: u64,
+    ) -> Result<Self, FileError> {
+        let schema_version = u64::try_from(schema_version)
+            .ok()
+            .filter(|&v| v != 0)
+            .ok_or(FileError::SchemaVersion)?;
+        let table_count = u16::try_from(TABLES.len()).map_err(|_| FileError::TooLarge)?;
+        let mut encoder = Self {
+            out,
+            hasher: Sha256::new(),
+            len: 0,
+            limit,
+            tables: 0,
+            rows_declared: 0,
+            rows: 0,
+        };
+        encoder.put(&MAGIC)?;
+        encoder.put(&FORMAT_VERSION.to_be_bytes())?;
+        encoder.put(&schema_version.to_be_bytes())?;
+        encoder.put(&created_at_ms.to_be_bytes())?;
+        encoder.put(&table_count.to_be_bytes())?;
+        Ok(encoder)
+    }
+
+    /// The bytes written so far.
+    #[must_use]
+    pub const fn written(&self) -> u64 {
+        self.len
+    }
+
+    /// Begins the next table of [`TABLES`]: its name, its column descriptors and
+    /// `row_count`, the number of [`Encoder::row`] calls that must follow.
+    ///
+    /// # Errors
+    ///
+    /// [`FileError::RowCount`] when the previous table got another number of rows than it
+    /// declared; [`FileError::Dump`] when every table has been written already;
+    /// [`FileError::TooLarge`]; [`FileError::Write`].
+    pub fn table(&mut self, row_count: u64) -> Result<(), FileError> {
+        self.end_table()?;
+        let table_index = self.tables;
+        let spec = TABLES
+            .get(table_index)
+            .ok_or(FileError::Dump(RestoreError::UnknownTable {
+                index: table_index,
+            }))?;
+        let at = Location {
+            table: Some(table_index),
+            ..Location::default()
+        };
+        self.put_bytes(spec.name.as_bytes(), at)?;
+        let column_count = u16::try_from(spec.columns.len()).map_err(|_| FileError::Malformed {
+            at,
+            problem: Problem::ColumnCount,
+        })?;
+        self.put(&column_count.to_be_bytes())?;
+        for column in spec.columns {
+            self.put_bytes(column.name.as_bytes(), at)?;
+            self.put(&[kind_byte(column.kind), u8::from(column.nullable)])?;
+        }
+        self.put(&row_count.to_be_bytes())?;
+        self.tables = table_index.saturating_add(1);
+        self.rows_declared = row_count;
+        self.rows = 0;
+        Ok(())
+    }
+
+    /// Writes one row of the current table, checked first against its columns and every
+    /// value against its limit, so nothing of a refused row is written.
+    ///
+    /// # Errors
+    ///
+    /// [`FileError::RowCount`] when the table already has its declared rows (or no table has
+    /// begun); [`FileError::Dump`] when the row does not fit its columns;
+    /// [`FileError::ValueTooLarge`]; [`FileError::TooLarge`]; [`FileError::Write`].
+    pub fn row(&mut self, row: &[Value]) -> Result<(), FileError> {
+        let table_index = self.tables.saturating_sub(1);
+        let spec = TABLES
+            .get(table_index)
+            .filter(|_| self.tables > 0 && self.rows < self.rows_declared)
+            .ok_or(FileError::RowCount { table: table_index })?;
+        let row_index = usize::try_from(self.rows).unwrap_or(usize::MAX);
+        check_row(spec, row_index, row).map_err(FileError::Dump)?;
+        let row_number = self.rows;
+        let at = |column: usize| Location {
+            table: Some(table_index),
+            row: Some(row_number),
+            column: Some(column),
+        };
+        let mut encoded: u64 = 0;
+        for (column, value) in row.iter().enumerate() {
+            let value_len = match value {
+                Value::Null => 0,
+                Value::Integer(_) => 8,
+                Value::Text(t) if t.len() > MAX_TEXT_LEN => {
+                    return Err(FileError::ValueTooLarge { at: at(column) });
+                }
+                Value::Blob(b) if b.len() > MAX_BLOB_LEN => {
+                    return Err(FileError::ValueTooLarge { at: at(column) });
+                }
+                Value::Text(t) => t.len().saturating_add(4),
+                Value::Blob(b) => b.len().saturating_add(4),
             };
+            encoded = encoded.saturating_add(u64::try_from(value_len).unwrap_or(u64::MAX));
+            encoded = encoded.saturating_add(1);
+        }
+        if !self.fits(encoded) {
+            return Err(FileError::TooLarge);
+        }
+        for (column, value) in row.iter().enumerate() {
             match value {
-                Value::Null => out.push(tag::NULL),
+                Value::Null => self.put(&[tag::NULL])?,
                 Value::Integer(v) => {
-                    out.push(tag::INTEGER);
-                    out.extend_from_slice(&v.to_be_bytes());
+                    self.put(&[tag::INTEGER])?;
+                    self.put(&v.to_be_bytes())?;
                 }
                 Value::Text(t) => {
-                    if t.len() > MAX_TEXT_LEN {
-                        return Err(FileError::ValueTooLarge { at });
-                    }
-                    out.push(tag::TEXT);
-                    put_bytes(out, t.as_bytes(), at)?;
+                    self.put(&[tag::TEXT])?;
+                    self.put_bytes(t.as_bytes(), at(column))?;
                 }
                 Value::Blob(b) => {
-                    if b.len() > MAX_BLOB_LEN {
-                        return Err(FileError::ValueTooLarge { at });
-                    }
-                    out.push(tag::BLOB);
-                    put_bytes(out, b, at)?;
+                    self.put(&[tag::BLOB])?;
+                    self.put_bytes(b, at(column))?;
                 }
             }
         }
-        // Checked per row, so a dump far over the limit stops early; one row adds at most
-        // `MAX_COLUMNS` values of at most 32 MiB each past the limit before it is noticed.
-        if !within_file_limit(out.len()) {
+        self.rows = self.rows.saturating_add(1);
+        Ok(())
+    }
+
+    /// Ends the file: writes the digest and flushes `out`. Returns `out`, the digest and
+    /// the file's length.
+    ///
+    /// # Errors
+    ///
+    /// [`FileError::RowCount`] when the last table got another number of rows than it
+    /// declared; [`FileError::Dump`] when a table was not written; [`FileError::TooLarge`];
+    /// [`FileError::Write`].
+    pub fn finish(mut self) -> Result<(W, [u8; DIGEST_LEN], u64), FileError> {
+        self.end_table()?;
+        if let Some(missing) = TABLES.get(self.tables) {
+            return Err(FileError::Dump(RestoreError::MissingTable {
+                name: missing.name,
+            }));
+        }
+        if !self.fits(0) {
             return Err(FileError::TooLarge);
         }
+        let sum: [u8; DIGEST_LEN] = self.hasher.finalize().into();
+        self.out
+            .write_all(&sum)
+            .and_then(|()| self.out.flush())
+            .map_err(|e| FileError::Write(e.kind()))?;
+        let len = self.len.saturating_add(DIGEST_LEN as u64);
+        Ok((self.out, sum, len))
     }
-    Ok(())
-}
 
-/// Whether `body_len` bytes and the digest fit [`MAX_BACKUP_FILE_LEN`], compared in `u64`.
-fn within_file_limit(body_len: usize) -> bool {
-    u64::try_from(body_len)
-        .ok()
-        .and_then(|n| n.checked_add(DIGEST_LEN as u64))
-        .is_some_and(|n| n <= MAX_BACKUP_FILE_LEN)
+    /// Whether `n` more bytes and the digest fit the limit.
+    fn fits(&self, n: u64) -> bool {
+        self.len
+            .checked_add(n)
+            .and_then(|n| n.checked_add(DIGEST_LEN as u64))
+            .is_some_and(|n| n <= self.limit)
+    }
+
+    /// Requires the current table (if any) to have its declared rows.
+    const fn end_table(&self) -> Result<(), FileError> {
+        if self.rows == self.rows_declared {
+            Ok(())
+        } else {
+            Err(FileError::RowCount {
+                table: self.tables.saturating_sub(1),
+            })
+        }
+    }
+
+    /// Writes `bytes`, hashing and counting them; refuses a write past the limit.
+    fn put(&mut self, bytes: &[u8]) -> Result<(), FileError> {
+        let n = u64::try_from(bytes.len()).map_err(|_| FileError::TooLarge)?;
+        if !self.fits(n) {
+            return Err(FileError::TooLarge);
+        }
+        self.out
+            .write_all(bytes)
+            .map_err(|e| FileError::Write(e.kind()))?;
+        self.hasher.update(bytes);
+        self.len = self.len.saturating_add(n);
+        Ok(())
+    }
+
+    /// Writes `u32(len) ‖ bytes` (CRYPTO.md §2 `bytes(x)`).
+    fn put_bytes(&mut self, bytes: &[u8], at: Location) -> Result<(), FileError> {
+        let len = u32::try_from(bytes.len()).map_err(|_| FileError::ValueTooLarge { at })?;
+        self.put(&len.to_be_bytes())?;
+        self.put(bytes)
+    }
 }
 
 /// A cursor over the tables region of the file (between the header and the digest).
@@ -805,6 +1013,66 @@ mod tests {
         // The digest is SHA-256 of everything before it.
         let (body, sum) = KAT.split_at(KAT.len() - DIGEST_LEN);
         assert_eq!(Sha256::digest(body).as_slice(), sum);
+    }
+
+    /// Streams `dump` through an [`Encoder`] with file limit `limit`, table by table.
+    fn stream(dump: &Dump, created_at_ms: u64, limit: u64) -> Result<Vec<u8>, FileError> {
+        let mut e = Encoder::with_limit(Vec::new(), dump.schema_version, created_at_ms, limit)?;
+        for t in &dump.tables {
+            e.table(t.rows.len() as u64)?;
+            for r in &t.rows {
+                e.row(r)?;
+            }
+        }
+        e.finish().map(|(out, _, _)| out)
+    }
+
+    /// ADR 0094 §2 and §6 test 1: the streaming writer gives `write()`'s bytes exactly, and
+    /// over a discarding sink (pass 1) the same length and digest.
+    #[test]
+    fn stream_write_equals_write() {
+        for (dump, at) in [(kat_dump(), KAT_CREATED_AT_MS), (empty(), 7)] {
+            let bytes = write(&dump, at).unwrap();
+            let mut streamed = Vec::new();
+            let (sum, len) = write_to(&mut streamed, &dump, at).unwrap();
+            assert_eq!(streamed, bytes);
+            assert_eq!(len, bytes.len() as u64);
+            assert_eq!(sum, digest(&bytes[..bytes.len() - DIGEST_LEN]));
+            assert_eq!(write_to(std::io::sink(), &dump, at).unwrap(), (sum, len));
+            assert_eq!(stream(&dump, at, MAX_BACKUP_FILE_LEN).unwrap(), bytes);
+        }
+        let mut streamed = Vec::new();
+        write_to(&mut streamed, &kat_dump(), KAT_CREATED_AT_MS).unwrap();
+        assert_eq!(streamed, KAT);
+    }
+
+    /// The encoder refuses a table with another number of rows than it declared, a missing
+    /// table, and any byte past its limit.
+    #[test]
+    fn encoder_refusals() {
+        let v = schema_version();
+        let mut e = Encoder::new(Vec::new(), v, 0).unwrap();
+        e.table(1).unwrap();
+        assert_eq!(e.table(0), Err(FileError::RowCount { table: 0 }));
+        let mut e = Encoder::new(Vec::new(), v, 0).unwrap();
+        e.table(0).unwrap();
+        assert_eq!(e.row(&[]), Err(FileError::RowCount { table: 0 }));
+        let mut e = Encoder::new(Vec::new(), v, 0).unwrap();
+        assert_eq!(e.row(&[]), Err(FileError::RowCount { table: 0 }));
+        assert!(matches!(
+            Encoder::new(Vec::new(), v, 0).unwrap().finish(),
+            Err(FileError::Dump(RestoreError::MissingTable { .. }))
+        ));
+        assert_eq!(
+            Encoder::new(Vec::new(), 0, 0).unwrap_err(),
+            FileError::SchemaVersion
+        );
+        let len = KAT.len() as u64;
+        assert_eq!(stream(&kat_dump(), KAT_CREATED_AT_MS, len).unwrap(), KAT);
+        assert_eq!(
+            stream(&kat_dump(), KAT_CREATED_AT_MS, len - 1),
+            Err(FileError::TooLarge)
+        );
     }
 
     #[test]
