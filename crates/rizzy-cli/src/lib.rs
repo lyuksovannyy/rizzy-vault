@@ -24,7 +24,7 @@
 //! | [`account`] | A new master password or Secret Key (CRYPTO.md §11.5), server-side 2FA (§5.10) |
 //! | [`commands`] | The commands |
 //! | [`error`] | [`CliError`], with no secret in it |
-//! | `coredump` | Core dumps off at start (INV-60, ADR 0024) |
+//! | `coredump` | Core dumps off at start (INV-60, ADR 0024); panics exit 101 (INV-125, ADR 0112) |
 //!
 //! # Contract
 //!
@@ -83,11 +83,14 @@ use std::process::ExitCode;
 /// The `rv` process: core dumps off, the command line, one command on a current-thread
 /// runtime, the exit code.
 ///
-/// Exit codes: 0 success, 1 a failure, 2 a usage error. Messages go to stderr through
+/// Exit codes: 0 success, 1 a failure, 2 a usage error, 101 an internal error (a panic; it
+/// exits without a crash dump, threat model INV-125, ADR 0112). Messages go to stderr through
 /// `write!` on a locked handle and name what failed, never a value.
 #[must_use]
 pub fn main() -> ExitCode {
-    // First, before the arguments are read (threat model INV-60, ADR 0024; `coredump`).
+    // First the panic hook, then core dumps off, both before the arguments are read (threat
+    // model INV-125 and INV-60, ADR 0112 §2 and ADR 0024; `coredump`).
+    coredump::exit_on_panic();
     if let Err(e) = coredump::disable() {
         let _ = writeln!(std::io::stderr().lock(), "rv: {e}");
         return ExitCode::FAILURE;
