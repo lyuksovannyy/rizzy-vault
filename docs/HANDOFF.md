@@ -334,7 +334,7 @@ Every Proposed ADR as of today, oldest first. "Unblocks" is what accepting it cl
 
 **Reconcile at acceptance (shared numbers).** The batch was drafted in parallel, so shared numbered slots were allocated once, in ADR-number order, and each ADR marks them provisional: proposed invariants INV-70 … INV-100, CRYPTO.md §5.11 server-only purposes 0x0103 (0060 SMTP credentials), 0x0104 (0066), 0x0105 (0071), 0x0106 (0072), migrations 0006 (0047), 0007 (0048), 0008 (0064), and ADR 0028 item 1's endpoint count (+5 → 32 for 0054, +4 → 36 for 0064, +1 → 37 for 0066, +3 → 40 for 0068). If ADRs are accepted out of order, renumber at acceptance. Three things no single ADR could fix, left for whoever accepts the last of them: (1) 0052, 0061 and 0064 each partially supersede ADR 0028 item 1's "Paths and methods" text and the replacement texts do not chain; merge them into one text; (2) ADR 0028's "Retry after an unknown outcome" table has no row for 0054's five attachment endpoints or 0068's three mail endpoints; (3) `Purpose::ALL` reaches 35 once 0060, 0066, 0071 and 0072 all land, and no ADR states that final figure. 0054's clause (c) was read as an amendment to INV-15, not a new invariant; if it is new, ids from INV-80 on shift by one.
 
-**Shipped migration numbers (2026-10-25).** Several Accepted ADRs name the provisional number, not the shipped one (0047 says 0006, 0048 says 0007, 0081 says 0008 and, for M9, 0009); they are listed for an erratum in [the errata candidates](reviews/2026-10-25-errata-candidates.md). The shipped files, `crates/rizzy-storage/migrations/{sqlite,postgres}/` and `crates/rizzy-storage/src/migrate.rs`, and a backup's `schema_version` (the last applied migration, 11 today):
+**Shipped migration numbers (2026-10-25).** Several Accepted ADRs name the provisional number, not the shipped one (0047 says 0006, 0048 says 0007, 0081 says 0008 and, for M9, 0009); they are listed for an erratum in [the errata candidates](reviews/2026-10-25-errata-candidates.md). The shipped files, `crates/rizzy-storage/migrations/{sqlite,postgres}/` and `crates/rizzy-storage/src/migrate.rs`, and a backup's `schema_version` (the last applied migration, 12 today):
 
 | # | File | ADR |
 |---|---|---|
@@ -349,8 +349,9 @@ Every Proposed ADR as of today, oldest first. "Unblocks" is what accepting it cl
 | 0009 | `vault_kinds` | 0081 Part A |
 | 0010 | `auth_last_recovery` | 0045 |
 | 0011 | `auth_invalidate_pending` | 0047 |
+| 0012 | `auth_revocation_window` | 0091 §2 (not backed up) |
 
-A new migration takes the next free number when it is implemented (0012 now), whatever its ADR's text says.
+A new migration takes the next free number when it is implemented (0013 now), whatever its ADR's text says.
 
 ## 4. Dependency requests waiting for the owner
 
