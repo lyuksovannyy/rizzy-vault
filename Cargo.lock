@@ -3260,6 +3260,7 @@ version = "0.0.0"
 dependencies = [
  "rizzy-core",
  "rizzy-match",
+ "rizzy-proto",
  "serde_json",
  "sha2 0.11.0",
 ]

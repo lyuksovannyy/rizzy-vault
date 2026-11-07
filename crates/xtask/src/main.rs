@@ -63,6 +63,9 @@
 //! - **ADR 0037 §3** the resolved `psl` package's `data/rules.txt` and `src/list.rs` hash to
 //!   the constants pinned in `rizzy_match::suffix`, and its version matches
 //!   `rizzy_match::suffix::PSL_VERSION` ([`mod@psl_check`]).
+//! - **ADR 0106 §2** the root manifest's `[workspace.package] repository`, the base of the
+//!   server's default source URL, is a valid `SourceUrl` with no query, fragment or trailing
+//!   `/` ([`mod@source_url_check`]).
 //!
 //! R3, R5 and R6 cover dev-dependencies too. The rules table is in `rules.rs`.
 //!
@@ -158,6 +161,7 @@ mod metadata;
 mod psl_check;
 mod rules;
 mod signoff;
+mod source_url_check;
 mod spdx;
 mod tables;
 mod tokens;
@@ -381,13 +385,15 @@ fn check_deps() -> ExitCode {
     let psl_violations = psl_check::check(&inputs.all_targets)
         .err()
         .unwrap_or_default();
-    if violations.is_empty() && psl_violations.is_empty() {
+    let source_violation = source_url_check::check(&inputs.workspace_manifest).err();
+    if violations.is_empty() && psl_violations.is_empty() && source_violation.is_none() {
         let members = inputs.all_targets.members().count();
         let sources = inputs.rust_sources.len();
         let _ = writeln!(
             io::stdout().lock(),
             "check-deps: ok ({members} workspace crates, {sources} first-party .rs files; \
-             ADR 0016 R1–R8, ADR 0009, ADR 0019 §4.1, ADR 0024, ADR 0030, ADR 0037 §3)"
+             ADR 0016 R1–R8, ADR 0009, ADR 0019 §4.1, ADR 0024, ADR 0030, ADR 0037 §3, \
+             ADR 0106 §2)"
         );
         return ExitCode::SUCCESS;
     }
@@ -397,13 +403,16 @@ fn check_deps() -> ExitCode {
     for v in &psl_violations {
         let _ = writeln!(err, "error: [ADR 0037 §3] {v}");
     }
+    if let Some(v) = &source_violation {
+        let _ = writeln!(err, "error: [ADR 0106 §2] {v}");
+    }
     let _ = writeln!(
         err,
         "check-deps: {} violation(s) of the crate-boundary rules (ADR 0016 §4, ADR 0009), the \
-         token scans (`unsafe`: ADR 0019 §4.1; rustls `dangerous()`: ADR 0030), or the PSL \
-         snapshot check (ADR 0037 §3). The rules table is crates/xtask/src/rules.rs; \
-         changing it is a security review.",
-        violations.len() + psl_violations.len()
+         token scans (`unsafe`: ADR 0019 §4.1; rustls `dangerous()`: ADR 0030), the PSL \
+         snapshot check (ADR 0037 §3) or the source URL base (ADR 0106 §2). The rules table is \
+         crates/xtask/src/rules.rs; changing it is a security review.",
+        violations.len() + psl_violations.len() + usize::from(source_violation.is_some())
     );
     ExitCode::FAILURE
 }

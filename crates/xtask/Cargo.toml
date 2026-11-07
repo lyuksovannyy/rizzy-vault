@@ -26,6 +26,11 @@ rizzy-match.workspace = true
 # "Tool", unrestricted by R1), not a new crate. `.workspace = true` inherits the root entry's
 # `default-features = false`.
 sha2.workspace = true
+# `cargo xtask check-deps`'s `source_url_check` (ADR 0106 §2, implementation step 4): checks the
+# workspace `repository` with the same `SourceUrl` grammar the server and clients use. The edge
+# `xtask` → `rizzy-proto` is already in xtask's ADR 0016 internal allow-list (`rules.rs`); no
+# new crate.
+rizzy-proto.workspace = true
 
 [lints]
 workspace = true
