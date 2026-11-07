@@ -23,6 +23,7 @@ import type {
   Generated,
   GeneratorLimits,
   HistoryEntry,
+  IconsStatus,
   IdentityCountry,
   IdentityDefaults,
   IdentityGeneratorOptions,
@@ -186,6 +187,12 @@ export interface CoreApi {
    * the core checked, or `null` when there is none to show. Only the hostname is sent. Runs
    * beside the call queue (it touches no session state), and only while unlocked. */
   itemIcon(websiteHost: string): Uint8Array | null;
+  /** Where website icons stand (ADR 0099 §3): probes the `icons` role once per session, and
+   * sends nothing at all while the account's website-icons setting reads off. Only
+   * `available` lets the vault ask for icons; `itemIcon` refuses `icons_off` before it. */
+  iconsProbe(): IconsStatus;
+  /** Whether the account's website-icons setting reads on (ADR 0099 §1; on by default). */
+  websiteIcons(): boolean;
   exportEncrypted(vaultId: string, password: Uint8Array): EncryptedExport;
   exportBlockers(vaultId: string): string[];
   csvExportWarning(vaultId: string): string;
@@ -319,6 +326,8 @@ export const METHODS: readonly Method[] = [
   "breachCheckItem",
   "breachCheckPassword",
   "itemIcon",
+  "iconsProbe",
+  "websiteIcons",
   "exportEncrypted",
   "exportBlockers",
   "csvExportWarning",
@@ -521,6 +530,8 @@ export function isSettingsChange(value: unknown): value is SettingsChange {
       return typeof c["id"] === "string";
     case "identityDefaults":
       return isIdentityDefaults(c["defaults"]);
+    case "websiteIcons":
+      return typeof c["on"] === "boolean";
     default:
       return false;
   }

@@ -40,14 +40,29 @@ export function ItemsView({ client, revision }: ItemsViewProps) {
   const [error, setError] = useState<string | undefined>(undefined);
   // Item icons from the server's `icons` role (ADR 0052 point 6), one loader while this view is
   // shown: the popup closes on lock, and unmounting revokes every icon URL (packages/ui
-  // `itemIcons.ts`). Only the hostname leaves the browser; no third-party image is loaded.
+  // `itemIcons.ts`). Only the hostname leaves the browser; no third-party image is loaded. No
+  // loader, and so no host, unless the account's website-icons setting reads on and the
+  // session's probe found the role (ADR 0099 §2–§3); otherwise rows show the item-type icon.
   const [icons, setIcons] = useState<IconLoader | undefined>(undefined);
   useEffect(() => {
-    // Made in the effect, so that a cleared loader (an unmount, or React's development-mode
-    // remount) is never reused.
-    const loader = new IconLoader((host) => client.itemIcon(host));
-    setIcons(loader);
-    return () => loader.clear();
+    let live = true;
+    let loader: IconLoader | undefined;
+    void client
+      .iconsProbe()
+      .then((status) => {
+        if (!live || status !== "available") {
+          return;
+        }
+        // Made here, so that a cleared loader (an unmount, or React's development-mode
+        // remount) is never reused.
+        loader = new IconLoader((host) => client.itemIcon(host));
+        setIcons(loader);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+      loader?.clear();
+    };
   }, [client]);
 
   useEffect(() => {

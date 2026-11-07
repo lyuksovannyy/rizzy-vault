@@ -36,6 +36,8 @@ import {
   decideMatchCandidates,
   enrolDevice as coreEnrolDevice,
   fetchItemIcon,
+  type IconsStatus,
+  probeItemIcons,
   fetchTransport,
   init,
   newElementId,
@@ -332,11 +334,22 @@ export function saveVault(session: DurableSession, picked: string | undefined): 
   return chosen.id;
 }
 
-/** The icon of an item's website host from `serverOrigin`'s `icons` role (ADR 0052 point 6):
- * PNG bytes the core checked, or `undefined` when there is none to show. Only the hostname is
- * sent, with no Authorization header (packages/core `fetchItemIcon`). */
-export function itemIcon(serverOrigin: string, websiteHost: string): Promise<Uint8Array | undefined> {
-  return fetchItemIcon(fetchTransport(serverOrigin), websiteHost);
+/** The icon of an item's website host from `serverOrigin`'s `icons` role (ADR 0052 point 6),
+ * under the session's permit (ADR 0099 §4): PNG bytes the core checked, or `undefined` when there
+ * is none to show; `icons_off` before the probe found the role or while the setting reads off.
+ * Only the hostname is sent, with no Authorization header (packages/core `fetchItemIcon`). */
+export function itemIcon(
+  session: DurableSession,
+  serverOrigin: string,
+  websiteHost: string,
+): Promise<Uint8Array | undefined> {
+  return fetchItemIcon(session, fetchTransport(serverOrigin), websiteHost);
+}
+
+/** Runs the session's icon probe against `serverOrigin` (ADR 0099 §3; packages/core
+ * `probeItemIcons`): nothing is sent while the account's setting reads off. */
+export function iconsProbe(session: DurableSession, serverOrigin: string): Promise<IconsStatus> {
+  return probeItemIcons(session, fetchTransport(serverOrigin));
 }
 
 /** The `createItem` changeset for a brand-new Login saved from a submitted form (ROADMAP §4.4

@@ -9,7 +9,8 @@
 // (ADR 0042). "Identity generator" (`IdentityDefaultsPane.tsx`) is the synced defaults of a new
 // identity and its email domain (ADR 0079 Open question 7). "Third-party notices" carries the
 // attributions THIRD_PARTY_NOTICES.md requires (the EFF wordlist; the default site groups,
-// ADR 0080; the identity generator's data, ADR 0079).
+// ADR 0080; the identity generator's data, ADR 0079). "Website icons" (`WebsiteIconsPane.tsx`) is
+// the account's switch for item icons and its disclosure (ADR 0099 §6).
 import { ThirdPartyNotices } from "@rizzy-vault/ui";
 
 import { isTheme, useThemeContext } from "../theme.ts";
@@ -19,6 +20,7 @@ import { IdentityDefaultsPane } from "./IdentityDefaultsPane.tsx";
 import { MatchingPane } from "./MatchingPane.tsx";
 import { TransparencyPane } from "./TransparencyPane.tsx";
 import { TwoFactorPane } from "./TwoFactorPane.tsx";
+import { WebsiteIconsPane } from "./WebsiteIconsPane.tsx";
 
 /** The Appearance group: the theme choice (module docs). */
 function AppearanceGroup() {
@@ -76,6 +78,7 @@ export function SettingsView(props: { readonly ctx: VaultContext; readonly onOpe
       <DevicesPane ctx={props.ctx} />
       <MatchingPane ctx={props.ctx} />
       <IdentityDefaultsPane ctx={props.ctx} />
+      <WebsiteIconsPane ctx={props.ctx} />
       <AppearanceGroup />
       <TransparencyPane ctx={props.ctx} />
       <GettingStartedGroup onOpenGuide={props.onOpenGuide} />

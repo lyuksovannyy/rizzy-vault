@@ -1062,6 +1062,9 @@ export type PopupRequest =
   /** The icon of an item's website host (ADR 0052 point 6), fetched by the core from the
    * account's server; only the hostname leaves the browser. */
   | { readonly type: "item_icon"; readonly websiteHost: string }
+  /** Where website icons stand (ADR 0099 §3): runs the session's probe once, and sends nothing
+   * at all while the account's website-icons setting reads off. */
+  | { readonly type: "icons_probe" }
   /** "Remove this device", step 1 (ADR 0026 §5 as ADR 0095 §D replaces it): the refusal under
    * an alarm, or, while unlocked, the byte-identical upload of the unsent own rows and what is
    * still unacknowledged after it. Deletes nothing. */
@@ -1129,6 +1132,8 @@ export type PopupResponse =
   | { readonly type: "items"; readonly items: readonly ItemSummary[] }
   /** `item_icon`'s answer: the PNG as base64 (`messaging/bytes.ts`), or `null` for none. */
   | { readonly type: "icon"; readonly png: string | null }
+  /** `icons_probe`'s answer (packages/core `IconsStatus`). */
+  | { readonly type: "icons_status"; readonly status: "off" | "unknown" | "available" | "unavailable" }
   | { readonly type: "fields"; readonly fields: readonly ItemFieldSummary[] }
   | { readonly type: "revealed"; readonly value: string }
   | { readonly type: "generated"; readonly value: string }
@@ -1187,6 +1192,7 @@ export const MESSAGE_TYPES = [
   "generate_password",
   "get_status",
   "item_icon",
+  "icons_probe",
   "removal_check",
   "remove_device",
   "revocation_retry",
@@ -1200,6 +1206,7 @@ export const MESSAGE_TYPES = [
   "revealed",
   "generated",
   "icon",
+  "icons_status",
   "removed",
   "error",
 ] as const;

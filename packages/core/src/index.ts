@@ -1371,46 +1371,122 @@ export async function checkPasswordBreach(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Item icons (ADR 0052 point 6)
+// Item icons (ADR 0052 point 6), only under the session's permit (ADR 0099 §2–§4)
 //
 // The core normalises the host of an item's website (IDNA A-labels, lowercase, no trailing dot)
 // and builds `POST /api/v1/icons/fetch` with `{"host": …}` as its only field and no
-// Authorization header: the `icons` role learns a hostname, never who asks. The answer is
+// Authorization header: the `icons` role learns a hostname, never who asks. It builds one only
+// while the account's website-icons setting reads on (ACCOUNT_SETTINGS tag 0x0005, on by default)
+// and after this session's probe found the role: {@link probeItemIcons} sends `{"host":""}`
+// once; a server without the role answers 404 and then no host leaves the device. The answer is
 // checked (`image/png`, the PNG signature, a bounded length) and returned as bytes for the
 // caller to show as an image: a `blob:` URL, never markup, never a `data:` URL.
 
-/** The hostname an icon request for `websiteHost` would carry (lowercase A-labels), or
- * `undefined` when nothing would be sent for it (an IP literal in brackets, empty, too long).
- * Hosts that normalise to the same name share one request and one cache entry. */
-export function iconHost(websiteHost: string): string | undefined {
-  ensureReady();
-  const fetch = startIconFetch(websiteHost);
-  return fetch === undefined ? undefined : mapOne(fetch, (f) => f.host);
+/** Where website icons stand in a session (ADR 0099 §3, §6): `off` (the account's setting reads
+ * off), `unknown` (on, not probed yet), `available` (the probe found the `icons` role) or
+ * `unavailable` (it did not: "This server does not offer website icons."). */
+export type IconsStatus = "off" | "unknown" | "available" | "unavailable";
+
+/** The pause after a rate-limited probe (ADR 0099 §3; the transport gives no `Retry-After`). */
+export const ICON_PROBE_PAUSE_MS = 4000;
+
+/** @internal The core session calls the icon functions use: the web vault's and the
+ * extension's. */
+export interface IconSessionCore {
+  iconsStatus(): string;
+  iconProbeRequest(): HttpRequest;
+  iconProbeFinish(status: number, body: Uint8Array): string;
+  iconFetch(websiteHost: string): IconFetch;
 }
 
-/** The icon fetch for `websiteHost`, or `undefined` when the core refuses the host. */
-function startIconFetch(websiteHost: string): IconFetch | undefined {
+/** A session that can probe and fetch icons ({@link VaultSession}, {@link DurableSession}). */
+export interface IconSession {
+  /** @internal */
+  readonly iconCore: IconSessionCore;
+}
+
+/** The status as the core reports it, checked. */
+function iconsStatusOf(s: IconSessionCore): IconsStatus {
+  const status = call(() => s.iconsStatus());
+  return status === "off" || status === "available" || status === "unavailable" ? status : "unknown";
+}
+
+/** The hostname an icon request for `websiteHost` would carry (lowercase A-labels), or
+ * `undefined` when nothing would be sent for it (an IP literal in brackets, empty, too long).
+ * Hosts that normalise to the same name share one request and one cache entry. Sends nothing. */
+export function iconHost(websiteHost: string): string | undefined {
+  ensureReady();
+  return call(() => IconFetch.hostName(websiteHost));
+}
+
+/** The probe in flight per session, so that concurrent callers share one. */
+const probes = new WeakMap<IconSessionCore, Promise<IconsStatus>>();
+
+/**
+ * Runs the icon probe of ADR 0099 §3, once per session, and returns where icons stand: nothing
+ * at all is sent while the setting reads off. `429` waits {@link ICON_PROBE_PAUSE_MS} and tries
+ * again, at most three probes in all; a transport failure reads unavailable.
+ */
+export async function probeItemIcons(
+  session: IconSession,
+  transport: Transport,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+): Promise<IconsStatus> {
+  ensureReady();
+  const s = session.iconCore;
+  const running = probes.get(s);
+  if (running !== undefined) {
+    return running;
+  }
+  const run = (async (): Promise<IconsStatus> => {
+    for (;;) {
+      const status = iconsStatusOf(s);
+      if (status !== "unknown") {
+        return status;
+      }
+      const request = takeRequest(call(() => s.iconProbeRequest()));
+      let answer: CoreResponse;
+      try {
+        answer = await transport(request);
+      } catch {
+        answer = { status: 0, body: new Uint8Array() };
+      }
+      const outcome = call(() => s.iconProbeFinish(answer.status, answer.body));
+      if (outcome === "rate_limited") {
+        await sleep(ICON_PROBE_PAUSE_MS);
+      }
+    }
+  })();
+  probes.set(s, run);
   try {
-    return call(() => IconFetch.forHost(websiteHost));
+    return await run;
+  } finally {
+    probes.delete(s);
+  }
+}
+
+/**
+ * Fetches the icon of `websiteHost` from this server's `icons` role (ADR 0052), under the
+ * session's permit (ADR 0099 §4): the PNG bytes, re-encoded by the role and checked here, or
+ * `undefined` when there is no icon to show (no usable host, no icon for the site). Throws a
+ * {@link CoreError}: `icons_off` while the setting reads off or before {@link probeItemIcons}
+ * found the role (nothing was sent), `server_rate_limited` (wait and retry) and
+ * `transport_failed`.
+ */
+export async function fetchItemIcon(
+  session: IconSession,
+  transport: Transport,
+  websiteHost: string,
+): Promise<Uint8Array | undefined> {
+  ensureReady();
+  let fetch: IconFetch;
+  try {
+    fetch = call(() => session.iconCore.iconFetch(websiteHost));
   } catch (e) {
     if (e instanceof CoreError && e.code === "invalid_input") {
       return undefined;
     }
     throw e;
-  }
-}
-
-/**
- * Fetches the icon of `websiteHost` from this server's `icons` role (ADR 0052): the PNG bytes,
- * re-encoded by the role and checked here, or `undefined` when there is no icon to show (no
- * usable host, no icon for the site, or no `icons` role on this server). Throws a
- * {@link CoreError} only for `server_rate_limited` (wait and retry) and `transport_failed`.
- */
-export async function fetchItemIcon(transport: Transport, websiteHost: string): Promise<Uint8Array | undefined> {
-  ensureReady();
-  const fetch = startIconFetch(websiteHost);
-  if (fetch === undefined) {
-    return undefined;
   }
   try {
     const answer = await transport(takeRequest(call(() => fetch.request())));
@@ -2406,6 +2482,24 @@ export class VaultSession {
   matchSettings(): MatchSettings {
     const s = this.#s();
     return matchSettingsOf(call(() => s.matchSettings()));
+  }
+
+  /** Whether the account's website-icons setting reads on (ADR 0099 §1): on by default, off for
+   * an explicit off and when the settings record cannot be read. Changed with
+   * `changeMatchSettings({ kind: "websiteIcons", on })`. */
+  websiteIcons(): boolean {
+    const s = this.#s();
+    return call(() => s.websiteIcons());
+  }
+
+  /** Where website icons stand in this session ({@link IconsStatus}). */
+  iconsStatus(): IconsStatus {
+    return iconsStatusOf(this.iconCore);
+  }
+
+  /** @internal the icon calls ({@link probeItemIcons}, {@link fetchItemIcon}). */
+  get iconCore(): IconSessionCore {
+    return this.#s();
   }
 
   /** The identity generator's synced defaults (ADR 0079 Open question 7), or `null` until first
@@ -3890,6 +3984,26 @@ export class DurableSession {
   matchSettings(): MatchSettings {
     return matchSettingsOf(call(() => this.#inner.matchSettings()));
   }
+
+  /** Whether the account's website-icons setting reads on (ADR 0099 §1), read-only here: the
+   * web vault's Settings change it for every device. */
+  websiteIcons(): boolean {
+    return call(() => this.#inner.websiteIcons());
+  }
+
+  /** Where website icons stand in this session ({@link IconsStatus}). */
+  iconsStatus(): IconsStatus {
+    return iconsStatusOf(this.iconCore);
+  }
+
+  /** @internal the icon calls ({@link probeItemIcons}, {@link fetchItemIcon}); `locked` once
+   * locked. */
+  get iconCore(): IconSessionCore {
+    if (this.#locked) {
+      throw new CoreError("locked");
+    }
+    return this.#inner;
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4060,7 +4174,8 @@ export type SettingsChange =
   | { readonly kind: "removeUserGroup"; readonly id: string }
   | { readonly kind: "disableGlobalGroup"; readonly id: string }
   | { readonly kind: "enableGlobalGroup"; readonly id: string }
-  | { readonly kind: "identityDefaults"; readonly defaults: IdentityDefaults };
+  | { readonly kind: "identityDefaults"; readonly defaults: IdentityDefaults }
+  | { readonly kind: "websiteIcons"; readonly on: boolean };
 
 /** A generated settings view as a plain object, freed. */
 function matchSettingsOf(view: WasmMatchSettingsView): MatchSettings {
@@ -4103,5 +4218,7 @@ function settingsRequest(s: Session, change: SettingsChange): HttpRequest {
         d.emailDomain ?? undefined,
       );
     }
+    case "websiteIcons":
+      return s.setWebsiteIconsRequest(change.on);
   }
 }

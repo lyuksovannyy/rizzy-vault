@@ -126,6 +126,7 @@ function fakeContext(): VaultContext {
     generator: undefined as unknown as VaultContext["generator"],
     identity: undefined as unknown as VaultContext["identity"],
     icons: undefined as unknown as VaultContext["icons"],
+    iconsChanged: () => undefined,
     vaults: [],
     personalVaultId: undefined,
     vaultAlarms: [],

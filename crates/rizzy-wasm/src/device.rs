@@ -62,6 +62,7 @@ use core::fmt;
 use rizzy_client::ClientError;
 use rizzy_client::account::VerifiedAccount;
 use rizzy_client::device::{DeviceState, UnlockedDevice};
+use rizzy_client::icons::IconsSetting;
 use rizzy_client::items::{FieldEdit, ItemId, TRASH_RETENTION_MS};
 use rizzy_client::login::{
     Enrolled, LoggedIn, LoginAwaitingSession, LoginInput, LoginStarted, start_login,
@@ -97,6 +98,7 @@ use zeroize::Zeroizing;
 use crate::alarms::{self, Alarms};
 use crate::error::{CoreError, CoreResult, SECURITY_KEY_REQUIRED, WRONG_STATE};
 use crate::http::{self, HttpRequest};
+use crate::icons::{IconFetch, IconsState};
 use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, item_ref, type_from_name};
 use crate::matching::{self, MatchDecision, MatchSettingsView, UriInput};
 use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
@@ -534,6 +536,9 @@ pub struct DeviceSession {
     rng: Rng,
     /// The account settings of `account`, read once per object (ADR 0042 §6).
     settings: SettingsCache,
+    /// The icon probe's outcome and this session's `IconPermit` (ADR 0099 §3–§4;
+    /// [`crate::icons`]): gone with the session.
+    icons: IconsState,
     /// The compiled-in global equivalence list's groups, verified once when the session
     /// started against the cache's persisted floor (ADR 0051 §4), for every later decision.
     global_groups: Vec<EquivalenceGroup>,
@@ -603,6 +608,7 @@ impl DeviceSession {
             sync: SyncDriver::default(),
             rng: os_rng(),
             settings: SettingsCache::default(),
+            icons: IconsState::default(),
             global_groups,
             start_writes,
             alarms,
@@ -1594,6 +1600,63 @@ impl DeviceSession {
             settings.matching(),
             &self.global_groups,
         ))
+    }
+
+    /// Whether the account's website-icons setting reads on (ADR 0099 §1); off when the
+    /// settings record cannot be read. The extension follows the account's setting; it is
+    /// changed in the web vault's Settings.
+    #[wasm_bindgen(js_name = websiteIcons)]
+    #[must_use]
+    pub fn website_icons(&mut self) -> bool {
+        self.icons_setting().is_on()
+    }
+
+    /// As [`crate::session::Session::icons_status`].
+    #[wasm_bindgen(js_name = iconsStatus)]
+    #[must_use]
+    pub fn icons_status(&mut self) -> String {
+        let setting = self.icons_setting();
+        self.icons.status(setting).to_owned()
+    }
+
+    /// As [`crate::session::Session::icon_probe_request`].
+    ///
+    /// # Errors
+    /// `icons_off` while the setting reads off; `wrong_state` once the outcome is known.
+    #[wasm_bindgen(js_name = iconProbeRequest)]
+    pub fn icon_probe_request(&mut self) -> Result<HttpRequest, CoreError> {
+        let setting = self.icons_setting();
+        self.icons.probe_request(setting)
+    }
+
+    /// As [`crate::session::Session::icon_probe_finish`].
+    ///
+    /// # Errors
+    /// `wrong_state` without a probe in flight; `icons_off` if the setting went off.
+    #[wasm_bindgen(js_name = iconProbeFinish)]
+    pub fn icon_probe_finish(&mut self, status: u16, body: &[u8]) -> Result<String, CoreError> {
+        let setting = self.icons_setting();
+        self.icons
+            .probe_finish(setting, status, body)
+            .map(str::to_owned)
+    }
+
+    /// As [`crate::session::Session::icon_fetch`].
+    ///
+    /// # Errors
+    /// `icons_off` while the setting reads off or before the probe found the role;
+    /// `invalid_input` for a host that is not a usable hostname.
+    #[wasm_bindgen(js_name = iconFetch)]
+    pub fn icon_fetch(&mut self, website_host: &str) -> Result<IconFetch, CoreError> {
+        let setting = self.icons_setting();
+        self.icons.fetch(setting, website_host)
+    }
+}
+
+impl DeviceSession {
+    /// The account's website-icons setting (ADR 0099 §1): off when the record cannot be read.
+    fn icons_setting(&mut self) -> IconsSetting {
+        IconsSetting::from_read(self.settings.get(&self.account, &self.unlocked))
     }
 }
 

@@ -118,6 +118,9 @@ export interface VaultContext {
   /** Item icons from the server's `icons` role, for this unlocked session (packages/ui
    * `itemIcons.ts`). */
   readonly icons: IconLoader | undefined;
+  /** Re-reads the website-icons setting after Settings changed it (ADR 0099 §2): off clears the
+   * loader at once; on probes again before any host. */
+  readonly iconsChanged: () => void;
   /** Every vault of the account, Personal first (ADR 0081 §A2, §A8). */
   readonly vaults: readonly VaultInfo[];
   /** The Personal vault, which every picker preselects (§A8). */
@@ -164,15 +167,49 @@ export function VaultView(props: {
   const generator = useGeneratorMemory();
   const identity = useIdentityMemory();
   // One loader per unlocked session: the vault view unmounts on lock, which revokes every icon
-  // URL and stops the queue (packages/ui `itemIcons.ts`).
+  // URL and stops the queue (packages/ui `itemIcons.ts`). ADR 0099 §2–§3: no loader, and so no
+  // host and no probe, until the account's website-icons setting is read on; then one probe,
+  // and a loader only if it found the `icons` role. Turning the setting off (here, or on another
+  // device, seen at the next sync) clears the loader at once: the queue is dropped and every
+  // `blob:` URL revoked; the core refuses any fetch still asked for (`icons_off`).
+  const [iconsOn, setIconsOn] = useState<boolean | undefined>(undefined);
+  const [iconsEpoch, setIconsEpoch] = useState(0);
+  const iconsChanged = useCallback(() => setIconsEpoch((n) => n + 1), []);
+  useEffect(() => {
+    let live = true;
+    client
+      .call("websiteIcons")
+      .then((on) => live && setIconsOn(on))
+      .catch(() => live && setIconsOn(false));
+    return () => {
+      live = false;
+    };
+  }, [client, revision, iconsEpoch]);
   const [icons, setIcons] = useState<IconLoader | undefined>(undefined);
   useEffect(() => {
-    // Made in the effect, so that a cleared loader (an unmount, or React's development-mode
-    // remount) is never reused.
-    const loader = new IconLoader((host) => client.call("itemIcon", host));
-    setIcons(loader);
-    return () => loader.clear();
-  }, [client]);
+    setIcons(undefined);
+    if (iconsOn !== true) {
+      return;
+    }
+    let live = true;
+    let loader: IconLoader | undefined;
+    client
+      .call("iconsProbe")
+      .then((status) => {
+        if (!live || status !== "available") {
+          return;
+        }
+        // Made here, so that a cleared loader (an unmount, or React's development-mode
+        // remount) is never reused.
+        loader = new IconLoader((host) => client.call("itemIcon", host));
+        setIcons(loader);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+      loader?.clear();
+    };
+  }, [client, iconsOn]);
   const lockedRef = useRef(false);
   /** The latest session state, for the auto-lock (which runs outside a render). */
   const sessionRef = useRef(props.initialSession);
@@ -458,6 +495,7 @@ export function VaultView(props: {
     generator,
     identity,
     icons,
+    iconsChanged,
     vaults,
     personalVaultId,
     vaultAlarms,

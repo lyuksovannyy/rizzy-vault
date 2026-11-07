@@ -181,6 +181,17 @@ export class ExtensionClient {
     throw this.#unexpected(response);
   }
 
+  /** Where website icons stand (ADR 0099 §3): the session probes the `icons` role once, and
+   * sends nothing while the account's website-icons setting reads off. Only `available` lets
+   * the popup ask for icons. */
+  async iconsProbe(): Promise<"off" | "unknown" | "available" | "unavailable"> {
+    const response = await this.#transport({ type: "icons_probe" });
+    if (response.type === "icons_status") {
+      return response.status;
+    }
+    throw this.#unexpected(response);
+  }
+
   async itemFields(
     itemId: string,
   ): Promise<ReadonlyArray<{ key: string; kind: string; concealed: boolean; value: string | undefined }>> {

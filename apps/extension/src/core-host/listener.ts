@@ -69,6 +69,7 @@ function isPopupRequest(value: unknown): value is PopupRequest {
     type === "generate_password" ||
     type === "get_status" ||
     type === "item_icon" ||
+    type === "icons_probe" ||
     type === "removal_check" ||
     type === "remove_device" ||
     type === "revocation_retry"

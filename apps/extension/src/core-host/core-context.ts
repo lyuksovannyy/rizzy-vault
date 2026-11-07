@@ -30,6 +30,7 @@ import {
   enrolDevice,
   findItemForUpdate,
   initCore,
+  iconsProbe,
   itemCredentials,
   itemIcon,
   newElementId,
@@ -1018,8 +1019,27 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
         if (serverOrigin === undefined) {
           return { type: "error", code: "not_enrolled" };
         }
-        const png = await itemIcon(serverOrigin, request.websiteHost);
+        const png = await itemIcon(session, serverOrigin, request.websiteHost);
         return { type: "icon", png: png === undefined ? null : bytesToBase64(png) };
+      } catch (e) {
+        return { type: "error", code: errorCode(e, "item_icon_failed") };
+      }
+    }
+    case "icons_probe": {
+      // ADR 0099 §2–§3: the session reads the account's website-icons setting and, only while
+      // it reads on, probes the role once; while off, nothing is sent at all.
+      if (session === undefined) {
+        return { type: "error", code: "locked" };
+      }
+      try {
+        if (!session.websiteIcons()) {
+          return { type: "icons_status", status: "off" };
+        }
+        const { serverOrigin } = await readAccountConfig();
+        if (serverOrigin === undefined) {
+          return { type: "error", code: "not_enrolled" };
+        }
+        return { type: "icons_status", status: await iconsProbe(session, serverOrigin) };
       } catch (e) {
         return { type: "error", code: errorCode(e, "item_icon_failed") };
       }

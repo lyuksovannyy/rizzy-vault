@@ -33,6 +33,7 @@ import {
   cxfExportWarning,
   detectImportFormat,
   fetchItemIcon,
+  probeItemIcons,
   fetchTransport,
   generatePassphraseWithOptions,
   generatePasswordWithOptions,
@@ -385,10 +386,10 @@ async function run(m: CallMessage): Promise<unknown> {
     restoreLateAsNew: () => current().restoreLateAsNew(str(a[0]), str(a[1]) as never),
     totp: () => current().totp(str(a[0])),
     breachCheckItem: async () => (await current().checkItemBreach(str(a[0]))) ?? null,
-    itemIcon: async () => {
-      current();
-      return (await fetchItemIcon(transport, str(a[0]))) ?? null;
-    },
+    itemIcon: async () => (await fetchItemIcon(current(), transport, str(a[0]))) ?? null,
+    // ADR 0099 §2–§3: nothing is sent while the account's setting reads off; on, one probe.
+    iconsProbe: () => probeItemIcons(current(), transport),
+    websiteIcons: () => current().websiteIcons(),
     breachCheckPassword: () => {
       current();
       return checkPasswordBreach(transport, bytes(a[0]));
@@ -546,10 +547,11 @@ scope.addEventListener("message", (event) => {
     totpWaiters.get(m.id)?.(m.code);
     return;
   }
-  // An icon fetch touches no session state and may wait on a slow site (the role's budget is
-  // 10 s), so it runs beside the queue instead of holding every user action behind it. A lock
-  // still aborts it (`bounded.abortAll`), and it refuses to start while locked.
-  if (m.method === "lock" || m.method === "itemIcon") {
+  // An icon fetch or probe touches only the session's icon permit (each core call is
+  // synchronous) and may wait on a slow site (the role's budget is 10 s), so it runs beside the
+  // queue instead of holding every user action behind it. A lock still aborts it
+  // (`bounded.abortAll`), and it refuses to start while locked.
+  if (m.method === "lock" || m.method === "itemIcon" || m.method === "iconsProbe") {
     void serve(m);
     return;
   }
