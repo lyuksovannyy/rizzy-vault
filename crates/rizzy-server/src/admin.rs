@@ -52,7 +52,7 @@
 //!
 //! `backup` dumps the database in one read snapshot next to the running server, writes it as
 //! the backup file of `rizzy_storage::backup::file` (canonical, with its trailing SHA-256, and
-//! never longer than the reader's 2 GiB limit), and prints the file's length and SHA-256 on
+//! never longer than `MAX_BACKUP_FILE_LEN`, 1 TiB, ADR 0094 §1), and prints the file's length and SHA-256 on
 //! stderr for the operator to record. `--out -` writes the file to stdout, for piping into
 //! `age` or a backup tool, and is refused when stdout is a terminal (usage error). Otherwise
 //! the file is created new with mode 0600, never over an existing one, and removed again if
@@ -65,7 +65,8 @@
 //!    refused while any server process holds it. Then require an empty target: no migration
 //!    applied, or exactly this release's, and no row
 //!    ([`rizzy_storage::Database::check_restore_target`]).
-//! 2. **Read the file** (at most 2 GiB, from a path or `-` for stdin) and parse it: magic,
+//! 2. **Read the file** (into memory, at most `MAX_IN_MEMORY_BACKUP_LEN`, 2 GiB, from a path
+//!    or `-` for stdin) and parse it: magic,
 //!    format version and SHA-256 first, then every table strictly.
 //! 3. **Require this release's schema version**; an older backup is restored with the release
 //!    that wrote it, then upgraded with `migrate` (ADR 0023 open question 4, as recommended).
@@ -180,7 +181,7 @@ use rizzy_domain_auth::secrets::SecretsError;
 use rizzy_domain_auth::types::ServerSetup;
 use rizzy_domain_auth::{ServerSecrets, StartupCheckError};
 use rizzy_storage::backup::file::{
-    self as backup_file, DIGEST_LEN, FileError, MAX_BACKUP_FILE_LEN,
+    self as backup_file, DIGEST_LEN, FileError, MAX_IN_MEMORY_BACKUP_LEN,
 };
 use rizzy_storage::{
     Database, InstanceLock, InstanceLockMode, PostgresOptions, RestoreError, RestoreGeneration,
@@ -1204,11 +1205,11 @@ pub async fn backup(
 }
 
 /// Reads the backup file from `path`, or from standard input when `path` is `-`, refusing
-/// anything longer than [`MAX_BACKUP_FILE_LEN`] without reading past it.
+/// anything longer than [`MAX_IN_MEMORY_BACKUP_LEN`] without reading past it.
 fn read_backup(path: &Path) -> Result<Zeroizing<Vec<u8>>, AdminError> {
     if is_stdio(path) {
         let mut buf = Zeroizing::new(Vec::new());
-        let limit = u64::try_from(MAX_BACKUP_FILE_LEN)
+        let limit = u64::try_from(MAX_IN_MEMORY_BACKUP_LEN)
             .unwrap_or(u64::MAX)
             .saturating_add(1);
         std::io::stdin()
@@ -1216,12 +1217,12 @@ fn read_backup(path: &Path) -> Result<Zeroizing<Vec<u8>>, AdminError> {
             .take(limit)
             .read_to_end(&mut buf)
             .map_err(|e| AdminError::Input(e.kind()))?;
-        if buf.len() > MAX_BACKUP_FILE_LEN {
+        if buf.len() > MAX_IN_MEMORY_BACKUP_LEN {
             return Err(AdminError::BackupFile(FileError::TooLarge));
         }
         Ok(buf)
     } else {
-        fsutil::read_limited(path, MAX_BACKUP_FILE_LEN).map_err(|e| match e {
+        fsutil::read_limited(path, MAX_IN_MEMORY_BACKUP_LEN).map_err(|e| match e {
             ReadError::TooLarge => AdminError::BackupFile(FileError::TooLarge),
             ReadError::Io(e) => AdminError::Input(e.kind()),
         })

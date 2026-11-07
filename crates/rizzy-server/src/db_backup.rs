@@ -50,10 +50,12 @@
 //! # Reading (strict, canonical)
 //!
 //! [`parse_header`] checks, before any crypto and before any allocation sized by a declared
-//! length: the input is at most [`MAX_BACKUP_FILE_LEN`] and at least [`HEADER_LEN`] bytes; the
+//! length: the input is at most [`MAX_BACKUP_FILE_LEN`] (1 TiB, [ADR 0094] §1, compared in
+//! `u64`) and at least [`HEADER_LEN`] bytes; the
 //! magic; `format_version` = 2; `plaintext_len` > 0 (a format version 1 file is never empty,
 //! and a container without chunks would authenticate nothing); `chunk_count =
-//! ceil(plaintext_len / CHUNK_LEN)` (ADR 0071: "before opening any chunk"); and the input's
+//! ceil(plaintext_len / CHUNK_LEN)` and at most [`MAX_CHUNK_COUNT`] (ADR 0071: "before
+//! opening any chunk"; ADR 0094 §1); and the input's
 //! length is exactly `HEADER_LEN + plaintext_len + 90 × chunk_count`. [`open`] then looks up
 //! the header's `backup_key_id` in the secrets file, which may no longer be the current one,
 //! and opens the chunks in order, stopping at the first failure. Every file [`open`] accepts
@@ -69,6 +71,7 @@
 //!
 //! [ADR 0071]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0071-encrypted-db-backup-format.md
 //! [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
+//! [ADR 0094]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0094-backup-container-limits.md
 
 use core::fmt;
 
@@ -88,6 +91,10 @@ pub const CHUNK_OVERHEAD: usize = 90;
 /// The header's length: magic (22), `format_version` (2), `backup_id` (16),
 /// `created_at_ms` (8), `backup_key_id` (4), `plaintext_len` (8), `chunk_count` (4).
 pub const HEADER_LEN: usize = MAGIC.len() + 2 + 16 + 8 + 4 + 8 + 4;
+
+/// The most chunks a format version 2 file has: [`MAX_BACKUP_FILE_LEN`] / [`CHUNK_LEN`] =
+/// 2^40 / 2^23 = 131 072 ([ADR 0094] §1; `chunk_count` stays a `u32`).
+pub const MAX_CHUNK_COUNT: u32 = 131_072;
 
 /// The framing rule a file whose length disagrees with its header breaks.
 const LENGTH_MISMATCH: &str = "the file length does not match plaintext_len and chunk_count";
@@ -165,7 +172,10 @@ impl fmt::Display for DbBackupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => f.write_str("encrypted backup: nothing to encrypt"),
-            Self::TooLarge => f.write_str("encrypted backup exceeds the 2 GiB file limit"),
+            Self::TooLarge => write!(
+                f,
+                "encrypted backup exceeds this release's limit of {MAX_BACKUP_FILE_LEN} bytes"
+            ),
             Self::Malformed(rule) => write!(f, "encrypted backup is malformed: {rule}"),
             Self::UnknownBackupKey { backup_key_id } => write!(
                 f,
@@ -194,19 +204,20 @@ pub fn format_version(bytes: &[u8]) -> Option<u16> {
 
 /// The length of the format version 2 file for a payload of `plaintext_len` bytes in
 /// `chunk_len`-byte chunks: header, payload and 90 bytes per chunk (ADR 0071 "Size"); `None`
-/// on overflow.
-fn sealed_len_with(plaintext_len: usize, chunk_len: usize) -> Option<usize> {
+/// on overflow. Computed in `u64` (ADR 0094 §1).
+fn sealed_len_with(plaintext_len: u64, chunk_len: usize) -> Option<u64> {
+    let chunk_len = u64::try_from(chunk_len).ok().filter(|&n| n > 0)?;
     plaintext_len
         .div_ceil(chunk_len)
-        .checked_mul(CHUNK_OVERHEAD)?
+        .checked_mul(u64::try_from(CHUNK_OVERHEAD).ok()?)?
         .checked_add(plaintext_len)?
-        .checked_add(HEADER_LEN)
+        .checked_add(u64::try_from(HEADER_LEN).ok()?)
 }
 
 /// The length of the format version 2 file for a payload of `plaintext_len` bytes: header,
 /// payload and 90 bytes per chunk; `None` on overflow.
 #[must_use]
-pub fn sealed_len(plaintext_len: usize) -> Option<usize> {
+pub fn sealed_len(plaintext_len: u64) -> Option<u64> {
     sealed_len_with(plaintext_len, CHUNK_LEN)
 }
 
@@ -238,13 +249,14 @@ fn seal_with<R: CryptoRng + ?Sized>(
     if plaintext.is_empty() {
         return Err(DbBackupError::Empty);
     }
-    let total = sealed_len_with(plaintext.len(), chunk_len).ok_or(DbBackupError::TooLarge)?;
-    if total > MAX_BACKUP_FILE_LEN {
-        return Err(DbBackupError::TooLarge);
-    }
-    let chunk_count =
-        u32::try_from(plaintext.len().div_ceil(chunk_len)).map_err(|_| DbBackupError::TooLarge)?;
     let plaintext_len = u64::try_from(plaintext.len()).map_err(|_| DbBackupError::TooLarge)?;
+    let total = sealed_len_with(plaintext_len, chunk_len)
+        .filter(|&n| n <= MAX_BACKUP_FILE_LEN)
+        .ok_or(DbBackupError::TooLarge)?;
+    let chunk_count = u32::try_from(plaintext.len().div_ceil(chunk_len))
+        .ok()
+        .filter(|&n| n <= MAX_CHUNK_COUNT)
+        .ok_or(DbBackupError::TooLarge)?;
     let header = Header {
         backup_id: BackupId::generate(rng),
         created_at_ms,
@@ -252,7 +264,7 @@ fn seal_with<R: CryptoRng + ?Sized>(
         plaintext_len,
         chunk_count,
     };
-    let mut out = Vec::with_capacity(total);
+    let mut out = Vec::with_capacity(usize::try_from(total).map_err(|_| DbBackupError::TooLarge)?);
     out.extend_from_slice(&header.encode());
     for (index, chunk) in (0..chunk_count).zip(plaintext.chunks(chunk_len)) {
         let envelope = key
@@ -260,7 +272,7 @@ fn seal_with<R: CryptoRng + ?Sized>(
             .map_err(|_| DbBackupError::Seal)?;
         out.extend_from_slice(&envelope);
     }
-    if out.len() != total {
+    if u64::try_from(out.len()).ok() != Some(total) {
         return Err(DbBackupError::Seal);
     }
     Ok(out)
@@ -278,7 +290,8 @@ pub fn parse_header(bytes: &[u8]) -> Result<Header, DbBackupError> {
 /// [`parse_header`] with `chunk_len`-byte chunks (only the unit tests pass another length).
 fn parse_header_with(bytes: &[u8], chunk_len: usize) -> Result<Header, DbBackupError> {
     const SHORT: DbBackupError = DbBackupError::Malformed("shorter than the header");
-    if bytes.len() > MAX_BACKUP_FILE_LEN {
+    let file_len = u64::try_from(bytes.len()).map_err(|_| DbBackupError::TooLarge)?;
+    if file_len > MAX_BACKUP_FILE_LEN {
         return Err(DbBackupError::TooLarge);
     }
     let mut r = Reader(bytes);
@@ -300,16 +313,19 @@ fn parse_header_with(bytes: &[u8], chunk_len: usize) -> Result<Header, DbBackupE
     }
     // A plaintext_len longer than any file this reader accepts is refused before the
     // arithmetic, so nothing below can overflow.
-    let payload = usize::try_from(plaintext_len)
+    if plaintext_len > MAX_BACKUP_FILE_LEN {
+        return Err(DbBackupError::Malformed(LENGTH_MISMATCH));
+    }
+    let expected_chunks = u64::try_from(chunk_len)
         .ok()
-        .filter(|&n| n <= MAX_BACKUP_FILE_LEN)
-        .ok_or(DbBackupError::Malformed(LENGTH_MISMATCH))?;
-    if usize::try_from(chunk_count).ok() != Some(payload.div_ceil(chunk_len)) {
+        .filter(|&n| n > 0)
+        .map(|n| plaintext_len.div_ceil(n));
+    if chunk_count > MAX_CHUNK_COUNT || Some(u64::from(chunk_count)) != expected_chunks {
         return Err(DbBackupError::Malformed(
             "chunk_count is not ceil(plaintext_len / CHUNK_LEN)",
         ));
     }
-    if sealed_len_with(payload, chunk_len) != Some(bytes.len()) {
+    if sealed_len_with(plaintext_len, chunk_len) != Some(file_len) {
         return Err(DbBackupError::Malformed(LENGTH_MISMATCH));
     }
     Ok(Header {
@@ -535,7 +551,11 @@ mod tests {
             5 * SMALL + 7,
         ] {
             let file = seal_small(len, len as u64);
-            assert_eq!(Some(file.len()), sealed_len_with(len, SMALL), "{len}");
+            assert_eq!(
+                Some(file.len() as u64),
+                sealed_len_with(len as u64, SMALL),
+                "{len}"
+            );
             let header = parse_header_with(&file, SMALL).unwrap();
             assert_eq!(header.plaintext_len, len as u64);
             assert_eq!(header.chunk_count as usize, len.div_ceil(SMALL));
@@ -572,10 +592,15 @@ mod tests {
         // fit once encrypted (ADR 0071 "Size").
         assert!(sealed_len(MAX_BACKUP_FILE_LEN).unwrap() > MAX_BACKUP_FILE_LEN);
         assert_eq!(
-            sealed_len(CHUNK_LEN + 1),
-            Some(HEADER_LEN + CHUNK_LEN + 1 + 2 * CHUNK_OVERHEAD)
+            sealed_len(CHUNK_LEN as u64 + 1),
+            Some((HEADER_LEN + CHUNK_LEN + 1 + 2 * CHUNK_OVERHEAD) as u64)
         );
-        assert_eq!(sealed_len(usize::MAX), None);
+        assert_eq!(sealed_len(u64::MAX), None);
+        // ADR 0094 §1: the 1 TiB cap allows at most 131 072 chunks of CHUNK_LEN.
+        assert_eq!(
+            MAX_BACKUP_FILE_LEN / CHUNK_LEN as u64,
+            u64::from(MAX_CHUNK_COUNT)
+        );
     }
 
     #[test]

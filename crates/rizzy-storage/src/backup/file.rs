@@ -36,8 +36,11 @@
 //!
 //! # Limits (ADR 0023 §3)
 //!
-//! - The whole file: [`MAX_BACKUP_FILE_LEN`], 2 GiB, for this in-memory reader. [`write()`]
-//!   refuses to produce a longer file, so no backup this release writes is one it cannot read.
+//! - The whole file: [`MAX_BACKUP_FILE_LEN`], 1 TiB ([ADR 0094] §1), for every file this
+//!   release writes and every one it reads from a regular file. [`write()`] refuses to produce
+//!   a longer file, so no backup this release writes is one it cannot read from a file. The
+//!   in-memory [`parse`] (and so stdin, a path that is not a regular file and the fuzz target)
+//!   reads at most [`MAX_IN_MEMORY_BACKUP_LEN`], 2 GiB.
 //! - A text value: [`MAX_TEXT_LEN`] (4 KiB). A blob value: [`MAX_BLOB_LEN`] (32 MiB), at least
 //!   every `rizzy-proto` limit on a stored value (asserted by a test in `rizzy-domain-vault`,
 //!   the crate that sees both). A name: 1–[`MAX_NAME_LEN`] bytes of `[a-z0-9_]`. At most
@@ -63,6 +66,7 @@
 //! arbitrary bytes, with and without a valid digest, and round-trips dumps built from them.
 //!
 //! [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
+//! [ADR 0094]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0094-backup-container-limits.md
 
 use core::fmt;
 
@@ -79,9 +83,16 @@ pub const MAGIC: [u8; 22] = *b"rizzy-vault-db-backup\0";
 /// decided by an ADR (ADR 0023 §1).
 pub const FORMAT_VERSION: u16 = 1;
 
-/// The longest backup file this release reads and writes: 2 GiB (ADR 0023 §3, open question 2
-/// answered as recommended).
-pub const MAX_BACKUP_FILE_LEN: usize = 2 * 1024 * 1024 * 1024;
+/// The longest backup file this release writes, and reads from a regular file: 2^40 bytes
+/// (1 TiB), format version 1 or 2 ([ADR 0094] §1, replacing ADR 0023 §3's 2 GiB). A `u64`,
+/// since 1 TiB does not fit a 32-bit `usize`; every comparison with a file length or
+/// `plaintext_len` is made in `u64`.
+pub const MAX_BACKUP_FILE_LEN: u64 = 1 << 40;
+
+/// The longest backup this release holds in memory: 2^31 bytes (2 GiB, ADR 0094 §1). It caps
+/// [`parse`], a backup read from stdin or from a path that is not a regular file, and the fuzz
+/// target.
+pub const MAX_IN_MEMORY_BACKUP_LEN: usize = 1 << 31;
 
 /// The longest text value: 4 KiB. The only text column is `auth_accounts.login_name`, at most
 /// 254 bytes (CRYPTO.md §2).
@@ -212,7 +223,8 @@ impl fmt::Display for Problem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FileError {
-    /// The file is longer than [`MAX_BACKUP_FILE_LEN`], or writing it would make it so.
+    /// The file is longer than [`MAX_BACKUP_FILE_LEN`] (or, for the in-memory [`parse`],
+    /// [`MAX_IN_MEMORY_BACKUP_LEN`]), or writing it would make it so.
     TooLarge,
     /// The file is shorter than a header and a digest.
     Truncated,
@@ -256,7 +268,8 @@ impl fmt::Display for FileError {
         match self {
             Self::TooLarge => write!(
                 f,
-                "the backup file is larger than this release's limit of {MAX_BACKUP_FILE_LEN} bytes"
+                "the backup file is larger than this release's limit (at most \
+                 {MAX_BACKUP_FILE_LEN} bytes from a file, {MAX_IN_MEMORY_BACKUP_LEN} bytes in memory)"
             ),
             Self::Truncated => f.write_str("the backup file is truncated"),
             Self::BadMagic => f.write_str("not a rizzy-vault database backup file"),
@@ -338,7 +351,7 @@ pub fn write(dump: &Dump, created_at_ms: u64) -> Result<Vec<u8>, FileError> {
     for (table_index, (spec, table)) in planned.into_iter().enumerate() {
         write_table(&mut out, table_index, spec, table)?;
     }
-    if out.len().saturating_add(DIGEST_LEN) > MAX_BACKUP_FILE_LEN {
+    if !within_file_limit(out.len()) {
         return Err(FileError::TooLarge);
     }
     let sum = digest(&out);
@@ -401,11 +414,19 @@ fn write_table(
         }
         // Checked per row, so a dump far over the limit stops early; one row adds at most
         // `MAX_COLUMNS` values of at most 32 MiB each past the limit before it is noticed.
-        if out.len().saturating_add(DIGEST_LEN) > MAX_BACKUP_FILE_LEN {
+        if !within_file_limit(out.len()) {
             return Err(FileError::TooLarge);
         }
     }
     Ok(())
+}
+
+/// Whether `body_len` bytes and the digest fit [`MAX_BACKUP_FILE_LEN`], compared in `u64`.
+fn within_file_limit(body_len: usize) -> bool {
+    u64::try_from(body_len)
+        .ok()
+        .and_then(|n| n.checked_add(DIGEST_LEN as u64))
+        .is_some_and(|n| n <= MAX_BACKUP_FILE_LEN)
 }
 
 /// A cursor over the tables region of the file (between the header and the digest).
@@ -502,7 +523,7 @@ fn min_row_len(columns: &[Column]) -> usize {
 ///
 /// [`FileError`], on any input that is not exactly a file [`write()`] produces; never panics.
 pub fn parse(file: &[u8]) -> Result<BackupFile, FileError> {
-    if file.len() > MAX_BACKUP_FILE_LEN {
+    if file.len() > MAX_IN_MEMORY_BACKUP_LEN {
         return Err(FileError::TooLarge);
     }
     if !file.starts_with(&MAGIC) {
