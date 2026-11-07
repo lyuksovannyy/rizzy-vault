@@ -16724,6 +16724,7 @@ pub mod error {
                     ErrorCode::CredentialsStale => "server_credentials_stale",
                     ErrorCode::QuotaExceeded => "server_quota_exceeded",
                     ErrorCode::RevocationPending => "server_revocation_pending",
+                    ErrorCode::RotationLimit => "server_rotation_limit",
                     ErrorCode::Internal => "server_internal",
                     _ => "server_unknown",
                 })
