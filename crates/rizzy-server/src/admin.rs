@@ -1416,8 +1416,8 @@ impl std::io::Read for Input {
             Self::Memory(bytes, pos) => {
                 let rest = bytes.get(*pos..).unwrap_or_default();
                 let n = rest.len().min(out.len());
-                for (slot, b) in out.iter_mut().zip(rest) {
-                    *slot = *b;
+                if let (Some(dst), Some(src)) = (out.get_mut(..n), rest.get(..n)) {
+                    dst.copy_from_slice(src);
                 }
                 *pos += n;
                 Ok(n)

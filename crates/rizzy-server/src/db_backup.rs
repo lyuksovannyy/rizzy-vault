@@ -657,10 +657,9 @@ impl<'k, R: Read> Opener<'k, R> {
             return Ok(0);
         }
         let avail = self.plain.get(self.pos..).unwrap_or_default();
-        let mut n = 0;
-        for (slot, b) in out.iter_mut().zip(avail) {
-            *slot = *b;
-            n += 1;
+        let n = avail.len().min(out.len());
+        if let (Some(dst), Some(src)) = (out.get_mut(..n), avail.get(..n)) {
+            dst.copy_from_slice(src);
         }
         self.pos += n;
         Ok(n)

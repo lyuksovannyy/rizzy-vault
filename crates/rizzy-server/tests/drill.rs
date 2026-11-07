@@ -1208,6 +1208,96 @@ fn streaming_restore_drill() {
     });
 }
 
+/// Writes, streamed, the backup file of [`populated`] with `extra` more chunks of 32 MiB
+/// ([`file::MAX_BLOB_LEN`]) on its attachment; returns the file's length.
+fn write_big_backup(path: &Path, secrets_path: &Path, extra: u64) -> u64 {
+    let base = populated(secrets_path);
+    let out = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+    let mut e = file::Encoder::new(out, base.schema_version, 1).unwrap();
+    for t in &base.tables {
+        let more = if t.table == "vault_attachment_chunks" {
+            extra
+        } else {
+            0
+        };
+        e.table(t.rows.len() as u64 + more).unwrap();
+        for r in &t.rows {
+            e.row(r).unwrap();
+        }
+        let mut row = vec![idv(36), int(0), blob(40, file::MAX_BLOB_LEN)];
+        for i in 1..=more {
+            row[1] = int(i64::try_from(i).unwrap());
+            e.row(&row).unwrap();
+        }
+    }
+    let (out, _, len) = e.finish().unwrap();
+    out.into_inner().unwrap().sync_all().unwrap();
+    len
+}
+
+/// The process's peak resident set, in KiB (`VmHWM`), where `/proc` has it.
+fn peak_rss_kib() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+    line.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// ADR 0094 §6 test 6, at `extra` chunks of 32 MiB: a streamed backup file restores into the
+/// source instance, which then round-trips through `backup` and `restore` in both formats,
+/// each file and target removed before the next, with the peak RSS under 512 MiB.
+fn big_round_trip(extra: u64) {
+    block_on(async {
+        let root = TempDir::new();
+        let secrets_dir = root.join("secrets");
+        std::fs::create_dir_all(&secrets_dir).unwrap();
+        let secrets_path = secrets_dir.join("secrets.json");
+        let source_dir = root.join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source = server_config(&source_dir, &secrets_path);
+        admin::secrets_init(&source).unwrap();
+        admin::secrets_rotate(&source, admin::Rotate::BackupKey)
+            .await
+            .unwrap();
+        let generated = root.join("generated.rvbackup");
+        let generated_len = write_big_backup(&generated, &secrets_path, extra);
+        let rows = admin::restore(&source, &generated).await.unwrap().rows;
+        std::fs::remove_file(&generated).unwrap();
+        for encrypt in [false, true] {
+            let path = root.join("backup.rvbackup");
+            let summary = admin::backup(&source, &path, encrypt).await.unwrap();
+            if !encrypt {
+                assert_eq!(summary.len, generated_len);
+            }
+            let target_dir = root.join("target");
+            std::fs::create_dir_all(&target_dir).unwrap();
+            let target = server_config(&target_dir, &secrets_path);
+            let report = admin::restore(&target, &path).await.unwrap();
+            assert_eq!(report.rows, rows, "encrypt {encrypt}");
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_dir_all(&target_dir).unwrap();
+        }
+        if let Some(peak) = peak_rss_kib() {
+            assert!(peak < 512 * 1024, "peak RSS {peak} KiB");
+        }
+    });
+}
+
+/// [`big_round_trip`] at one 32 MiB attachment chunk more, in the gate.
+#[test]
+fn backup_restore_streams_large_values() {
+    big_round_trip(1);
+}
+
+/// ADR 0094 §6 test 6: about 2.5 GiB of attachment rows (80 chunks of 32 MiB) round-trip
+/// through `backup` and `restore` in both formats, from a regular file, with the peak RSS
+/// under 512 MiB. Needs about 8 GiB of free disk; run by hand (`--ignored`) before the M3
+/// attachments release and record the result in the PR.
+#[test]
+#[ignore = "slow and needs about 8 GiB of free disk: run by hand"]
+fn backup_restore_over_2gib() {
+    big_round_trip(80);
+}
+
 /// ADR 0094 §6 test 4: `BackupTooLarge` writes nothing to stdout. The test runs itself again
 /// as a child process with stdout piped (so not a terminal); there `backup --out -` over a
 /// lowered limit refuses, and the child's stdout holds no byte of a backup file (every one
